@@ -3,9 +3,9 @@
 -- Unsupported or hidden menus are inert; gestures never capture or inject input.
 -- Loader-only: plaintext Lua, no DLL, no hook, no code patch. See docs/RESEARCH.md.
 
-local module = {revision = 'v2.10'}
+local module = {revision = 'v2.13'}
 
--- The engine's UI is reachable from Lua: the armory's scrollbars are the game's own
+-- The engine's UI is reachable from Lua: equipment scrollbars are the game's own
 -- ScrollBar objects, and driving one is a data write rather than synthesised input.
 -- Anchors are the ones the shipped Armory mods use (game+0x347cd90 is the UI root,
 -- game+0x3326e68 the dispatch table); nothing is written until the object is found.
@@ -29,10 +29,10 @@ end
 
 -- ------------------------------------------------------------- native grid
 
--- Equipment uses a ScrollBar and a virtualized grid; Career scrolls a widget
--- container and derives its thumb during the frame update. Both are driven
--- directly, without synthesised input. These offsets were read from the shipped build
--- (game.dll CC75948D...) and every field is bounds-checked before it is used;
+-- Armory and loadout equipment use a ScrollBar and a virtualized grid; Career
+-- scrolls a widget container and derives its thumb during the frame update.
+-- Both are driven directly, without synthesised input. These grid fields were
+-- read from the shipped build (game.dll CC75948D...) and are bounds-checked;
 -- nothing is written unless the whole chain resolves.
 local GRID = {
     offset = 523752,        -- controller + ...            -> the item grid
@@ -60,13 +60,24 @@ local GRID = {
 
 local CAREER = {offset = 318472, list = 2488, track = 195256, thumb = 195808,
                 thumb_height = 196148, enabled = 196089, padding = 4}
+local LOADOUT_GRID_OFFSET = 864032
+-- Both the settings page and Bindings own inline virtual lists of the same
+-- widget type. Page offsets were measured in Steam build 25327279.
+local OPTIONS_LIST = {bar = 816, thumb = 1432,
+                      scroll = 552, span = 2784, value = 2792}
+local OPTIONS_PAGES = {
+    [1] = {menu = 200, list = 4189984, route = 'settings'},
+    [26] = {menu = 208, list = 338344, route = 'bindings'},
+}
 local GRID_SOLVER, SCROLL_SET, POSITION_SET, ANIMATION_STOP =
     0x18d2a90, 0x1794460, 0x1447610, 0x1439cb0
+local INPUT_CONSUME, INPUT_STATE, UI_SELECT = 0x12fde90, 0x347cf18, 0xA00000000
 module.native_signatures = {
     {GRID_SOLVER, '488bc45355565741544155415641574881ecf800000083b9'},
     {SCROLL_SET, '0f57d20f2fd1770cf30f1015f028c300f30f5dd1f30f1081'},
     {POSITION_SET, '48895c241848896c24204889542410565741574883ec20f3'},
     {ANIMATION_STOP, '40534883ec40488b05532320014833c448894424300fb601'},
+    {INPUT_CONSUME, '40534883ec204c8bd14c8bca488bcae8dc7c28ff'},
 }
 
 local function native_key(pointer)
@@ -177,6 +188,11 @@ function module.native_calls(bridge)
     function calls.solve(grid)
         ffi.cast('void (*)(void *)', bridge.game + GRID_SOLVER)(grid)
     end
+    function calls.consume(input, action)
+        -- Match the game's buttons: -1 consumes this action until release.
+        ffi.cast('void (*)(void *, uint64_t, float)', bridge.game + INPUT_CONSUME)(
+            input, ffi.new('uint64_t', action), -1)
+    end
     return calls
 end
 
@@ -193,6 +209,12 @@ function module.native_apply(bridge, model, value, calls)
             -- from (container.y + padding) / (content - viewport).
             calls.position(bridge.panel + CAREER.list, model.list_x,
                            value * model.span - CAREER.padding)
+        elseif bridge.route == 'bindings' or bridge.route == 'settings' then
+            -- The game's list input handler updates both objects in this order:
+            -- the scrollbar value, then the content container's vertical
+            -- position. Updating only the bar moves the thumb but not rows.
+            calls.scroll(bridge.bar, value)
+            calls.position(bridge.grid + 544, 0, value * model.span)
         else
             -- Follow the game's wheel handler: stop an existing animation,
             -- update the scrollbar (including its rendered thumb), then layout.
@@ -210,8 +232,33 @@ function module.native_apply(bridge, model, value, calls)
     return value
 end
 
+-- Settings rows and tabs both read UI_SELECT, including its held value. The
+-- list's 0.5-second timer is not a capture gate: its update adds dt before row
+-- input, and tabs bypass it entirely. Consume the selection through the same
+-- engine routine used by buttons; it clears all frame copies and held values.
+-- The OS button/cursor remain untouched and continue driving our scroll model.
+function module.native_settings_input(bridge, calls)
+    if not bridge or bridge.route ~= 'settings' or not bridge.api or not bridge.game then
+        return nil, 'not a settings list'
+    end
+    local ok, result = pcall(function()
+        local input = bridge.api.pointer(bridge.api.read(bridge.game + INPUT_STATE, 8))
+        if not input then return false end
+        calls = calls or module.native_calls(bridge)
+        return calls.consume(input, UI_SELECT) ~= false
+    end)
+    if not ok or not result then return nil, 'settings input consume failed' end
+    return true
+end
+
 function module.native_moved(before, after)
     if type(before) ~= 'table' or type(after) ~= 'table' then return false end
+    if before.kind == 'bindings' or before.kind == 'settings' then
+        -- The options route never writes the content offset directly; this is
+        -- evidence that the game's container position setter answered.
+        return after.kind == before.kind and before.scroll and after.scroll
+            and math.abs(before.scroll - after.scroll) > 0.1 or false
+    end
     -- Only the fields the game itself derives count: the value and the pixel
     -- offset are what this addon writes, so comparing them with themselves would
     -- read a write back as a success.
@@ -295,8 +342,9 @@ function module.native_api()
     return api
 end
 
--- Resolve the live armory grid: the dispatch table the shipped Armory mods read
--- lists every registered controller; kind 224 is the item grid in build 25327279.
+-- Resolve the live equipment grid from its screen's registered controller.
+-- Ship Armory uses kind 224; the mission loadout picker uses kind 229 and embeds
+-- the same grid at a different controller offset in build 25327279.
 function module.native_locate(api, memory)
     if type(api) ~= 'table' then return nil, 'no reader' end
     memory = memory or module.native_memory(api)
@@ -310,29 +358,104 @@ function module.native_locate(api, memory)
     -- Snapshot the bounded registry once instead of a system call per row.
     local rows = api.read(dispatch + 5744, count * 16)
     if type(rows) ~= 'string' or #rows ~= count * 16 then return nil, 'dispatch rows unreadable' end
+
+    local has_armory, has_loadout = false, false
+    for index = 0, count - 1 do
+        local kind = rows:byte(index * 16 + 9)
+            + rows:byte(index * 16 + 10) * 256
+            + rows:byte(index * 16 + 11) * 65536
+            + rows:byte(index * 16 + 12) * 16777216
+        if kind == 224 then has_armory = true
+        elseif kind == 229 then has_loadout = true end
+    end
+    local active_kind
+    if has_loadout then
+        -- The loadout controller can remain registered while a different UI
+        -- state is on top. Use the screen stack when readable; captured tests
+        -- without that optional anchor still use visible-widget validation.
+        local ok, value = pcall(function()
+            local stack_owner = api.pointer(api.read(game + 0x347ce28, 8))
+            if not stack_owner then return nil end
+            local stack = api.read(stack_owner + 0x429c, 24)
+            if type(stack) ~= 'string' or #stack < 24 then return nil end
+            local function word(offset)
+                local a, b, c, d = stack:byte(offset + 1, offset + 4)
+                if not d then return nil end
+                return a + b * 256 + c * 65536 + d * 16777216
+            end
+            local depth = word(20)
+            if not depth or depth < 1 or depth > 5 then return false end
+            local top = word((depth - 1) * 4)
+            if top == 5 then return 224 end
+            if top == 14 then return 229 end
+            return false
+        end)
+        if ok then active_kind = value end
+        if active_kind == false then return nil, 'unsupported UI screen' end
+    end
+
     for index = 0, count - 1 do
         local offset = index * 16
-        if rows:sub(offset + 9, offset + 12) == '\224\0\0\0' then
+        local kind = rows:byte(offset + 9)
+            + rows:byte(offset + 10) * 256
+            + rows:byte(offset + 11) * 65536
+            + rows:byte(offset + 12) * 16777216
+        if (kind == 224 or kind == 229) and (not active_kind or kind == active_kind) then
             local controller = api.pointer(rows, offset)
-            if not controller then return nil, 'grid controller unavailable' end
+            if not controller then return nil, 'equipment controller unavailable' end
+            local grid_offset = kind == 224 and GRID.offset or LOADOUT_GRID_OFFSET
             local bridge = {api = api, memory = memory, game = game, controller = controller,
-                            grid = controller + GRID.offset, panel = controller + CAREER.offset}
+                            kind = kind, grid = controller + grid_offset,
+                            panel = kind == 224 and controller + CAREER.offset or nil}
             -- Resolved alpha includes parent visibility. The equipment grid
             -- remains allocated behind Career and must never own its gestures.
-            if (memory.read_f32(bridge.panel + CAREER.track + 84) or 0) > 0.95 then
+            if bridge.panel and (memory.read_f32(bridge.panel + CAREER.track + 84) or 0) > 0.95 then
                 bridge.route = 'career'
                 bridge.bar, bridge.thumb = bridge.panel + CAREER.track, bridge.panel + CAREER.thumb
             elseif (memory.read_f32(bridge.grid + 272 + 84) or 0) > 0.95 then
                 bridge.route = 'grid'
                 bridge.bar, bridge.thumb = bridge.grid + 272, bridge.grid + 888
             else
-                return nil, 'no visible armory scrollbar'
+                if active_kind then return nil, 'no visible equipment scrollbar' end
+                -- A stale/hidden controller may precede the visible owner in
+                -- the registry; keep looking before declaring the menu inert.
+                bridge = nil
             end
-            bridge.key = native_key(controller) .. ':' .. bridge.route
-            return bridge
+            if bridge then
+                bridge.key = native_key(controller) .. ':' .. tostring(kind) .. ':' .. bridge.route
+                return bridge
+            end
         end
     end
-    return nil, 'armory grid not registered'
+    -- The options pages have no equipment controller registration. Their own
+    -- page pointer and active screen ID gate access to each inline list.
+    local ok, bindings = pcall(function()
+        local owner = api.pointer(api.read(game + 0x347ce28, 8))
+        if not owner then return nil end
+        local stack = api.read(owner + 0x429c, 24)
+        if not stack or #stack ~= 24 then return nil end
+        local function word(offset)
+            local a, b, c, d = stack:byte(offset + 1, offset + 4)
+            return a and d and (a + b * 256 + c * 65536 + d * 16777216)
+        end
+        local depth = word(20)
+        if not depth or depth < 1 or depth > 5 then return nil end
+        local screen_id = word((depth - 1) * 4)
+        local page = OPTIONS_PAGES[screen_id]
+        if not page then return nil end
+        local menu = api.pointer(api.read(game + 0x347ce38, 8))
+        local screen = menu and api.pointer(api.read(menu + page.menu, 8))
+        if not screen or api.read(screen + 12, 1) ~= '\1' then return nil end
+        local list = screen + page.list
+        local bar, thumb = list + OPTIONS_LIST.bar, list + OPTIONS_LIST.thumb
+        if (memory.read_f32(bar + 84) or 0) <= 0.95 then return nil end
+        return {api = api, memory = memory, game = game, controller = screen,
+                grid = list, bar = bar, thumb = thumb, route = page.route,
+                kind = screen_id, key = native_key(screen) .. ':' .. screen_id .. ':' .. page.route}
+    end)
+    if ok and bindings then return bindings end
+    return nil, (has_armory or has_loadout) and 'no visible equipment scrollbar'
+        or 'equipment grid not registered'
 end
 
 -- Read the grid's own scroll model, with the bounds the offsets were measured
@@ -380,6 +503,19 @@ function module.native_state(bridge)
         return geometry({content = content, span = span, viewport = viewport,
             scroll = y + CAREER.padding, list_x = x,
             value = native_clamp((y + CAREER.padding) / span, 0, 1), kind = 'career'})
+    end
+    if bridge.route == 'bindings' or bridge.route == 'settings' then
+        local span, value, scroll = f32(OPTIONS_LIST.span), f32(OPTIONS_LIST.value),
+            f32(OPTIONS_LIST.scroll)
+        local viewport = widget_f32(bridge.bar, 16)
+        if not (span and value and scroll and viewport) or span ~= span or value ~= value
+            or scroll ~= scroll or span <= 0 or span > GRID.max_pixels
+            or value < -0.001 or value > 1.001 or viewport <= 0
+            or viewport > GRID.max_pixels or scroll < -1 or scroll > span + 1 then
+            return nil, 'bindings list out of range'
+        end
+        return geometry({content = span + viewport, span = span, viewport = viewport,
+            value = native_clamp(value, 0, 1), scroll = scroll, kind = bridge.route})
     end
     local model = {columns = u32(GRID.columns), rows = u32(GRID.rows), items = u32(GRID.items),
                    kind = u32(GRID.kind),
@@ -1271,6 +1407,7 @@ function module.create_platform()
         return bit.band(user32.GetAsyncKeyState(0x01), 0x8000) ~= 0
     end
 
+
     -- Raw two-byte GetAsyncKeyState value for VK_LBUTTON, for diagnostics
     -- (0x8000 = down now, 0x0001 = pressed since the previous query).
     function platform.key_state()
@@ -1474,6 +1611,9 @@ function module.install(create_platform, environment)
     local last_observe_ms, last_jump_ms = -100000, -100000
     local stopped = false
     local drag, thumb, jump = nil, nil, nil
+    -- Input capture outlives a cancelled scroll until the physical mouse-up.
+    -- Releasing over another control must not turn the old hold into a click.
+    local settings_capture
     -- Notches sent since `thumb.observed_at`, so a later observation can turn
     -- the movement the game produced into a pixels-per-notch sample.
     local injected_total = 0
@@ -2325,6 +2465,13 @@ function module.install(create_platform, environment)
         if not model or not thumb_centre or not thumb_height then return false end
         local track = native_track or module.native_track(model, thumb_centre - thumb_height / 2, thumb_height)
         if not track then return false end
+        if state.native.route == 'settings' then
+            if not module.native_settings_input(state.native) then
+                note('settings_input_unavailable')
+                return false
+            end
+            settings_capture = state.native
+        end
         begin_drag(cursor_x, cursor_y, now, left, right, side, nil, track)
         drag.native, drag.track, drag.press_y = true, track, cursor_y
         drag.model, drag.key = model, state.native.key
@@ -2352,8 +2499,8 @@ function module.install(create_platform, environment)
         return true
     end
 
-    -- The grid is registered only while the Armory screen exists, and its
-    -- controller is rebuilt with the screen, so the resolution is attempted when
+    -- The grid is registered only while its Armory or loadout screen exists,
+    -- and its controller is rebuilt with the screen, so resolution is attempted when
     -- it is needed, cached, and dropped the moment a read stops passing its
     -- bounds. A stale pointer therefore costs one failed read, never a write.
     local function refresh_native(now)
@@ -2370,8 +2517,8 @@ function module.install(create_platform, environment)
             end
             state.native_api = api
         end
-        -- The Armory rebuilds its controller - and with it the grid - every time the
-        -- screen is entered, so the grid is resolved from the dispatch table afresh
+        -- Each screen rebuilds its controller - and with it the grid - every time
+        -- it is entered, so the grid is resolved from dispatch afresh
         -- on each press. A remembered pointer reads plausibly long after its screen
         -- is gone and writes into nothing, which is exactly the failure this
         -- replaces.
@@ -2469,8 +2616,8 @@ function module.install(create_platform, environment)
         local model = state.native_model
         local top = native_track.top + model.value * native_track.span
         local centre = top + native_track.thumb / 2
-        begin_native_drag(cursor_x, cursor_y, now, centre, native_track.thumb,
-                          native_track.left, native_track.right, nil, native_track)
+        if not begin_native_drag(cursor_x, cursor_y, now, centre, native_track.thumb,
+                                 native_track.left, native_track.right, nil, native_track) then return end
         if cursor_y < top or cursor_y > top + native_track.thumb then
             drag.press_y = centre
             service_native_drag(now, cursor_y)
@@ -2500,6 +2647,16 @@ function module.install(create_platform, environment)
         local was_down = last_button
         local pressed = down and not was_down
         last_button = down
+        -- The engine refreshes selection state each frame. Consume it before
+        -- native row/tab handlers run, even if scrolling was cancelled. Resolve
+        -- only the input singleton here; a previous menu owner may be gone.
+        if settings_capture then
+            if platform.foreground_self() and not module.native_settings_input(settings_capture) then
+                drag, thumb, state.drag_active = nil, nil, false
+                note('settings_input_cancelled')
+            end
+            if not down then settings_capture = nil end
+        end
         -- Focus loss cancels ownership; resuming an old drag after alt-tab can
         -- use a different menu or deliver queued input to another application.
         if not state.settings.enabled or not platform.foreground_self() then
@@ -2828,6 +2985,7 @@ function module.install(create_platform, environment)
     end
     environment.shutdown = function(...)
         stopped = true
+        settings_capture = nil
         state.status = 'stopped'
         record('shutdown frames=%d clicks=%d pages=%d', state.frames or 0, state.clicks or 0, state.pages or 0)
         log(true)

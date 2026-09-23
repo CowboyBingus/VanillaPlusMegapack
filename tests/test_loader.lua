@@ -1,22 +1,34 @@
 -- Run real compiled bundle and loader in an isolated, non-game environment.
 local build, loader = assert(arg[1]), assert(arg[2])
 local discovery_only = arg[3] == 'discovery'
+-- Scenarios represent separate game starts but share this LuaJIT process.
+-- Declare each exact FFI block once: repeated typedefs otherwise exhaust its
+-- process-wide CType table after thousands of synthetic addon installations.
+-- The first use still executes the real declaration and validates its types.
+local ffi = require('ffi')
+local declarations = {}
+local scenario_ffi = setmetatable({cdef = function(body)
+    if not declarations[body] then
+        ffi.cdef(body)
+        declarations[body] = true
+    end
+end}, {__index = ffi})
 local pack = 'mods/cowboybingus/vanilla_plus_megapack'
 local wwise = 'core/wwise/lua/wwise_flow_callbacks'
 local names = {pack, 'mods/cowboybingus/better_stratagem_bounce',
     'mods/cowboybingus/hellpod_steering_unlocked', 'mods/cowboybingus/reinforcement_beacon_fix_data',
     'mods/cowboybingus/consistent_vaulting', 'mods/cowboybingus/shallow_water_dive',
     'mods/cowboybingus/sentry_aim_retention', 'mods/cowboybingus/corpse_collision_repair', 'mods/cowboybingus/hover_pack_cancel', 'mods/cowboybingus/enemy_intelligence', 'mods/cowboybingus/armory_preview_cache',
-    'mods/cowboybingus/clickable_scrollbars', 'mods/cowboybingus/arc_thrower_auto'}
+    'mods/cowboybingus/clickable_scrollbars', 'mods/cowboybingus/arc_thrower_auto', 'mods/cowboybingus/galactic_menu_hotkey'}
 local folders = {'', 'BetterStratagemBounce', 'HellpodSteeringUnlocked', 'ReinforcementBeaconsFixed',
     'ConsistentVaulting', 'ShallowWaterDiving', 'SentryAimRetention', 'EnemyCollisionSynchronized', 'ControllableHoverPack', 'KnowYourConstellation', 'ArmoryPreviewCache',
-    'ClickableScrollbars', 'ArcThrowerRevamped'}
+    'ClickableScrollbars', 'ArcThrowerRevamped', 'GalacticMenuHotkey'}
 -- The shared loader build carries a built-in registry written before this
 -- component existed, so the registry path cannot see it: in game it is loaded
 -- through declared-entry discovery, which the 'discovery' pass below proves by
 -- running with that registry emptied. Both paths are asserted separately here
 -- instead of pretending the older registry knows the new module.
-local registry_cannot_see = {['mods/cowboybingus/clickable_scrollbars'] = true, ['mods/cowboybingus/arc_thrower_auto'] = true}
+local registry_cannot_see = {['mods/cowboybingus/clickable_scrollbars'] = true, ['mods/cowboybingus/arc_thrower_auto'] = true, ['mods/cowboybingus/galactic_menu_hotkey'] = true}
 local function read(path)
     local file = assert(io.open(path, 'rb'))
     local bytes = file:read('*a'); file:close(); return bytes
@@ -108,7 +120,8 @@ for _, scenario in ipairs(scenarios) do
         end
         env.require = function(name)
             if loaded[name] ~= nil then return loaded[name] end
-            if name == 'ffi' or name == 'bit' then return require(name) end
+            if name == 'ffi' then return scenario_ffi end
+            if name == 'bit' then return require(name) end
             if name == 'core/wwise/lua/wwise_visualization' or name == 'core/wwise/lua/wwise_bank_reference' then return {} end
             if name == wwise then
                 return execute(installed_loader and startup or read(loader .. '/vanilla-callbacks.ljbc'))
@@ -142,7 +155,7 @@ for _, scenario in ipairs(scenarios) do
             end
             local identity = env.CowboyBingusModLoader.megapack
             if installed_pack and failure ~= 1 and failure ~= #names + 1 then
-                assert(identity.name == 'Vanilla Plus Megapack' and identity.revision == 'megapack-v21')
+                assert(identity.name == 'Vanilla Plus Megapack' and identity.revision == 'megapack-v27')
                 assert(#identity.modules == #names - 1)
                 for i = 2, #names do assert(identity.modules[i-1] == names[i]) end
             else assert(identity == nil) end
@@ -156,4 +169,4 @@ for _, scenario in ipairs(scenarios) do
         assert(x == 'shutdown' and y == nil and z == 7)
         cases = cases + 1
 end
-print('PASS: ' .. cases .. (discovery_only and ' discovery-only (legacy list removed)' or ' normal loader') .. ' bundle scenarios; all 4096 option subsets with/without loader, failures isolated, one startup, callbacks preserved')
+print('PASS: ' .. cases .. (discovery_only and ' discovery-only (legacy list removed)' or ' normal loader') .. ' bundle scenarios; all ' .. 2 ^ (#names - 1) .. ' option subsets with/without loader, failures isolated, one startup, callbacks preserved')

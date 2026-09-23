@@ -2,6 +2,7 @@ local ffi=require('ffi')
 local source,fixtures=assert(arg[1]),assert(arg[2])
 local M=dofile(source..'/corpse_data.lua')
 local captured=dofile(fixtures..'/stuck_impaler.lua')
+captured=dofile(fixtures..'/layout_25327279.lua')(captured)
 local api=dofile(source..'/windows_api.lua')()
 api.read=function(pointer,size)
     local address=api.address(pointer)
@@ -37,4 +38,4 @@ state.native={pose=function()pose_calls=pose_calls+1 end,
     disable=function()disable_calls=disable_calls+1 end,stop_sync=function()error('No renewed motion in one frozen sample') end}
 assert(M.apply(api,game,exe,state))
 assert(pose_calls==poses and disable_calls==claws and state.accepted_units==1)
-print(string.format('PASS: recorded stuck Impaler bytes through production reader/planner/apply; %d collider repairs, %d claw disables, %.3f m leg gap; synthetic allocations/stub commands only',poses,claws,leg.gap))
+print(string.format('PASS: translated stuck Impaler fixture through production reader/planner/apply; %d collider repairs, %d claw disables, %.3f m leg gap; synthetic allocations/stub commands only',poses,claws,leg.gap))

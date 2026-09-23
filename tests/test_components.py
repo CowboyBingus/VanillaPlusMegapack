@@ -21,13 +21,13 @@ def main():
     for order in ('hellpod-first', 'bounce-first'):
         commands.append([steering / 'tests/test_api_coexistence.lua', steering / 'src', bounce / 'src', order])
     suites = {
-        'KnowYourConstellation': [(n,None) for n in ('test_resolve','test_panel','test_install','test_mission','test_heavy','test_presentation','test_rows')],
-        'ControllableHoverPack': [(n,None) for n in ('test_cancel','test_snapshot','test_settings','test_loader','test_replay')],
+        'KnowYourConstellation': [(n,None) for n in ('test_resolve','test_panel','test_install','test_mission','test_heavy','test_presentation','test_current_ui','test_rows')],
+        'ControllableHoverPack': [(n,None) for n in ('test_cancel','test_snapshot','test_settings','test_loader','test_replay','test_current_game')],
         'ReinforcementBeaconsFixed': [('test_data', 'solo_scenarios'), ('test_startup', None)],
         'ConsistentVaulting': [(n, None) for n in ('test_vault', 'test_geometry', 'test_raised_approach', 'test_slope', 'test_loader')],
-        'ShallowWaterDiving': [('test_dive', None), ('test_loader', None)],
+        'ShallowWaterDiving': [('test_dive', None), ('test_loader', None), ('test_current_game', None)],
         'SentryAimRetention': [('test_aim', 'gatling_target_loss'), ('test_firing', 'firing_sweeps'),
-                               ('test_loader', None), ('test_snapshot', None), ('test_windows_api', None)],
+                               ('test_loader', None), ('test_snapshot', None), ('test_windows_api', None), ('test_current_game', None)],
     }
     for slug, suite in suites.items():
         root = mods / slug
@@ -40,7 +40,7 @@ def main():
     print(run([sys.executable, corpse / 'tests/test_profiles.py']).strip())
     for name in ('snapshot', 'loader'):
         commands.append([corpse / 'tests' / ('test_' + name + '.lua'), corpse / 'src'])
-    for name in ('repair', 'fling', 'settlement', 'completion'):
+    for name in ('repair', 'recorded_snapshot', 'automaton_recording', 'fling', 'settlement', 'completion', 'bindings'):
         commands.append([corpse / 'tests' / ('test_' + name + '.lua'), corpse / 'src', corpse / 'tests/fixtures'])
     commands.append([corpse / 'tests/test_performance.lua', corpse / 'src', corpse / 'tests'])
     commands.append([corpse / 'tests/test_profiler.lua', corpse / 'src'])
@@ -61,19 +61,29 @@ def main():
     for scenario in ('normal', 'slow', 'stale'):
         commands.append([mods / 'ArcThrowerRevamped/tests/test_work_budget.lua',
                          mods / 'ArcThrowerRevamped/src/arc_thrower_auto.lua', scenario])
-    for name in ['test_policy', 'test_install', 'test_images', 'test_partial_images', 'test_image_keys', 'test_v10_images', 'test_v10_policy', 'test_prewarm_recency', 'test_material_synthetic', 'test_render_refresh']:
+    for mode in ('normal', 'slow'):
+        for scenario in ('patch-reset', 'patch-replaced', 'patch-shadow-copy', 'input-gap',
+                         'identity-gap', 'holder-gap', 'charge-binding-gap', 'large-trigger-table',
+                         'sparse-trigger-table', 'dense-trigger-table', 'input-expired', 'release-during-gap',
+                         'identity-change-during-gap', 'holder-change-during-gap', 'diagnostic-recovery'):
+            commands.append([mods / 'ArcThrowerRevamped/tests/test_work_budget.lua',
+                             mods / 'ArcThrowerRevamped/src/arc_thrower_auto.lua', mode, scenario])
+    for name in ['test_policy', 'test_install', 'test_images', 'test_partial_images', 'test_image_keys', 'test_v10_images', 'test_v10_policy', 'test_prewarm_recency', 'test_material_synthetic', 'test_render_refresh', 'test_current_ui']:
         commands.append([mods/'ArmoryPreviewCache/tests'/(name+'.lua'),mods/'ArmoryPreviewCache'])
     # Clickable Scrollbars keeps its own suites: a detector replay, a scripted
     # runtime and the Windows platform bindings, each taking the search root and
     # the vendored source path.
     scrollbars = mods / 'ClickableScrollbars'
     for name in ('test_detector', 'test_install', 'test_native', 'test_platform',
-                 'test_performance', 'test_profile', 'test_ui_sim'):
+                 'test_performance', 'test_profile', 'test_ui_sim', 'test_settings_input'):
         command = [scrollbars / 'tests' / (name + '.lua'), ROOT,
                    scrollbars / 'src/clickable_scrollbars.lua']
         if name == 'test_platform' and '--skip-desktop-capture' in sys.argv:
             command.append('--skip-capture')
         commands.append(command)
+    commands.append([scrollbars / 'tests/test_current_ui.lua', scrollbars])
+    commands.append([mods / 'GalacticMenuHotkey/tests/test_hotkey.lua',
+                     mods / 'GalacticMenuHotkey/src/galactic_menu_hotkey.lua'])
     for command in commands:
         result = run([LUA, *command])
         print(result.strip())

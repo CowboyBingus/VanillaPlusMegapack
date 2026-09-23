@@ -28,6 +28,7 @@ def main():
             raise ValueError('Unsupported executable modification API in '+path.name)
     resources=build_module(ROOT,build,MODULE,'dive_data.lua',REVISION)
     env=dict(os.environ,LUA_PATH=str(LUA.parent/'?.lua')+';;')
+    tests=run([LUA,ROOT/'tests/test_current_game.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_dive.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_loader.lua',ROOT/'src'],env=env)
     (build/ARCHIVE).write_bytes(make_archive(resources))
@@ -39,7 +40,7 @@ def main():
         'game_exe_sha256':EXE_SHA,'game_dll_sha256':GAME_DLL_SHA,'deployment_files':files,
         'files':{p:sha((ROOT/p).read_bytes()) for p in files.values()},
         'requires':[{'name':'Bingus Shared Loader','api':1,'revision':'loader-v5'}],
-        'module':MODULE,'runtime_verified':False,'status':'release',
+        'module':MODULE,'runtime_verified':False,'status':'offline_verified_gameplay_pending',
         'executable_memory_changed':False,'custom_dlls':0,'boot_replaced':False,
         'write':{'target':'local avatar Drownable runtime only','max_records':1,
                  'bytes_per_record':8,'fields':['temporary reference offset','one-time startup elapsed reset'],

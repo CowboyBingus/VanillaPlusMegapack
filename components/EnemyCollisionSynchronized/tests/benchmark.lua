@@ -23,7 +23,7 @@ for _, config in ipairs({{'empty',0,0,0},{'living',256,0,0},{'crowd',1500,0,0},
     local profiler=arg[3]=='profile' and dofile(source..'/profiler.lua').new(api,'benchmark')
     api.profiler=profiler
     local function apply()
-        if profiler then profiler.begin() end
+        if profiler then profiler.begin(state) end
         assert(M.apply(api,g,e,state))
         if profiler then profiler.finish(state) end
     end

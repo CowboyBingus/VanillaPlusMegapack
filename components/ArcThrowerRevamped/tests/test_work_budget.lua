@@ -47,10 +47,19 @@ map(OWNER+0xf22ec8,0x25000000,9,1);map(AM+0xf8,0x25000100,222,1)
 put(GAME+0x3326dc0,integer(0x26000000));map(0x26000000+32,0x25000200,77,1)
 put(0x26000000+64,integer(0x26000100));put(0x26000100+48+4,u(222))
 local relocated, generation, input_valid, command=false,1,true,true
+local scenario=arg[3]
+local blocked,trigger_count,trigger_slot={},2,0
+local trigger_dense=false
+local held_time,full_time=.5,1.2
+local record2=200000
+local function install_record(at)
+    ffi.copy(region+at,region+record,216);region[at+184]=0
+end
 local function slot()return second and 510 or (relocated and 3 or 511)end
 local function entry_base()return ENTRIES+(relocated and 0x10000 or 0)end
 local function memory(address,size)
-    if address==input then return input_valid and blob(32,{[8]=integer(down and .5 or 0,'float')}) or nil end
+    if blocked[address] then return nil end
+    if address==input then return input_valid and blob(32,{[8]=integer(down and held_time or 0,'float')}) or nil end
     if local_bytes[address] then
         local b={};for i=0,size-1 do if not local_bytes[address+i] then return nil end;b[#b+1]=local_bytes[address+i]end
         return table.concat(b)
@@ -62,10 +71,24 @@ local function memory(address,size)
     if address==GAME+0x3326660 then return integer(TRIGGER) end
     if address==GAME+0x3326c20 then charge_reads=charge_reads+1;return integer(CHARGE) end
     if address==TRIGGER+24 then
-        return blob(72,{[0]=integer(2,'uint32_t'),[40]=integer(ENTITIES),[64]=integer(FLAGS)})
+        return blob(72,{[0]=integer(trigger_count,'uint32_t'),[40]=integer(ENTITIES),[64]=integer(FLAGS)})
     end
-    if address==FLAGS then return not command and '\0\0' or second and '\0\1' or '\1\0' end
-    if address==ENTITIES then return integer(WEAPON)..integer(SECOND) end
+    if address>=FLAGS and address+size<=FLAGS+trigger_count then
+        local flags=trigger_dense and string.rep('\1',trigger_count)
+            or blob(trigger_count,{[(second and 1 or trigger_slot)]=command and '\1' or '\0'})
+        return flags:sub(address-FLAGS+1,address-FLAGS+size)
+    end
+    if address>=ENTITIES and address+size<=ENTITIES+trigger_count*8 then
+        local entities
+        if trigger_dense then
+            entities=string.rep(integer(0x90000),trigger_slot)..integer(WEAPON)
+                ..string.rep(integer(0x90000),trigger_count-trigger_slot-1)
+        else
+            entities=blob(trigger_count*8,{[trigger_slot*8]=integer(WEAPON),[8]=integer(SECOND)})
+        end
+        return entities:sub(address-ENTITIES+1,address-ENTITIES+size)
+    end
+    if address==0x90000 then return blob(24,{[0]='ordinary'}) end
     if address==WEAPON or address==SECOND then
         return blob(24,{[0]=(weapon=='arc' and resource or 'ordinary'),[8]=u(77),[16]=u(generation),[20]='\1'})
     end
@@ -77,7 +100,7 @@ local function memory(address,size)
         return pointers:sub(address-CHARGED+1,address-CHARGED+size)
     end
     if address==entry_base()+511*40 or address==entry_base()+510*40 or address==entry_base()+3*40 then
-        local b=ffi.new('uint8_t[40]');putf(b,4,charge);putf(b,8,1.2);b[12]=1
+        local b=ffi.new('uint8_t[40]');putf(b,4,charge);putf(b,8,full_time);b[12]=1
         return ffi.string(b,40)
     end
     return nil
@@ -109,13 +132,15 @@ function kernel.VirtualQueryEx(_,address,info)
     return 0
 end
 function kernel.VirtualProtectEx(_,address,size,protection,previous)
-    assert(tonumber(ffi.cast('uintptr_t',address))==REGION+record+184 and size==1)
+    address=tonumber(ffi.cast('uintptr_t',address))
+    assert((address==REGION+record+184 or address==REGION+record2+184) and size==1)
     previous[0]=2;return 1
 end
 function kernel.WriteProcessMemory(_,address,data,size,written)
     address=tonumber(ffi.cast('uintptr_t',address))
     assert(size==1 and ffi.string(data,1)=='\1')
-    if address==REGION+record+184 then patches=patches+1
+    if address==REGION+record+184 or address==REGION+record2+184 then
+        patches=patches+1;region[address-REGION]=1
     else
         assert(address==entry_base()+slot()*40+12,'wrong weapon entry')
         writes=writes+1
@@ -126,11 +151,13 @@ local bindings=setmetatable({load=function(name)
     if name=='kernel32' then return kernel end
     error('Raw mouse state must not decide the native Fire action: '..name)
 end},{__index=ffi})
+local log_text={}
 local env=setmetatable({},{__index=_G});env._G=env
+env.ArcThrowerDiagnostics=scenario=='diagnostic-recovery'
 env.require=function(name) return name=='ffi' and bindings or require(name) end
 env.CowboyBingusModLoader={api=1,open_log=function()
     return {write=function(_,text)
-        assert(not text:find('error #',1,true),text);logs=logs+1
+        assert(not text:find('error #',1,true),text);logs=logs+1;log_text[#log_text+1]=text
     end,flush=function() end}
 end}
 env.update=function(_,marker) assert(marker=='original');updates=updates+1;return 1,nil,3 end
@@ -155,6 +182,68 @@ if mode=='stale' then
     return
 end
 assert(patches==1 and max_read<=65536,'bounded scan must find a split fingerprint and patch exactly once')
+if scenario then
+    local function ticks(n)for _=1,n do tick()end end
+    if scenario=='large-trigger-table' or scenario=='sparse-trigger-table' then
+        trigger_count=scenario=='large-trigger-table' and 65 or 4096
+        trigger_slot=trigger_count-1;down=true;weapon='arc'
+        tick();assert(writes==1,'active Arc at the end of a sparse table must arm on first discovery')
+        down=false;tick();local before=writes;trigger_count=0xffffffff;down=true;ticks(30)
+        assert(writes==before,'corrupt table size must not authorize writes')
+    elseif scenario=='dense-trigger-table' then
+        trigger_count=4096;trigger_slot=64;trigger_dense=true;down=true;weapon='arc'
+        local before=reads;tick()
+        assert(writes==0 and charge_reads==0,'first batch must stop before active candidate 65')
+        assert(reads-before<200,'dense trigger discovery must bound native candidate reads')
+        ticks(12);assert(writes>0,'next batch must reach the active Arc command')
+    else
+        weapon='arc';down=true;tick();assert(writes==1)
+        charge=.8;tick();charge=0;command=false;tick()
+        local before=writes
+        if scenario=='patch-reset' then
+            region[record+184]=0;ticks(30)
+            assert(region[record+184]==1 and patches==2,'lost static auto-fire flag must be repaired')
+        elseif scenario=='patch-replaced' then
+            install_record(record2);region[record+168]=0;region[record+184]=0;ticks(100)
+            assert(region[record2+184]==1,'replacement record must be discovered and patched')
+            assert(region[record+184]==0,'invalid old record must never be patched')
+        elseif scenario=='patch-shadow-copy' then
+            install_record(record2);charge=full_time;ticks(400)
+            assert(region[record2+184]==1,'full-charge stall must scan beyond a healthy cached record')
+        elseif scenario=='input-gap' or scenario=='input-expired' or scenario=='release-during-gap' then
+            input_valid=false;tick();assert(writes==before,'unknown input must pause charge writes')
+            if scenario=='input-expired' then ticks(40) end
+            input_valid=true
+            if scenario=='release-during-gap' then held_time=.01 end
+            tick()
+            if scenario=='input-gap' then
+                assert(writes==before+1,'same held weapon must recover with its engine command cleared')
+                down=false;before=writes;ticks(5);assert(writes==before,'release must immediately stop writes')
+                down=true;ticks(20);assert(writes==before,'a new hold requires a new fire command')
+            else
+                ticks(20);assert(writes==before,'expired or interrupted hold must require a new fire command')
+            end
+        elseif scenario=='identity-gap' or scenario=='holder-gap' or scenario=='charge-binding-gap' then
+            local address=scenario=='identity-gap' and WEAPON or scenario=='holder-gap' and 0x26000100+48+4 or CHARGE+16
+            blocked[address]=true;tick();assert(writes==before,'unvalidated binding must pause writes')
+            blocked[address]=nil;tick();assert(writes==before+1,'validated binding must resume without a new command')
+        elseif scenario=='identity-change-during-gap' or scenario=='holder-change-during-gap' then
+            input_valid=false;tick();input_valid=true
+            if scenario=='identity-change-during-gap' then generation=2 else put(0x26000100+48+4,u(999)) end
+            ticks(20);assert(writes==before,'changed identity or holder must not resume the old hold')
+        elseif scenario=='diagnostic-recovery' then
+            full_time=0;tick();full_time=1.2;ticks(230)
+            charge=.8;tick();charge=0;tick();down=false;tick()
+            local text=table.concat(log_text)
+            local _,failures=text:gsub('idle: invalid full%-charge time','')
+            assert(failures==1,'successful recovery must clear stale failure diagnostics')
+            assert(text:find('released after 2 shot(s)',1,true),'first shot must be counted')
+            assert(text:find('(1)',1,true),'first real shot interval must be included')
+        else error('unknown recovery scenario '..scenario) end
+    end
+    print('PASS: recovery '..scenario..' ('..mode..'), bounded work and no render writes')
+    return
+end
 local baseline_logs=logs
 down=true
 local before=reads

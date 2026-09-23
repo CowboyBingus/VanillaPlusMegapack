@@ -1,9 +1,9 @@
 -- Only the owner-routed request policy is exercised; native calls are stubs.
-local source=assert(arg[1])
+local source,fixtures=assert(arg[1]),assert(arg[2])
 local M=dofile(source..'/corpse_data.lua')
 local original=M.snapshot
 local function unit(resource)
-    return {unit=99,id=77,resource=resource,settled=true,corpse=false,
+    return {unit=0x1800cd8,id=4194397,resource=resource,settled=true,corpse=false,
         owner=false,active=true,update_enabled=false,main_enabled=M.profiles[resource].bodies,main_static=M.profiles[resource].bodies,
         main_signature='15 unchanged handles',actors={},guards={{address=1,bytes='identity'}},
         root_body={id=42,guards={{address=2,bytes='root'}}},manager=100,index=2}
@@ -20,7 +20,7 @@ for resource in pairs(M.profiles) do
         local state={fling_stopped={[u.unit]={entity=u.id,resource=u.resource,members=u.main_signature,
             stopped_at=100,last_scan=0}},native={
             request_completion=function(entity)
-                assert(entity==77);requests=requests+1
+                assert(entity==4194397);requests=requests+1
                 if variant=='request_error' then error('Simulated request failure') end
             end,
             stop_sync=function()handoffs=handoffs+1 end,
@@ -62,5 +62,21 @@ for resource in pairs(M.profiles) do
         assert(next(state.fling_stopped)==nil and state.completion_pending==0)
     end
 end
+-- Replay eligible observations of the actual stopped Impaler. Its native
+-- elapsed timer was frozen, so the follow-up uses monotonic observation time.
+local recording=dofile(fixtures..'/completion_recording.lua')
+local resource=string.char(59,238,251,18,66,231,248,220)
+local u=unit(resource)
+u.main_signature=table.concat(recording.members,':')
+local now,requests,request_seq,current=recording.stopped_at,0,nil,nil
+local state={fling_stopped={[u.unit]={entity=u.id,resource=u.resource,members=u.main_signature,
+    stopped_at=recording.stopped_at,last_scan=0}},native={request_completion=function(entity)
+    assert(entity==recording.entity);requests=requests+1;request_seq=current.seq
+end}}
+local api={time=function()return now end,read=function(address)return address==1 and 'identity' or 'root' end}
+M.snapshot=function()return {u},'ready' end
+for _,row in ipairs(recording.rows) do current=row;now=row.time;M.apply(api,0,0,state) end
+assert(requests==1 and request_seq==3004 and state.completion_pending==1)
+assert(not state.completion_corpse_observed,'Historical recording cannot prove a future request succeeds')
 M.snapshot=original
-print('PASS: 21-profile completion grace, once-only requests, lifecycle, identity, ownership and mission exit')
+print('PASS: 21-profile completion grace/once-only policy, identity/root/lifecycle guards, native failure, ownership handoff, observed conversion and mission exit')

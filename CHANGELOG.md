@@ -1,10 +1,10 @@
-# v26
+## v27
 
-- Update both Megapacks for game build 25327279.
-- Include the updated scrollbar, forecast, cache, Arc Thrower, hover and sentry fixes.
-- Fix reinforcement placement and higher-ledge detection.
-- Tighten shallow-water dive assistance and update enemy collision handling.
-- Keep all twelve mod options and both forecast layouts.
+- Add Galactic Menu Hotkey v1.1 as an independent option.
+- Include Arc Thrower Revamped v1.5 recovery fixes and Clickable Scrollbars v2.13 Display drag input fixes.
+- Keep Mod Bindings Menu v1.0 as a separate dependency for keyboard rebinding; it is not bundled.
+- Update both standard and Rows packages with the same thirteen mod options.
+- Offline regression and packaging checks pass; new fixes still need in-game confirmation.
 
 # v19
 

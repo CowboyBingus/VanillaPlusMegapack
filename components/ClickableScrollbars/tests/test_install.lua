@@ -39,6 +39,23 @@ do
     check(f.captures==0 and f.wheels==0 and f.logs==0, 'native gestures need no screenshots, input injection or disk writes')
 end
 do
+    local f=fixture(module,{route='settings'})
+    f.press(1005,515)
+    check(f.consumes==1 and f.gate_writes==0, 'settings press consumes native selection without changing the timer')
+    f.move(900,595)
+    check(f.x==900 and math.abs(f.value-0.6)<1e-6,
+        'settings drag follows free mouse movement without activating row input')
+    f.release()
+    check(f.gate==0.504, 'settings drag leaves the native row timer untouched')
+    f.press(1005,515);f.focused=false;f.tick()
+    check(f.gate==0.504, 'settings focus loss leaves the native row timer untouched')
+end
+do
+    local f=fixture(module,{route='settings',input_refused=true})
+    f.press(1005,515);f.move(900,595)
+    check(f.writes==0 and f.gate==0.504, 'settings route is inert if input consumption fails')
+end
+do
     local f=fixture(module)
     f.press(1005,100)
     check(f.value==0, 'track click reaches the top')

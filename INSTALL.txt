@@ -1,21 +1,45 @@
-Vanilla Plus Megapack v26
+Vanilla Plus Megapack - v27
 
-Supports Helldivers 2 Steam build 25327279 / game 1.8.45850.0.
-Requires Bingus Shared Loader v16 or newer / API 1.
+Supports Steam build 25327279 / EXE 1.8.45850.0.
+Requires the separate Bingus Shared Loader v16 or newer / API 1.
 
-1. Close Helldivers 2 and use one mod manager.
-2. Replace the previous package with Vanilla-Plus-Megapack-v26.zip.
-3. Enable this package and Bingus Shared Loader.
-4. With Arsenal's default priority, put the loader last (at the bottom).
-   With first-mod priority enabled, put the loader first.
-5. Purge / Deploy, then start the game normally.
+1. Close Helldivers 2 and use either Arsenal or HD2MM.
+2. Disable previous megapacks and standalone copies of features you want off.
+   Enable only one Megapack variant (standard or Rows).
+3. Import Vanilla-Plus-Megapack-v27.zip and Bingus Shared Loader v16 or newer.
+4. With Arsenal's default priority, place the loader LAST. If first-mod
+   priority is enabled, place the loader FIRST instead.
+5. Open the pack's Options and select any of the thirteen independent mods.
+   Review these choices after updates; defaults depend on your manager.
+6. Purge / Deploy, then start the game. Close the game before changing options.
 
-Choose the desired features in the package Options. Both layouts contain the
-same twelve options. Enable either standard or Rows. Disable standalone copies
-of any feature you want turned off; unchecking the pack option does not disable
-an independently installed copy.
+Install Mod Bindings Menu v1.0 separately to rebind Galactic Menu Hotkey under
+Mouse & Keyboard > General > MODS. Without it, the hotkey uses Tab aboard
+the ship while no menu is open. Controller activation is not yet supported.
+Mod Bindings Menu is not bundled in either Megapack variant.
 
-To remove or change options, close the game, disable the package, and
-Purge / Deploy again. Keep the loader enabled while other mods need it.
+https://github.com/CowboyBingus/BingusSharedLoader/releases/latest
+https://github.com/CowboyBingus/ModBindingsMenu/releases/latest
 
+Included revisions:
+- Better Stratagem Bounce v15.2
+- Hellpod Steering Unlocked v7.2
+- Reinforcement Beacons Fixed v4.3
+- Consistent Vaulting v8.6
+- Shallow Water Diving v3.5
+- Sentry Aim Retention v1.0.11
+- Enemy Collision Synchronized v2.10.1
+- Controllable Hover Pack v1.5
+- Know Your Constellation v3.15
+- Armory Preview Cache v21
+- Clickable Scrollbars v2.13
+- Arc Thrower Revamped v1.5
+- Galactic Menu Hotkey v1.1
+
+Rows uses the static constellation forecast layout. All other resources match
+the standard package. An unchecked option cannot disable a separately enabled
+standalone copy. Remove older startup-replacing packages when migrating.
+
+Offline regression, package and option-selection checks passed. New gameplay
+fixes and current-build multiplayer behavior still need in-game confirmation.
 Logs: %LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs

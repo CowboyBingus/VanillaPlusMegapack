@@ -4,6 +4,7 @@ local source,fixtures=assert(arg[1]),assert(arg[2])
 local M=dofile(source..'/corpse_data.lua')
 for _,name in ipairs({'automaton_static','automaton_mixed'}) do
     local captured=dofile(fixtures..'/'..name..'.lua')
+    captured=dofile(fixtures..'/layout_25327279.lua')(captured)
     local api=dofile(source..'/windows_api.lua')()
     api.read=function(pointer,size)
         local address=api.address(pointer)

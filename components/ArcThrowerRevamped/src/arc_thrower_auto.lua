@@ -10,7 +10,7 @@
 if rawget(_G, 'ArcThrowerRevampedInstalled') then return end
 rawset(_G, 'ArcThrowerRevampedInstalled', true)
 
-local module = {revision = 'v1.4'}
+local module = {revision = 'v1.5'}
 
 local ffi = require('ffi')
 local bit = require('bit')
@@ -32,6 +32,8 @@ local ARC_RESOURCE = '\xe6\x06\x73\x0f\xd5\x9c\xde\x96'
 local AUTO_FIRE_FLAG = 184
 local ENTRY_SIZE = 40
 local POINTER_SIZE = 8
+local RECOVERY_WINDOW = 0.25
+local TRIGGER_BATCH, TRIGGER_LIMIT = 64, 4096
 local MEM_COMMIT, MEM_PRIVATE, PAGE_READONLY, PAGE_READWRITE = 0x1000, 0x20000, 0x02, 0x04
 
 local state = {armed = false, patched = false, record = nil, scans = 0,
@@ -132,7 +134,7 @@ local function write(address, data)
     if not state.bound then return false end
     return kernel.WriteProcessMemory(state.process, ffi.cast('void *', address),
                                      ffi.cast('const void *', data), #data,
-                                     written) ~= 0
+                                     written) ~= 0 and written[0] == #data
 end
 
 local function write_protected(address, data)
@@ -203,17 +205,18 @@ local function local_fire()
     if not input then return nil end
     local held=f32(input,8)
     if held~=held or held<0 or held>=86400 then return nil end
-    return held>0,avatar
+    return held>0,avatar,held
 end
 
 local function local_weapon(record,avatar)
     local manager=pointer(state.game+0x3326dc0)
-    if not manager or manager==0 then return false end
+    if not manager or manager==0 then return nil end
     local index=lookup(read(manager+32,20),u32(record,8),8192)
-    if not index or index>=4096 then return false end
+    if not index or index>=4096 then return nil end
     local rows=pointer(manager+64)
     local holder=rows and rows~=0 and read(rows+index*48+4,4)
-    return holder and u32(holder,0)==u32(avatar,8) or false
+    if not holder then return nil end
+    return u32(holder,0)==u32(avatar,8)
 end
 
 -- Entry arrays can move or compact while fire stays held. Check the slot every
@@ -236,6 +239,7 @@ local function charge_entry(chosen)
             return entries+index*ENTRY_SIZE
         end
     end
+    return false -- readable table confirms this weapon is no longer charged
 end
 
 local function supported_build()
@@ -252,6 +256,23 @@ end
 -- The weapon data library is one large read-only private allocation. The arc
 -- thrower's charge record is located by its animation-variable fingerprint;
 -- auto_fire_in_safety tells the engine it may complete the shot itself.
+local function valid_charge_record(charge)
+    return charge and charge:sub(169,184)==ARC_FINGERPRINT
+        and math.abs(f32(charge,0)-1.0)<1e-3
+        and math.abs(f32(charge,24)-1.1)<1e-3
+        and math.abs(f32(charge,48)-1.2)<1e-3
+        and math.abs(f32(charge,72)-0.7)<1e-3
+        and math.abs(f32(charge,76)-1.4)<1e-3
+end
+
+local function ensure_auto_fire(record, charge)
+    if charge:byte(AUTO_FIRE_FLAG+1)==1 then return true end
+    local ok=write_protected(record+AUTO_FIRE_FLAG,'\x01')
+        and read(record+AUTO_FIRE_FLAG,1)=='\x01'
+    if ok then log_line(string.format('auto-fire flag restored at %#x',record)) end
+    return ok
+end
+
 local function scan_charge_record()
     local information = ffi.new('MEMORY_BASIC_INFORMATION')
     local address = 0
@@ -278,15 +299,13 @@ local function scan_charge_record()
                         if not found then break end
                         local record = base + offset + found - 1 - 168
                         local charge = read(record, 216)
-                        if charge and charge:sub(169, 184) == ARC_FINGERPRINT
-                           and math.abs(f32(charge, 0) - 1.0) < 1e-3
-                           and math.abs(f32(charge, 24) - 1.1) < 1e-3
-                           and math.abs(f32(charge, 48) - 1.2) < 1e-3
-                           and math.abs(f32(charge, 72) - 0.7) < 1e-3
-                           and math.abs(f32(charge, 76) - 1.4) < 1e-3 then
+                        -- A recovery scan must pass already-patched copies to
+                        -- find a replacement, even if the old allocation lives on.
+                        if valid_charge_record(charge)
+                           and (not state.patched or charge:byte(AUTO_FIRE_FLAG+1)~=1) then
                             state.record = record
-                            if write_protected(record + AUTO_FIRE_FLAG, '\x01') then
-                                state.patched = true
+                            state.patched=ensure_auto_fire(record,charge)
+                            if state.patched then
                                 return true
                             end
                             return false, 'charge record write failed'
@@ -311,6 +330,7 @@ local scan_thread, next_scan = nil, 0
 local function patch_charge_record(now)
     if now < next_scan then return false, 'waiting' end
     if not scan_thread then
+        state.rescan_requested = nil
         scan_thread = coroutine.create(scan_charge_record)
         state.scans = state.scans + 1
     end
@@ -322,13 +342,38 @@ local function patch_charge_record(now)
             return false, 'scan failed'
         end
         if coroutine.status(scan_thread) == 'dead' then
-            scan_thread, next_scan = nil, now + 5
+            scan_thread, next_scan = nil, now + (result and 1 or 5)
             return result, reason
         end
         bytes = bytes + (result or 0)
         if bytes >= 262144 or seconds() >= deadline then break end
     end
     return false, 'pending'
+end
+
+local function maintain_charge_record(now)
+    if state.record and now >= (state.next_record_check or 0) then
+        state.next_record_check=now+0.25
+        local charge=read(state.record,216)
+        if valid_charge_record(charge) then
+            state.patched=ensure_auto_fire(state.record,charge)
+            if not state.patched then log_line('charge record repair failed; retrying') end
+        else
+            -- Never write through an expired/reused record address.
+            state.record=nil;state.patched=false
+            scan_thread=nil;next_scan=now
+            log_line('charge record unavailable or changed; rediscovering')
+        end
+    end
+    if not state.patched or state.rescan_requested or scan_thread then
+        local ok,reason=patch_charge_record(now)
+        if ok then
+            if not state.patch_logged then note('Charge record ready.');state.patch_logged=true end
+        elseif not state.patched and reason~='pending' and reason~='waiting' and not state.scan_logged then
+            state.scan_logged=true
+            note('Charge record not ready yet: '..tostring(reason))
+        end
+    end
 end
 
 -- Inspect the small fire-command table first. Ordinary weapons never trigger
@@ -340,17 +385,35 @@ local function active_arc(avatar)
     local header = read(manager + 24, 72)
     if not header then return nil end
     local count, entities, held = u32(header, 0), u64(header, 40), u64(header, 64)
-    if count < 1 or count > 64 or entities == 0 or held == 0 then return nil end
-    local flags, pointers = read(held, count), read(entities, count * POINTER_SIZE)
-    if not flags or not pointers then return nil end
-    local chosen
-    for index = 0, count - 1 do
+    state.trigger_count=count
+    if count < 1 or count > TRIGGER_LIMIT or entities == 0 or held == 0 then
+        return nil,'invalid trigger table (count '..tostring(count)..')'
+    end
+    -- Read the small flag array first so a sparse table's last slot is found
+    -- before the first shot clears its command. Inspect at most 64 active
+    -- candidates per discovery; dense tables continue in the next batch.
+    if state.discovery_entities~=entities or state.discovery_count~=count then
+        state.discovery_index=0
+        state.discovery_entities=entities;state.discovery_count=count
+    end
+    local first=state.discovery_index or 0
+    local flags=read(held,count)
+    if not flags then return nil end
+    state.discovery_index=0
+    local chosen,examined=nil,0
+    for offset = 0, count - 1 do
+        local index=(first+offset)%count
         if flags:byte(index + 1) ~= 0 then
-            local entity = u64(pointers, index * POINTER_SIZE)
-            local record = entity ~= 0 and read(entity, 24)
+            local entity = pointer(entities+index*POINTER_SIZE)
+            local record = entity and entity ~= 0 and read(entity, 24)
             if record and record:sub(1, 8) == ARC_RESOURCE and bit.band(record:byte(21), 1) == 1
                 and local_weapon(record,avatar) then
                 chosen = {entity=entity,identity=record}
+                break
+            end
+            examined=examined+1
+            if examined>=TRIGGER_BATCH then
+                state.discovery_index=(index+1)%count
                 break
             end
         end
@@ -363,7 +426,23 @@ end
 local failure_logged = false
 local resolved = nil
 
+local function clear_hold(reason)
+    state.armed=false;resolved=nil;state.previous=nil
+    state.next_discovery=nil;state.discovery_index=0
+    state.suspended_since=nil;state.held_time=nil
+    state.progress_time=nil;state.drove_since=nil;state.drove_peak=0
+    state.shots={};state.last_shot=nil;state.reason=reason
+end
+
+local function suspend_hold(now,reason)
+    state.suspended_since=state.suspended_since or now
+    state.previous=nil
+    state.reason=reason
+    if now-state.suspended_since>=RECOVERY_WINDOW then clear_hold(reason..'; hold expired') end
+end
+
 local function step(dt)
+    state.reason=nil -- diagnostics must describe this frame, not a past failure
     if not bind() then
         if not state.bind_logged then
             state.bind_logged = true
@@ -380,16 +459,14 @@ local function step(dt)
         return
     end
     local now = seconds()
-    if not state.patched then
-        local ok, reason = patch_charge_record(now)
-        if ok then
-            note('Charge record ready.')
-        elseif reason ~= 'pending' and reason ~= 'waiting' and not state.scan_logged then
-            state.scan_logged = true
-            note('Charge record not ready yet: ' .. tostring(reason))
-        end
+    maintain_charge_record(now)
+    local down,avatar,held = local_fire()
+    if down==nil then
+        -- Unknown input is not proof of release. Retain only a short-lived
+        -- binding, with no charge writes until all validation succeeds again.
+        suspend_hold(now,'native Fire input unavailable')
+        return
     end
-    local down,avatar = local_fire()
     if not down then
         if state.armed and rawget(_G, 'ArcThrowerDiagnostics') then
             local intervals = {}
@@ -411,29 +488,31 @@ local function step(dt)
             end
             log_line(summary)
         end
-        state.armed = false
-        resolved = nil
-        state.next_discovery = nil
-        state.previous = nil
-        state.shots = {}
-        state.last_shot = nil
-        state.reason = nil
+        clear_hold(nil)
         return
     end
 
+    if state.suspended_since and (now-state.suspended_since>=RECOVERY_WINDOW
+        or (state.held_time and held<state.held_time)) then
+        clear_hold('interrupted hold requires a new fire command')
+    end
     if resolved then
         local identity = read(resolved.entity, 24)
-        if identity ~= resolved.identity or avatar ~= resolved.avatar or not local_weapon(identity,avatar) then
-            resolved = nil
-            state.armed = false
-            state.previous = nil
-            state.reason = 'weapon entity changed'
+        if not identity then suspend_hold(now,'weapon identity unreadable');return end
+        if identity ~= resolved.identity or avatar ~= resolved.avatar then
+            clear_hold('weapon entity changed')
+            return
+        end
+        local owned=local_weapon(identity,avatar)
+        if owned==nil then suspend_hold(now,'weapon holder unavailable');return end
+        if not owned then
+            clear_hold('weapon holder changed')
             return
         end
         local entry=charge_entry(resolved)
-        if not entry then
-            resolved=nil;state.armed=false;state.previous=nil
-            state.reason='charge binding changed'
+        if entry==nil then suspend_hold(now,'charge binding unavailable');return end
+        if entry==false then
+            clear_hold('charge binding changed')
             return
         end
         if entry~=resolved.entry then
@@ -446,9 +525,9 @@ local function step(dt)
     if not state.armed then
         if now < (state.next_discovery or 0) then return end
         state.next_discovery = now + 0.1
-        local chosen = active_arc(avatar)
+        local chosen,reason = active_arc(avatar)
         if not chosen then
-            state.reason = 'waiting for the engine fire command'
+            state.reason = reason or 'waiting for the engine fire command'
             return
         end
         resolved = chosen
@@ -459,9 +538,12 @@ local function step(dt)
         state.reason = nil
         state.drove_since = nil
         state.drove_peak = 0
+        state.progress_time=now
         log_line(string.format('assist armed entity=%#x entry=%#x',
                                chosen.entity, chosen.entry))
     end
+
+    state.suspended_since=nil;state.held_time=held
 
     local blob = read(resolved.entry, ENTRY_SIZE)
     if not blob then
@@ -471,7 +553,7 @@ local function step(dt)
     local value = f32(blob, 4)
     local full = f32(blob, 8)
     local flag = blob:byte(13)
-    if full <= 0.1 then
+    if full~=full or value~=value or full <= 0.1 or value<0 then
         state.reason = 'invalid full-charge time'
         return
     end
@@ -499,6 +581,13 @@ local function step(dt)
 
     local previous = state.previous
     state.previous = value
+    -- A missing auto-fire patch can also leave charge stuck at full, which the
+    -- low-charge stall check above cannot detect. Search for another matching
+    -- data record only after sustained lack of progress, within the scan budget.
+    if not previous or math.abs(value-previous)>1e-4 then state.progress_time=now end
+    if now-(state.progress_time or now)>math.max(1.2,full*1.5) then
+        state.rescan_requested=true;state.progress_time=now
+    end
     -- Progress belongs to this charge cycle, not the best charge since press.
     -- Otherwise a completed first shot disables stall recovery for the hold.
     if previous and value < previous - 0.01 then
@@ -507,7 +596,7 @@ local function step(dt)
     if rawget(_G, 'ArcThrowerDiagnostics') and previous and previous > full * 0.5 and value < full * 0.05 then
         local interval = state.last_shot and (now - state.last_shot) or nil
         state.last_shot = now
-        state.shots[#state.shots + 1] = interval
+        state.shots[#state.shots + 1] = interval or false
         log_line(string.format('shot %d (charge %.3f -> %.3f, interval %s)',
                                #state.shots, previous, value,
                                interval and string.format('%.3f', interval) or 'n/a'))

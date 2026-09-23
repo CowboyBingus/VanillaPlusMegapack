@@ -28,7 +28,7 @@ def main():
     source=build/'mod.wrapper.lua';source.write_text(wrapper,encoding='utf-8',newline='\n')
     env=dict(os.environ,LUA_PATH=str(LUA.parent/'?.lua')+';;')
     tests=''
-    for name in ('cancel','snapshot','settings','loader','replay'):
+    for name in ('cancel','snapshot','settings','loader','replay','current_game'):
         tests+=run([LUA,ROOT/f'tests/test_{name}.lua',ROOT/'src'],env=env)
     compiled=build/'mod.ljbc';run([LUA,'-bsdW',source,compiled],env=env)
     code=compiled.read_bytes();assert code[:5]==b'\x1bLJ\x02\x02'

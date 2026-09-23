@@ -1,10 +1,19 @@
-# v1.4
-
-- Update compatibility for game build 25327279.
-- Use the game fire command for mouse, controller and rebound controls.
-- Fix charge resets that could stop repeated firing.
-
 # Changelog
+
+## v1.5
+
+- Revalidate the auto-fire record every 250 ms, repair a cleared flag, and
+  rediscover replaced records without writing through an invalid old address.
+- Search beyond an already-patched copy when charging stalls, including at full
+  charge. Recovery scans retain the existing byte, step, and time budgets.
+- Pause on unavailable input or weapon bindings for up to 250 ms; resume only
+  after revalidating the same local weapon and uninterrupted hold. Confirmed
+  release, changed identity/holder, and expired holds still cancel assistance.
+- Discover active Arc commands in larger trigger tables with bounded candidate
+  work, rather than rejecting the whole table above 64 entries.
+- Correct diagnostic shot counts and clear stale failure reasons.
+- Add regression coverage for recovery and cancellation, including slow reads.
+  These fixes have offline proof; affected-session gameplay verification remains pending.
 
 ## v1.2
 

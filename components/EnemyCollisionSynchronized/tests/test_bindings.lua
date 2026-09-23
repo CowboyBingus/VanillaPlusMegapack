@@ -18,16 +18,16 @@ local function put(address,data)memory[key(address)]=data end
 local function pointer(address,value)
     local b=ffi.new('uintptr_t[1]',ffi.cast('uintptr_t',value));put(address,ffi.string(b,8))
 end
-local table_address=exe+0x27d1830
-pointer(game+0x276c070,table_address)
-for _,entry in ipairs({{8,0x7846f0},{0x60,0x79e7d0},{0x68,0x79eaf0}}) do
+local table_address=exe+0x27cd910
+pointer(game+0x3326338,table_address)
+for _,entry in ipairs({{8,0x77f4f0},{0x60,0x799880},{0x68,0x799ba0}}) do
     pointer(table_address+entry[1],exe+entry[2])
 end
-put(exe+0x79e7d0,'\x48\x89\x5c\x24\x08\x48\x89\x6c')
-put(exe+0x79eaf0,'\x48\x89\x5c\x24\x08\x48\x89\x6c')
-assert(evidence.rva==0x7a33f0 and #evidence.bytes==152)
+put(exe+0x799880,'\x48\x89\x5c\x24\x08\x48\x89\x6c')
+put(exe+0x799ba0,'\x48\x89\x5c\x24\x08\x48\x89\x6c')
+assert(evidence.rva==0x7abd00 and #evidence.bytes==152)
 put(game+evidence.rva,evidence.bytes)
-assert(completion.rva==0x111ed10 and #completion.bytes==422)
+assert(completion.rva==0x13c02c0 and #completion.bytes==422)
 put(game+completion.rva,completion.bytes)
 api.read=function(address,size)
     local b=memory[key(address)];return b and #b>=size and b:sub(1,size) or nil

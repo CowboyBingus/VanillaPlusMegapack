@@ -6,7 +6,7 @@ assert(type(loader.api) == 'number' and loader.api >= 1, 'Shared loader API 1 is
 assert(type(loader.version) == 'number' and loader.version >= 16, 'Bingus Shared Loader loader-v16 is required')
 local pack = {
     name = 'Vanilla Plus Megapack',
-    revision = 'megapack-v21',
+    revision = 'megapack-v27',
     -- Available component inventory; installed choices are in loader.modules.
     modules = {
         'mods/cowboybingus/better_stratagem_bounce',
@@ -21,6 +21,7 @@ local pack = {
         'mods/cowboybingus/armory_preview_cache',
         'mods/cowboybingus/clickable_scrollbars',
         'mods/cowboybingus/arc_thrower_auto',
+        'mods/cowboybingus/galactic_menu_hotkey',
     },
 }
 loader.megapack = pack

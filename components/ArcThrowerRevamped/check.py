@@ -57,6 +57,22 @@ def check_work_budget(lua, path):
         print(result.stdout.strip())
 
 
+def check_recovery(lua, path):
+    test = Path(__file__).parent / "tests" / "test_work_budget.lua"
+    scenarios = ("patch-reset", "patch-replaced", "patch-shadow-copy", "input-gap",
+                 "identity-gap", "holder-gap", "charge-binding-gap", "large-trigger-table",
+                 "sparse-trigger-table", "dense-trigger-table",
+                 "input-expired", "release-during-gap", "identity-change-during-gap",
+                 "holder-change-during-gap", "diagnostic-recovery")
+    for mode in ("normal", "slow"):
+        for scenario in scenarios:
+            result = subprocess.run([str(lua), str(test), str(path), mode, scenario],
+                                    capture_output=True, text=True)
+            if result.returncode:
+                raise SystemExit("Recovery regression failed:\n" + result.stdout + result.stderr)
+    print("PASS: {} recovery/safety scenarios, including slow native reads".format(len(scenarios)*2))
+
+
 def archive_entry(archive):
     with zipfile.ZipFile(archive) as package:
         name = next(entry for entry in package.namelist() if entry.endswith(".patch_0"))
@@ -97,6 +113,7 @@ def main():
     print("LuaJIT check ({}): ok".format(luajit))
     check_bindings(luajit, source)
     check_work_budget(luajit, source)
+    check_recovery(luajit, source)
     if arguments.archive:
         body = archive_entry(arguments.archive)
         with tempfile.NamedTemporaryFile("wb", suffix=".lua", delete=False) as handle:
@@ -106,6 +123,7 @@ def main():
             check_luajit(luajit, temporary)
             check_bindings(luajit, temporary)
             check_work_budget(luajit, temporary)
+            check_recovery(luajit, temporary)
         finally:
             os.unlink(temporary)
         print("packaged entry check ({}): ok".format(arguments.archive))

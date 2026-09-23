@@ -283,6 +283,87 @@ empty.cells[DISPATCH + 5768] = nil
 check('an unregistered grid is refused',
     module.native_locate(reader(empty.cells), view(empty.cells, {})) == nil)
 
+-- Bindings/options uses a separate inline list with the same native scrollbar
+-- setter. Its screen stack and visible widget must both agree before capture.
+do
+    local cells, screen, menu, owner, list = {}, 0x11000000, 0x12000000, 0x13000000,
+        0x11000000 + 338344
+    local put = function(a, value) cells[a] = value end
+    put(GAME + 0x3326e68, pack_u64(DISPATCH))
+    put(DISPATCH + 5740, pack_u32(1))
+    put(DISPATCH + 5744, pack_u64(0x1111111) .. pack_u32(67) .. pack_u32(0))
+    put(GAME + 0x347ce28, pack_u64(owner))
+    put(owner + 0x429c, pack_u32(1) .. pack_u32(26) .. string.rep('\0', 12) .. pack_u32(2))
+    put(GAME + 0x347ce38, pack_u64(menu))
+    put(menu + 208, pack_u64(screen))
+    put(screen + 12, '\1')
+    local function widget(address, height, bottom)
+        put(address + 12, pack_f32(6)); put(address + 16, pack_f32(height))
+        put(address + 84, pack_f32(1)); put(address + 100, pack_f32(4/3))
+        put(address + 140, pack_f32(4/3)); put(address + 148, pack_f32(1668.667))
+        put(address + 156, pack_f32(bottom))
+    end
+    widget(list + 816, 806, 117.333)
+    widget(list + 1432, 198.3, 544.444)
+    put(list + 552, pack_f32(1168)); put(list + 2784, pack_f32(2470))
+    put(list + 2792, pack_f32(0.473))
+    local resolved = assert(module.native_locate(reader(cells), view(cells, {})))
+    check('visible bindings page resolves its own bar',
+        resolved.route == 'bindings' and resolved.bar == list + 816)
+    local model = assert(module.native_state(resolved))
+    check('bindings model reads the live list value and span',
+        model.span == 2470 and math.abs(model.value - 0.473) < 0.001
+        and model.geometry.thumb > 260)
+    local applied = {}
+    check('bindings updates the native bar and content in order',
+        module.native_apply(resolved, model, 0.75,
+            {scroll = function(bar, value) applied[#applied+1] = {bar, value} end,
+             position = function(widget, x, y) applied[#applied+1] = {widget, x, y} end}) == 0.75
+        and applied[1][1] == list + 816 and applied[1][2] == 0.75
+        and applied[2][1] == list + 544 and applied[2][2] == 0
+        and applied[2][3] == 0.75 * model.span)
+    check('options movement requires the content to move, not just the thumb',
+        not module.native_moved(model, {kind='bindings',scroll=model.scroll,rendered_thumb=40})
+        and module.native_moved(model, {kind='bindings',scroll=model.scroll+5}))
+    put(owner + 0x429c, pack_u32(1) .. pack_u32(25) .. string.rep('\0', 12) .. pack_u32(2))
+    check('inactive bindings screen cannot capture',
+        module.native_locate(reader(cells), view(cells, {})) == nil)
+    put(owner + 0x429c, pack_u32(1) .. pack_u32(26) .. string.rep('\0', 12) .. pack_u32(2))
+    put(list + 816 + 84, pack_f32(0))
+    check('hidden bindings bar cannot capture',
+        module.native_locate(reader(cells), view(cells, {})) == nil)
+    local settings_screen, settings_list = 0x14000000, 0x14000000 + 4189984
+    put(owner + 0x429c, pack_u32(1) .. string.rep('\0', 16) .. pack_u32(1))
+    put(menu + 200, pack_u64(settings_screen))
+    put(settings_screen + 12, '\1')
+    widget(settings_list + 816, 806, 117.333)
+    widget(settings_list + 1432, 548.679, 117.333)
+    put(settings_list + 552, pack_f32(378)); put(settings_list + 2784, pack_f32(378))
+    put(settings_list + 2792, pack_f32(1))
+    local settings = assert(module.native_locate(reader(cells), view(cells, {})))
+    local settings_model = assert(module.native_state(settings))
+    check('settings page resolves its own native list',
+        settings.route == 'settings' and settings.bar == settings_list + 816
+        and settings_model.span == 378 and settings_model.value == 1)
+    local input, consumed = 0x15000000, 0
+    put(GAME + 0x347cf18, pack_u64(input))
+    local consume = {consume=function(owner, action)
+        check('settings captures the shared UI select action', owner==input and action==0xA00000000)
+        consumed=consumed+1
+    end}
+    check('settings consumes input through the native action handler',
+        module.native_settings_input(settings, consume) and consumed==1)
+    check('bindings does not consume settings selection',
+        not module.native_settings_input(resolved, consume) and consumed==1)
+    check('refused input consumption cancels capture',
+        not module.native_settings_input(settings, {consume=function() return false end}))
+    check('input handler errors cancel capture',
+        not module.native_settings_input(settings, {consume=function() error('refused') end}))
+    cells[GAME + 0x347cf18]=nil
+    check('unreadable input state cannot capture or call native code',
+        not module.native_settings_input(settings, consume) and consumed==1)
+end
+
 print('native grid tests passed')
 
 -- Exercise the real memory decoder: one bounded registry read even when full.
@@ -296,10 +377,10 @@ do
     end
     local api=reader(cells);local read=api.read;local calls=0
     api.read=function(a,n)calls=calls+1;return read(a,n)end
-    assert(not module.native_locate(api) and calls==3,'absent owner must cost three reads')
+    assert(not module.native_locate(api) and calls==4,'absent owner must cost four reads')
     cells[DISPATCH+5752+63*16]=pack_u32(224)
     cells[GRID+272+84]=pack_f32(0);calls=0
-    assert(not module.native_locate(api) and calls==5,'hidden owner must cost five reads')
+    assert(not module.native_locate(api) and calls==6,'hidden owner must cost six reads')
     api.read=function(a,n)if n==1024 then return string.rep('x',1023)end;return read(a,n)end
     assert(not module.native_locate(api),'short registry snapshot must be rejected')
 end

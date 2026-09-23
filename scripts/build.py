@@ -14,7 +14,7 @@ from package import package_release, release_directory
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build'
 MODULE = 'mods/cowboybingus/vanilla_plus_megapack'
-VERSION = '26'
+VERSION = '27'
 REVISION = f'megapack-v{VERSION}'
 GUID = '876060ae-0640-4ac5-95b6-ec7c9a0567d3'
 ROWS_GUID = 'fb497df5-080b-48a5-b31d-103ccb060e1c'
@@ -33,6 +33,7 @@ OPTION_DESCRIPTIONS = {
     'ControllableHoverPack': 'Press the Jump Pack action again to descend early with native landing assistance.',
     'KnowYourConstellation': 'Shows local enemy forecasts on mission previews and briefing.',
     'ClickableScrollbars': 'Smoothly drag equipment and Career scrollbars, even with the pointer away from the track.',
+    'GalacticMenuHotkey': 'Open the Galactic Map aboard the ship. Install Mod Bindings Menu separately to rebind the keyboard shortcut.',
 }
 
 
@@ -100,6 +101,16 @@ def build_component(component, build=BUILD, rows=False):
         payload = struct.pack('<II', len(body), 2) + body
         if sha(payload) != component['resource_sha256']:
             raise ValueError('Scrollbar resource differs from the verified standalone release')
+        directory = build / component['slug']
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'mod.lua.main').write_bytes(payload)
+        return payload
+    if component['slug'] == 'GalacticMenuHotkey':
+        filename = 'galactic_menu_hotkey.lua'
+        body = (root / 'src' / filename).read_bytes()
+        payload = struct.pack('<II', len(body), 2) + body
+        if sha(payload) != component['resource_sha256']:
+            raise ValueError('Addon resource differs from verified standalone: ' + component['slug'])
         directory = build / component['slug']
         directory.mkdir(parents=True, exist_ok=True)
         (directory / 'mod.lua.main').write_bytes(payload)
@@ -213,8 +224,8 @@ def main():
                         'Include': [folder]})
     report = {
         'name': 'Vanilla Plus Megapack', 'slug': 'VanillaPlusMegapack', 'revision': REVISION, 'guid': GUID,
-        'description': 'Choose any of the twelve bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v16 or newer. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. With default Arsenal priority put the loader last.',
-        'requires': [{'name': 'Bingus Shared Loader', 'guid': '612eaf70-d682-43c7-9efd-16dcc695f977', 'api': 1, 'revision': 'loader-v16'}],
+        'description': 'Choose any of the thirteen bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v16 or newer. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. Install Mod Bindings Menu separately to rebind Galactic Menu Hotkey. With default Arsenal priority put the loader last.',
+        'requires': [{'name': 'Bingus Shared Loader', 'guid': '612eaf70-d682-43c7-9efd-16dcc695f977', 'api': 1, 'revision': 'loader-v16'}, {'name': 'Mod Bindings Menu', 'revision': 'v1.0', 'repository': 'https://github.com/CowboyBingus/ModBindingsMenu', 'required_for': 'Galactic Menu Hotkey keyboard rebinding', 'bundled': False}],
         'game_exe_sha256': EXE_SHA, 'game_dll_sha256': GAME_DLL_SHA,
         'deployment_files': files, 'options': options,
         'files': {p: sha((ROOT / p).read_bytes()) for p in files.values()},

@@ -44,7 +44,7 @@ def main():
         assert len(package.namelist()) == len(expected) and set(package.namelist()) == expected
         manager = json.loads(package.read('manifest.json'))
         assert manager['Version'] == 1 and manager['Name'] == name+f' - v{VERSION}' and manager['Guid'] == (ROWS_GUID if rows else GUID)
-        assert len(manager['Options']) == len(components) == 12
+        assert len(manager['Options']) == len(components) == 13
         assert manager['IconPath'] == 'thumbnail.png'
         png = package.read('thumbnail.png')
         assert png[:8] == b'\x89PNG\r\n\x1a\n'
@@ -99,7 +99,8 @@ def main():
                 # A direct component is its own plaintext entry: the option
                 # carries the standalone source, not a compiled wrapper.
                 pinned = next(c['revision'] for c in components if c['slug'] == component['slug'])
-                assert f"local module = {{revision = '{pinned}'}}".encode() in body
+                if component['slug'] in ('ArcThrowerRevamped', 'ClickableScrollbars'):
+                    assert f"local module = {{revision = '{pinned}'}}".encode() in body
                 assert b'loadstring(' not in body
                 assert entry == (build / component['slug'] / 'mod.lua.main').read_bytes()
                 continue
@@ -117,12 +118,16 @@ def main():
             changed = {key for key in original if original[key] != payloads[key]}
             assert changed == {resource_hash('mods/cowboybingus/enemy_intelligence')}
             print(f'PASS: only the forecast payload differs from the standard v{VERSION} package')
+        assert resource_hash('mods/cowboybingus/mod_bindings_menu') not in payloads
+        assert resource_hash('content/input') not in payloads
+        assert all(c['slug'] != 'ModBindingsMenu' for c in components)
+        assert report['requires'][1]['bundled'] is False
         assert resource_hash('boot') not in payloads
         assert resource_hash('core/wwise/lua/wwise_flow_callbacks') not in payloads
         for name in package.namelist():
             data = package.read(name).lower()
             assert b'users\\' not in data and b'users/' not in data
-    print('PASS: twelve independent options, all 4096 selections, exact pinned payloads, no boot or shared loader')
+    print(f'PASS: {len(components)} independent options, all {1 << len(components)} selections, exact pinned payloads, no bundled bindings menu, boot or shared loader')
 
 
 if __name__ == '__main__':

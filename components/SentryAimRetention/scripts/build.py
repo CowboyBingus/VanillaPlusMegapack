@@ -27,6 +27,7 @@ def main():
             'CreateRemoteThread','RtlAddFunctionTable','LoadLibrary')):
             raise ValueError('Executable modification API in '+p.name)
     env=dict(os.environ,LUA_PATH=str(LUA.parent/'?.lua')+';;')
+    tests=run([LUA,ROOT/'tests/test_current_game.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_aim.lua',ROOT/'src',ROOT/'tests/gatling_target_loss.lua'],env=env)
     tests+=run([LUA,ROOT/'tests/test_firing.lua',ROOT/'src',ROOT/'tests/firing_sweeps.lua'],env=env)
     tests+=run([LUA,ROOT/'tests/test_loader.lua',ROOT/'src'],env=env)

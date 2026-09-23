@@ -1,4 +1,4 @@
--- Actual stopped Impaler observations from session redacted.
+-- Native regression recording; session metadata removed.
 -- Seed the stop confirmed by the live mod log; this replays follow-up timing, not physics.
 return {unit=25169112,entity=4194397,stopped_at=599.6148114000098,members={2952913386,2952897318,2952897323,2952897222,2952897223,2952897316,2952897317,2952897319,2952897324,2952897320,2952913950,2952897321,2952913949,2952897322,2952913948},rows={
 {seq=2998,time=599.61481140000978},

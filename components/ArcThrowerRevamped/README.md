@@ -1,6 +1,6 @@
-Mission repair v1.4: Uses the game's Fire action for mouse, controller and rebound input. Revalidates charge entries after table movement, preserves held input through pauses after the first shot, and rejects replaced entities or another holder. Synthetic regression tests pass; controller and extended combat checks remain pending.
+Recovery update v1.5: Rechecks the auto-fire patch, rediscovers replacement charge records, and recovers short input/binding outages after the first shot. Release and weapon-ownership checks remain enforced. Synthetic regression tests pass; affected-session gameplay verification remains pending.
 
-> Current compatibility candidate: Arc Thrower Revamped v1.4, Steam build 25327279 / EXE 1.8.45850.0. Use Bingus Shared Loader v16. Offline checks passed; live mission verification is pending.
+> Current compatibility candidate: Arc Thrower Revamped v1.5, Steam build 25327279 / EXE 1.8.45850.0. Use Bingus Shared Loader v16. Offline checks passed; live mission verification is pending.
 
 # Arc Thrower Revamped
 
@@ -16,7 +16,7 @@ held and an arc thrower is the weapon the engine issued a fire command for.
 ## Install
 
 1. Close Helldivers 2.
-2. Import `Arc-Thrower-Revamped-v1.4.zip` and **Bingus Shared Loader v16 or
+2. Import `Arc-Thrower-Revamped-v1.5.zip` and **Bingus Shared Loader v16 or
    newer** into Arsenal or HD2MM, then enable both.
 3. With Arsenal's default priority, put the loader last at the bottom of the
    load order.
@@ -29,15 +29,18 @@ loader should be removed before deploying this one.
 
 - The first shot of a press is the weapon's own; the addon keeps the cycle
   going after that one.
-- Only the physical left mouse button triggers the assist. Holding the button
-  while any other weapon is equipped does nothing.
+- The game's processed Fire action drives the assist, including mouse,
+  controller, and rebound input. Actual controller coverage still needs gameplay testing.
+- Unavailable input or bindings pause assistance. Recovery requires the same
+  local weapon within 250 ms; release, ownership changes, and longer outages
+  require a new engine fire command.
 - A second arc thrower called down later has its own entity and charge entry,
   so the addon follows whichever thrower the engine issued a fire command for.
 - No executable code is modified. The addon writes the thrower's charge record
   (`auto_fire_in_safety`) and its runtime charge entry, and verifies a known
   `game.dll` fingerprint before touching anything.
 - Targets Steam build 25327279 / EXE 1.8.45850.0. The earlier implementation
-  was validated in a solo session; v1.4 still needs in-game verification.
+  was validated in a solo session; v1.5 still needs in-game verification.
   Other builds are refused by design.
 
 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/ArcThrowerAuto.log` records startup,
@@ -51,7 +54,7 @@ its `-- HD2-Addon:` declaration. Package it from this checkout:
 
 ```powershell
 python -B scripts/build.py --loader ..\BingusSharedLoader `
-  --output releases\Arc-Thrower-Revamped-v1.4.zip
+  --output releases\Arc-Thrower-Revamped-v1.5.zip
 ```
 
 The builder runs `python check.py --archive <zip>` before finishing. The check
@@ -62,15 +65,18 @@ synthetic unsupported game image is rejected without writes. These offline
 checks do not validate live gameplay.
 
 Requires [Bingus Shared Loader](https://github.com/CowboyBingus/BingusSharedLoader/releases/latest)
-v15 or newer (API 1). Artwork is not included; the repository ships source and
+v16 or newer (API 1). Artwork is not included; the repository ships source and
 the packaged release only.
 
-## Performance update â€” v1.4
+## Performance and recovery
 
 The startup scan runs incrementally, reading at most 64 KiB at once with bounded work per update. Active fire commands are checked before looking through charged weapons; unsuccessful discovery is retried at most ten times per second while the button stays held. Render does not run a second assist. Normal shot, hold and idle diagnostics are disabled; startup and actual errors remain logged.
 
 Offline binding, work-budget and synthetic firing tests pass. This update still needs in-game verification.
 
-Release **v1.4** includes input/performance fixes. Offline checks cover this revision; in-game frame-time validation is pending.
-
-Current version: **v1.4**, for game build **25327279**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).
+Release **v1.5** adds bounded recovery without changing charge times, cadence,
+damage, or arc settings. It revalidates the cached auto-fire record every 250 ms
+and searches for a replacement after a sustained charge stall. Trigger discovery
+accepts up to 4096 entries and examines at most 64 active candidates per attempt.
+Recovery, release, changed-weapon, work-budget, and packaged-payload checks run
+offline. In-game frame-time and affected-user verification are pending.
