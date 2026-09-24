@@ -4,10 +4,8 @@ return function(create_api,patch,build)
         realignments=0,claws_disabled=0,skipped=0,retries=0,max_gap=0}
     rawset(_G,'CorpseCollisionRepair',state)
     local api,last_log
-    local diagnostics=rawget(_G,'CowboyBingusDiagnostics')==true
     local function report(status,active,force)
         state.status=status;state.active=active
-        if not force and not diagnostics then return end
         local now=api and api.time() or 0
         if not force and last_log and now-last_log<2 then return end
         last_log=now
@@ -53,7 +51,7 @@ return function(create_api,patch,build)
         profiler=nil;api.profiler=nil;api.read=original_read
         state.profiler_failures=(state.profiler_failures or 0)+1
     end
-    if diagnostics and patch.profiler then
+    if patch.profiler then
         local created,value=pcall(patch.profiler.new,api,build.revision)
         if created then profiler=value;api.profiler=value else disable_profiler() end
     end

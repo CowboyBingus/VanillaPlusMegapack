@@ -1,3 +1,10 @@
+# v28
+
+- Update both Megapack layouts for Steam build 25480438.
+- Include the refreshed addresses, guards and corpse state-machine hashes from the standalone mods.
+- Keep all thirteen independent options and the separate Mod Bindings Menu dependency.
+- Offline builds and package checks pass; live gameplay validation remains pending.
+
 ## v27
 
 - Add Galactic Menu Hotkey v1.1 as an independent option.

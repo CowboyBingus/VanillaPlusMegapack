@@ -62,7 +62,7 @@ function M.mission(kind)
     put(defs,record(52,{[0]=word(101),[4]=word(40),[8]=word(424242),[24]=word(13),[28]=word(0x9fd5943a)}))
     local hashes={}
     for i=0,31 do hashes[#hashes+1]=word(i==12 and 0x9fd5943a or 1000+i) end
-    put(game+0x21e18e0,table.concat(hashes))
+    put(game+0x21e1920,table.concat(hashes))
     put(campaign+494868,word(0))
     put(campaign+490072,word(0))
     put(campaign+155672,word(0))

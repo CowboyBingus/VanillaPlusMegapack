@@ -45,7 +45,7 @@ u(records,64,0x80000001);u(records,72,444);p(records,80,0x70900000);p(records,88
 local definition,object=region(0x70900000,28),region(0x70a00000,104)
 u(definition,0,123);f(definition,8,1.9);f(definition,12,.5);f(definition,16,.5)
 f(definition,20,50*math.pi/180);f(definition,24,70*math.pi/180)
-p(object,0,e+0x16a16c8);f(object,88,1);f(object,100,math.cos(70*math.pi/180))
+p(object,0,e+0x16a16d8);f(object,88,1);f(object,100,math.cos(70*math.pi/180))
 local component=region(0x70b00000,884);p(region(owner+0xf12bb8,8),0,0x70b00000)
 ffi.copy(component,entities+24,8);u(component,8,0)
 local settings=avatars+0x547d24+852
@@ -90,7 +90,7 @@ local function reset()
     ffi.fill(avatars+flags,24);u(avatars,flags,2);move[12]=0;move[15]=0;f(move,20,0);f(move,24,0);f(move,28,1)
     f(avatars,direction+8,-1);f(settings,12,2);f(settings,152,45);f(settings,172,40);f(settings,260,1.95)
     f(component+32,12,2);f(component+32,152,45);f(component+32,172,40);f(component+32,260,1.95)
-    f(object,96,math.cos(50*math.pi/180));p(object,0,e+0x16a16c8)
+    f(object,96,math.cos(50*math.pi/180));p(object,0,e+0x16a16d8)
     u(overrides,222%16*8,222);u(overrides,222%16*8+4,1);u(avatars,0x547d20,2)
     u(records,64,0x80000001);u(records,72,444);u(entities,32,222)
 end

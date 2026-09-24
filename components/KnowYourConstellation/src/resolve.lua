@@ -68,7 +68,7 @@ function M.exclusion_key(hash)
     return value
 end
 
--- Keep authored catalogue IDs stable after native tag 1 was inserted in build 25327279.
+-- Keep authored catalogue IDs stable after native tag 1 was inserted in build 25480438.
 function M.from_native(tag)
     assert(tag >= 0 and tag <= 31, 'Unknown native enemy tag')
     if tag == 1 then return 31 end

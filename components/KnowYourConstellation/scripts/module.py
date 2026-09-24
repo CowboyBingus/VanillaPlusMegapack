@@ -1,5 +1,5 @@
 """Build the stable runtime wrapper shared by standalone and megapack builds."""
-REVISION = 'v3.15'
+REVISION = 'v3.16'
 ROWS_REVISION = REVISION + '-rows-v1'
 MODULE = 'mods/cowboybingus/enemy_intelligence'
 TESTED_RESOURCE_SHA = '8B0929FB67A59AD5D950D231D059650894DE0472F053FC1F86DF8DFD0F01A60E'

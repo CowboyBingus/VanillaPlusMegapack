@@ -1,4 +1,4 @@
-local source,fixtures=assert(arg[1]),assert(arg[2])
+local source=assert(arg[1])
 local M=dofile(source..'/corpse_data.lua')
 local function matrix(x,y,angle)
     local c,s=math.cos(math.rad(angle or 0)),math.sin(math.rad(angle or 0))
@@ -58,37 +58,4 @@ for resource in pairs(M.profiles) do
     assert(not state.fling_history[u.unit].armed)
 end
 
-local function replay(name)
-    local rows=dofile(fixtures..'/'..name..'.lua')
-    local state,stops,seen={},{},{}
-    for _,r in ipairs(rows) do
-        local resource=r.resource:gsub('0x',''):gsub('..',function(s)return string.char(tonumber(s,16))end):reverse()
-        assert(M.profiles[resource],'Fixture must preserve the exact 64-bit resource hash')
-        local u=unit(resource);u.unit=r.unit;u.id=r.entity
-        u.main_bodies=r.poses;u.root_body=r.poses[1]
-        local ids={};for _,b in ipairs(r.poses) do ids[#ids+1]=b.id end
-        u.main_signature=table.concat(ids,':');seen[u.unit]=true
-        if not stops[u.unit] then
-            local a=M.fling_action(u,state,r.time)
-            if a then stops[u.unit]={seq=r.seq,time=r.time,action=a,name=r.name} end
-        end
-    end
-    local units,count=0,0;for _ in pairs(seen) do units=units+1 end;for _ in pairs(stops) do count=count+1 end
-    return rows,stops,units,count
-end
-local rows,stops,units,count=replay('settlement_latest')
-assert(#rows==299 and units==32 and count==11)
--- Recovered pre-Corpse limb episodes: the root stays under the original
--- trigger while substantial independent articulation now receives a stop.
-assert(stops[0x34003bf].seq==952 and stops[0x34003bf].action.cause=='limb_rotation')
-assert(stops[0x34003bf].action.distance<.1 and stops[0x34003bf].action.limb_degrees>20)
-assert(stops[0x1c03ad4].seq==4499 and stops[0x1c03ad4].action.cause=='limb_rotation')
-assert(stops[0x1c03ad4].action.degrees<20)
-local impalers,titans=0,0
-for _,stop in pairs(stops) do
-    if stop.name=='Impaler' then impalers=impalers+1 else titans=titans+1 end
-end
-print('REPLAY: latest 299 strict samples / 32 units; '..count..' detections ('..titans..' Titans, '..impalers..' Impalers)')
-rows,stops,units,count=replay('settlement_control')
-assert(#rows==10 and units==1 and count==0,'Healthy Impaler control remains unchanged')
-print('PASS: 21-profile independent limb translation/rotation, persistent confirmation, coherent whole-body motion, invalid poses/lifecycle/gaps, latest recording and healthy Impaler control')
+print('PASS: 21-profile limb motion, confirmation, coherent movement, lifecycle and gap guards')

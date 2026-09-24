@@ -146,7 +146,7 @@ function M.snapshot(api,game)
     s.base=f(resource,4)
     s.prone=rounded(s.base+rounded(0.9))
     assert(read(game+0x23c7100,4)==packed(2),'Native dive timeout changed')
-    assert(read(game+0x23c6cbc,4)==packed(0.9) and read(game+0x23c69e8,4)==packed(0.4),'Stance offsets changed')
+    assert(read(game+0x23c6ccc,4)==packed(0.9) and read(game+0x23c69f8,4)==packed(0.4),'Stance offsets changed')
     for _,n in ipairs({s.elapsed,s.landing,s.offset,s.drown_elapsed,s.remaining,s.surface,s.root_z}) do
         assert(finite(n),'Invalid movement or water value')
     end

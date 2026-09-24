@@ -338,7 +338,7 @@ function M.new(api, game, resolve)
     function self:sample(screen)
         local snapshot = self:descriptor(screen)
         if not snapshot then return nil end
-        local hash_bytes = read(game+0x21e18e0,32*4)
+        local hash_bytes = read(game+0x21e1920,32*4)
         local hashes, hash_by_id = {}, {}
         for i = 0, 31 do
             local hash = u32(hash_bytes,i*4)
@@ -359,7 +359,7 @@ function M.new(api, game, resolve)
             snapshot.unresolved[#snapshot.unresolved+1] = 'Hovered mission differs from the loaded mission'
         end
         local tags = resolve.base(snapshot.seed,settings(snapshot),initial)
-        -- Native build 25327279 uses 896-byte mission records, a conditional
+        -- Native build 25480438 uses 896-byte mission records, a conditional
         -- additional tag, and eight exclusions (formerly one).
         local mission_config = read(game+0x3773420+896*snapshot.mission,896)
         if mission_config:byte(0x34+1)==2 and

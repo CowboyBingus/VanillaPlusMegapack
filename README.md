@@ -1,20 +1,21 @@
+> Current local compatibility candidate for Steam build 25480438 / EXE 1.8.46015.0. Offline checks passed; live gameplay verification is pending.
+
 ![Vanilla Plus Megapack](assets/banner.png)
 
 # Vanilla Plus Megapack
 
 Choose which of the thirteen bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, the Galactic Menu Hotkey, and Clickable Scrollbars.
 
-**Requires the separately built Bingus Shared Loader v16 or newer.** Install two ZIPs: `Vanilla-Plus-Megapack-v27.zip` and `Bingus-Shared-Loader-v16.zip`. Mod managers do not install the dependency automatically.
+**Requires the separately built Bingus Shared Loader v17 or newer.** Install two ZIPs: `Vanilla-Plus-Megapack-v28.zip` and `Bingus-Shared-Loader-v17.zip`. Mod managers do not install the dependency automatically.
 
-Current release: **v27** for Steam build **25327279 / EXE 1.8.45850.0**. All thirteen components retain independent options. The separately installed [Mod Bindings Menu](https://github.com/CowboyBingus/ModBindingsMenu/releases/latest) adds a MODS section to keyboard and controller bindings; the Galactic Menu Hotkey uses its saved keyboard binding when enabled, or Tab otherwise. Requires Bingus Shared Loader v16 or newer.
 
-The release also provides an optional [Rows package](docs/ROWS.md), `Vanilla-Plus-Megapack-Rows-v27.zip`. It displays every constellation section at once with the same native styling. Enable either the standard pack or Rows with the shared loader. All other bundled resources are identical.
+The release also provides an optional [Rows package](docs/ROWS.md), `Vanilla-Plus-Megapack-Rows-v28.zip`. It displays every constellation section at once with the same native styling. Enable either the standard pack or Rows with the shared loader. All other bundled resources are identical.
 
 ## Install with Arsenal or HD2MM
 
 1. Close Helldivers 2. Use one mod manager.
 2. Replace any previous loader entry with v16 or newer. Disable old megapacks and standalone copies of features you want turned off.
-3. Import `Vanilla-Plus-Megapack-v27.zip` and `Bingus-Shared-Loader-v16.zip`, then enable both.
+3. Import `Vanilla-Plus-Megapack-v28.zip` and `Bingus-Shared-Loader-v17.zip`, then enable both.
 4. With Arsenal's default priority, put **Bingus Shared Loader last**, at the bottom. If first-mod priority is enabled, put the loader first.
 5. Open the Megapack's **Options** (sliders button) in Arsenal, or its mod options in HD2MM. Check each mod you want and uncheck each mod you do not want. Confirm/save the selection.
 6. **Purge / Deploy**, then launch the game normally. Close the game and repeat these steps whenever you change options.
@@ -23,7 +24,7 @@ Each of the thirteen options is independent. Select all for the complete pack, a
 
 An unchecked option removes only the pack's copy. An enabled standalone package or another megapack can still activate that feature, so disable those copies as well. Overlapping gameplay entries run once and their callbacks do not stack. If versions differ, manager priority selects the winner.
 
-## Included in v27
+## Included in v28
 
 | Mod | Version | Effect |
 | --- | --- | --- |
@@ -43,7 +44,7 @@ An unchecked option removes only the pack's copy. An enabled standalone package 
 
 All gameplay components are pinned to the source and compiled-resource hashes in `components.lock.json`. Third-party HUD mods and the reserved, unreleased Wide Angle Stratagems module are not included. Mod Bindings Menu is not included in either Megapack variant. It is a separate dependency for keyboard rebinding; controller activation is not yet supported. The shared loader remains a separate dependency with its own repository and updates.
 
-Supported game: Steam build 25327279 / EXE 1.8.45850.0. Each bundled mod retains its behavior and compatibility checks.
+Supported game: Steam build 25480438 / EXE 1.8.46015.0. Each bundled mod retains its behavior and compatibility checks.
 
 ## Compatibility and updates
 
@@ -60,3 +61,5 @@ With at least one pack option selected, check `%LOCALAPPDATA%/CowboyBingus/Helld
 The prior performance improvements remain included: bounded Arc Thrower scanning, update-only assist, and reduced scrollbar capture and logging.
 
 Current-build mission and multiplayer checks for the earlier gameplay components remain pending.
+
+Current version: **v28**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).

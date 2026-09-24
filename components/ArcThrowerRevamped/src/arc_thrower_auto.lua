@@ -10,7 +10,7 @@
 if rawget(_G, 'ArcThrowerRevampedInstalled') then return end
 rawset(_G, 'ArcThrowerRevampedInstalled', true)
 
-local module = {revision = 'v1.5'}
+local module = {revision = 'v1.6'}
 
 local ffi = require('ffi')
 local bit = require('bit')
@@ -20,7 +20,7 @@ local bit = require('bit')
 -- and a failed binding only leaves the assist idle.
 local kernel
 
--- Build 25327279 anchors. The charge manager holds one 40-byte entry per
+-- Build 25480438 anchors. The charge manager holds one 40-byte entry per
 -- weapon; entry + 4 is the charge, + 8 its full-charge time, + 12 the flag the
 -- engine's charge updater advances while set.
 local CHARGE_MANAGER = 0x3326c20

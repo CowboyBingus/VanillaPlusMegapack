@@ -8,7 +8,7 @@ sys.path.insert(0, str(ROOT/'scripts'))
 from generate_profiles import END, generate
 
 catalog = json.loads((ROOT/'profiles/catalog.json').read_text())
-assert catalog['schema'] == 1 and catalog['steam_build'] == 25327279
+assert catalog['schema'] == 1 and catalog['steam_build'] == 25480438
 profiles = catalog['profiles']
 assert len(profiles) == len({p['resource'] for p in profiles}) == 21
 assert {p['faction'] for p in profiles} == {'Terminid', 'Automaton', 'Illuminate'}

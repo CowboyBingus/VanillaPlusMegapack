@@ -18,7 +18,7 @@ local function locate(address,size)
 end
 local game,pm,mode,owner,am,dm,sm,mm=0x10000000,0x20000000,0x21000000,0x30000000,0x40000000,0x50000000,0x51000000,0x52000000
 for rva,ptr in pairs({[0x3326468]=pm,[0x33266a0]=mode,[0x346bf98]=owner,[0x3326d20]=am,[0x3326a80]=dm,[0x3326598]=sm,[0x3326558]=mm}) do p(region(game+rva,8),0,ptr) end
-for rva,v in pairs({[0x23c7100]=2,[0x23c6cbc]=0.9,[0x23c69e8]=0.4}) do f(region(game+rva,4),0,v) end
+for rva,v in pairs({[0x23c7100]=2,[0x23c6ccc]=0.9,[0x23c69f8]=0.4}) do f(region(game+rva,4),0,v) end
 local players,mission,avatars,drown,stances,motion=region(pm,0x400),region(mode,0x44),region(am,0x550000),region(dm,80),region(sm,72),region(mm,0x48e0)
 local player=region(0x22000000,24);p(players,0xe8,0x22000000);player[20]=1
 u(players,0x3a8,9);u(players,0x84,2);u(players,0x88,2);u(mission,8,1);u(mission,0x40,1)

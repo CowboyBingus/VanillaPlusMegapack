@@ -37,17 +37,17 @@ function M.new(api,game,exe,signatures,test_calls)
     for off,rva in pairs({[368]=0x31af50,[400]=0x31b360,[528]=0x31e030})do
         assert(ptr(app+off)==exe+rva,'Image application API mismatch')
     end
-    assert(u32(read(exe+0x16588b0,4),0)==32,'Unexpected texture format size')
+    assert(u32(read(exe+0x1658990,4),0)==32,'Unexpected texture format size')
     local calls=test_calls or {}
     local create=calls.create or ffi.cast('void *(*)(int,int,int,int,uint32_t,uint8_t)',exe+0x31af50)
     local destroy=calls.destroy or ffi.cast('void (*)(void *)',exe+0x31b360)
     local register=calls.register or ffi.cast('void (*)(uint32_t,void *)',exe+0x31e030)
-    local set_texture=calls.texture or ffi.cast('void (*)(void *,uint32_t,void *)',game+0x1449950)
-    local set_uv=calls.uv or ffi.cast('void (*)(void *,uint64_t,uint64_t)',game+0x143ee60)
-    local set_size=calls.size or ffi.cast('void (*)(void *,uint64_t)',game+0x14470d0)
-    local set_alpha=calls.alpha or ffi.cast('void (*)(void *,float)',game+0x1448a40)
-    local material=calls.material or ffi.cast('void (*)(void *,uint64_t,uint8_t)',game+0x144f770)
-    local register_image=calls.register_image or ffi.cast('void (*)(void *,void *)',game+0x13925f0)
+    local set_texture=calls.texture or ffi.cast('void (*)(void *,uint32_t,void *)',game+0x14499e0)
+    local set_uv=calls.uv or ffi.cast('void (*)(void *,uint64_t,uint64_t)',game+0x143eef0)
+    local set_size=calls.size or ffi.cast('void (*)(void *,uint64_t)',game+0x1447160)
+    local set_alpha=calls.alpha or ffi.cast('void (*)(void *,float)',game+0x1448ad0)
+    local material=calls.material or ffi.cast('void (*)(void *,uint64_t,uint8_t)',game+0x144f800)
+    local register_image=calls.register_image or ffi.cast('void (*)(void *,void *)',game+0x1392680)
     local byte=calls.byte or function(p,v)ffi.cast('uint8_t *',p)[0]=v end
     local image_material=ffi.new('uint64_t',0x27ef0643)*0x100000000+0x5506e446
     local image_material_bytes=ffi.string(ffi.new('uint64_t[1]',image_material),8)

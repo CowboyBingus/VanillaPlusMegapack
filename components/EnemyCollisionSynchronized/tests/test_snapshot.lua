@@ -6,7 +6,7 @@ local function fixture(corpse,native_pointers,resource)
     local profile=M.profiles[resource];local count=profile.bodies;local extra=count+1
     local aux,node=next(profile.actors)
     if profile.name=='Impaler' then aux,node=0x70f1db61,0x9b47948d end
-    local blocks,alloc={},native_pointers and 0x20df0000000 or 0x30000000
+    local blocks,alloc={},native_pointers and 0x20000000000 or 0x30000000
     local function address(a)return type(a)=='cdata' and tonumber(ffi.cast('uintptr_t',a)) or a end
     local function add(address,size)
         local b={address=address,size=size,bytes=ffi.new('uint8_t[?]',size)};blocks[#blocks+1]=b;return address,b
@@ -27,7 +27,7 @@ local function fixture(corpse,native_pointers,resource)
         local v=ffi.new('float[16]',{1,0,0,0,0,1,0,0,0,0,1,0,x or 0,y or 0,z or 0,1})
         write(address,ffi.string(v,64))
     end
-    local game,exe=native_pointers and 0x7ff882d80000 or 0x10000000,native_pointers and 0x7ff784160000 or 0x20000000
+    local game,exe=native_pointers and 0x7ff800000000 or 0x10000000,native_pointers and 0x7ff700000000 or 0x20000000
     local function global(base,rva,target)add(base+rva,8);p(base+rva,target) end
     local mode=reserve(0x44);u(mode+8,1);u(mode+0x40,1);global(game,0x33266a0,mode)
     local rm,cm=reserve(88),reserve(88);global(game,0x3326948,rm);global(game,0x3326920,cm)

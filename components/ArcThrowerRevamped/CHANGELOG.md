@@ -1,3 +1,9 @@
+# v1.6
+
+- Refresh game-build guards for Steam build 25480438.
+- Preserve repeated fire through mouse, controller and rebound fire commands.
+- Offline builds and package checks pass; live gameplay validation remains pending.
+
 # Changelog
 
 ## v1.5

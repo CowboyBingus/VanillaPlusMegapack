@@ -2,11 +2,11 @@
   {
     "slug": "BetterStratagemBounce",
     "name": "Better Stratagem Bounce",
-    "revision": "archive-v15.2",
+    "revision": "archive-v15.3",
     "repository": "https://github.com/CowboyBingus/BetterStratagemBounce",
     "module": "mods/cowboybingus/better_stratagem_bounce",
     "patch": "navigation_patch.lua",
-    "resource_sha256": "50D3596B328DE2AA5773434C68A34EE6FF08A4B560BB46937D47FBAE3A3873B5",
+    "resource_sha256": "A227FB2DB436D0A428457BC7153E4B0B6B3B33F55E43A77C7E0C1C7D48AE4B6C",
     "source_sha256": {
       "src/archive_loader.lua": "A607A9A3B2BF9617E756312590448E1C7757F07A42F440A59A2AD7DC4FE0044A",
       "src/navigation_patch.lua": "888AC10DBDFF7E27ABAA165C40A8EB477153DB15B6A79FF2513F552F1E546CC2",
@@ -14,16 +14,16 @@
       "tests/test_archive.lua": "D66816CDE9E384C5FC34BE40504AA29AA846FE8294C2421DD3A04854C7236AEC",
       "tests/test_windows_interop.lua": "66EF3BB6238BA8BD1119913993019F3F83594F51B493ECA3D29D31E839F8A957"
     },
-    "source_origin": "Local standalone candidate for Steam build 25327279; offline checks passed; live gameplay pending"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "slug": "HellpodSteeringUnlocked",
     "name": "Hellpod Steering Unlocked",
-    "revision": "data-v7.2",
+    "revision": "data-v7.3",
     "repository": "https://github.com/CowboyBingus/HellpodSteeringUnlocked",
     "module": "mods/cowboybingus/hellpod_steering_unlocked",
     "patch": "steering_patch.lua",
-    "resource_sha256": "D20C48F81B9F6B55C76993A4804A73D3A79808BC18956B5A7C060C12995BFC67",
+    "resource_sha256": "7CEB0210589E5374884C13A807456DA0DB24E1C8A78BE697A5BF0E1224171AFB",
     "source_sha256": {
       "src/archive_loader.lua": "108FC6F79992E1712E114009386537C2FDA443CE3BCF6E05733526D58C7E61F3",
       "src/steering_patch.lua": "6FCCA0A4878FF148C221CC595E7ACCF1C0CFB752B9097CD01B7ACF28BD72B64A",
@@ -31,16 +31,16 @@
       "tests/test_api_coexistence.lua": "DE16024385E8DBE7A44684D4704FF44AE88411012DF43CB6551FCDBEE3B22401",
       "tests/test_data.lua": "546AE51449F9E61C67E84AAA3132BC562019BD6D0DB7705B31C20A96940202B3"
     },
-    "source_origin": "Local standalone candidate for Steam build 25327279; offline checks passed; live gameplay pending"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "slug": "ReinforcementBeaconsFixed",
     "name": "Reinforcement Beacons Fixed",
-    "revision": "data-v4.3",
+    "revision": "data-v4.4",
     "repository": "https://github.com/CowboyBingus/ReinforcementBeaconsFixed",
     "module": "mods/cowboybingus/reinforcement_beacon_fix_data",
     "patch": "spawn_data.lua",
-    "resource_sha256": "1552DE96645704B8A06F310106D2932675157A57B4B41FFCC5192B95809B85E8",
+    "resource_sha256": "C03D389E56EDEC0080240A0A2B0DE96505A47A9D4853B34324F776E492165A90",
     "source_sha256": {
       "src/archive_loader.lua": "89244D865F0C6C611373F16A72CD60E524FDB9EAD7225B7A272A1F61F98888D7",
       "src/spawn_data.lua": "1119DD61C7830713C8E12800D324A249DF79FD51E5407324B299071E2BF25D47",
@@ -49,69 +49,69 @@
       "tests/test_data.lua": "6CF19872BC54B3A29937EFEA62C9E3C8DF639991AF2540C99E9915E270312600",
       "tests/test_startup.lua": "2EBD8E169F88FFDFB417ADFAC5C2732B8E6FAC3957279209B2792D971ECF64A8"
     },
-    "source_origin": "Current automatic anchor type 0x7C; real reader/wrapper solo regression and existing remote-beacon tests pass; gameplay pending"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "slug": "ConsistentVaulting",
     "name": "Consistent Vaulting",
-    "revision": "data-v8.6",
+    "revision": "data-v8.7",
     "repository": "https://github.com/CowboyBingus/ConsistentVaulting",
     "module": "mods/cowboybingus/consistent_vaulting",
     "patch": "vault_data.lua",
-    "resource_sha256": "FFEF7461FEDCF183FB67051604E85DE946F893132FF67D385A3DE6B76FE41E7F",
+    "resource_sha256": "68259980052A0934A22A2251FB1CD8EEF7438B4D9B605EDB81C2A3A2E783E6B0",
     "source_sha256": {
       "src/archive_loader.lua": "8E322890C9276E6411DD1CF9B6A0BF5CB31B8B4ED6B97480F9D58664B0768CEC",
-      "src/slope_assist.lua": "8F5D4112B2D0FC17015BF3336437286F0D5FFF3DC5AFBD0D9E6A3E1635B5F977",
+      "src/slope_assist.lua": "FE04B0A9C21C13CEDD1584A5AB01AF34122062F4FD78ED9722264D6BF92C612A",
       "src/vault_data.lua": "7DD15C6441536672BC131EA352042E0908A1C34B9638E29A5C53CE80D88ECEF1",
-      "src/windows_api.lua": "718270E00E8987BCD7D6AE999860889FD012550CFD221D262DED626DA20E30C5",
+      "src/windows_api.lua": "DA6C28FEBA27E46A07B53D003204CD674CB736DAED47D70500EF3266FB3BD3B7",
       "tests/test_geometry.lua": "40AA769EF81BA1EDEBA48DE231D27655D9F4171A00754AA686F346294ED6A193",
       "tests/test_loader.lua": "9EADD70CC6FF537C837BB482731E3D4112A8A3A1F7C1771F75B5754422260880",
-      "tests/test_slope.lua": "1C0DE020E38EBEC7F969F1D45C38AF59767BB6C749845DE42C4E3873AFE18034",
+      "tests/test_slope.lua": "524A3EAFC3EAC3E88AA6644314CC9E76DFA953D7C4161FA1C2A4CB2871ED2287",
       "tests/test_vault.lua": "D6816CB19F1789D6AD1FC206A005E26653F50D0CF0843CB83FF92CF442AED71C",
-      "scripts/archive.py": "C5B3B56DBC0A909255445DD55BF36D0101552115A2062D9EF61ED07D53310EAF",
-      "scripts/build.py": "D1756CCB7940B13D9C84E94A75E685518DF73ED202ED0B3610DF514CE85388B4",
+      "scripts/archive.py": "13C9726B645BA02F518A57D740C9AEBBCAD2D37D8A18D03E1A2FAE67D4646C47",
+      "scripts/build.py": "A7F40DDAAAD183A055D6DDCD50AF9D8EB32DE3C0DB57C4D00AA52F88E6B35168",
       "scripts/module.py": "71A3487F74648F8C8BD0CBD18724173D985B8773DCAB21DD1A95719434FFE5B0",
-      "scripts/package.py": "9DAB75E559A0579215F6D99D3CBB1FFCCB57A5A61DEB7582FD471DB0C5930FF2",
+      "scripts/package.py": "DE2EC667273148291E077FAFB8CA2F6AF08050CA07FAA16215765676D2B57D10",
       "scripts/privacy_audit.py": "88C350801074DA9A5A8C8216B1EB317100E2F2F3DB26A7C60361D1258177E56A",
-      "tests/test_package.py": "277566366F1C1A6E08C31845AB938F272FE19F68AA9522E474EA1BA127A94119",
+      "tests/test_package.py": "438F9DC19299C8C8CE98CA69C527426DEC309BE9580C1DF152BC76E07C3A31E9",
       "tests/test_raised_approach.lua": "BFB305FD69886BEA3244722B06EEA9EBDC7BA74376C84E66CB36CB1E45E31FCA"
     },
-    "source_origin": "Installed v8.5 blocked high-ledge discovery on ordinary approach failure; native private raised approach and regressions pass; installed obstacle retest pending"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "slug": "ShallowWaterDiving",
     "name": "Shallow Water Diving",
-    "revision": "data-v3.5",
+    "revision": "data-v3.6",
     "repository": "https://github.com/CowboyBingus/ShallowWaterDiving",
     "module": "mods/cowboybingus/shallow_water_dive",
     "patch": "dive_data.lua",
-    "resource_sha256": "1E3BAE9BCE609E026BF4798B2B539C8C9EAFEAF44C6BADE96C25F51599462C8B",
+    "resource_sha256": "7438B4FE17F6BD246314D91537E8DFEA6A86771FF83C88F2086E2742633E08ED",
     "source_sha256": {
       "src/archive_loader.lua": "11A48212FFDF63A429EE7B45934BD7A5CDF248B11D790E6A10C5730EA9262778",
-      "src/dive_data.lua": "46B14B203FE740266C64BB2E9052E4B9DD1EFF14E38066D5E9E4491C24316721",
+      "src/dive_data.lua": "2B9EADE3EC24CD3DE953B5EF28606E083A9EFF3CD0A14A3DC0029D85BACADD95",
       "src/windows_api.lua": "CB354AC6E9834CC73A00E01DD78BA33EB4319791F8A0EF7804B4579E508B68C8",
-      "tests/test_dive.lua": "B5405B562D1ECC2CA391EEC00F4A8D2B761C023823B6EAD4B38A8923DB80AA1B",
+      "tests/test_dive.lua": "281790CCE28B24DD76A02580E99EA4C17C4D13073049400942BE069046FC656E",
       "tests/test_loader.lua": "A6C1EAEB0DF6055A693CF8B1EB818EB699AA7AF4C3170D74340547345BF7F440",
-      "scripts/archive.py": "D7CF42FEC485156766C7C99D99FB571BC68B4A5F9086CA7294A7A14FD79B2043",
-      "scripts/build.py": "331187A53B6396D6B8E49DEB9986940F0422831AF8F6392935C3B10C95AB49D5",
+      "scripts/archive.py": "63911A138A51532E5C44A1D77690DB80C09F86C4AC003EF3B8A069A46C1E62BB",
+      "scripts/build.py": "89FD00883C40B9BC89F924B74C227499808B5C63CB7DC669C9843DFCBA584E66",
       "scripts/module.py": "7F54640FBC9073555E3C1A85E66D5E7BF51B1ECFE9AF147CC93ABAEA0272752D",
-      "scripts/package.py": "E3EA6F2A22577A18876D8C3A6832524334987191DD4C03AA9B856D8580E1B8D0",
+      "scripts/package.py": "EE2E8A2A30618C655A1BA5CDD53B4FEB4D18321B17FBCF51A2C812610671EB73",
       "scripts/privacy_audit.py": "1745891FD014BA7AE6CC6B055259BE3982BAF3CAF8C500B4AE5A7B597B80F689",
-      "tests/test_package.py": "D5B40DFD4AF74DF74ED632C4D4B4E9CFDE0F253ECB7C474034780B56E278FE98",
+      "tests/test_package.py": "C124A58F679FCE06850BB9B911A700F472B1EEF75314BE86C292B43B798C7310",
       "tests/captured_game.lua": "79BFF1A9D77D0EFC5EE5D9701528B3B17B83B6EB76F05B71742AC1518537C949",
       "tests/current_game_25327279.lua": "1AC0DE1FFB0A1DB1C079518CB79AC955DEF806A08BF63C60B19035E0CB8312C2",
       "tests/test_current_game.lua": "F727C1CDA14B869B1CE2C8A12ECE6D47D3AB02C14B2A8A3BCD8C4F84995CE652"
     },
-    "source_origin": "Depth cutoff tightened from 0.30 to 0.20 after knee-depth feedback; boundary/restoration regressions pass; visual retest pending"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "slug": "SentryAimRetention",
     "name": "Sentry Aim Retention",
-    "revision": "data-v8.4",
+    "revision": "data-v8.5",
     "repository": "https://github.com/CowboyBingus/SentryAimRetention",
     "module": "mods/cowboybingus/sentry_aim_retention",
     "patch": "aim_data.lua",
-    "resource_sha256": "2B040324E2F23ECBDB11D4F08F868387DDE942740A9B5258AFFA0E6ED17A7B56",
+    "resource_sha256": "6B9D455275E8FC8F30626B9D678B2F5C32E8808758A7A3471A0C69BEE3544B68",
     "source_sha256": {
       "src/aim_data.lua": "AF56CD049B358E212FDB2A87904D5645D210209CB59849F8CD563206D28A8640",
       "src/archive_loader.lua": "9E2A03CE4B36D13109558558AC7B15825DB689E6BFC6631714CAEC340E1523B2",
@@ -123,49 +123,49 @@
       "tests/test_loader.lua": "D2585C2C48FB2AE6B97502C85114BD22FC354892AD74367193B7124F443E4248",
       "tests/test_snapshot.lua": "8F4DFADC83D7A7F24595A58B5B83AFF5CEC158F726B2B16AD14144A85582098C",
       "tests/test_windows_api.lua": "2C61847CC96CB163D5041A51AD1AD1D231ECF956BB8DD284D6B1941ABF0ED5E6",
-      "scripts/archive.py": "C5B3B56DBC0A909255445DD55BF36D0101552115A2062D9EF61ED07D53310EAF",
-      "scripts/build.py": "83EC077D52A33CE66608BFEE23D99253A1749EF3679C12D63EBF70A2923C093C",
+      "scripts/archive.py": "13C9726B645BA02F518A57D740C9AEBBCAD2D37D8A18D03E1A2FAE67D4646C47",
+      "scripts/build.py": "0F58E99EFDA58D851B4E1B501740AFF6F53F7EE5883FEDF379C4612440D31BEA",
       "scripts/module.py": "7F54640FBC9073555E3C1A85E66D5E7BF51B1ECFE9AF147CC93ABAEA0272752D",
-      "scripts/package.py": "2F5036E4EAF54450272404FDCC7323481F51D06DD4D5EA51D34DC4BEA7506417",
+      "scripts/package.py": "24F89FA3EBD3BC7CAED0DA596ADB0A2AB0B41F732A68EC2686A8310BC88D9D02",
       "scripts/privacy_audit.py": "05A785057078EA31587A973D7FD172635A2271CC755F2CFBC0F917E652BFEBA1",
       "scripts/source_release.py": "DEFC6F17DB606324932ADD188C4B01B9198962C15D86DD597D78FDBC64325A55",
       "tests/captured_game.lua": "79BFF1A9D77D0EFC5EE5D9701528B3B17B83B6EB76F05B71742AC1518537C949",
       "tests/current_game_25327279.lua": "9C240929E4621D5544E53FC4A9F4EE53E5C9691816F4010AE152EF20A894EF21",
       "tests/test_current_game.lua": "4E9043D56706DB31D5414C4FDD0ECB83DB75133C293AB41D7401DE15EE8FE9A8",
-      "tests/test_package.py": "183FE93E57B2363113FF435B149288E363E16EEA9ACAA8993DF24CE7D4914188"
+      "tests/test_package.py": "F66EAAE625EFC3EE76C4D3F87800914AB80E230A76F8047CA7423E118D7CBC33"
     },
-    "source_origin": "Local mission repair for Steam 25327279; production-reader capture and synthetic regression checks passed; installed gameplay pending"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "slug": "EnemyCollisionSynchronized",
     "name": "Enemy Collision Synchronized",
-    "revision": "v2.10.1",
+    "revision": "v2.10.2",
     "repository": "https://github.com/CowboyBingus/EnemyCollisionSynchronized",
     "module": "mods/cowboybingus/corpse_collision_repair",
     "patch": "corpse_data.lua",
-    "resource_sha256": "5292051BF4C896EF6C5334E64603A6DD47C577002ED8210F0A5C381E7CC4A0C2",
+    "resource_sha256": "23DD15AF5FA3370CA97AB6B2FB24F0F02AC44939334BD180204F2D72D1C811CB",
     "source_sha256": {
-      "profiles/catalog.json": "20E0A211C103FF81CBB0220531CE875838D953D5CABA0C1A9D74053A4599FF40",
+      "profiles/catalog.json": "F075B7BFC6AB39FF48077E6B1C52DD12521CBA4F3345C76443A6C5AC6C7AE73F",
       "scripts/generate_profiles.py": "1783AFB1D739A8D82F4D64AAD39755A5BBA245D57888C5D21B5203EEA28A0FF0",
-      "src/archive_loader.lua": "31D0CEFAB5D39B1538F072F72D3C3AC3B682D7A1EF5E5B9B508C0127CBF35483",
+      "src/archive_loader.lua": "CFB425DB0C942D61C0704CBF62DE1775A6C3F34A415F7A530EDA261B6A395B73",
       "src/corpse_data.lua": "6616C194EBDA59EC333A21A83C2DE2BEDF00E344496FFAD658821B6F0236EAFA",
       "src/profiler.lua": "159861953064325D2797995B6EA1AF05B32D0DC7BF2EE1DC8846497C97947388",
-      "src/windows_api.lua": "8D2B8FB3BE98AE383320D4CCD4630E54C89CA72C08D43211B257571A8F6EEE00",
-      "tests/benchmark.lua": "D839FBC0B47D66BB88CE9A68B293C37AEB125638835C5DEFDE00DB30E3360CBD",
+      "src/windows_api.lua": "89D1B5DB28FF71A2D8EFAF9FD9E8CD60DBF653BD91F182A37471A658335EF122",
+      "tests/benchmark.lua": "A55389DCE6ADBA10B16D306C59440B12BFCD66482A4FAC418572DF1F9ECFAB07",
       "tests/benchmark_compare.lua": "034639801CE0C65DA5221431F9914B4F3E8A14D61D443EE1AFBC41BFCC4B582E",
       "tests/perf_scene.lua": "872406389550525AF52D4542101539A54682C4385622C1932A7DFF4DE5197179",
-      "tests/test_completion.lua": "70E9EA85AB924BD02A3649AFE39CA1D76853DF48DD2DAFDA62FD7C24F01D2E80",
-      "tests/test_fling.lua": "7D0EFED35A4CEB30BC7838E3E693B9C02F18739A1F424837AC55C8B56F86AA02",
-      "tests/test_loader.lua": "97A13D6A1F5718AF8245458DCF6D9C4A89D8B5E1800928009C060CD341A65AFD",
+      "tests/test_completion.lua": "6D365565F8B753CB31655A3FA36712786B83BF8E12B2F635ACFF0A0EC4DB306D",
+      "tests/test_fling.lua": "82F5B987027B2A1ADB6A8637330597D91B6007A8F21B4584DD02C00E9B814B1B",
+      "tests/test_loader.lua": "610FCF58688DFA0516E4B9F3063282067B8AA0E6EDD282B1B8B203C36D8D5812",
       "tests/test_metadata_cache.lua": "7242548C953FE962DB312CD1A995AC77AD77601F4C9CEE90157D61EC05595ED0",
       "tests/test_performance.lua": "2659EEC581C8B85BBA44B9BBAD6C201F30904418B4F72FF8FFE77341891A3C3B",
       "tests/test_profiler.lua": "932CBC186EACC98C4E56ADB0F9769034998A1307CD2E94151980A3EDB0F5274F",
       "tests/test_profiler_behavior.lua": "91B00E7CC892CD330FAA4B7D03997BA5C9C30CFB98ECD1B0E39106F69FF201AD",
       "tests/test_profiler_detail.lua": "06190BE34F6AAFA61E355DDA9BCA40267174A0BA829190FDF8F8AC3864AB4507",
-      "tests/test_profiles.py": "D8DF4C224B09AC3C62292D7B28C8CAA8A898139D36614CD918C568D29F0B426C",
-      "tests/test_repair.lua": "7D3C66A269AACA8E54F8E1B7F0A57960FDEE241A00CB96DEF7C70516F2172C67",
-      "tests/test_settlement.lua": "1DAC17930B7B275DC6A3234394DA5000A7D70427B1E96DFC09DFB6844F912978",
-      "tests/test_snapshot.lua": "38252D62EAD43B7B3B2E50A862EB9166958B1DA16480A2EA33EFB5CD465773F0",
+      "tests/test_profiles.py": "6587A10760D89917442B606E270C388D75A041DE974A069A761F879CE1BE86C5",
+      "tests/test_repair.lua": "3CE11FA43C8F56E9C9C51B550BBE10EE6FB2A3E541EFBB3EB2C656108AA2428A",
+      "tests/test_settlement.lua": "957C3543713950160FD03A2B5D8AB16F94CADDFCF0DAA2174432888F00908B23",
+      "tests/test_snapshot.lua": "EA62A4E89ADC1AA25D7ECAE3019E8F3B2B897EA7DA4CB78630440CAFDF698EF3",
       "tests/test_recorded_snapshot.lua": "3A3B92DC0637E8BA4DC7856E34E69D10D61D9DFF20A00EED26E32FC6F8DDB568",
       "tests/test_automaton_recording.lua": "2E2731DE7D8DD07409FBB9394605060E8FCB9388572E494BEA29F679D83AEB25",
       "tests/test_bindings.lua": "8E0589C37EFC711F26BE38A06037FA9D03AA232679ED359A336401C3174B601F",
@@ -186,16 +186,16 @@
       "tests/synthetic_profiler.lua": "B702BCA1BF11EE26AE64C79E4013913D4F12DF73298E8474A853922B466777AD",
       "tests/fixtures/layout_25327279.lua": "9B230BE22451C53DE8A7CB1EEE023A7875791AA6AB20FDF871D09231584B582B"
     },
-    "source_origin": "Published v2.10.1 runtime retained; regression fixtures refreshed and session metadata removed"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "name": "Controllable Hover Pack",
     "slug": "ControllableHoverPack",
-    "revision": "v1.5",
+    "revision": "v1.6",
     "repository": "https://github.com/CowboyBingus/ControllableHoverPack",
     "module": "mods/cowboybingus/hover_pack_cancel",
     "patch": "hover_data.lua",
-    "resource_sha256": "5B1CE59EFFC162FF88A041195F38AD83FD8028F9A49C9D45A1C20A39F0CC3731",
+    "resource_sha256": "92E4D5C393D4EA50645C495B34F8EAE1ADD260D8631C6819BB0866F744B06893",
     "source_sha256": {
       "src/archive_loader.lua": "E0A8F333CA0D9DE92051CC140A7D0C2FD6BD2508CE2B3832224D5F32147D8C53",
       "src/cancel.lua": "472A2A0256DC3E202CC74791DD954A68C3DC18B26E4064A7D5F9E8D2BF77B6ED",
@@ -208,39 +208,39 @@
       "tests/test_replay.lua": "B26FF22B417415528F89657D2598C6D8AE85601A5587E37D68525135B40B6393",
       "tests/test_settings.lua": "C5153AFB918F473F2B1A33C62B78B9E6AD25948DA9BABFD04CD7BD696A9DEC98",
       "tests/test_snapshot.lua": "6B7150F51A9AF1798003A3B1A5071CFCB9FA9407FBC7EEEFDE10D04B0408E1F4",
-      "scripts/archive.py": "C5B3B56DBC0A909255445DD55BF36D0101552115A2062D9EF61ED07D53310EAF",
-      "scripts/build.py": "037F592DCFE2F2763AC3383C8BDA987A35D56A958B787CAA09705A2C80CA3027",
-      "scripts/package.py": "C34813BDF7287C87CEA61C85882AFAC0F52CC5A3D80F9AE236DF0A292722857F",
+      "scripts/archive.py": "13C9726B645BA02F518A57D740C9AEBBCAD2D37D8A18D03E1A2FAE67D4646C47",
+      "scripts/build.py": "A44FA2CD53E9470D740DAD13B46670B6D0949F15BE9E287D81230271AA25DA70",
+      "scripts/package.py": "01DFF4F3D70AB6301A139CA8B8670FAF55D773401D4CA7AC03B8943C8B81DD9C",
       "scripts/privacy_audit.py": "A71B46673F410DDF9E59DF23DB2ABFE983904EBD663790EA74C6B5020BD5EA2E",
       "tests/captured_game.lua": "79BFF1A9D77D0EFC5EE5D9701528B3B17B83B6EB76F05B71742AC1518537C949",
       "tests/current_game_25327279.lua": "8DF4DBCE250B5C0788D156F3F70AF0DCCC19474D56473D3FC6A9221F8768C220",
       "tests/test_current_game.lua": "1DBF745ADA967DDE3B871B316E631B04B7DF04EACC048958F2C66C551A0FF140",
-      "tests/test_package.py": "31B02BB6C790C3E51B12E5576FAA467566333B68E8462C1E77CCB89011780486"
+      "tests/test_package.py": "B783C7031ECA19BBE4893133001BFB3018D342B7A49B5DA9D31BBC4D132C3D45"
     },
-    "source_origin": "Local mission repair for Steam 25327279; production-reader capture and synthetic regression checks passed; installed gameplay pending"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "name": "Know Your Constellation",
     "slug": "KnowYourConstellation",
-    "revision": "v3.15",
+    "revision": "v3.16",
     "repository": "https://github.com/CowboyBingus/KnowYourConstellation",
     "module": "mods/cowboybingus/enemy_intelligence",
     "patch": "install.lua",
-    "resource_sha256": "8E99E6BE0A595FB56E7FC2787E7F163B79390DE1442A33B9A38D9BC82D654D15",
+    "resource_sha256": "23A6B826EA47582A8F3D8A789DD8E782CFA3D19EED4ED9F1F8EED3781F5D944E",
     "source_sha256": {
-      "scripts/module.py": "BD33D4C98C09B940974D98B3781052DE3B8BEC0B080E66493EA124B3CF7EE20E",
+      "scripts/module.py": "A0809276C768BCFF0731B04CA3E2213348A6EA192D27F390EFF13D715C3D9D35",
       "src/catalogue.lua": "357BDD4D4E2B537433EE49A707213C60821D62EE6C59B711C7F5B20B36CFD37D",
       "src/heavy.lua": "6D2C3D88569F9944B9A93B3280C18FFD62BECD2FCEEE26D5BFF0F15D2FDBC2AE",
       "src/heavy_data.lua": "061DD5F7803D0EF0C43A7D55573E4FF7B41C9DE7941363A77967633BD1E356F8",
       "src/install.lua": "5B724498340EE538CC983A767FB182AE5789423ACCEDF3D5AF34EAB56C1F44FB",
-      "src/mission.lua": "36A2DFE9D8E134BB034B120C991A1A8225BE731CBC999FF2AAD12E24C3ADCBF6",
+      "src/mission.lua": "4C348ABD92EB794FC49782875ED67AC42ADABBC79D0316A5BCA1890659E8A260",
       "src/model.lua": "91B7A9D0B9E639F9CACBF8CC67A8DBDB061CACCD8D7BBE97F92EA5DB988E86E5",
       "src/panel.lua": "7B5F44FCCC40670F13E11A38BA6B84C8237474E9C49DAA165335BB14BCA8B743",
       "src/presentation.lua": "42F392D24836E68A86C8DD1B5B0EAA60D345FAB8EA3EF71535426C3FA02BBAFC",
       "src/read_api.lua": "FCEA95FC4C465299532E8A4657EAD1C5A6F1BA621455FA9212BB6E449D8B5E94",
-      "src/resolve.lua": "DE64BB7948B5771A793D7F83607DBB46FDA134A6EAE6F6DDA8BD56CBDB37BEE8",
+      "src/resolve.lua": "A02235C8C0A8CC5962B09FB0024EFC740FC359607AC434C6FAAE50D6330D9E84",
       "src/rows.lua": "44C562BE7EE6BBBC3FD591C6AFCA17A35EF13F9A06D186815A3BC5CE4868F1CC",
-      "tests/fixtures/memory.lua": "479BD893AB8423F00DD1E71769BB92C928B42F8A26059022CBB14E1A173D672B",
+      "tests/fixtures/memory.lua": "408F0267CBE1A2D47F2DA0E32C121D10EA562D12BF424994CC7F8E1973040D5A",
       "tests/fixtures/mission.lua": "FF9C7B4F8ADF990FC4E2C8BDF5E7A5983134BCCC1A8A39FF4E41BF213173101C",
       "tests/fixtures/mission_join.lua": "80BE16A79352EA761F13A5E3EA25C3ED9589C52646B6462E8860F7D38D775F2A",
       "tests/fixtures/mission_join_other_planet.lua": "9E4CA643B710741A93702E7783F169E9AFDCB2C4370909AA36BE29127F726080",
@@ -266,24 +266,24 @@
     },
     "rows": {
       "name": "Know Your Constellation Rows",
-      "revision": "v3.15-rows-v1",
-      "resource_sha256": "D57C8CF71AAF20523FBCAD7A3783B2C4DA72B92F4B43E24131C361C06756202B"
+      "revision": "v3.16-rows-v1",
+      "resource_sha256": "C8D2AD02BFA7B536D09F79D8385A425616DFB430BAD9A07D7E633374618A8281"
     },
-    "source_origin": "Local UI repair for Steam 25327279; actual current-build UI capture replay passed; installed interaction/rendering pending"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "name": "Armory Preview Cache",
     "slug": "ArmoryPreviewCache",
-    "revision": "v21",
+    "revision": "v22",
     "repository": "https://github.com/CowboyBingus/ArmoryPreviewCache",
     "module": "mods/cowboybingus/armory_preview_cache",
     "patch": "install.lua",
-    "resource_sha256": "243A78A725362986867C9F0C99C3292789019472EC5988E71E8528A1F600A596",
+    "resource_sha256": "890D34F917D5B25525982B7F94450CD0986FA11AD3F1F47B485632D6A7763D12",
     "source_sha256": {
-      "scripts/module.py": "C5364DFF4AB5FA3243F489B8D3C3DC5FE12C77A9E2E010AF7847C4C7604346C4",
+      "scripts/module.py": "14E800F9E0C0C244E950E1C6FCA84167C7631BF8E82E6CAEDE2FBEF63358B7FF",
       "src/dependencies.lua": "D05B4A68D8D18B954E5463CF5E12AA2F58F07D74F5CC5358001AD34B7465A391",
-      "src/image_native.lua": "C8EE0EAECE389D32B1E683703320C6E0C6D4A7646F3C88E056471FD56878DC75",
-      "src/image_signatures.lua": "D0AD5FFD84D4343F9E830B0B842E7396D4AE08FE6B1F28D819621672BEEDDDE4",
+      "src/image_native.lua": "89C716F5DC21758A467F7D18E512EB76B2C500A6A255AF1F5DEBCA158665AEFD",
+      "src/image_signatures.lua": "72ED6870296888EF36D0FC43E992D304AFE6955A60F34C6F73609744BCCD1C2E",
       "src/images.lua": "3ED9B7A3F5D1E5BC1AB822453E06BC00CEF9B924BB5F2DED22BA9F8971838DC7",
       "src/install.lua": "AA00D741B9649C50399F8ED8C756D2DCC1B129B0251B5705DB9D9E8DAD34E140",
       "src/native.lua": "02C276FEFDE07DE2BAEEBCD64E2EB714AD1FF40861CBFAC43B5ED2A6D55A3B0E",
@@ -291,12 +291,12 @@
       "src/policy.lua": "3D51D6B38F533F54168A0CDB4346A831F96AD73A5B4102C95CD17F3953110D3A",
       "src/profile.lua": "46ECAA76392907D0026B450527E30BFA75408C136CECE087DD53CABA5159A549",
       "src/read_api.lua": "FCEA95FC4C465299532E8A4657EAD1C5A6F1BA621455FA9212BB6E449D8B5E94",
-      "src/signatures.lua": "3DDA8FE4A0AF96FF44D401E7E62406F07F3B9610DFC692583C923FF4FC42B0C6",
+      "src/signatures.lua": "AB73BFF7FB74B2FABCD5A7991866C94C0E2E077595F540AA0B7F33C9435CDDAA",
       "tests/image_key_fixture.lua": "9209BEFDAE58D62806DADC5C3289EFCB0E43F153ECBFA6D42E8A308F9E7F1235",
       "tests/test_image_keys.lua": "62F3C788835A89670FE033F198CE609D573C23F45ACDBF32AC05357703097E34",
       "tests/test_images.lua": "95329DB870FAC73BE4798F8A8F4181D32000D8EB556C588856DAD0A49795DC81",
       "tests/test_install.lua": "81E7A387A8C4D9CB6AB8F14BB917633CE0F796A5CA81CA46B94CD21B62CD3AAA",
-      "tests/test_material_synthetic.lua": "30AA674FCEC0B55758D4C262E6B6E159BE4EDA4B27FD8F7EF712FBD48795CF21",
+      "tests/test_material_synthetic.lua": "3B36AD61BCDE884DD229CD033C193620D9E151AE37FEC4F56DE331679E4DD20A",
       "tests/test_partial_images.lua": "F48E2B550723C94C5DE2E3E5C06DC729EF2060C1D420C6D770657842DC55AEEF",
       "tests/test_policy.lua": "D19D68152D95A57CE263E3E52D81AEB1D5471A86A54005B0ACDD701A4F53A5C3",
       "tests/test_prewarm_recency.lua": "AB04FF7B33EFCC75F8A6AE754BB5E53663082C29A6DF03E9F8ED9C21DA055084",
@@ -308,18 +308,18 @@
       "tests/fixtures/ui_loadout_25327279.lua": "3791B0430A2CDEC631245B333DF70C84F49570042224766F4A7101E933B5A3B0",
       "tests/test_current_ui.lua": "EE794BF1A5FA4AC8B6439C5DD73CD13BDDC14EC8F1D88C93A9012A2F0F2F31E0"
     },
-    "source_origin": "Local UI repair for Steam 25327279; actual current-build UI capture replay passed; installed interaction/rendering pending"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "slug": "ClickableScrollbars",
     "name": "Clickable Scrollbars",
-    "revision": "v2.13",
+    "revision": "v2.14",
     "repository": "https://github.com/CowboyBingus/ClickableScrollbars",
     "module": "mods/cowboybingus/clickable_scrollbars",
     "entry": "direct",
-    "resource_sha256": "1D04E5D445B06336F5CB89C748B8AB3CA95601183E121FA94148F85BA86764EA",
+    "resource_sha256": "0FCA7BA580C4A2FE5A073B70E4AE372E5795F74E518145F2B4A11815B57C4892",
     "source_sha256": {
-      "src/clickable_scrollbars.lua": "A4C8318D45C75A7F866AF49CD5444473B83ACC1FAC63E03605B92877A73A36FB",
+      "src/clickable_scrollbars.lua": "67570EC6ABA4F79922D315A597352F50767258B324E04C6015C4FABDB10D1840",
       "tests/captured_ui.lua": "6DC02563B574AEF9AF68503A4CA2202E4460FF614872D85D33BA293969369926",
       "tests/fixtures/ui_armory_25327279.lua": "30CAC42DFE4A23DDC1FEC54C8D8A8BCA87DB4409D261F30377529724F6EF643A",
       "tests/runtime_fixture.lua": "969679BE036A8EF3B45CCA323B6A225EF60F2C02AECE743B078A69DE6A378207",
@@ -334,36 +334,36 @@
       "tests/test_settings_input.lua": "514B24FF47727D2661A06492028A24F3FC2FC038FD3897862DD8422137EF6245",
       "tests/test_ui_sim.lua": "761735BE834A4EED4042DCC777E32A1CF31772CDF8D04AFC38BAF3304D4BEBE7"
     },
-    "source_origin": "Standalone release; offline regression and package checks passed; new fixes await in-game confirmation"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "slug": "ArcThrowerRevamped",
     "name": "Arc Thrower Revamped",
-    "revision": "v1.5",
+    "revision": "v1.6",
     "repository": "https://github.com/CowboyBingus/ArcThrowerRevamped",
     "module": "mods/cowboybingus/arc_thrower_auto",
     "entry": "direct",
-    "resource_sha256": "9E4EFDF07544A49FB48ADA844D8EA1DA85B6DE3D6B958A209F4E4CD87C014C12",
+    "resource_sha256": "AFC9BDE4F376D613E70D09E741FF062DC0E7CCD8520FE96158F97400C5FC0C95",
     "source_sha256": {
-      "scripts/build.py": "FA19436B35C119E28A14D5B4930B6C6268C03A7683722A1CF6E346ABE6E4BBCE",
-      "src/arc_thrower_auto.lua": "8325A440C4A4E25679547CC8A20755EE4DBC96F8657EE37239C430415E114CF7",
+      "scripts/build.py": "5076ECEE7066C7CCA2A971BC33727FE8F5F716EF8F3CD393589E4D512DA7A19A",
+      "src/arc_thrower_auto.lua": "041C162FAB76448F027DAD176D752D438ED50036F06022ACA8BA2B3793C1CC65",
       "tests/test_bindings.lua": "CE2212A99787D20DC747BC6D530806F4D2AD0DC199346F7AB4620761268B5079",
       "tests/test_work_budget.lua": "822EF958BB70D9FB620432DD7B61AEE9EBD3D57404E698CB7A9C785FD56D6B53"
     },
-    "source_origin": "Standalone release; offline regression and package checks passed; new fixes await in-game confirmation"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   },
   {
     "slug": "GalacticMenuHotkey",
     "name": "Galactic Menu Hotkey",
-    "revision": "v1.1",
+    "revision": "v1.2",
     "repository": "https://github.com/CowboyBingus/GalacticMenuHotkey",
     "module": "mods/cowboybingus/galactic_menu_hotkey",
     "entry": "direct",
-    "resource_sha256": "325409344BD8AFF939DFDB858A277124C02F0B09B75731FEB96FA8B8A0035C10",
+    "resource_sha256": "E650BB121A4F5A157EF4E9E128DB8967417140BD94D6309E6704611B7638CB22",
     "source_sha256": {
-      "src/galactic_menu_hotkey.lua": "05113296A947A9D2B8AD246E8A13BCE016CC1BA52630A8A81CBB94DBDF085396",
+      "src/galactic_menu_hotkey.lua": "5119C8B5B3AF594CA1E8BAB42FB78A4973110ADFA6BAF84EE6F927A3C1086FEB",
       "tests/test_hotkey.lua": "120AC1AB7D576D169D5D7600D2648EC573B92AA4C300364469E2485320A9F314"
     },
-    "source_origin": "Standalone release; offline regression and package checks passed; new fixes await in-game confirmation"
+    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
   }
 ]

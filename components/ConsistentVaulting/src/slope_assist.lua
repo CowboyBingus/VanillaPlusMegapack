@@ -85,7 +85,7 @@ function A.snapshot(api,game,exe,key)
     local definition,object=ptr(record,16),ptr(record,24)
     local def=read(definition,28,true)
     assert(u(def)==u(mover,76),'Mover name mismatch')
-    assert(api.distance(ptr(read(object,8,true)),exe+0x16a16c8)==0,'Unsupported character controller')
+    assert(api.distance(ptr(read(object,8,true)),exe+0x16a16d8)==0,'Unsupported character controller')
     local up=vec(read(object+80,12,true),0)
     assert(math.abs(up[1])+math.abs(up[2])+math.abs(up[3]-1)<0.001,'Unsupported up vector')
     -- Preserve the separate 70-degree support/drop limit and shared definition.

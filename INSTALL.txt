@@ -1,12 +1,14 @@
-Vanilla Plus Megapack - v27
+Current local compatibility candidate for Steam build 25480438 / EXE 1.8.46015.0. Offline checks passed; live gameplay verification is pending.
 
-Supports Steam build 25327279 / EXE 1.8.45850.0.
-Requires the separate Bingus Shared Loader v16 or newer / API 1.
+Vanilla Plus Megapack - v28
+
+Supports Steam build 25480438 / EXE 1.8.46015.0.
+Requires the separate Bingus Shared Loader v17 or newer / API 1.
 
 1. Close Helldivers 2 and use either Arsenal or HD2MM.
 2. Disable previous megapacks and standalone copies of features you want off.
    Enable only one Megapack variant (standard or Rows).
-3. Import Vanilla-Plus-Megapack-v27.zip and Bingus Shared Loader v16 or newer.
+3. Import Vanilla-Plus-Megapack-v28.zip and Bingus Shared Loader v17 or newer.
 4. With Arsenal's default priority, place the loader LAST. If first-mod
    priority is enabled, place the loader FIRST instead.
 5. Open the pack's Options and select any of the thirteen independent mods.

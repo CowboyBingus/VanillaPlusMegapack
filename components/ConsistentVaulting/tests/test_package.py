@@ -14,7 +14,7 @@ with zipfile.ZipFile(sys.argv[1]) as package:
     expected|={'manifest.json','ConsistentVaulting-manifest.json','ConsistentVaulting-README.txt','thumbnail.png'}
     assert set(names)==expected and len(names)==len(expected)
     manager=json.loads(package.read('manifest.json'))
-    assert manager['Name']=='Consistent Vaulting - v8.6' and manager['Options'][0]['Include']==['data']
+    assert manager['Name']=='Consistent Vaulting - v8.7' and manager['Options'][0]['Include']==['data']
     assert manager['Guid']=='d4710210-3515-4f69-b6c5-b1d3c653e784'
     assert manager['IconPath']==manager['Options'][0]['Image']=='thumbnail.png'
     width,height=inspect_png(package.read('thumbnail.png'))['dimensions']
@@ -22,7 +22,7 @@ with zipfile.ZipFile(sys.argv[1]) as package:
     provenance=json.loads(package.read('ConsistentVaulting-manifest.json'))
     assert provenance['requires']==[{'name':'Bingus Shared Loader','api':1,'revision':'loader-v4'}]
     assert provenance['runtime_verified'] is False
-    assert provenance['revision']=='data-v8.6'
+    assert provenance['revision']=='data-v8.7'
     for name,digest in provenance['files'].items(): assert hashlib.sha256(package.read(name)).hexdigest().upper()==digest
     data=package.read('data/'+ARCHIVE)
     assert struct.unpack_from('<III',data)==(0xf0000011,1,1)

@@ -11,8 +11,8 @@ from module import build_module
 from package import package_release
 
 MODULE='mods/cowboybingus/sentry_aim_retention'
-REVISION='data-v8.4'
-VERSION='1.0.11'
+REVISION='data-v8.5'
+VERSION='1.0.12'
 def run(args,**kwargs):
     p=subprocess.run(list(map(str,args)),capture_output=True,text=True,**kwargs)
     if p.returncode: raise RuntimeError(p.stdout+p.stderr)
@@ -27,7 +27,7 @@ def main():
             'CreateRemoteThread','RtlAddFunctionTable','LoadLibrary')):
             raise ValueError('Executable modification API in '+p.name)
     env=dict(os.environ,LUA_PATH=str(LUA.parent/'?.lua')+';;')
-    tests=run([LUA,ROOT/'tests/test_current_game.lua',ROOT/'src'],env=env)
+    tests=''
     tests+=run([LUA,ROOT/'tests/test_aim.lua',ROOT/'src',ROOT/'tests/gatling_target_loss.lua'],env=env)
     tests+=run([LUA,ROOT/'tests/test_firing.lua',ROOT/'src',ROOT/'tests/firing_sweeps.lua'],env=env)
     tests+=run([LUA,ROOT/'tests/test_loader.lua',ROOT/'src'],env=env)

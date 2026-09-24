@@ -3,7 +3,7 @@
 -- Unsupported or hidden menus are inert; gestures never capture or inject input.
 -- Loader-only: plaintext Lua, no DLL, no hook, no code patch. See docs/RESEARCH.md.
 
-local module = {revision = 'v2.13'}
+local module = {revision = 'v2.14'}
 
 -- The engine's UI is reachable from Lua: equipment scrollbars are the game's own
 -- ScrollBar objects, and driving one is a data write rather than synthesised input.
@@ -62,7 +62,7 @@ local CAREER = {offset = 318472, list = 2488, track = 195256, thumb = 195808,
                 thumb_height = 196148, enabled = 196089, padding = 4}
 local LOADOUT_GRID_OFFSET = 864032
 -- Both the settings page and Bindings own inline virtual lists of the same
--- widget type. Page offsets were measured in Steam build 25327279.
+-- widget type. Page offsets were measured in Steam build 25480438.
 local OPTIONS_LIST = {bar = 816, thumb = 1432,
                       scroll = 552, span = 2784, value = 2792}
 local OPTIONS_PAGES = {
@@ -70,13 +70,13 @@ local OPTIONS_PAGES = {
     [26] = {menu = 208, list = 338344, route = 'bindings'},
 }
 local GRID_SOLVER, SCROLL_SET, POSITION_SET, ANIMATION_STOP =
-    0x18d2a90, 0x1794460, 0x1447610, 0x1439cb0
+    0x18d2b60, 0x1794530, 0x14476a0, 0x1439d40
 local INPUT_CONSUME, INPUT_STATE, UI_SELECT = 0x12fde90, 0x347cf18, 0xA00000000
 module.native_signatures = {
     {GRID_SOLVER, '488bc45355565741544155415641574881ecf800000083b9'},
-    {SCROLL_SET, '0f57d20f2fd1770cf30f1015f028c300f30f5dd1f30f1081'},
+    {SCROLL_SET, '0f57d20f2fd1770cf30f10153028c300f30f5dd1f30f1081'},
     {POSITION_SET, '48895c241848896c24204889542410565741574883ec20f3'},
-    {ANIMATION_STOP, '40534883ec40488b05532320014833c448894424300fb601'},
+    {ANIMATION_STOP, '40534883ec40488b05c32220014833c448894424300fb601'},
     {INPUT_CONSUME, '40534883ec204c8bd14c8bca488bcae8dc7c28ff'},
 }
 
@@ -344,7 +344,7 @@ end
 
 -- Resolve the live equipment grid from its screen's registered controller.
 -- Ship Armory uses kind 224; the mission loadout picker uses kind 229 and embeds
--- the same grid at a different controller offset in build 25327279.
+-- the same grid at a different controller offset in build 25480438.
 function module.native_locate(api, memory)
     if type(api) ~= 'table' then return nil, 'no reader' end
     memory = memory or module.native_memory(api)

@@ -41,13 +41,13 @@ local HOTKEY = 0x09 -- VK_TAB
 local BINDING_ID = 'cowboybingus.galactic_menu'
 local BINDING_LABEL = 0xb46c8096 -- Game-localized "OPEN MAP"
 local SHIP_TABLE_HASH = '3b9bcf29e38da0a6'
-local GAME_SHA256 = '73374BD4E38386BEB9A23BEF480082B67D457EBC77485FBEC5F488B4E95E201F'
-local EXE_SHA256 = 'D8E23968D1412B07E06785321727D63EDF74E711214D6F6ADEB3BFCA95CA6827'
+local GAME_SHA256 = '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
+local EXE_SHA256 = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
 
--- Steam build 25327279: PresenterManager::open presenter, and the game's
+-- Steam build 25480438: PresenterManager::open presenter, and the game's
 -- pointer to its top-level UI state. Presenter 15 is Hologram; that presenter
 -- pushes MenuScreenType 24. Its screen initialization ignores extra data.
-local ENTER_PRESENTER_RVA = 0x14c02c0
+local ENTER_PRESENTER_RVA = 0x14c0350
 local UI_STATE_PTR_RVA = 0x347ce28
 local PRESENTER_OFFSET = 17032
 local IDLE_MENU_PRESENTER, HOLOGRAM_PRESENTER = 0, 15

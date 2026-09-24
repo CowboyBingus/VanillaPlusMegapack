@@ -16,7 +16,7 @@ local game,exe=p(0x10000000),p(0x20000000)
 local app,sm,ui,dispatch,tm,owner,world,widget,record,atlas=0x30000000,0x30010000,0x30020000,0x30030000,0x30040000,0x30050000,0x30060000,0x30070000,0x30080000,0x30090000
 put(game+0x3326308,ptr(0x227c8d80));put(exe+0x27c8d80+16,ptr(app))
 for off,rva in pairs({[368]=0x31af50,[400]=0x31b360,[528]=0x31e030})do put(app+off,ptr(0x20000000+rva))end
-put(exe+0x16588b0,word(32));put(game+0x347ce28,ptr(sm));put(sm+0x429c,word(14)..string.rep('\0',16)..word(1))
+put(exe+0x1658990,word(32));put(game+0x347ce28,ptr(sm));put(sm+0x429c,word(14)..string.rep('\0',16)..word(1))
 put(game+0x347cd90,ptr(ui));put(ui+15432,ptr(world));put(game+0x3326e68,ptr(dispatch))
 put(dispatch+5740,word(1));put(dispatch+5744,ptr(owner)..word(229)..word(0))
 put(game+0x347cd80,ptr(tm));put(tm+11112,ptr(atlas));put(tm+11136,word(1))
