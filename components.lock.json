@@ -354,16 +354,16 @@
   },
   {
     "slug": "GalacticMenuHotkey",
-    "name": "Galactic Menu Hotkey",
-    "revision": "v1.2",
-    "repository": "https://github.com/CowboyBingus/GalacticMenuHotkey",
+    "name": "Ship Station Hotkeys",
+    "revision": "v1.7",
+    "repository": "https://github.com/CowboyBingus/ShipStationHotkeys",
     "module": "mods/cowboybingus/galactic_menu_hotkey",
     "entry": "direct",
-    "resource_sha256": "E650BB121A4F5A157EF4E9E128DB8967417140BD94D6309E6704611B7638CB22",
+    "resource_sha256": "165163DDE8E7CCFB9F5D60531A1412900F11A12F481A41CAE20DEC545287471B",
     "source_sha256": {
-      "src/galactic_menu_hotkey.lua": "5119C8B5B3AF594CA1E8BAB42FB78A4973110ADFA6BAF84EE6F927A3C1086FEB",
-      "tests/test_hotkey.lua": "120AC1AB7D576D169D5D7600D2648EC573B92AA4C300364469E2485320A9F314"
+      "src/galactic_menu_hotkey.lua": "CD5AC17E9BE9B1DCA46C9EE202006C1719D2E46534D2696E71BA8154F7CAD4B3",
+      "tests/test_hotkey.lua": "CB9FB84B5775225B95C6417CA20B45F13A554CB3C77110587789C80E963C64E9"
     },
-    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
+    "source_origin": "Standalone Ship Station Hotkeys v1.7 for Steam build 25480438; offline checks passed; F8 and backing out live-verified."
   }
 ]

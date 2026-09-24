@@ -1,4 +1,12 @@
-# v28
+# v29
+
+- Replace the Galactic Menu Hotkey option with Ship Station Hotkeys v1.7: Tab map, F1 Armory, F5 Control Center, F6 Ship Management, F7 Stratagem Hero and F8 instant Hellpod entry.
+- Name the option Ship Station Hotkeys; its option folder and addon resource are unchanged, so managers update it in place.
+- Rebind all six shortcuts, choose activation types and assign controller buttons with the separate Mod Bindings Menu v2.0.
+- List the exact bundled component versions in the README and install notes.
+- All other bundled components are unchanged from v28.
+
+## v28
 
 - Update both Megapack layouts for Steam build 25480438.
 - Include the refreshed addresses, guards and corpse state-machine hashes from the standalone mods.
