@@ -38,21 +38,26 @@ return function()
     local process = kernel.GetCurrentProcess()
     local api = {}
     function api.time() return tonumber(kernel.GetTickCount64()) / 1000 end
-    local frequency,counter=ffi.new('int64_t[1]'),ffi.new('int64_t[1]')
+    local frequency=ffi.new('int64_t[1]')
     local performance_counter=ffi.cast('int (*)(void *)',kernel.QueryPerformanceCounter)
     local performance_frequency=ffi.cast('int (*)(void *)',kernel.QueryPerformanceFrequency)
     assert(performance_frequency(frequency)~=0 and frequency[0]>0,'Performance clock unavailable')
     local ticks_per_second=tonumber(frequency[0])
-    function api.clock() performance_counter(counter);return tonumber(counter[0])/ticks_per_second end
+    -- Read the counter as two 32-bit halves: indexing a 64-bit integer boxes a
+    -- new cdata on every call, and the clock runs on every budget check.
+    local halves=ffi.new('uint32_t[2]')
+    function api.clock() performance_counter(halves);return (halves[0]+halves[1]*4294967296)/ticks_per_second end
     -- Optional read-only diagnostic counter. Raw cycles must not be converted
     -- to milliseconds: CPU timer frequency/implementation varies by hardware.
     local has_cycles,query_cycles=pcall(function()
         return ffi.cast('int (*)(void *, void *)',kernel.QueryThreadCycleTime)
     end)
     if has_cycles then
-        local cycle_buffer=ffi.new('uint64_t[1]')
+        -- Two 32-bit halves avoid boxing a 64-bit cdata per call. The pseudo
+        -- handle always names the calling thread, so it is fetched once.
+        local cycle_halves,thread=ffi.new('uint32_t[2]'),kernel.GetCurrentThread()
         function api.thread_cycles()
-            if query_cycles(kernel.GetCurrentThread(),cycle_buffer)~=0 then return tonumber(cycle_buffer[0]) end
+            if query_cycles(thread,cycle_halves)~=0 then return cycle_halves[0]+cycle_halves[1]*4294967296 end
         end
     end
 
@@ -72,6 +77,22 @@ return function()
         end
         return ffi.string(buffer, size)
     end
+
+    -- Validation view: the same copy into a separate scratch buffer, returned
+    -- as a pointer instead of a new Lua string. Valid until the next view; only
+    -- compared in place, never stored.
+    local view_buffer=ffi.new('uint8_t[32768]')
+    function api.view(address, size)
+        if type(size)~='number' or size<1 or size>32768 or size%1~=0 then return nil end
+        if kernel.ReadProcessMemory(process, address, view_buffer, size, count) == 0 or count[0] ~= size then
+            return nil
+        end
+        return view_buffer
+    end
+    -- The view copies the same memory api.read does. Anything that replaces
+    -- api.read (a replay, a counting wrapper) breaks this pairing, and callers
+    -- then fall back to string reads through the replacement.
+    api.view_read=api.read
 
     local pointer_word=ffi.new('uintptr_t[1]')
     function api.pointer(bytes, offset)

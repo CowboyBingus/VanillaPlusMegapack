@@ -21,7 +21,7 @@ return function(create_api,patch,build)
                 'fling_armed','fling_stops','fling_stops_verified','fling_handoffs','max_fling_distance',
                 'last_fling_unit','last_fling_entity','last_fling_type','last_fling_reason',
                 'fling_limb_stops','last_fling_actor','last_fling_limb_distance','last_fling_limb_degrees',
-                'landed_disabled_stops','mixed_corpse_realignments',
+                'landed_disabled_stops','mixed_corpse_realignments','reposes_deferred',
                 'completion_requests','completion_corpse_observed','completion_pending',
                 'last_completion_unit','last_completion_entity','last_completion_uptime',
                 'last_fling_distance','last_fling_degrees','last_fling_uptime'}) do
@@ -45,10 +45,10 @@ return function(create_api,patch,build)
         return g,e
     end)
     if not ok then report(tostring(game),false,true);return end
-    local profiler,original_read
-    original_read=api.read
+    local profiler,original_read,original_view,original_view_read
+    original_read,original_view,original_view_read=api.read,api.view,api.view_read
     local function disable_profiler()
-        profiler=nil;api.profiler=nil;api.read=original_read
+        profiler=nil;api.profiler=nil;api.read=original_read;api.view=original_view;api.view_read=original_view_read
         state.profiler_failures=(state.profiler_failures or 0)+1
     end
     if patch.profiler then

@@ -14,7 +14,7 @@ from package import package_release, release_directory
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build'
 MODULE = 'mods/cowboybingus/vanilla_plus_megapack'
-VERSION = '29'
+VERSION = '30'
 REVISION = f'megapack-v{VERSION}'
 GUID = '876060ae-0640-4ac5-95b6-ec7c9a0567d3'
 ROWS_GUID = 'fb497df5-080b-48a5-b31d-103ccb060e1c'

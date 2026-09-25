@@ -1,12 +1,16 @@
 local ffi,bit=require('ffi'),require('bit')
 local M={}
 local ZERO=string.rep('\0',4)
-local function u(b,o)
-    local v=ffi.new('uint32_t[1]');ffi.copy(v,b:sub(o+1,o+4),4);return tonumber(v[0])
+-- Four-byte fields decode through reused cells instead of a new cell and a
+-- substring per read; out-of-range offsets keep the original path.
+local u_cell,f_cell=ffi.new('uint32_t[1]'),ffi.new('float[1]')
+local function field(cell,b,o)
+    if o>=0 and o+4<=#b then ffi.copy(cell,ffi.cast('const uint8_t *',b)+o,4)
+    else ffi.copy(cell,b:sub(o+1,o+4),4) end
+    return tonumber(cell[0])
 end
-local function f(b,o)
-    local v=ffi.new('float[1]');ffi.copy(v,b:sub(o+1,o+4),4);return tonumber(v[0])
-end
+local function u(b,o) return field(u_cell,b,o) end
+local function f(b,o) return field(f_cell,b,o) end
 local function word(n) return ffi.string(ffi.new('uint32_t[1]',n),4) end
 local function ticks(b)
     local v=ffi.new('uint64_t[1]');ffi.copy(v,b,8);return tonumber(v[0])

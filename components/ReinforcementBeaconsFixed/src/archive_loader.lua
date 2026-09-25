@@ -42,8 +42,13 @@ return function(create_api,patch,build)
         if not accepted then stopped=true end
         report(tostring(reason),active==true)
     end
+    -- The second boundary only matters while a reinforcement is in progress:
+    -- on the ship, while waiting for data or while alive, skip the repeat.
     local function after(...)
-        check()
+        local last=state.previous
+        if last and last.owned and last.mode>=1 and last.mode<=7 and (last.state==1 or last.state==2) then
+            check()
+        end
         return ...
     end
     update=function(...)

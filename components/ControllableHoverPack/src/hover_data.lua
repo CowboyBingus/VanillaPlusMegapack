@@ -1,6 +1,17 @@
 local ffi,bit=require('ffi'),require('bit')
 local M={}
-local function value(b,o,t)local x=ffi.new(t..'[1]');ffi.copy(x,b:sub(o+1),ffi.sizeof(x));return tonumber(x[0])end
+-- Fields decode through one reused cell per type. The previous b:sub(o+1)
+-- copied the whole rest of the buffer for every field read; out-of-range
+-- offsets keep that original path, so every result is unchanged.
+local decode_cells={}
+local function value(b,o,t)
+    local cell=decode_cells[t]
+    if not cell then cell=ffi.new(t..'[1]');decode_cells[t]=cell end
+    local size=ffi.sizeof(cell)
+    if o>=0 and o+size<=#b then ffi.copy(cell,ffi.cast('const uint8_t *',b)+o,size)
+    else ffi.copy(cell,b:sub(o+1),size) end
+    return tonumber(cell[0])
+end
 local function u(b,o)return value(b,o,'uint32_t')end
 local function resource(hex)return hex:gsub('..',function(x)return string.char(tonumber(x,16))end):reverse()end
 local AVATAR=resource('4d1c334d294dfa97')
@@ -113,8 +124,10 @@ function M.apply(api,game,exe,state)
         if not M.settings.restore(api,game,state) then return 'restore_pending' end
         M.policy.step(state,nil)
     end
-    if not api.focused() then M.policy.step(state,nil);return 'waiting_for_game_focus'end
+    -- Without a hover-pack snapshot there is nothing to focus-gate: skip the
+    -- window/process system calls on every such frame.
     if not s then M.policy.step(state,nil);return reason end
+    if not api.focused() then M.policy.step(state,nil);return 'waiting_for_game_focus'end
     if not M.current(api,s) then M.policy.step(state,nil);return 'snapshot_changed'end
     if not M.policy.step(state,s) then return s.flight and 'watching_hover' or 'waiting_for_hover'end
     if not api.focused() or not M.current(api,s) then

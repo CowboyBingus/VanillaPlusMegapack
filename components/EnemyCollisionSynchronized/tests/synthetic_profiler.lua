@@ -276,6 +276,25 @@ function P.new(api, revision, options)
         if section then section.reads = section.reads+1;section.bytes = section.bytes+size end
         return read(address,size)
     end
+    -- Views are reads for every count here, and stay paired with the wrapped read.
+    local view = api.view
+    if view and api.view_read==read then
+        api.view = function(address,size)
+            p.reads = p.reads+1;p.bytes = p.bytes+size
+            local class = classify(tonumber(ffi.cast('uintptr_t',address)))
+            local row = p.classes[class]
+            if not row then row = class_row(class) end
+            row.reads = row.reads+1;row.bytes = row.bytes+size
+            if size>row.max_size then row.max_size = size end
+            note_size(size)
+            local stage = p.rows[p.current or 'other']
+            stage.reads = stage.reads+1;stage.bytes = stage.bytes+size
+            local section = p.running and p.current=='snapshot' and p.detail_current and p.sections[p.detail_current]
+            if section then section.reads = section.reads+1;section.bytes = section.bytes+size end
+            return view(address,size)
+        end
+        api.view_read = api.read
+    end
     if type(api.pointer)=='function' then
         -- Pointer decoding is pure LuaJIT arithmetic but happens several times
         -- per read, so it stays visible to the hotspot report.

@@ -4,16 +4,16 @@
 
 Choose which of the thirteen bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, Ship Station Hotkeys, and Clickable Scrollbars.
 
-**Requires the separately built Bingus Shared Loader v17 or newer.** Install two ZIPs: `Vanilla-Plus-Megapack-v29.zip` and `Bingus-Shared-Loader-v17.zip`. Mod managers do not install the dependency automatically.
+**Requires the separately built Bingus Shared Loader v17 or newer.** Install two ZIPs: `Vanilla-Plus-Megapack-v30.zip` and `Bingus-Shared-Loader-v17.zip`. Mod managers do not install the dependency automatically.
 
 
-The release also provides an optional [Rows package](docs/ROWS.md), `Vanilla-Plus-Megapack-Rows-v29.zip`. It displays every constellation section at once with the same native styling. Enable either the standard pack or Rows with the shared loader. All other bundled resources are identical.
+The release also provides an optional [Rows package](docs/ROWS.md), `Vanilla-Plus-Megapack-Rows-v30.zip`. It displays every constellation section at once with the same native styling. Enable either the standard pack or Rows with the shared loader. All other bundled resources are identical.
 
 ## Install with Arsenal or HD2MM
 
 1. Close Helldivers 2. Use one mod manager.
 2. Replace any previous loader entry with v17 or newer. Disable old megapacks and standalone copies of features you want turned off.
-3. Import `Vanilla-Plus-Megapack-v29.zip` and `Bingus-Shared-Loader-v17.zip`, then enable both.
+3. Import `Vanilla-Plus-Megapack-v30.zip` and `Bingus-Shared-Loader-v17.zip`, then enable both.
 4. With Arsenal's default priority, put **Bingus Shared Loader last**, at the bottom. If first-mod priority is enabled, put the loader first.
 5. Open the Megapack's **Options** (sliders button) in Arsenal, or its mod options in HD2MM. Check each mod you want and uncheck each mod you do not want. Confirm/save the selection.
 6. **Purge / Deploy**, then launch the game normally. Close the game and repeat these steps whenever you change options.
@@ -22,18 +22,18 @@ Each of the thirteen options is independent. Select all for the complete pack, a
 
 An unchecked option removes only the pack's copy. An enabled standalone package or another megapack can still activate that feature, so disable those copies as well. Overlapping gameplay entries run once and their callbacks do not stack. If versions differ, manager priority selects the winner.
 
-## Included in v29
+## Included in v30
 
 | Mod | Version | Effect |
 | --- | --- | --- |
 | [Better Stratagem Bounce](https://github.com/CowboyBingus/BetterStratagemBounce) | v15.3 | Allows stratagem balls to stick on more usable surfaces. |
-| [Hellpod Steering Unlocked](https://github.com/CowboyBingus/HellpodSteeringUnlocked) | v7.3 | Removes the hellpod steering restriction near high ground. |
-| [Reinforcement Beacons Fixed](https://github.com/CowboyBingus/ReinforcementBeaconsFixed) | v4.4 | Centers queued reinforcements over their beacon or solo anchor. |
-| [Consistent Vaulting](https://github.com/CowboyBingus/ConsistentVaulting) | v8.7 | Adds fresh obstacle checks, higher ledge detection and bounded steep-surface support. |
-| [Shallow Water Diving](https://github.com/CowboyBingus/ShallowWaterDiving) | v3.6 | Preserves the standing water reference during a local airborne dive. |
-| [Sentry Aim Retention](https://github.com/CowboyBingus/SentryAimRetention) | v1.0.12 | Retains sentry aim, improves nearby target handoffs, and pauses broad sweeps, stale-target shots and terrain-obstructed fire. |
-| [Enemy Collision Synchronized](https://github.com/CowboyBingus/EnemyCollisionSynchronized) | v2.10.2 | Aligns displaced corpse collision and curbs renewed movement after large remote corpses settle. |
-| [Controllable Hover Pack](https://github.com/CowboyBingus/ControllableHoverPack) | v1.6 | Press the Jump Pack action again to descend early while retaining native landing assistance. |
+| [Hellpod Steering Unlocked](https://github.com/CowboyBingus/HellpodSteeringUnlocked) | v7.4 | Removes the hellpod steering restriction near high ground. |
+| [Reinforcement Beacons Fixed](https://github.com/CowboyBingus/ReinforcementBeaconsFixed) | v4.5 | Centers queued reinforcements over their beacon or solo anchor. |
+| [Consistent Vaulting](https://github.com/CowboyBingus/ConsistentVaulting) | v8.8 | Adds fresh obstacle checks, higher ledge detection and bounded steep-surface support. |
+| [Shallow Water Diving](https://github.com/CowboyBingus/ShallowWaterDiving) | v3.7 | Preserves the standing water reference during a local airborne dive. |
+| [Sentry Aim Retention](https://github.com/CowboyBingus/SentryAimRetention) | v1.0.13 | Retains sentry aim, improves nearby target handoffs, and pauses broad sweeps, stale-target shots and terrain-obstructed fire. |
+| [Enemy Collision Synchronized](https://github.com/CowboyBingus/EnemyCollisionSynchronized) | v2.11.0 | Aligns displaced corpse collision and curbs renewed movement after large remote corpses settle. |
+| [Controllable Hover Pack](https://github.com/CowboyBingus/ControllableHoverPack) | v1.7 | Press the Jump Pack action again to descend early while retaining native landing assistance. |
 | [Know Your Constellation](https://github.com/CowboyBingus/KnowYourConstellation) | v3.16 | Shows local enemy forecasts on mission previews and briefing before choosing a loadout. |
 | [Armory Preview Cache](https://github.com/CowboyBingus/ArmoryPreviewCache) | v22 | Caches equipment thumbnails and preloads their assets in Armory and mission briefing. |
 | [Arc Thrower Revamped](https://github.com/CowboyBingus/ArcThrowerRevamped) | v1.6 | Hold the fire button to keep the Arc Thrower firing; stock charge, damage and arc settings. |
@@ -60,4 +60,4 @@ The prior performance improvements remain included: bounded Arc Thrower scanning
 
 Current-build mission and multiplayer checks for the earlier gameplay components remain pending.
 
-Current version: **v29**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).
+Current version: **v30**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).

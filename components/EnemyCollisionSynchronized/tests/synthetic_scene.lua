@@ -273,12 +273,28 @@ function S.build(M, api, config)
         end
         return ffi.string(address,size)
     end
+    -- The production adapter's validation view: the same accounting and
+    -- failures, but the scene's own bytes are compared in place (no string).
+    local function base_view(address, size)
+        reads = reads+1; bytes = bytes+size
+        work_clock = work_clock+cfg.read_cost
+        local class = classify(tonumber(ffi.cast('uintptr_t',address)))
+        local extra = region_cost[class]
+        if extra then work_clock = work_clock+extra end
+        if hostile and (not hostile.region or hostile.region==class) then
+            hostile_served = hostile_served+1
+            if hostile_served>hostile.after then return nil end
+        end
+        return ffi.cast('const uint8_t *',address)
+    end
     -- The scene owns the bytes; an api table is only a view onto them. Reusing
     -- one scene with a freshly attached api gives a second measurement window at
     -- identical addresses, which is how the harness separates real change from
     -- allocator placement.
     local function attach(target)
         target.read = base_read
+        target.view = base_view
+        target.view_read = base_read
         target.time = function() return poll_clock end
         target.clock = function() return work_clock end
         target.profiler = nil

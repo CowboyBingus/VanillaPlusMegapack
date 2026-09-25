@@ -81,7 +81,6 @@ local function snapshot(api, game, exe)
         return nil
     end
     local pm = global(0x3326468,'player_manager')
-    assert(api.writable_data(pm,0x440), 'Player manager is not private writable data')
     local players = read(pm,0x440)
     local count, available = u32(players,0x84),u32(players,0x88)
     assert(count<=4 and available<=4, 'Unsupported player layout')
@@ -128,13 +127,14 @@ local function snapshot(api, game, exe)
     assert(n<=512, 'Unsupported active stratagem count')
     if n>0 then
         local data=data_pointer(stratagems,0x78)
+        local rows=read(data,n*64)
         for i=0,n-1 do
-            local row=read(data+i*64,64)
+            local base=i*64
             -- Current automatic-reinforcement producer ACCC96 / ACCEC5.
-            if u32(row,12)==0x7C then
-                local v=vector(row,16)
+            if u32(rows,base+12)==0x7C then
+                local v=vector(rows,base+16)
                 if v then snapshot.automatic[#snapshot.automatic+1]={
-                    key=row:sub(17,28),position=v} end
+                    key=rows:sub(base+17,base+28),position=v} end
             end
         end
     end

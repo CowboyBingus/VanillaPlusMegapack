@@ -219,4 +219,17 @@ patch.snapshot=function()
 end
 assert(patch.apply(api,g,e,state));avatars[input]=1;assert(patch.apply(api,g,e,state))
 assert(state.slope_lease and patch.stop(api,g,e,state));baseline();done()
+-- With no lease and the input released, a step reads only up to the input
+-- state; pressing the input reads and validates everything and still arms.
+do
+    local raw_read,reads=api.read,0
+    api.read=function(a,n) reads=reads+1;return raw_read(a,n) end
+    reset();local idle_state={};avatars[input]=0;step(idle_state);local idle=reads
+    reads=0;avatars[input]=1;step(idle_state);local pressed=reads
+    assert(idle_state.slope_lease,'Released-input snapshots must not prevent arming')
+    assert(idle*2<pressed,string.format('idle step read %d times, pressed step %d',idle,pressed))
+    assert(A.stop(api,g,e,idle_state));baseline()
+    api.read=raw_read
+end
+print('PASS: released-input steps skip the mover/settings reads; a press reads everything and arms')
 print('PASS: '..passed..' slope ownership, native-override model, limits, lease lifecycle, cleanup and integration scenarios')

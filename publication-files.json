@@ -142,6 +142,7 @@
   "components/EnemyCollisionSynchronized/tests/test_profiles.py",
   "components/EnemyCollisionSynchronized/tests/test_recorded_snapshot.lua",
   "components/EnemyCollisionSynchronized/tests/test_repair.lua",
+  "components/EnemyCollisionSynchronized/tests/test_repose_cooldown.lua",
   "components/EnemyCollisionSynchronized/tests/test_settlement.lua",
   "components/EnemyCollisionSynchronized/tests/test_snapshot.lua",
   "components/EnemyCollisionSynchronized/tests/test_synthetic_harness.lua",

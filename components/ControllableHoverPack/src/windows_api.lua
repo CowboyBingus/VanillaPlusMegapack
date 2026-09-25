@@ -48,11 +48,13 @@ return function()
         return ffi.string(buffer, size)
     end
 
+    local pointer_word = ffi.new('uintptr_t[1]')
     function api.pointer(bytes, offset)
         offset = offset or 0
         if not bytes or offset < 0 or offset + 8 > #bytes then return nil end
-        local value = ffi.new('uintptr_t[1]')
-        ffi.copy(value, bytes:sub(offset + 1, offset + 8), 8)
+        -- Reused word, copied straight from the string: no allocation per pointer.
+        local value = pointer_word
+        ffi.copy(value, ffi.cast('const uint8_t *', bytes) + offset, 8)
         if value[0] < 0x10000 or value[0] >= 0x800000000000 then return nil end
         return ffi.cast('uint8_t *', value[0])
     end

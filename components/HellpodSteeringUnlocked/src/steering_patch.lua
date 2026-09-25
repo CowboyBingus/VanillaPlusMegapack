@@ -25,9 +25,6 @@ function patch.apply(api, game)
     if api.distance(manager, owner) ~= patch.owner_offset then
         return false, 'avoidance_owner_mismatch', false
     end
-    if not api.writable_data(manager, patch.size) then
-        return false, 'avoidance_is_not_writable_private_data', false
-    end
     local enabled = api.read(manager, 1)
     local records = api.read(manager + 32772, 4)
     local links = api.read(manager + 65544, 4)
@@ -53,6 +50,11 @@ function patch.apply(api, game)
         return false, 'avoidance_layout_mismatch', false
     end
     if enabled == '\0' then return true, 'avoidance_settings_ready', true end
+    -- Checked only before a write: once settings are ready, every 10 Hz poll
+    -- used to repeat this memory-protection query for nothing.
+    if not api.writable_data(manager, patch.size) then
+        return false, 'avoidance_is_not_writable_private_data', false
+    end
     -- Recheck identity and the exact target immediately before the single-byte
     -- write. Mission initialization can reset this manager between checks.
     local current = api.pointer(api.read(game + patch.manager_rva, 8))

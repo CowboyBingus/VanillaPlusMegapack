@@ -1,8 +1,17 @@
 local ffi,bit=require('ffi'),require('bit')
 local M={}
 local MAX_WATER_DEPTH=0.20 -- game units above the native root; tightened after the knee-depth test
+-- Fields decode through one reused cell per type. The previous b:sub(o+1)
+-- copied the whole rest of the buffer for every field read; out-of-range
+-- offsets keep that original path, so every result is unchanged.
+local decode_cells={}
 local function value(b,o,kind)
-    local v=ffi.new(kind..'[1]');ffi.copy(v,b:sub(o+1),ffi.sizeof(v));return tonumber(v[0])
+    local cell=decode_cells[kind]
+    if not cell then cell=ffi.new(kind..'[1]');decode_cells[kind]=cell end
+    local size=ffi.sizeof(cell)
+    if o>=0 and o+size<=#b then ffi.copy(cell,ffi.cast('const uint8_t *',b)+o,size)
+    else ffi.copy(cell,b:sub(o+1),size) end
+    return tonumber(cell[0])
 end
 local function u(b,o) return value(b,o,'uint32_t') end
 local function f(b,o) return value(b,o,'float') end
@@ -16,6 +25,7 @@ local function partial(before,after,current)
     end
     return false
 end
+local DIVE_TIMEOUT_RVAS={0x23c7110,0x23c7100}
 local RESOURCE='\151\250\077\041\077\051\028\077'
 local function matches(api,guards)
     for _,g in ipairs(guards) do if api.read(g.address,#g.bytes)~=g.bytes then return false end end
@@ -96,6 +106,15 @@ function M.snapshot(api,game)
     s.swim=bit.band(u(flags,8),0x80000000)~=0
     s.ragdoll=bit.band(u(flags,12),0x10)~=0
     s.elapsed=f(dive,8);s.landing=f(dive,12)
+    if not s.dive then
+        -- Outside a dive, apply() needs only the identity and the dive timer
+        -- (it answers 'dive_ended' before reading anything else), so the water,
+        -- stance, movement and settings records wait for a dive. They are still
+        -- fully read and validated on every dive frame, before any write.
+        assert(finite(s.elapsed) and finite(s.landing),'Invalid movement or water value')
+        s.key=entity_address;s.entity=entity
+        return s
+    end
     stage='water'
     local dm=global(0x3326a80,true)
     local di=lookup(read(dm+32,20,true),id,32768,true)
@@ -145,7 +164,21 @@ function M.snapshot(api,game)
     assert(u(resource,0)==0x4a182741 and resource:sub(5,8)==packed(-1.3),'Drownable settings changed')
     s.base=f(resource,4)
     s.prone=rounded(s.base+rounded(0.9))
-    assert(read(game+0x23c7100,4)==packed(2),'Native dive timeout changed')
+    -- Build 25480438 shifted this constant block by 0x10 (both stance
+    -- constants below moved); the timeout kept its old address by mistake.
+    -- The exact 2.0 value remains the gate; the old address is a fallback.
+    local timeout_ok=false
+    for _,rva in ipairs(DIVE_TIMEOUT_RVAS) do
+        if api.read(game+rva,4)==packed(2) then timeout_ok=true;break end
+    end
+    if not timeout_ok then
+        -- Evidence for the next migration: every 2.0 near the expected block.
+        local window=api.read(game+0x23c7080,0x100) or ''
+        local found={}
+        for o=0,#window-4,4 do if window:sub(o+1,o+4)==packed(2) then found[#found+1]=string.format('0x%x',0x23c7080+o) end end
+        error(string.format('Native dive timeout changed (2.0 near expected block at: %s)',
+            #found>0 and table.concat(found,',') or 'none'),0)
+    end
     assert(read(game+0x23c6ccc,4)==packed(0.9) and read(game+0x23c69f8,4)==packed(0.4),'Stance offsets changed')
     for _,n in ipairs({s.elapsed,s.landing,s.offset,s.drown_elapsed,s.remaining,s.surface,s.root_z}) do
         assert(finite(n),'Invalid movement or water value')

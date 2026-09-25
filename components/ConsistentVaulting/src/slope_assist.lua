@@ -1,8 +1,17 @@
 local ffi,bit=require('ffi'),require('bit')
 local A={limit=65,radius=3}
 local INVALID=0xffffffff
+-- Fields decode through one reused cell per type. The previous b:sub(o+1)
+-- copied the whole rest of the buffer for every field read; out-of-range
+-- offsets keep that original path, so every result is unchanged.
+local decode_cells={}
 local function value(b,o,t)
-    local v=ffi.new(t..'[1]');ffi.copy(v,b:sub(o+1),ffi.sizeof(v));return tonumber(v[0])
+    local cell=decode_cells[t]
+    if not cell then cell=ffi.new(t..'[1]');decode_cells[t]=cell end
+    local size=ffi.sizeof(cell)
+    if o>=0 and o+size<=#b then ffi.copy(cell,ffi.cast('const uint8_t *',b)+o,size)
+    else ffi.copy(cell,b:sub(o+1),size) end
+    return tonumber(cell[0])
 end
 local function u(b,o)return value(b,o or 0,'uint32_t') end
 local function f(b,o)return value(b,o or 0,'float') end
@@ -13,7 +22,7 @@ local COS=math.cos(A.limit*math.pi/180)
 
 -- A saved identity is used only for cleanup. It can locate the original avatar
 -- after registry compaction or a local-player switch, never grant a new lease.
-function A.snapshot(api,game,exe,key)
+function A.snapshot(api,game,exe,key,light)
     local s={guards={}}
     local function read(a,n,guard)
         local b=assert(api.read(a,n),'Slope data unavailable');assert(#b==n,'Short slope read')
@@ -27,9 +36,9 @@ function A.snapshot(api,game,exe,key)
         local cap,empty,mult=u(h,8),u(h,12),u(h,16)
         assert(cap>0 and cap<=limit and bit.band(cap,cap-1)==0,'Unsupported slope map')
         local data=ptr(h)
+        local low=tonumber(ffi.cast('uint32_t',ffi.new('uint64_t',id)*ffi.new('uint64_t',mult)))
         for i=0,math.min(cap,128)-1 do
-            local product=ffi.new('uint64_t',id)*ffi.new('uint64_t',mult)
-            local slot=bit.band(tonumber(ffi.cast('uint32_t',product))+i,cap-1)
+            local slot=bit.band(low+i,cap-1)
             local row=read(data+slot*8,8,true)
             if u(row)==id then return u(row,4) end
             if u(row)==empty then return nil end
@@ -62,6 +71,17 @@ function A.snapshot(api,game,exe,key)
     if not ai or ai==INVALID then return nil,'gone' end
     assert(ai<u(read(manager+0x6c,4)) and ai<8,'Unsupported avatar index')
     assert(read(ptr(read(manager+0x110+ai*8,8,true)),24,true)==entity,'Avatar registry mismatch')
+    if light and not key then
+        -- With no lease and the manual input released, A.step uses only the
+        -- input state. The mover, controller, settings and flags are read and
+        -- validated in full as soon as the input is pressed, and on every
+        -- lease check.
+        if read(manager+0x150+ai*0xa7aec+0x1b68+14*32,1,true):byte()==0 then
+            s.key={ref=ref,id=id,unit=unit,owner=owner,manager=manager}
+            s.manual=false
+            return s
+        end
+    end
     assert(u(read(manager+0x53e1b8+ai*0x1238+0x2ac,4,true))==id,'Vault identity mismatch')
     local direction=manager+0x53e134+ai*0x1238
     assert(u(read(direction+40,4,true))==id,'Movement direction identity mismatch')
@@ -217,7 +237,7 @@ function A.step(api,game,exe,state)
         if not A.stop(api,game,exe,state) then return false,'slope_restore_failed' end
         return true
     end
-    local ok,s=pcall(A.snapshot,api,game,exe)
+    local ok,s=pcall(A.snapshot,api,game,exe,nil,not state.slope_lease)
     if not ok or not s then
         -- Require a fresh input release after transitions or unavailable data.
         state.slope_down=true

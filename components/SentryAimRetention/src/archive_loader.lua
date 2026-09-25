@@ -65,6 +65,7 @@ return function(create_api,patch,build)
             report(tostring(called and reason or accepted)..(restored and '' or '; restore_failed'),false,true)
             return
         end
+        state.last_reason=reason
         report(reason,active==true)
     end
     local function after(called,...)
@@ -73,7 +74,10 @@ return function(create_api,patch,build)
             report(cleanup() and 'stopped_after_update_error' or 'restore_failed',false,true)
             error((...),0)
         end
-        check();return ...
+        -- With no sentries deployed the repeat at the second boundary finds
+        -- nothing; a sentry placed mid-frame is picked up on the next frame.
+        if state.last_reason~='waiting_for_sentries' then check() end
+        return ...
     end
     update=function(...)
         state.updates=state.updates+1;check();return after(pcall(previous,...))

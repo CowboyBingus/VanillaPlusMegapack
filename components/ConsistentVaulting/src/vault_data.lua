@@ -1,10 +1,17 @@
 local ffi, bit = require('ffi'), require('bit')
 local M = {}
 local INVALID = 0xffffffff
-local function value(bytes, offset, kind)
-    local out = ffi.new(kind .. '[1]')
-    ffi.copy(out, bytes:sub(offset + 1), ffi.sizeof(out))
-    return tonumber(out[0])
+-- Fields decode through one reused cell per type. The previous b:sub(o+1)
+-- copied the whole rest of the buffer for every field read; out-of-range
+-- offsets keep that original path, so every result is unchanged.
+local decode_cells={}
+local function value(bytes,offset,kind)
+    local cell=decode_cells[kind]
+    if not cell then cell=ffi.new(kind..'[1]');decode_cells[kind]=cell end
+    local size=ffi.sizeof(cell)
+    if offset>=0 and offset+size<=#bytes then ffi.copy(cell,ffi.cast('const uint8_t *',bytes)+offset,size)
+    else ffi.copy(cell,bytes:sub(offset+1),size) end
+    return tonumber(cell[0])
 end
 local function u32(b,o) return value(b,o,'uint32_t') end
 local function u16(b,o) return value(b,o,'uint16_t') end
@@ -52,10 +59,11 @@ function M.snapshot(api,game,exe,state,discovery)
         local capacity,empty,mult=u32(header,8),u32(header,12),u32(header,16)
         assert(capacity<=limit and capacity>0 and bit.band(capacity,capacity-1)==0,'Unsupported map')
         local data=pointer(header)
+        -- Keep the low product exact even for a full uint32 key/multiplier.
+        -- It does not depend on the probe index, so it is computed once.
+        local low=tonumber(ffi.cast('uint32_t',ffi.new('uint64_t',key)*ffi.new('uint64_t',mult)))
         for probe=0,math.min(capacity,128)-1 do
-            -- Keep the low product exact even for a full uint32 key/multiplier.
-            local product=ffi.new('uint64_t',key)*ffi.new('uint64_t',mult)
-            local slot=bit.band(tonumber(ffi.cast('uint32_t',product))+probe,capacity-1)
+            local slot=bit.band(low+probe,capacity-1)
             local row=read(data+slot*8,8)
             if u32(row,0)==key then return u32(row,4) end
             if u32(row,0)==empty then return nil end

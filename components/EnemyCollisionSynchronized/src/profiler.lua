@@ -237,6 +237,22 @@ function P.new(api,revision)
         end
         return read(address,size)
     end
+    local view=api.view
+    -- Wrap the view only while it is paired with the read wrapped above, and
+    -- keep the wrapped pair paired.
+    if view and api.view_read==read then
+        api.view_read=api.read
+        api.view=function(address,size)
+            if not p.running then return view(address,size) end
+            local row=p.rows[p.current]
+            p.reads=p.reads+1;p.bytes=p.bytes+size;row.reads=row.reads+1;row.bytes=row.bytes+size
+            if p.sample then
+                local start=clock();local result=view(address,size)
+                row.read_ms=row.read_ms+(clock()-start)*1000;row.sampled_reads=row.sampled_reads+1;return result
+            end
+            return view(address,size)
+        end
+    end
     return p
 end
 return P

@@ -132,9 +132,22 @@ local function test_loader(loader,accepted)
     local api={module=function(n)return n or 'exe'end,module_hash=function(n)return n end}
     install(function()return api end,{apply=function()checks=checks+1;return true,'waiting',false end},
         {revision='test',game_sha256='game.dll',exe_sha256='exe'})
+    -- Idle (no reinforcement in progress): one check per frame.
     local a,b,c=env.update(4)
-    assert(a==4 and b==nil and c==3 and checks==(accepted and 2 or 0))
+    assert(a==4 and b==nil and c==3 and checks==(accepted and 1 or 0))
     assert(select('#',env.update(4))==3)
+    if accepted then
+        -- While a reinforcement is in progress both update boundaries are checked.
+        local before=checks
+        env.ReinforcementBeaconFixData.previous={owned=true,mode=1,state=2}
+        env.update(4)
+        assert(checks==before+2)
+        -- Not owned, outside gameplay modes or alive: the repeat is skipped again.
+        for _,snapshot in ipairs({{owned=false,mode=1,state=2},{owned=true,mode=0,state=2},{owned=true,mode=1,state=3}}) do
+            env.ReinforcementBeaconFixData.previous=snapshot
+            before=checks;env.update(4);assert(checks==before+1)
+        end
+    end
     if not accepted then
         assert(env.update==previous and not env.ReinforcementBeaconFixData.active)
         assert(env.ReinforcementBeaconFixData.status:find('Bingus Shared Loader',1,true))

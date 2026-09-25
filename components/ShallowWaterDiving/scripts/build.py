@@ -11,7 +11,7 @@ from module import build_module
 from package import package_release
 
 MODULE='mods/cowboybingus/shallow_water_dive'
-REVISION='data-v3.6'
+REVISION='data-v3.7'
 FORBIDDEN=('VirtualAlloc','VirtualProtect','FlushInstructionCache','CreateRemoteThread',
            'RtlAddFunctionTable','RtlDeleteFunctionTable','LoadLibrary')
 def run(args,**kwargs):

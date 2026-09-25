@@ -1,4 +1,14 @@
-# v29
+# v30
+
+- Reduce the per-frame work of the bundled mods: in recorded real play, their combined main-thread time per frame fell from about 2.0 ms to 0.85 ms in missions and from about 1.05 ms to 0.37 ms aboard the ship, even with Shallow Water Diving now active.
+- Reinforcement Beacons Fixed v4.5 and Hellpod Steering Unlocked v7.4 check memory protection only before a write; in game that query costs about 0.3 ms each. Reinforcement Beacons Fixed dropped from about 0.99 ms to 0.03 ms per frame in missions.
+- Shallow Water Diving v3.7 fixes the mod stopping itself in missions on this game build ("Native dive timeout changed") and reads only identity and dive records outside a dive.
+- Consistent Vaulting v8.8 reads only the input state while no assist is active and the input is released, verifies native tables once and decodes fields without copying buffers: about 0.44 ms to 0.25 ms per frame in missions.
+- Enemy Collision Synchronized v2.11.0 validates guards without per-block string copies, halves per-poll garbage in synthetic scenes and adds a one-second cooldown before re-posing the same actor for small corrections (under 10 cm and 5 degrees): about 0.29 ms to 0.14 ms per frame in missions.
+- Sentry Aim Retention v1.0.13 and Controllable Hover Pack v1.7 skip per-frame work that could not act (no deployed sentries, no hover pack) and reuse decode and read buffers.
+- Every changed mod was checked in live play: beacon corrections, vault, slope and ledge assists, dives and the shallow-water correction, early hover descent, sentry aim holds and corpse realignments. Gameplay behavior is otherwise unchanged; these are CPU savings, not a promised frame-rate change, which depends on the machine.
+
+## v29
 
 - Replace the Galactic Menu Hotkey option with Ship Station Hotkeys v1.7: Tab map, F1 Armory, F5 Control Center, F6 Ship Management, F7 Stratagem Hero and F8 instant Hellpod entry.
 - Name the option Ship Station Hotkeys; its option folder and addon resource are unchanged, so managers update it in place.

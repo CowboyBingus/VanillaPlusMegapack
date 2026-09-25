@@ -42,6 +42,7 @@ def main():
         commands.append([corpse / 'tests' / ('test_' + name + '.lua'), corpse / 'src'])
     for name in ('repair', 'fling', 'settlement', 'completion'):
         commands.append([corpse / 'tests' / ('test_' + name + '.lua'), corpse / 'src', corpse / 'tests/fixtures'])
+    commands.append([corpse / 'tests/test_repose_cooldown.lua', corpse / 'src', corpse / 'tests'])
     commands.append([corpse / 'tests/test_performance.lua', corpse / 'src', corpse / 'tests'])
     commands.append([corpse / 'tests/test_profiler.lua', corpse / 'src'])
     commands.append([corpse / 'tests/test_profiler_detail.lua', corpse / 'src'])

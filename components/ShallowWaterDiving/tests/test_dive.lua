@@ -18,7 +18,10 @@ local function locate(address,size)
 end
 local game,pm,mode,owner,am,dm,sm,mm=0x10000000,0x20000000,0x21000000,0x30000000,0x40000000,0x50000000,0x51000000,0x52000000
 for rva,ptr in pairs({[0x3326468]=pm,[0x33266a0]=mode,[0x346bf98]=owner,[0x3326d20]=am,[0x3326a80]=dm,[0x3326598]=sm,[0x3326558]=mm}) do p(region(game+rva,8),0,ptr) end
-for rva,v in pairs({[0x23c7100]=2,[0x23c6ccc]=0.9,[0x23c69f8]=0.4}) do f(region(game+rva,4),0,v) end
+for rva,v in pairs({[0x23c6ccc]=0.9,[0x23c69f8]=0.4}) do f(region(game+rva,4),0,v) end
+-- Build 25480438 layout: the 2.0 dive timeout sits 0x10 above its old address
+-- (like both stance constants); another value now occupies the old one.
+do local constants=region(game+0x23c7080,0x100);f(constants,0x90,2);f(constants,0x80,1.5) end
 local players,mission,avatars,drown,stances,motion=region(pm,0x400),region(mode,0x44),region(am,0x550000),region(dm,80),region(sm,72),region(mm,0x48e0)
 local player=region(0x22000000,24);p(players,0xe8,0x22000000);player[20]=1
 u(players,0x3a8,9);u(players,0x84,2);u(players,0x88,2);u(mission,8,1);u(mission,0x40,1)
@@ -181,5 +184,31 @@ reset();p(locate(game+0x33266a0,8),0,123);assert(not pcall(apply));assert(writes
 p(locate(game+0x33266a0,8),0,mode)
 reset();f(resource,122*16+5*64+4,-1.1);assert(not pcall(apply));assert(writes==0)
 f(resource,122*16+5*64+4,-1.3)
+-- Timeout constant: the old address still works as a fallback, and when 2.0 is
+-- at neither address the mod stops and names where 2.0 was seen nearby.
+local constants=locate(game+0x23c7080,0x100)
+local function timeout_layout(new,old) f(constants,0x90,new);f(constants,0x80,old) end
+reset();timeout_layout(0,2);assert(pcall(apply),'old-address fallback')
+reset();timeout_layout(0,0);f(constants,0x20,2)
+local ok,message=pcall(apply)
+assert(not ok and tostring(message):find('Native dive timeout changed (2.0 near expected block at: 0x23c70a0)',1,true),
+    tostring(message))
+f(constants,0x20,0);reset();timeout_layout(2,1.5);assert(pcall(apply),'build 25480438 layout')
+-- Outside a dive only the identity and dive records are read; a dive frame
+-- still reads and validates everything, and a dive ending releases the lease.
+do
+    local raw_read,reads=api.read,0
+    api.read=function(a,size) reads=reads+1;return raw_read(a,size) end
+    reset();u(avatars,local_ctl+0xf8c,0)
+    local ok,reason=apply();local idle=reads
+    assert(ok and reason=='dive_ended' and idle<20,'idle frame read '..idle..' times: '..tostring(reason))
+    reads=0;reset();assert(apply() and state.protected==1)
+    assert(reads>idle*2,'dive frame reads the full snapshot')
+    u(avatars,local_ctl+0xf8c,0);local released,why=apply()
+    assert(released and why=='dive_ended' and state.restored==1,'lease released when the dive ends: '..tostring(why))
+    api.read=raw_read
+end
+print('PASS: idle frames skip the water/stance/movement/settings reads; dives still read everything and release on end')
+print('PASS: dive timeout at the build 25480438 address, old-address fallback and located failure message')
 print('PASS: 20 cm depth limit, no dry/reset-surface assistance, restoration above 20 cm, startup debt, landings, prone/ragdoll/timeout, local ownership and write failures')
 print('PASS: null managers/player pointers, empty records and transient stance/motion wait then recover; invalid pointers and settings still fail')

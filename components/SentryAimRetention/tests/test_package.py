@@ -13,12 +13,12 @@ with zipfile.ZipFile(sys.argv[1]) as z:
     assert set(z.namelist())==expected and len(z.namelist())==len(expected)
     manager=json.loads(z.read('manifest.json'))
     assert manager['Version']==1 and manager['Guid']=='2c158cef-8455-461c-8113-6a207a60b692'
-    assert manager['Name']=='Sentry Aim Retention - v1.0.12' and len(manager['Options'])==1
+    assert manager['Name']=='Sentry Aim Retention - v1.0.13' and len(manager['Options'])==1
     assert manager['IconPath']==manager['Options'][0]['Image']=='thumbnail.png'
     assert manager['Options'][0]['Include']==['data'] and 'experimental' not in manager['Description'].lower()
     p=json.loads(z.read('SentryAimRetention-manifest.json'))
-    assert p['revision']=='data-v8.5' and p['runtime_verified'] is False
-    assert p['version']=='1.0.12' and p['status']=='release'
+    assert p['revision']=='data-v8.6' and p['runtime_verified'] is False
+    assert p['version']=='1.0.13' and p['status']=='release'
     assert p['sweep_policy']['pause_degrees']==[16,14]
     assert p['sweep_policy']['paused_time_consumes_sweep_budget'] is False
     assert p['sweep_policy']['close_reacquisition'].startswith('immediate after target-loss-only pause')

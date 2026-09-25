@@ -42,12 +42,16 @@ return function()
         return ffi.cast('uint8_t *', handle)
     end
 
+    -- One scratch buffer, grown on demand, instead of two allocations per read.
+    -- ReadProcessMemory does not call back into Lua, and the bytes are copied
+    -- into a Lua string before the buffer is reused.
+    local scratch_size, scratch, count = 4096, ffi.new('uint8_t[4096]'), ffi.new('size_t[1]')
     function api.read(address, size)
-        local buffer, count = ffi.new('uint8_t[?]', size), ffi.new('size_t[1]')
-        if kernel.ReadProcessMemory(process, address, buffer, size, count) == 0 or count[0] ~= size then
+        if size < 0 or size > scratch_size then scratch, scratch_size = ffi.new('uint8_t[?]', size), size end
+        if kernel.ReadProcessMemory(process, address, scratch, size, count) == 0 or count[0] ~= size then
             return nil
         end
-        return ffi.string(buffer, size)
+        return ffi.string(scratch, size)
     end
 
     function api.write(address, bytes)
@@ -56,11 +60,13 @@ return function()
         return kernel.WriteProcessMemory(process, address, bytes, #bytes, count) ~= 0 and count[0] == #bytes
     end
 
+    local pointer_word = ffi.new('uintptr_t[1]')
     function api.pointer(bytes, offset)
         offset = offset or 0
         if not bytes or offset < 0 or offset + 8 > #bytes then return nil end
-        local value = ffi.new('uintptr_t[1]')
-        ffi.copy(value, bytes:sub(offset + 1, offset + 8), 8)
+        -- Reused word, copied straight from the string: no allocation per pointer.
+        local value = pointer_word
+        ffi.copy(value, ffi.cast('const uint8_t *', bytes) + offset, 8)
         if value[0] < 0x10000 or value[0] >= 0x800000000000 then return nil end
         return ffi.cast('uint8_t *', value[0])
     end

@@ -785,7 +785,14 @@ local function scalar(bytes,offset,kind)
     ffi.copy(value,ffi.cast('const uint8_t *',bytes)+offset,4)
     return tonumber(value[0])
 end
-local function u32(b,o) return scalar(b,o or 0,'uint32_t') end
+-- Little-endian decode from the copied bytes. Unlike an FFI cast, this makes
+-- no cdata object when the interpreter, not a compiled trace, runs it.
+local function u32(b,o)
+    o=o or 0
+    assert(o>=0 and o+4<=#b,'Scalar outside copied data')
+    local b1,b2,b3,b4=string.byte(b,o+1,o+4)
+    return b1+b2*256+b3*65536+b4*16777216
+end
 local function f32(b,o) return scalar(b,o,'float') end
 local function floats(b,o,n)
     assert(o>=0 and n<=16 and o+n*4<=#b,'Matrix outside copied data')
@@ -801,43 +808,49 @@ local function detail(api,name)
     if api.profiler then api.profiler.detail(name) end
 end
 local function finite(n) return type(n)=='number' and n==n and math.abs(n)<100000 end
-local function dot(a,b) return a[1]*b[1]+a[2]*b[2]+a[3]*b[3] end
-local function normalize(v)
-    local n=math.sqrt(dot(v,v));if not finite(n) or n<0.001 then return nil end
-    return {v[1]/n,v[2]/n,v[3]/n}
-end
 
 -- Havok body translations and unit matrices use the same world-space node
 -- origin. Shape-local geometry remains in the existing shape. Remove skeletal
 -- scale from the orientation; do not resize or replace a collision shape.
+local RIGID_FIELDS={1,2,3,5,6,7,9,10,11,13,14,15}
+local function unit3(a,b,c)
+    local n=math.sqrt(a*a+b*b+c*c);if not finite(n) or n<0.001 then return nil end
+    return a/n,b/n,c/n
+end
+-- Numeric core of M.rigid: position XYZ then quaternion XYZW, or nil. It builds
+-- no tables, so poses that turn out aligned cost no garbage. Same arithmetic,
+-- in the same order, as the table form it replaced.
+local function rigid_values(matrix)
+    for i=1,12 do if not finite(matrix[RIGID_FIELDS[i]]) then return nil end end
+    local x1,x2,x3=unit3(matrix[1],matrix[2],matrix[3]);if not x1 then return nil end
+    local y1,y2,y3=unit3(matrix[5],matrix[6],matrix[7]);if not y1 then return nil end
+    local z1,z2,z3=unit3(matrix[9],matrix[10],matrix[11]);if not z1 then return nil end
+    if math.abs(x1*y1+x2*y2+x3*y3)>.025 or math.abs(x1*z1+x2*z2+x3*z3)>.025
+        or math.abs(y1*z1+y2*z2+y3*z3)>.025 then return nil end
+    local c1,c2,c3=x2*y3-x3*y2,x3*y1-x1*y3,x1*y2-x2*y1
+    if c1*z1+c2*z2+c3*z3<.99 then return nil end
+    -- Column-major matrix to XYZW quaternion.
+    local trace=x1+y2+z3
+    local s,a,b,c,d
+    if trace>0 then
+        s=math.sqrt(trace+1)*2;a,b,c,d=(y3-z2)/s,(z1-x3)/s,(x2-y1)/s,s/4
+    elseif x1>y2 and x1>z3 then
+        s=math.sqrt(1+x1-y2-z3)*2;a,b,c,d=s/4,(y1+x2)/s,(z1+x3)/s,(y3-z2)/s
+    elseif y2>z3 then
+        s=math.sqrt(1+y2-x1-z3)*2;a,b,c,d=(y1+x2)/s,s/4,(z2+y3)/s,(z1-x3)/s
+    else
+        s=math.sqrt(1+z3-x1-y2)*2;a,b,c,d=(z1+x3)/s,(z2+y3)/s,s/4,(x2-y1)/s
+    end
+    local length=math.sqrt(a^2+b^2+c^2+d^2)
+    if not finite(length) or length<.001 then return nil end
+    return matrix[13],matrix[14],matrix[15],a/length,b/length,c/length,d/length
+end
+
 function M.rigid(matrix)
     if type(matrix)~='table' or #matrix~=16 then return nil end
-    for _,i in ipairs({1,2,3,5,6,7,9,10,11,13,14,15}) do
-        if not finite(matrix[i]) then return nil end
-    end
-    local x=normalize({matrix[1],matrix[2],matrix[3]})
-    local y=normalize({matrix[5],matrix[6],matrix[7]})
-    local z=normalize({matrix[9],matrix[10],matrix[11]})
-    if not x or not y or not z then return nil end
-    if math.abs(dot(x,y))>.025 or math.abs(dot(x,z))>.025 or math.abs(dot(y,z))>.025 then return nil end
-    local cross={x[2]*y[3]-x[3]*y[2],x[3]*y[1]-x[1]*y[3],x[1]*y[2]-x[2]*y[1]}
-    if dot(cross,z)<.99 then return nil end
-    -- Column-major matrix to XYZW quaternion.
-    local trace=x[1]+y[2]+z[3]
-    local q,s
-    if trace>0 then
-        s=math.sqrt(trace+1)*2;q={(y[3]-z[2])/s,(z[1]-x[3])/s,(x[2]-y[1])/s,s/4}
-    elseif x[1]>y[2] and x[1]>z[3] then
-        s=math.sqrt(1+x[1]-y[2]-z[3])*2;q={s/4,(y[1]+x[2])/s,(z[1]+x[3])/s,(y[3]-z[2])/s}
-    elseif y[2]>z[3] then
-        s=math.sqrt(1+y[2]-x[1]-z[3])*2;q={(y[1]+x[2])/s,s/4,(z[2]+y[3])/s,(z[1]-x[3])/s}
-    else
-        s=math.sqrt(1+z[3]-x[1]-y[2])*2;q={(z[1]+x[3])/s,(z[2]+y[3])/s,s/4,(x[2]-y[1])/s}
-    end
-    local length=math.sqrt(q[1]^2+q[2]^2+q[3]^2+q[4]^2)
-    if not finite(length) or length<.001 then return nil end
-    for i=1,4 do q[i]=q[i]/length end
-    return {matrix[13],matrix[14],matrix[15]},q
+    local px,py,pz,qx,qy,qz,qw=rigid_values(matrix)
+    if not px then return nil end
+    return {px,py,pz},{qx,qy,qz,qw}
 end
 
 local function settled(unit)
@@ -853,8 +866,10 @@ local function command_guards(actor)
     -- usual fresh identity/motion checks. This never rereads stale addresses.
     local b=actor.guard_source
     if not actor.guards and b then
+        -- b[6] is the whole 160-byte body copied this poll; slice its motion
+        -- and identity words exactly as they were read.
         actor.guards={{address=b[1],bytes=b[2]},{address=b[3],bytes=b[4]},
-            {address=b[5]+64,bytes=b[6]},{address=b[5]+144,bytes=b[7]}}
+            {address=b[5]+64,bytes=b[6]:sub(65,68)},{address=b[5]+144,bytes=b[6]:sub(145,152)}}
     end
 end
 
@@ -874,17 +889,18 @@ function M.plan(unit)
                 command_guards(a)
                 actions[#actions+1]={kind='disable',actor=a}
             elseif a.motion==0 and a.pose~=a.node_pose then
-                local p,q=M.rigid(a.node_pose)
-                local old,oldq=M.rigid(a.pose)
-                if p and old then
-                    local distance=math.sqrt((p[1]-old[1])^2+(p[2]-old[2])^2+(p[3]-old[3])^2)
-                    local rotation=math.abs(q[1]*oldq[1]+q[2]*oldq[2]+q[3]*oldq[3]+q[4]*oldq[4])
+                local px,py,pz,qx,qy,qz,qw=rigid_values(a.node_pose)
+                local ox,oy,oz,rx,ry,rz,rw=rigid_values(a.pose)
+                if px and ox then
+                    local distance=math.sqrt((px-ox)^2+(py-oy)^2+(pz-oz)^2)
+                    local rotation=math.abs(qx*rx+qy*ry+qz*rz+qw*rw)
                     -- 2.5 cm / half a degree avoid rewriting an already aligned
                     -- stationary corpse. There is no upper gap cutoff: the
                     -- recorded 27 m failure must remain repairable.
                     if distance>.025 or rotation<.9999904807207345 then
                         command_guards(a)
-                        actions[#actions+1]={kind='pose',actor=a,position=p,rotation=q,gap=distance}
+                        actions[#actions+1]={kind='pose',actor=a,position={px,py,pz},rotation={qx,qy,qz,qw},
+                            gap=distance,degrees=math.deg(2*math.acos(math.min(1,rotation)))}
                     end
                 end
             end
@@ -893,51 +909,97 @@ function M.plan(unit)
     return actions
 end
 
+local byte=string.byte
+-- Compares expected bytes with a copied block at offset without creating a
+-- substring. Copied game data is unique per poll, so every :sub() allocated.
+local function ranges_equal(a,a_offset,b,b_offset,n)
+    if a_offset<0 or b_offset<0 or a_offset+n>#a or b_offset+n>#b then return false end
+    for i=1,n do if byte(a,a_offset+i)~=byte(b,b_offset+i) then return false end end
+    return true
+end
+local function matches(block,offset,expected) return ranges_equal(block,offset,expected,0,#expected) end
+M.matches=matches
+-- The same comparison against a scratch view of `size` copied bytes.
+local function view_matches(view,size,offset,expected)
+    local n=#expected
+    if offset<0 or offset+n>size then return false end
+    for i=1,n do if view[offset+i-1]~=byte(expected,i) then return false end end
+    return true
+end
+-- One guard against fresh game bytes: through the view when the adapter has
+-- one (no Lua string), otherwise through an ordinary read.
+local function viewable(api) return api.view~=nil and api.view_read==api.read end
+local function unchanged(api,g)
+    local n=#g.bytes
+    if viewable(api) then
+        local view=api.view(g.address,n)
+        return view~=nil and view_matches(view,n,0,g.bytes)
+    end
+    return api.read(g.address,n)==g.bytes
+end
+
+-- Grouping plan for one guard list, kept as parallel number arrays rather than
+-- a table per guard. The list's entries and their address/bytes are recorded,
+-- so any change to the list forces a fresh plan exactly as before.
+local function compile(api,guards)
+    local n=#guards
+    local c={count=n,entries={},addresses={},bytes={},numbers={},order={},first={},last={},start={},size={}}
+    local numbers,order=c.numbers,c.order
+    for i=1,n do
+        local g=guards[i]
+        c.entries[i]=g;c.addresses[i]=g.address;c.bytes[i]=g.bytes
+        numbers[i]=api.address(g.address);order[i]=i
+    end
+    table.sort(order,function(a,b) return numbers[a]<numbers[b] end)
+    local groups=0
+    for k=1,n do
+        local i=order[k]
+        local number,length=numbers[i],#guards[i].bytes
+        if groups==0 or number>c.start[groups]+c.size[groups]+128 or number+length-c.start[groups]>4096 then
+            groups=groups+1;c.first[groups]=k;c.start[groups]=number;c.size[groups]=length
+        else c.size[groups]=math.max(c.size[groups],number+length-c.start[groups]) end
+        c.last[groups]=k
+    end
+    c.groups=groups
+    return c
+end
+
+local function current(compiled,guards)
+    if not compiled or compiled.count~=#guards then return false end
+    for i=1,compiled.count do
+        local g=guards[i]
+        if g~=compiled.entries[i] or g.address~=compiled.addresses[i] or g.bytes~=compiled.bytes[i] then return false end
+    end
+    return true
+end
+
 local function same(api,guards)
     local previous=phase(api,'validation')
-    local function done(value) phase(api,previous);return value end
+    local result=true
     if not api.address or #guards<2 then
-        for _,g in ipairs(guards) do if api.read(g.address,#g.bytes)~=g.bytes then return done(false) end end
-        return done(true)
+        for _,g in ipairs(guards) do if not unchanged(api,g) then result=false;break end end
+        phase(api,previous);return result
     end
     local compiled=guards.compiled
-    if compiled then
-        if #compiled.original~=#guards then compiled=nil else
-            for i,g in ipairs(guards) do
-                local old=compiled.original[i]
-                if old.address~=g.address or old.bytes~=g.bytes then compiled=nil;break end
-            end
+    if not current(compiled,guards) then compiled=compile(api,guards);guards.compiled=compiled end
+    local order,numbers=compiled.order,compiled.numbers
+    for group=1,compiled.groups do
+        local start,size=compiled.start[group],compiled.size[group]
+        local address=guards[order[compiled.first[group]]].address
+        local view=viewable(api) and api.view(address,size) or nil
+        local block=not view and api.read(address,size)
+        local whole=view~=nil or (block and #block==size)
+        for k=compiled.first[group],compiled.last[group] do
+            local check=guards[order[k]]
+            local ok
+            if view then ok=view_matches(view,size,numbers[order[k]]-start,check.bytes)
+            elseif whole then ok=matches(block,numbers[order[k]]-start,check.bytes)
+            else ok=unchanged(api,check) end
+            if not ok then result=false;break end
         end
+        if not result then break end
     end
-    if not compiled then
-        compiled={original={},groups={}}
-        local ordered={}
-        for i,g in ipairs(guards) do
-            local row={address=g.address,bytes=g.bytes,number=api.address(g.address)}
-            compiled.original[i]=row;ordered[i]=row
-        end
-        table.sort(ordered,function(a,b)return a.number<b.number end)
-        for _,g in ipairs(ordered) do
-            local group=compiled.groups[#compiled.groups]
-            local last=g.number+#g.bytes
-            if not group or g.number>group.number+group.size+128 or last-group.number>4096 then
-                group={address=g.address,number=g.number,size=#g.bytes,checks={}}
-                compiled.groups[#compiled.groups+1]=group
-            else group.size=math.max(group.size,last-group.number) end
-            g.offset=g.number-group.number
-            group.checks[#group.checks+1]=g
-        end
-        guards.compiled=compiled
-    end
-    for _,group in ipairs(compiled.groups) do
-        local bytes=api.read(group.address,group.size)
-        for _,check in ipairs(group.checks) do
-            local actual=bytes and #bytes==group.size and bytes:sub(check.offset+1,check.offset+#check.bytes)
-                or api.read(check.address,#check.bytes)
-            if actual~=check.bytes then return done(false) end
-        end
-    end
-    return done(true)
+    phase(api,previous);return result
 end
 M.same=same
 
@@ -1215,7 +1277,7 @@ function M.snapshot(api,game,exe,state,consume,budget)
                         assert(node_count==profile.nodes,'Skeleton changed')
                         local node_pointer=pointer(guard(u.guards,object+0x88,8))
                         local nodes=read(node_pointer,node_count*64)
-                        local node_matrices,node_bytes={},{}
+                        local node_matrices={}
                         detail(api,'actors')
                         local list=pointer(guard(u.guards,exe+0x27c5b40,8))+slot_index*24
                         local ah=guard(u.guards,list,24);local flags=u32(ah,4)
@@ -1292,21 +1354,30 @@ function M.snapshot(api,game,exe,state,consume,budget)
                                         u.main_bodies[#u.main_bodies+1]=main_body
                                         if id==u.root_id then u.root_body=main_body end
                                     end
-                                    if profile.actors[name] and node<node_count then
+                                    local registered=u.registered[id] or is_main or filter==52 or filter==48 or filter==83
+                                    local node_hash=u32(ar,32)
+                                    local claw=profile.name=='Impaler' and claws[name]
+                                    -- Build a record only for an actor M.plan could act on:
+                                    -- the same authored-mapping, registration, claw and
+                                    -- static-body tests it applies. A static body whose bytes
+                                    -- equal its node is already aligned (M.plan compares the
+                                    -- identical table and skips it), so it needs no record.
+                                    if profile.actors[name] and node<node_count and not registered
+                                        and profile.actors[name]==node_hash
+                                        and (claw or (motion==0 and not ranges_equal(nodes,node*64,body,0,64))) then
                                         local node_pose=node_matrices[node]
                                         if not node_pose then
                                             node_pose=floats(nodes,node*64,16);node_matrices[node]=node_pose
-                                            node_bytes[node]=nodes:sub(node*64+1,node*64+64)
                                         end
                                         -- Copied matrices are immutable during the poll.
                                         -- Exact byte equality proves no pose repair is due;
                                         -- all nonidentical matrices retain the rigid checks.
-                                        local pose=body:sub(1,64)==node_bytes[node] and node_pose or floats(body,0,16)
-                                        local a={id=id,name=name,node=node,node_hash=u32(ar,32),enabled=enabled,motion=motion,
-                                            registered=u.registered[id] or is_main or filter==52 or filter==48 or filter==83,
-                                            pose=pose,node_pose=node_pose,
-                                            guard_source={identity_address,identity,address,ar,body_address,
-                                                body:sub(65,68),body:sub(145,152)}}
+                                        local pose=ranges_equal(nodes,node*64,body,0,64) and node_pose or floats(body,0,16)
+                                        -- The copied body block is kept whole; command_guards
+                                        -- slices the same bytes only if a command needs them.
+                                        local a={id=id,name=name,node=node,node_hash=node_hash,enabled=enabled,motion=motion,
+                                            registered=registered,pose=pose,node_pose=node_pose,
+                                            guard_source={identity_address,identity,address,ar,body_address,body}}
                                         -- Validate fresh identity/motion again at command
                                         -- dispatch. Aligned actors need no extra read pass.
                                         a.stable=true;u.actors[#u.actors+1]=a
@@ -1355,9 +1426,37 @@ function M.snapshot(api,game,exe,state,consume,budget)
     return result,'ready'
 end
 
+-- A settled remote ragdoll still receiving network corrections nudges its
+-- skeleton a few centimetres every tenth of a second, and each nudge
+-- requalified the same auxiliary actor: one recorded Acid Charger received 389
+-- realignments in 4.3 s. The first correction stays immediate. A small repeat
+-- on the same actor, unit and entity waits out the rest of the cooldown; a
+-- large repeat still applies at once.
+M.repose_cooldown=1
+M.repose_bypass_m=.1
+M.repose_bypass_degrees=5
+local function defer_repeats(state,u,actions,now)
+    local recent,kept=state.reposed,nil
+    for i,action in ipairs(actions) do
+        local last=action.kind=='pose' and recent[action.actor.id]
+        local hold=last and last.unit==u.unit and last.entity==u.id and now>=last.at
+            and now-last.at<M.repose_cooldown and action.gap<=M.repose_bypass_m
+            and (action.degrees or 0)<=M.repose_bypass_degrees
+        if hold then
+            state.reposes_deferred=(state.reposes_deferred or 0)+1
+            if not kept then kept={};for j=1,i-1 do kept[j]=actions[j] end end
+        elseif kept then kept[#kept+1]=action end
+    end
+    return kept or actions
+end
+
 function M.apply(api,game,exe,state)
     phase(api,'maintenance')
     local now=api.time and api.time() or 0
+    state.reposed=state.reposed or {}
+    for id,entry in pairs(state.reposed) do
+        if now<entry.at or now-entry.at>=M.repose_cooldown then state.reposed[id]=nil end
+    end
     state.fling_history=state.fling_history or {}
     state.fling_stopped=state.fling_stopped or {}
     state.fling_scan=(state.fling_scan or 0)+1
@@ -1383,6 +1482,7 @@ function M.apply(api,game,exe,state)
             u.profile_lifecycle=u.corpse and (#actions>0 and 'corpse_repair' or settled(u) and 'corpse_aligned' or 'corpse_other')
                 or (u.update_enabled==false and 'ragdoll_stopped' or settled(u) and 'ragdoll_settled' or 'ragdoll_dynamic')
         end
+        actions=defer_repeats(state,u,actions,now)
         local stopped=state.fling_stopped[u.unit]
         if #actions==0 and not stopped and u.corpse then return end
         if stopped and stopped.requested and u.corpse and u.active
@@ -1410,6 +1510,9 @@ function M.apply(api,game,exe,state)
                     else
                         phase(api,'native');state.native.pose(action.actor.id,action.position,action.rotation)
                         state.realignments=(state.realignments or 0)+1
+                        local entry=state.reposed[action.actor.id]
+                        if entry then entry.unit,entry.entity,entry.at=u.unit,u.id,now
+                        else state.reposed[action.actor.id]={unit=u.unit,entity=u.id,at=now} end
                         if u.corpse and u.main_static<u.main_enabled then
                             state.mixed_corpse_realignments=(state.mixed_corpse_realignments or 0)+1
                         end
@@ -1489,7 +1592,7 @@ function M.apply(api,game,exe,state)
     state.scan_entities=(state.scan_entities or 0)+budget.scanned
     state.deep_inspections=(state.deep_inspections or 0)+budget.inspected
     if budget.yielded then state.budget_yields=(state.budget_yields or 0)+1 end
-    if reason~='ready' then state.fling_history={};state.fling_stopped={};state.cursors={} end
+    if reason~='ready' then state.fling_history={};state.fling_stopped={};state.cursors={};state.reposed={} end
     state.completion_pending=0
     for _,entry in pairs(state.fling_stopped) do
         if entry.requested then state.completion_pending=state.completion_pending+1 end
