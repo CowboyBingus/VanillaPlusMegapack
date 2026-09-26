@@ -1,4 +1,12 @@
-# v30
+# v31
+
+- Require Bingus Shared Loader v18, which raises the game's shared LuaJIT code cache before any mod starts: 16 MB of machine code and 8,000 traces instead of the game's 512 KB and 1,000, shared by the game and every mod. Filling either limit made LuaJIT discard all compiled code at once and recompile it during play.
+- Measured in recorded real play with all thirteen options enabled (19 minutes aboard the ship and an 11-minute mission): the old 512 KB was already full aboard the ship, the session ended at 960 KB of machine code in 946 traces, and the cache never flushed.
+- If an older loader is still installed, the pack raises the same limits once at startup, without the loader's growth after a flush or its log line; with v18 it leaves the cache to the loader.
+- Correct the pack's self-reported revision, which still read megapack-v28.
+- No per-frame work and no gameplay change: the thirteen bundled mods are unchanged from v30. This removes repeated recompilation, not a promised frame-rate change, which depends on the machine.
+
+## v30
 
 - Reduce the per-frame work of the bundled mods: in recorded real play, their combined main-thread time per frame fell from about 2.0 ms to 0.85 ms in missions and from about 1.05 ms to 0.37 ms aboard the ship, even with Shallow Water Diving now active.
 - Reinforcement Beacons Fixed v4.5 and Hellpod Steering Unlocked v7.4 check memory protection only before a write; in game that query costs about 0.3 ms each. Reinforcement Beacons Fixed dropped from about 0.99 ms to 0.03 ms per frame in missions.

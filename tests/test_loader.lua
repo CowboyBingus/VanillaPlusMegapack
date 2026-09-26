@@ -155,7 +155,10 @@ for _, scenario in ipairs(scenarios) do
             end
             local identity = env.CowboyBingusModLoader.megapack
             if installed_pack and failure ~= 1 and failure ~= #names + 1 then
-                assert(identity.name == 'Vanilla Plus Megapack' and identity.revision == 'megapack-v28')
+                assert(identity.name == 'Vanilla Plus Megapack' and identity.revision == 'megapack-v31')
+                -- A loader that manages the LuaJIT cache (v18+) sets loader.jit; the pack then leaves it alone.
+                local managed = env.CowboyBingusModLoader.jit and env.CowboyBingusModLoader.jit.managed
+                assert((identity.jit_fallback == nil) == (managed == true))
                 assert(#identity.modules == #names - 1)
                 for i = 2, #names do assert(identity.modules[i-1] == names[i]) end
             else assert(identity == nil) end
@@ -169,4 +172,27 @@ for _, scenario in ipairs(scenarios) do
         assert(x == 'shutdown' and y == nil and z == 7)
         cases = cases + 1
 end
-print('PASS: ' .. cases .. (discovery_only and ' discovery-only (legacy list removed)' or ' normal loader') .. ' bundle scenarios; all ' .. 2 ^ (#names - 1) .. ' option subsets with/without loader, failures isolated, one startup, callbacks preserved')
+-- Older loaders (no loader.jit) get the pack's one-time LuaJIT cache limits;
+-- v18+ loaders keep ownership; a missing or failing jit library is ignored.
+local function run_pack(loader_state, library)
+    local env = {}; for key, value in pairs(_G) do env[key] = value end
+    env._G, env.CowboyBingusModLoader, env.jit = env, loader_state, library
+    env.loadstring = function(bytes, name)
+        local chunk, reason = loadstring(bytes, name)
+        if chunk then setfenv(chunk, env) end
+        return chunk, reason
+    end
+    return setfenv(assert(loadstring(sources[pack])), env)()
+end
+local calls = {}
+local recorder = {opt = {start = function(...) calls[#calls + 1] = table.concat({...}, ' ') end}}
+local old = run_pack({version = 16, api = 1, modules = {}}, recorder)
+assert(old.jit_fallback == 'maxmcode=16384 maxtrace=8000' and #calls == 1 and calls[1] == old.jit_fallback)
+calls = {}
+assert(run_pack({version = 17, api = 1, modules = {}, jit = {managed = true, expanded = false}}, recorder).jit_fallback == nil)
+assert(#calls == 0, 'A managed cache stays with the loader, whatever its current limits')
+assert(run_pack({version = 17, api = 1, modules = {}, jit = {managed = false}}, recorder).jit_fallback ~= nil and #calls == 1)
+assert(run_pack({version = 16, api = 1, modules = {}}, nil).jit_fallback == nil)
+local broken = {opt = {start = function() error('unknown or malformed optimization flag') end}}
+assert(run_pack({version = 16, api = 1, modules = {}}, broken).jit_fallback == nil)
+print('PASS: ' .. cases .. (discovery_only and ' discovery-only (legacy list removed)' or ' normal loader') .. ' bundle scenarios; all ' .. 2 ^ (#names - 1) .. ' option subsets with/without loader, failures isolated, one startup, callbacks preserved; LuaJIT cache fallback only for older loaders')

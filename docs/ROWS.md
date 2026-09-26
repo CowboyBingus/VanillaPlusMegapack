@@ -10,7 +10,7 @@ Every other resource, including the pack identity and all twelve other mods,
 matches the standard v27 ZIP byte for byte. Enemy Collision Synchronized v2.10.1
 and all existing gameplay settings are retained.
 
-Enable one megapack version with Bingus Shared Loader v16 or newer, installed
+Enable one megapack version with Bingus Shared Loader v18, installed
 separately. Disable the standard megapack before enabling Rows. Give Rows
 priority over standalone forecast packages to use its layout. Purge / Deploy
 with the game closed. The loader priority rules are the same for both packs.

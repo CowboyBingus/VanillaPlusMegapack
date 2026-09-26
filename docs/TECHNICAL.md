@@ -1,5 +1,7 @@
 # Bundle contract
 
+v31 raises the game's shared LuaJIT code cache limits (`maxmcode=16384`, `maxtrace=8000`) once at startup when `CowboyBingusModLoader.jit` is absent or not managed, that is with a loader older than v18; loader v18 manages the cache itself and the pack leaves it alone. No per-frame work; the bundled components are unchanged from v30.
+
 v18 updates Clickable Scrollbars to v2.7 and Arc Thrower Revamped to v1.2. Scrollbar input uses native menu geometry without screen capture or wheel injection. Arc Thrower discovery checks active fire commands first, spreads the startup scan across updates, and runs once per update. Routine input logging is disabled in both. In-game verification of these changes is pending.
 
 v17 updates Arc Thrower Revamped to v1.1, fixing native binding declarations and function detection. The startup regression suite uses real Windows LuaJIT FFI, preserves callbacks, and rejects an unsupported synthetic image without writes. v16 updates the bundled Clickable Scrollbars to v2.6 and requires Loader v15 / API 1. v13 added it to the pack. v12 updated the bundled Armory Preview Cache to v18. v11 added [declared entry discovery](DISCOVERY_MIGRATION.md). Pinned gameplay bytecode is embedded unchanged inside plaintext entries; entry-envelope hashes change.

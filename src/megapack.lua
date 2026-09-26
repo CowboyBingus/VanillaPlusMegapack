@@ -6,7 +6,7 @@ assert(type(loader.api) == 'number' and loader.api >= 1, 'Shared loader API 1 is
 assert(type(loader.version) == 'number' and loader.version >= 16, 'Bingus Shared Loader loader-v16 is required')
 local pack = {
     name = 'Vanilla Plus Megapack',
-    revision = 'megapack-v28',
+    revision = 'megapack-v31',
     -- Available component inventory; installed choices are in loader.modules.
     modules = {
         'mods/cowboybingus/better_stratagem_bounce',
@@ -25,4 +25,18 @@ local pack = {
     },
 }
 loader.megapack = pack
+
+-- The game's LuaJIT keeps its 2015 code cache limits (512 KB of machine code,
+-- 1000 traces) for the game and every mod; filling either discards every
+-- compiled trace. Bingus Shared Loader v18 and newer manage the cache and set
+-- loader.jit. With an older loader, or if the loader could not manage it,
+-- raise the limits once to the loader's starting values: no watcher, no
+-- per-frame work.
+if not (type(loader.jit) == 'table' and loader.jit.managed) then
+    local library = rawget(_G, 'jit')
+    local opt = type(library) == 'table' and type(library.opt) == 'table' and library.opt.start
+    if type(opt) == 'function' and pcall(opt, 'maxmcode=16384', 'maxtrace=8000') then
+        pack.jit_fallback = 'maxmcode=16384 maxtrace=8000'
+    end
+end
 return pack

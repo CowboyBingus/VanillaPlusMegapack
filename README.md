@@ -4,16 +4,16 @@
 
 Choose which of the thirteen bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, Ship Station Hotkeys, and Clickable Scrollbars.
 
-**Requires the separately built Bingus Shared Loader v17 or newer.** Install two ZIPs: `Vanilla-Plus-Megapack-v30.zip` and `Bingus-Shared-Loader-v17.zip`. Mod managers do not install the dependency automatically.
+**Requires the separately built Bingus Shared Loader v18.** Install two ZIPs: `Vanilla-Plus-Megapack-v31.zip` and `Bingus-Shared-Loader-v18.zip`. Mod managers do not install the dependency automatically.
 
 
-The release also provides an optional [Rows package](docs/ROWS.md), `Vanilla-Plus-Megapack-Rows-v30.zip`. It displays every constellation section at once with the same native styling. Enable either the standard pack or Rows with the shared loader. All other bundled resources are identical.
+The release also provides an optional [Rows package](docs/ROWS.md), `Vanilla-Plus-Megapack-Rows-v31.zip`. It displays every constellation section at once with the same native styling. Enable either the standard pack or Rows with the shared loader. All other bundled resources are identical.
 
 ## Install with Arsenal or HD2MM
 
 1. Close Helldivers 2. Use one mod manager.
-2. Replace any previous loader entry with v17 or newer. Disable old megapacks and standalone copies of features you want turned off.
-3. Import `Vanilla-Plus-Megapack-v30.zip` and `Bingus-Shared-Loader-v17.zip`, then enable both.
+2. Replace any previous loader entry with v18. Disable old megapacks and standalone copies of features you want turned off.
+3. Import `Vanilla-Plus-Megapack-v31.zip` and `Bingus-Shared-Loader-v18.zip`, then enable both.
 4. With Arsenal's default priority, put **Bingus Shared Loader last**, at the bottom. If first-mod priority is enabled, put the loader first.
 5. Open the Megapack's **Options** (sliders button) in Arsenal, or its mod options in HD2MM. Check each mod you want and uncheck each mod you do not want. Confirm/save the selection.
 6. **Purge / Deploy**, then launch the game normally. Close the game and repeat these steps whenever you change options.
@@ -22,7 +22,11 @@ Each of the thirteen options is independent. Select all for the complete pack, a
 
 An unchecked option removes only the pack's copy. An enabled standalone package or another megapack can still activate that feature, so disable those copies as well. Overlapping gameplay entries run once and their callbacks do not stack. If versions differ, manager priority selects the winner.
 
-## Included in v30
+## Shared LuaJIT code cache
+
+The game runs every Lua mod in its own LuaJIT, whose code cache keeps its 2015 limits (512 KB of machine code, 1,000 traces) for the game and all mods together. When it fills, LuaJIT discards all compiled code and recompiles it during play. Bingus Shared Loader v18, required by this pack, raises and manages these limits. If an older loader is still installed, this pack raises them once at startup to the same starting values (16 MB, 8,000 traces), with no per-frame work and without the loader's growth or log line.
+
+## Included in v31
 
 | Mod | Version | Effect |
 | --- | --- | --- |
@@ -60,4 +64,4 @@ The prior performance improvements remain included: bounded Arc Thrower scanning
 
 Current-build mission and multiplayer checks for the earlier gameplay components remain pending.
 
-Current version: **v30**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).
+Current version: **v31**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).
