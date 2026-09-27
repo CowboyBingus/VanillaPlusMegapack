@@ -58,7 +58,7 @@ With at least one pack option selected, check `%LOCALAPPDATA%/CowboyBingus/Helld
 
 [Build from source](CONTRIBUTING.md) | [Technical details](docs/TECHNICAL.md) | [Release notes](docs/RELEASE_NOTES.md) | [Third-party notices](THIRD_PARTY.md) | [Artwork and prompts](assets/ARTWORK.md)
 
-**AI disclosure:** GPT-6 Astra and Claude assisted with implementation, tests, documentation and artwork.
+**AI disclosure:** GPT-6 Astra and Claude Opus 5.5 assisted with implementation, tests, documentation and artwork.
 
 The prior performance improvements remain included: bounded Arc Thrower scanning, update-only assist, and reduced scrollbar capture and logging.
 
