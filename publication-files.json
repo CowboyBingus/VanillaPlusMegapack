@@ -228,6 +228,7 @@
   "components/ShallowWaterDiving/src/windows_api.lua",
   "components/ShallowWaterDiving/tests/captured_game.lua",
   "components/ShallowWaterDiving/tests/current_game_25327279.lua",
+  "components/ShallowWaterDiving/tests/frame_budget.lua",
   "components/ShallowWaterDiving/tests/test_current_game.lua",
   "components/ShallowWaterDiving/tests/test_dive.lua",
   "components/ShallowWaterDiving/tests/test_loader.lua",

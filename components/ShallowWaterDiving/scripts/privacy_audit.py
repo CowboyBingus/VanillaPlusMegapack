@@ -21,7 +21,7 @@ SOURCE_FILES = (
     'scripts/archive.py', 'scripts/build.py', 'scripts/module.py',
     'scripts/package.py', 'scripts/privacy_audit.py',
     'src/archive_loader.lua', 'src/dive_data.lua', 'src/windows_api.lua',
-    'tests/test_dive.lua', 'tests/test_loader.lua', 'tests/test_package.py',
+    'tests/frame_budget.lua', 'tests/test_dive.lua', 'tests/test_loader.lua', 'tests/test_package.py',
 )
 PATTERNS = {
     'personal_home_path': r'(?i)(?:[a-z]:[\\/]Users[\\/][^\s\\/]+|/(?:home|Users)/[a-z0-9_.-]+)',

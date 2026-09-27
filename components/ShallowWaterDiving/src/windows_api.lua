@@ -26,12 +26,23 @@ return function()
         int32_t BCryptHashData(void *hash, const void *data, uint32_t size, uint32_t flags);
         int32_t BCryptFinishHash(void *hash, void *digest, uint32_t size, uint32_t flags);
         int32_t BCryptDestroyHash(void *hash);
+        typedef size_t (*SwdQueryRegion)(const void *address, void *region, size_t size);
+        typedef int (*SwdReadMemory)(void *process, uint64_t address, uint64_t buffer, size_t size, uint32_t *read);
+        typedef int (*SwdWriteMemory)(void *process, uint64_t address, const void *buffer, size_t size, uint32_t *written);
     ]]
     local kernel, bcrypt = ffi.load('kernel32'), ffi.load('bcrypt')
     -- LuaJIT retains the first function declaration in the shared VM. Use an
     -- opaque buffer when declaring first so another mod's equivalent struct is
     -- accepted. Cast our own call as well for a typed declaration loaded first.
-    local query_region = ffi.cast('size_t (*)(const void *, void *, size_t)', kernel.VirtualQuery)
+    -- The casts use the named types above: a function pointer written out in a
+    -- type string adds C types to the table all mods share on every use.
+    local query_region = ffi.cast('SwdQueryRegion', kernel.VirtualQuery)
+    -- Memory is addressed by plain numbers: these casts take the address and
+    -- destination as uint64_t (the same register as a pointer on x64) and the
+    -- byte count as two 32-bit words, so a call creates no pointer or 64-bit
+    -- cdata. Neither call re-enters Lua before its count words are read.
+    local read_memory = ffi.cast('SwdReadMemory', kernel.ReadProcessMemory)
+    local write_memory = ffi.cast('SwdWriteMemory', kernel.WriteProcessMemory)
     local process = kernel.GetCurrentProcess()
     local api = {}
     function api.time() return tonumber(kernel.GetTickCount64()) / 1000 end
@@ -42,54 +53,63 @@ return function()
         return ffi.cast('uint8_t *', handle)
     end
 
-    -- One scratch buffer, grown on demand, instead of two allocations per read.
-    -- ReadProcessMemory does not call back into Lua, and the bytes are copied
-    -- into a Lua string before the buffer is reused.
-    local scratch_size, scratch, count = 4096, ffi.new('uint8_t[4096]'), ffi.new('size_t[1]')
-    function api.read(address, size)
-        if size < 0 or size > scratch_size then scratch, scratch_size = ffi.new('uint8_t[?]', size), size end
-        if kernel.ReadProcessMemory(process, address, scratch, size, count) == 0 or count[0] ~= size then
-            return nil
+    local count = ffi.new('uint32_t[2]')
+    local function read_to(address, size, destination)
+        return read_memory(process, address, destination, size, count) ~= 0 and count[0] == size and count[1] == 0
+    end
+    -- read(address, size) returns the bytes as a string (one scratch buffer,
+    -- grown on demand). read(address, size, into, offset) copies them into a
+    -- caller buffer {data, address, size} at offset and returns true: nothing
+    -- is allocated, which is what the per-frame snapshot uses.
+    local scratch_size, scratch = 4096, ffi.new('uint8_t[4096]')
+    local scratch_address = tonumber(ffi.cast('uintptr_t', scratch))
+    function api.read(address, size, into, offset)
+        if into then
+            offset = offset or 0
+            if size <= 0 or offset < 0 or offset + size > into.size then return nil end
+            return read_to(address, size, into.address + offset) or nil
         end
+        if size < 0 or size > scratch_size then
+            scratch, scratch_size = ffi.new('uint8_t[?]', size), size
+            scratch_address = tonumber(ffi.cast('uintptr_t', scratch))
+        end
+        if not read_to(address, size, scratch_address) then return nil end
         return ffi.string(scratch, size)
     end
 
-    function api.write(address, bytes)
-        if not api.writable_data(address, #bytes) then return false end
-        local count = ffi.new('size_t[1]')
-        return kernel.WriteProcessMemory(process, address, bytes, #bytes, count) ~= 0 and count[0] == #bytes
-    end
-
-    local pointer_word = ffi.new('uintptr_t[1]')
-    function api.pointer(bytes, offset)
-        offset = offset or 0
-        if not bytes or offset < 0 or offset + 8 > #bytes then return nil end
-        -- Reused word, copied straight from the string: no allocation per pointer.
-        local value = pointer_word
-        ffi.copy(value, ffi.cast('const uint8_t *', bytes) + offset, 8)
-        if value[0] < 0x10000 or value[0] >= 0x800000000000 then return nil end
-        return ffi.cast('uint8_t *', value[0])
+    local written, region = ffi.new('uint32_t[2]'), ffi.new('SwdMemoryRegion[1]')
+    -- checked: the caller verified this range with writable_data and decides
+    -- how long that check stays valid. Otherwise the write checks its page.
+    function api.write(address, bytes, checked)
+        if not checked and not api.writable_data(address, #bytes) then return false end
+        return write_memory(process, address, bytes, #bytes, written) ~= 0 and written[0] == #bytes and written[1] == 0
     end
 
     function api.distance(first, second)
         return tonumber(ffi.cast('intptr_t', first) - ffi.cast('intptr_t', second))
     end
 
+    -- True, and the span [low, high) of whole regions it checked, when every
+    -- page of [address, address + size) is committed private read/write data.
+    -- Each VirtualQuery costs about 0.2-0.3 ms in game; api.queries counts them.
+    api.queries = 0
     function api.writable_data(address, size)
         if size <= 0 then return false end
         local cursor = ffi.cast('uint8_t *', address)
-        local remaining = size
-        local region = ffi.new('SwdMemoryRegion[1]')
+        local remaining, low, high = size, nil, nil
         while remaining > 0 do
+            api.queries = api.queries + 1
             if query_region(cursor, region, ffi.sizeof(region[0])) ~= ffi.sizeof(region[0]) then return false end
             -- Settings must already be writable private data, never executable or mapped module pages.
             if region[0].state ~= 0x1000 or region[0].type ~= 0x20000 or region[0].protection ~= 4 then return false end
             local available = tonumber(region[0].size) - api.distance(cursor, region[0].base)
             if available <= 0 then return false end
-            local count = math.min(available, remaining)
-            cursor, remaining = cursor + count, remaining - count
+            local base = tonumber(ffi.cast('uintptr_t', region[0].base))
+            low, high = low or base, base + tonumber(region[0].size)
+            local step = math.min(available, remaining)
+            cursor, remaining = cursor + step, remaining - step
         end
-        return true
+        return true, low, high
     end
 
     function api.module_hash(module)

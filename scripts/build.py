@@ -14,7 +14,7 @@ from package import package_release, release_directory
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build'
 MODULE = 'mods/cowboybingus/vanilla_plus_megapack'
-VERSION = '31'
+VERSION = '32'
 REVISION = f'megapack-v{VERSION}'
 GUID = '876060ae-0640-4ac5-95b6-ec7c9a0567d3'
 ROWS_GUID = 'fb497df5-080b-48a5-b31d-103ccb060e1c'
@@ -27,7 +27,7 @@ OPTION_DESCRIPTIONS = {
     'HellpodSteeringUnlocked': 'Removes the hellpod steering restriction near high ground.',
     'ReinforcementBeaconsFixed': 'Centers queued reinforcements over their beacon or solo anchor.',
     'ConsistentVaulting': 'Adds fresh obstacle checks, higher ledge detection and bounded steep-surface support.',
-    'ShallowWaterDiving': 'Preserves the standing water reference during a local airborne dive.',
+    'ShallowWaterDiving': 'Preserves the standing water reference during a local airborne dive; the depth limit is adjustable in Mod Options Menu.',
     'SentryAimRetention': 'Retains sentry aim and improves target handoffs and firing checks.',
     'EnemyCollisionSynchronized': 'Aligns displaced corpse collision and curbs renewed movement after large remote corpses settle.',
     'ControllableHoverPack': 'Press the Jump Pack action again to descend early with native landing assistance.',

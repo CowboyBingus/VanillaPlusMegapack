@@ -1,4 +1,12 @@
-# v31
+# v32
+
+- Shallow Water Diving v3.8: with [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) installed, MODS > SHALLOW WATER DIVING > Max Dive Water Depth sets the deepest water a dive can start in, from 0.20 (lower shin; the previous fixed limit and still the default) up to 1.30, where the Helldiver starts swimming. It applies with the menu's Apply (Tab). Without Mod Options Menu nothing changes.
+- Shallow Water Diving checks the water record's memory page once per record table instead of before every write. A protection query costs about 0.2-0.3 ms in game; v31 made four at every dive start and two at every landing, now the first assisted dive after loading into a mission makes one and later dives and landings none.
+- Shallow Water Diving's per-frame checks allocate no memory (about 1.9 KB of garbage per frame aboard the ship before) and read far less: outside a mission one check per frame; in a mission, one read of your dive controller per check, with a full identity check every 31st check. Its log is written at startup, at shutdown and when it stops instead of on every status change. Measured in recorded play: 0.022 -> 0.006 ms per frame aboard the ship and 0.141 -> 0.009 ms per frame in missions.
+- INSTALL lists the bundled revisions again (the list had not been updated since v29).
+- The other twelve bundled mods are unchanged from v31.
+
+## v31
 
 - Require Bingus Shared Loader v18, which raises the game's shared LuaJIT code cache before any mod starts: 16 MB of machine code and 8,000 traces instead of the game's 512 KB and 1,000, shared by the game and every mod. Filling either limit made LuaJIT discard all compiled code at once and recompile it during play.
 - Measured in recorded real play with all thirteen options enabled (19 minutes aboard the ship and an 11-minute mission): the old 512 KB was already full aboard the ship, the session ended at 960 KB of machine code in 946 traces, and the cache never flushed.

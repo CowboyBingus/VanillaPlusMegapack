@@ -1,5 +1,7 @@
 # Bundle contract
 
+v32 updates Shallow Water Diving to v3.8 (optional Mod Options Menu depth slider; one protection query per write; allocation-free checks with a one-read idle gate; one protection query per water-record table). The other bundled components are unchanged from v31.
+
 v31 raises the game's shared LuaJIT code cache limits (`maxmcode=16384`, `maxtrace=8000`) once at startup when `CowboyBingusModLoader.jit` is absent or not managed, that is with a loader older than v18; loader v18 manages the cache itself and the pack leaves it alone. No per-frame work; the bundled components are unchanged from v30.
 
 v18 updates Clickable Scrollbars to v2.7 and Arc Thrower Revamped to v1.2. Scrollbar input uses native menu geometry without screen capture or wheel injection. Arc Thrower discovery checks active fire commands first, spreads the startup scan across updates, and runs once per update. Routine input logging is disabled in both. In-game verification of these changes is pending.

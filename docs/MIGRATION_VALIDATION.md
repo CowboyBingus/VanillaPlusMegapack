@@ -1,6 +1,7 @@
 Supports Helldivers 2 Steam build 25480438 / EXE 1.8.46015.0.
 
-Offline source, package and read-only module checks passed. v31 with all
+Offline source, package and read-only module checks passed. v32 changes only
+Shallow Water Diving (v3.8), checked in recorded live play with its depth slider. v31 with all
 thirteen options ran in recorded real play on this build with loader v18,
 aboard the ship and in a joined mission: every option loaded and none reported
 a failure. The 21

@@ -11,7 +11,7 @@ from module import build_module
 from package import package_release
 
 MODULE='mods/cowboybingus/shallow_water_dive'
-REVISION='data-v3.7'
+REVISION='data-v3.8'
 FORBIDDEN=('VirtualAlloc','VirtualProtect','FlushInstructionCache','CreateRemoteThread',
            'RtlAddFunctionTable','RtlDeleteFunctionTable','LoadLibrary')
 def run(args,**kwargs):
@@ -36,7 +36,7 @@ def main():
     files={f'data/{ARCHIVE}{suffix}':f'build/{ARCHIVE}{suffix}' for suffix in ('','.stream','.gpu_resources')}
     report={'name':'Shallow Water Diving','slug':'ShallowWaterDiving','revision':REVISION,
         'guid':'d93cfc97-0e42-47d6-936a-30e96a7fa539',
-        'description':'Preserves the launch of a shallow-water dive until landing or deep-water entry. Requires Bingus Shared Loader v5 or newer / API 1 or newer. Gameplay validation pending.',
+        'description':'Preserves the launch of a shallow-water dive until landing or deep-water entry; the depth limit is adjustable in Mod Options Menu. Requires Bingus Shared Loader v18.',
         'game_exe_sha256':EXE_SHA,'game_dll_sha256':GAME_DLL_SHA,'deployment_files':files,
         'files':{p:sha((ROOT/p).read_bytes()) for p in files.values()},
         'requires':[{'name':'Bingus Shared Loader','api':1,'revision':'loader-v5'}],
@@ -46,7 +46,7 @@ def main():
                  'bytes_per_record':8,'fields':['temporary reference offset','one-time startup elapsed reset'],
                  'protection':'existing MEM_PRIVATE/PAGE_READWRITE only'},
         'native_calls':'None; existing data only',
-        'water_depth_limit':{'max_game_units':0.20,'reference':'water surface minus native avatar root','tolerance':0.00001,'visual_calibration':'tightened after user reported 0.30 allowing knee-depth dives; retest pending'},
+        'water_depth_limit':{'default_game_units':0.20,'max_game_units':1.30,'setting':'optional Mod Options Menu slider, 0.05 steps; 1.30 is the standing drowning reference, where swimming begins','reference':'water surface minus native avatar root','tolerance':0.00001,'visual_calibration':'0.20 default tightened after user reported 0.30 allowing knee-depth dives'},
         'offline_tests':tests.strip(),
         'source_sha256':{p.relative_to(ROOT).as_posix():sha(p.read_bytes())
             for folder,pattern in [('src','*.lua'),('tests','*.*'),('scripts','*.py')]

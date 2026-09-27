@@ -1,4 +1,4 @@
-Vanilla Plus Megapack Rows - v31
+Vanilla Plus Megapack Rows - v32
 
 Supports Steam build 25480438 / EXE 1.8.46015.0.
 Requires the separate Bingus Shared Loader v18 / API 1.
@@ -6,7 +6,7 @@ Requires the separate Bingus Shared Loader v18 / API 1.
 1. Close Helldivers 2 and use either Arsenal or HD2MM.
 2. Disable previous megapacks and standalone copies of features you want off.
    Enable only one Megapack variant (standard or Rows).
-3. Import Vanilla-Plus-Megapack-Rows-v31.zip and Bingus Shared Loader v18.
+3. Import Vanilla-Plus-Megapack-Rows-v32.zip and Bingus Shared Loader v18.
 4. With Arsenal's default priority, place the loader LAST. If first-mod
    priority is enabled, place the loader FIRST instead.
 5. Open the pack's Options and select any of the thirteen independent mods.
@@ -19,18 +19,23 @@ Tab, F1 and F5-F8 aboard the ship while no menu is open. The option was named
 Galactic Menu Hotkey before v29; confirm it is still checked after updating.
 Mod Bindings Menu is not bundled in either Megapack variant.
 
+Install Mod Options Menu v1.0 separately to set Shallow Water Diving's
+maximum dive depth on the MODS tab of the escape menu. It is optional and not
+bundled in either Megapack variant.
+
 https://github.com/CowboyBingus/BingusSharedLoader/releases/latest
 https://github.com/CowboyBingus/ModBindingsMenu/releases/latest
+https://github.com/CowboyBingus/ModOptionsMenu/releases/latest
 
 Included revisions:
 - Better Stratagem Bounce v15.3
-- Hellpod Steering Unlocked v7.3
-- Reinforcement Beacons Fixed v4.4
-- Consistent Vaulting v8.7
-- Shallow Water Diving v3.6
-- Sentry Aim Retention v1.0.12
-- Enemy Collision Synchronized v2.10.2
-- Controllable Hover Pack v1.6
+- Hellpod Steering Unlocked v7.4
+- Reinforcement Beacons Fixed v4.5
+- Consistent Vaulting v8.8
+- Shallow Water Diving v3.8
+- Sentry Aim Retention v1.0.13
+- Enemy Collision Synchronized v2.11.0
+- Controllable Hover Pack v1.7
 - Know Your Constellation v3.16 (Rows v1 layout)
 - Armory Preview Cache v22
 - Clickable Scrollbars v2.14
