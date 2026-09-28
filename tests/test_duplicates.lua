@@ -1,6 +1,17 @@
 -- Resolve overlapping resources under either manager priority, then exercise
 -- the real compiled modules and their independent re-entry guards off-game.
 local root, build, loader = assert(arg[1]), assert(arg[2]), assert(arg[3])
+-- Every combination compiles the same entries again (the compiled modules carry
+-- their bytecode as escaped string literals). Compile each distinct chunk once
+-- and load its bytecode after that: the first load compiles the real source.
+local compiled = {}
+local function load_chunk(bytes, name)
+    local dumped = compiled[bytes]
+    if dumped then return loadstring(dumped) end
+    local chunk, reason = loadstring(bytes, name)
+    if chunk then compiled[bytes] = string.dump(chunk) end
+    return chunk, reason
+end
 local function read(path)
     local file = assert(io.open(path, 'rb'))
     local bytes = file:read('*a'); file:close(); return bytes
@@ -12,10 +23,16 @@ local components = {}
 local entries = {KnowYourConstellation = 'install.lua', ArmoryPreviewCache = 'install.lua',
                  ClickableScrollbars = 'clickable_scrollbars.lua',
                  ArcThrowerRevamped = 'arc_thrower_auto.lua',
-                 GalacticMenuHotkey = 'galactic_menu_hotkey.lua'}
+                 GalacticMenuHotkey = 'galactic_menu_hotkey.lua',
+                 FlameDamageFixed = 'flame_damage_fixed.lua',
+                 ModOptionsMenu = 'mod_options_menu.lua',
+                 ModBindingsMenu = 'mod_bindings_menu.lua'}
 local guards = {ClickableScrollbars = 'ClickableScrollbars',
                 ArcThrowerRevamped = 'ArcThrowerRevampedInstalled',
-                GalacticMenuHotkey = 'GalacticMenuHotkeyInstalled'}
+                GalacticMenuHotkey = 'GalacticMenuHotkeyInstalled',
+                FlameDamageFixed = 'FlameDamageFixedInstalled',
+                ModOptionsMenu = 'ModOptionsMenu',
+                ModBindingsMenu = 'ModBindingsMenu'}
 for i = 4, #arg, 2 do
     local module, slug = arg[i], assert(arg[i + 1])
     local entry = entries[slug] or 'archive_loader.lua'
@@ -34,7 +51,10 @@ local pack = 'mods/cowboybingus/vanilla_plus_megapack'
 -- alone, and excludes it from the registry-driven re-entry phase.
 local registry_cannot_see = {['mods/cowboybingus/clickable_scrollbars'] = true,
                              ['mods/cowboybingus/arc_thrower_auto'] = true,
-                             ['mods/cowboybingus/galactic_menu_hotkey'] = true}
+                             ['mods/cowboybingus/galactic_menu_hotkey'] = true,
+                             ['mods/cowboybingus/flame_damage_fixed'] = true,
+                             ['mods/cowboybingus/mod_options_menu'] = true,
+                             ['mods/cowboybingus/mod_bindings_menu'] = true}
 local cases = 0
 for mask = 0, 2 ^ #components - 1 do
   for _, pack_wins in ipairs({false, true}) do
@@ -45,10 +65,10 @@ for mask = 0, 2 ^ #components - 1 do
     local available = {[pack] = {bytes = read(build .. '/entry.lua.main'):sub(9)}}
     local loaded, calls, owners = {}, {}, {}
     local function execute(bytes)
-        return setfenv(assert(loadstring(bytes)), env)()
+        return setfenv(assert(load_chunk(bytes)), env)()
     end
     env.loadstring = function(bytes, name)
-        local chunk, reason = loadstring(bytes, name)
+        local chunk, reason = load_chunk(bytes, name)
         if chunk then setfenv(chunk, env) end
         return chunk, reason
     end

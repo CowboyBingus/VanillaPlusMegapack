@@ -135,6 +135,9 @@ def audit(packages=(), history=False):
                 assert option['Include'] == [folder]
                 expected |= {folder + '/9ba626afa44a3aa3.patch_0' + s
                              for s in ('', '.stream', '.gpu_resources')}
+                if component.get('input_archive_sha256'):  # Mod Bindings Menu's input actions
+                    expected |= {folder + '/9ba626afa44a3aa3.patch_1' + s
+                                 for s in ('', '.stream', '.gpu_resources')}
             assert set(names) == expected
             provenance = json.loads(archive.read(provenance_name))
             for name, digest in provenance['files'].items(): assert sha(archive.read(name)) == digest

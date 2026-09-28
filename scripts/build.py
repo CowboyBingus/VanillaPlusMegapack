@@ -14,11 +14,12 @@ from package import package_release, release_directory
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build'
 MODULE = 'mods/cowboybingus/vanilla_plus_megapack'
-VERSION = '32'
+VERSION = '33'
 REVISION = f'megapack-v{VERSION}'
 GUID = '876060ae-0640-4ac5-95b6-ec7c9a0567d3'
 ROWS_GUID = 'fb497df5-080b-48a5-b31d-103ccb060e1c'
 ROWS_REVISION = REVISION + '-rows-v1'
+INPUT_ARCHIVE = ARCHIVE.replace('patch_0', 'patch_1')  # Mod Bindings Menu's input actions, beside its addon
 
 OPTION_DESCRIPTIONS = {
     'ArcThrowerRevamped': 'Hold the fire button to keep the Arc Thrower firing.',
@@ -33,7 +34,10 @@ OPTION_DESCRIPTIONS = {
     'ControllableHoverPack': 'Press the Jump Pack action again to descend early with native landing assistance.',
     'KnowYourConstellation': 'Shows local enemy forecasts on mission previews and briefing.',
     'ClickableScrollbars': 'Smoothly drag equipment and Career scrollbars, even with the pointer away from the track.',
-    'GalacticMenuHotkey': 'Ship station shortcuts: Tab map, F1 Armory, F5 Control Center, F6 Ship Management, F7 Stratagem Hero, F8 instant Hellpod entry. Install Mod Bindings Menu separately to rebind them.',
+    'GalacticMenuHotkey': 'Ship station shortcuts: Tab map, F1 Armory, F5 Control Center, F6 Ship Management, F7 Stratagem Hero, F8 instant Hellpod entry. Enable Mod Bindings Menu to rebind them.',
+    'FlameDamageFixed': 'Fixes the Lumberer\'s and Flame Sentry\'s flame: two flame parts spawn again, it starts at the Cremator\'s distances and no longer hits the Lumberer.',
+    'ModOptionsMenu': 'Adds a native MODS tab to the Options screen, where mods such as Shallow Water Diving offer their settings.',
+    'ModBindingsMenu': 'Adds a native MODS tab to the keyboard and controller binding pages, where mods such as Ship Station Hotkeys offer rebindable keys.',
 }
 
 
@@ -52,6 +56,25 @@ def run(args):
     if result.returncode:
         raise RuntimeError(result.stdout + result.stderr)
     return result.stdout
+
+
+def run_parallel(*commands):
+    """Independent test processes at the same time; their outputs in the given order."""
+    env = dict(os.environ, LUA_PATH=str(LUA.parent / '?.lua') + ';;')
+    processes = [subprocess.Popen(list(map(str, args)), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, env=env) for args in commands]
+    outputs = []
+    try:
+        for process in processes:
+            out, err = process.communicate()
+            if process.returncode:
+                raise RuntimeError(out + err)
+            outputs.append(out)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+    return ''.join(outputs)
 
 
 def compile_resource(source, directory):
@@ -84,6 +107,18 @@ def build_component(component, build=BUILD, rows=False):
     for relative, expected in component['source_sha256'].items():
         if sha((root / relative).read_bytes()) != expected:
             raise ValueError('Pinned source changed: ' + component['slug'] + '/' + relative)
+    if component.get('source'):
+        # A standalone addon that declares itself on its first line: the option
+        # ships the standalone resource byte for byte, with no wrapper and no
+        # recompilation, and the same bytes are its discovery entry.
+        body = (root / component['source']).read_bytes()
+        payload = struct.pack('<II', len(body), 2) + body
+        if sha(payload) != component['resource_sha256']:
+            raise ValueError('Addon resource differs from the verified standalone release: ' + component['slug'])
+        directory = build / component['slug']
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'mod.lua.main').write_bytes(payload)
+        return payload
     if component['slug'] == 'ArmoryPreviewCache':
         import importlib.util
         spec = importlib.util.spec_from_file_location('armory_module', root / 'scripts/module.py')
@@ -171,6 +206,31 @@ def build_component(component, build=BUILD, rows=False):
     return payload
 
 
+def input_actions_archive(component):
+    """Mod Bindings Menu's native input actions (content/input), built by its own pinned build script from
+    the builder's unmodified content/input.config (HD2_INPUT_CONFIG), exactly as its standalone release."""
+    import importlib.util
+    import types
+    config = os.environ.get('HD2_INPUT_CONFIG')
+    if not config:
+        raise ValueError('Set HD2_INPUT_CONFIG to your extracted, unmodified content/input.config (CONTRIBUTING.md)')
+    # The script's own packaging imports the shared loader's build_addon; only its config functions run here.
+    if 'build_addon' not in sys.modules:
+        stub = types.ModuleType('build_addon')
+        stub.entry_source = None
+        sys.modules['build_addon'] = stub
+    spec = importlib.util.spec_from_file_location('bindings_build', ROOT / 'components' / component['slug'] / 'scripts/build.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    vanilla = Path(config).read_bytes()
+    if sha(vanilla) != component['input_config_sha256'] or module.CONFIG_SHA256 != component['input_config_sha256']:
+        raise ValueError('HD2_INPUT_CONFIG is not the unmodified content/input.config of Steam build 25480438')
+    archive = module.typed_archive(module.CONFIG_NAME, module.CONFIG_TYPE, module.extend_input_config(vanilla))
+    if sha(archive) != component['input_archive_sha256']:
+        raise ValueError('Input action resource differs from the verified standalone release')
+    return archive
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rows', action='store_true', help='Build the static forecast rows alternative')
@@ -198,11 +258,11 @@ def main():
                  for c in [*components, {'module': MODULE, 'slug': ''}]}
     component_tests = [sys.executable, ROOT / 'tests/test_components.py', build]
     if args.skip_desktop_capture: component_tests.append('--skip-desktop-capture')
-    tests = run(component_tests)
     loader_build = Path(os.environ.get('HD2_SHARED_LOADER_BUILD', ROOT.parent / 'BingusSharedLoader/build'))
-    tests += run([LUA, ROOT / 'tests/test_loader.lua', build, loader_build])
     duplicate_args = [value for c in components for value in (c['module'], c['slug'])]
-    tests += run([LUA, ROOT / 'tests/test_duplicates.lua', ROOT, build, loader_build, *duplicate_args])
+    # The option-subset suites replay every selection; they only read build outputs, so they run at once.
+    tests = run_parallel(component_tests, [LUA, ROOT / 'tests/test_loader.lua', build, loader_build],
+                         [LUA, ROOT / 'tests/test_duplicates.lua', ROOT, build, loader_build, *duplicate_args])
     files, options = {}, []
     for component in components:
         folder = 'options/' + component['slug']
@@ -217,6 +277,13 @@ def main():
             path = directory / (ARCHIVE + suffix)
             path.write_bytes(data)
             files[folder + '/' + path.name] = path.relative_to(ROOT).as_posix()
+        if component.get('input_archive_sha256'):
+            # Mod Bindings Menu also ships its input actions, as a second archive
+            # in the same option, like its standalone release.
+            for suffix, data in [('', input_actions_archive(component)), ('.stream', b''), ('.gpu_resources', b'')]:
+                path = directory / (INPUT_ARCHIVE + suffix)
+                path.write_bytes(data)
+                files[folder + '/' + path.name] = path.relative_to(ROOT).as_posix()
         description = OPTION_DESCRIPTIONS[component['slug']]
         if args.rows and component['slug'] == 'KnowYourConstellation':
             description += ' Uses the static Rows layout.'
@@ -224,8 +291,8 @@ def main():
                         'Include': [folder]})
     report = {
         'name': 'Vanilla Plus Megapack', 'slug': 'VanillaPlusMegapack', 'revision': REVISION, 'guid': GUID,
-        'description': 'Choose any of the thirteen bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v18. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. Install Mod Bindings Menu separately to rebind Ship Station Hotkeys. With default Arsenal priority put the loader last.',
-        'requires': [{'name': 'Bingus Shared Loader', 'guid': '612eaf70-d682-43c7-9efd-16dcc695f977', 'api': 1, 'revision': 'loader-v18'}, {'name': 'Mod Bindings Menu', 'revision': 'v2.0', 'repository': 'https://github.com/CowboyBingus/ModBindingsMenu', 'required_for': 'Ship Station Hotkeys rebinding', 'bundled': False}],
+        'description': 'Choose any of the sixteen bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v18. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. With default Arsenal priority put the loader last.',
+        'requires': [{'name': 'Bingus Shared Loader', 'guid': '612eaf70-d682-43c7-9efd-16dcc695f977', 'api': 1, 'revision': 'loader-v18'}],
         'game_exe_sha256': EXE_SHA, 'game_dll_sha256': GAME_DLL_SHA,
         'deployment_files': files, 'options': options,
         'files': {p: sha((ROOT / p).read_bytes()) for p in files.values()},
@@ -243,8 +310,7 @@ def main():
     check = [sys.executable, ROOT / 'tests/test_package.py', release, build]
     if args.rows:
         check += ['--rows', release_directory(ROOT) / f'Vanilla-Plus-Megapack-v{VERSION}.zip']
-    tests += run(check)
-    tests += run([LUA, ROOT / 'tests/test_loader.lua', build, loader_build, 'discovery'])
+    tests += run_parallel(check, [LUA, ROOT / 'tests/test_loader.lua', build, loader_build, 'discovery'])
     report['offline_tests'] = tests.strip()
     report['release_sha256'] = sha(release.read_bytes())
     (build / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')

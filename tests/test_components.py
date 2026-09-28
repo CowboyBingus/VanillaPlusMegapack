@@ -84,6 +84,15 @@ def main():
         commands.append(command)
     commands.append([mods / 'GalacticMenuHotkey/tests/test_hotkey.lua',
                      mods / 'GalacticMenuHotkey/src/galactic_menu_hotkey.lua'])
+    # Flame Damage Fixed takes its component root; the two menus take their source file.
+    flame = mods / 'FlameDamageFixed'
+    commands.append([flame / 'tests/test_fix.lua', flame])
+    commands.append([flame / 'tests/test_fix_adapter.lua', flame])
+    commands.append([mods / 'ModOptionsMenu/tests/test_options_tab.lua',
+                     mods / 'ModOptionsMenu/src/mod_options_menu.lua'])
+    for name in ('test_api', 'test_mods_tab'):
+        commands.append([mods / 'ModBindingsMenu/tests' / (name + '.lua'),
+                         mods / 'ModBindingsMenu/src/mod_bindings_menu.lua'])
     for command in commands:
         result = run([LUA, *command])
         print(result.strip())

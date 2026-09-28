@@ -70,13 +70,17 @@ const digest=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 const expected=new AdmZip(release);
 const manifest=JSON5.parse(expected.readAsText('manifest.json'));
 const archiveName='9ba626afa44a3aa3.patch_';
+// An option's archives in deployment order: its patch_N files by N (Mod Bindings Menu has two).
+const archivesOf=option=>expected.getEntries().map(e=>e.entryName)
+ .filter(name=>name.startsWith(option.Include[0]+'/'+archiveName)&&/_\d+$/.test(name))
+ .sort((a,b)=>Number(a.split('_').pop())-Number(b.split('_').pop()));
 function verify(mask) {
- const enabled=manifest.Options.filter((_,i)=>mask & (1<<i));
- assert.equal(listFiles(data).length,enabled.length*3);
- enabled.forEach((option,index)=>{
+ const archives=manifest.Options.filter((_,i)=>mask & (1<<i)).flatMap(archivesOf);
+ assert.equal(listFiles(data).length,archives.length*3);
+ archives.forEach((archive,index)=>{
   for(const suffix of ['', '.stream', '.gpu_resources']) {
    const actual=fs.readFileSync(path.join(data,archiveName+index+suffix));
-   const original=expected.readFile(option.Include[0]+'/'+archiveName+'0'+suffix);
+   const original=expected.readFile(archive+suffix);
    assert.equal(digest(actual),digest(original));
   }
  });

@@ -64,12 +64,16 @@ var expected = json.RootElement.GetProperty("Options").EnumerateArray().ToArray(
 var optionCount = expected.Length;
 var fullMask = (1 << optionCount) - 1;
 Require(optionCount >= 2, "Expected independent options");
+// An option's archives in deployment order: its patch_N files by N (Mod Bindings Menu has two).
+string[] ArchivesOf(string folder) => zip.Entries.Select(e=>e.FullName)
+    .Where(n=>n.StartsWith(folder+"/9ba626afa44a3aa3.patch_") && char.IsDigit(n[^1]))
+    .OrderBy(n=>int.Parse(n[(n.LastIndexOf('_')+1)..])).ToArray();
 void Verify(string data, int mask) {
-    var folders = expected.Where((_,i)=>(mask & (1<<i))!=0).Select(o=>o.GetProperty("Include")[0].GetString()).ToArray();
-    Require(Directory.GetFiles(data).Length == folders.Length * 3, "Unexpected deployment file count");
-    for(var i=0;i<folders.Length;i++) foreach(var suffix in new[]{"", ".stream", ".gpu_resources"}) {
+    var archives = expected.Where((_,i)=>(mask & (1<<i))!=0).SelectMany(o=>ArchivesOf(o.GetProperty("Include")[0].GetString()!)).ToArray();
+    Require(Directory.GetFiles(data).Length == archives.Length * 3, "Unexpected deployment file count");
+    for(var i=0;i<archives.Length;i++) foreach(var suffix in new[]{"", ".stream", ".gpu_resources"}) {
         var actual = File.ReadAllBytes(Path.Combine(data, "9ba626afa44a3aa3.patch_" + i + suffix));
-        Require(actual.SequenceEqual(Payload(folders[i]+"/9ba626afa44a3aa3.patch_0"+suffix)), "Wrong deployed payload");
+        Require(actual.SequenceEqual(Payload(archives[i]+suffix)), "Wrong deployed payload");
     }
 }
 var fixture = Fixture("options");

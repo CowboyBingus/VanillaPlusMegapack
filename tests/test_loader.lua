@@ -5,30 +5,60 @@ local discovery_only = arg[3] == 'discovery'
 -- Declare each exact FFI block once: repeated typedefs otherwise exhaust its
 -- process-wide CType table after thousands of synthetic addon installations.
 -- The first use still executes the real declaration and validates its types.
+-- Type strings are parsed once for the same reason: an anonymous struct or a
+-- function-pointer string creates a new C type at every evaluation, and every
+-- option subset starts the addons again (each starts once per real game start).
 local ffi = require('ffi')
-local declarations = {}
+local declarations, ctypes = {}, {}
+local function ctype(t)
+    if type(t) ~= 'string' then return t end
+    local parsed = ctypes[t]
+    if not parsed then parsed = ffi.typeof(t); ctypes[t] = parsed end
+    return parsed
+end
+-- Every scenario compiles the same entries again (the compiled modules carry
+-- their bytecode as escaped string literals). Compile each distinct chunk once
+-- and load its bytecode after that: the first load compiles the real source.
+local compiled = {}
+local function load_chunk(bytes, name)
+    local dumped = compiled[bytes]
+    if dumped then return loadstring(dumped) end
+    local chunk, reason = loadstring(bytes, name)
+    if chunk then compiled[bytes] = string.dump(chunk) end
+    return chunk, reason
+end
 local scenario_ffi = setmetatable({cdef = function(body)
     if not declarations[body] then
         ffi.cdef(body)
         declarations[body] = true
     end
-end}, {__index = ffi})
+end,
+    typeof = function(t, ...) if select('#', ...) > 0 then return ffi.typeof(t, ...) end return ctype(t) end,
+    cast = function(t, value) return ffi.cast(ctype(t), value) end,
+    new = function(t, ...) return ffi.new(ctype(t), ...) end,
+    sizeof = function(t, ...) return ffi.sizeof(ctype(t), ...) end,
+    alignof = function(t) return ffi.alignof(ctype(t)) end,
+    offsetof = function(t, field) return ffi.offsetof(ctype(t), field) end,
+    istype = function(t, value) return ffi.istype(ctype(t), value) end,
+}, {__index = ffi})
 local pack = 'mods/cowboybingus/vanilla_plus_megapack'
 local wwise = 'core/wwise/lua/wwise_flow_callbacks'
 local names = {pack, 'mods/cowboybingus/better_stratagem_bounce',
     'mods/cowboybingus/hellpod_steering_unlocked', 'mods/cowboybingus/reinforcement_beacon_fix_data',
     'mods/cowboybingus/consistent_vaulting', 'mods/cowboybingus/shallow_water_dive',
     'mods/cowboybingus/sentry_aim_retention', 'mods/cowboybingus/corpse_collision_repair', 'mods/cowboybingus/hover_pack_cancel', 'mods/cowboybingus/enemy_intelligence', 'mods/cowboybingus/armory_preview_cache',
-    'mods/cowboybingus/clickable_scrollbars', 'mods/cowboybingus/arc_thrower_auto', 'mods/cowboybingus/galactic_menu_hotkey'}
+    'mods/cowboybingus/clickable_scrollbars', 'mods/cowboybingus/arc_thrower_auto', 'mods/cowboybingus/galactic_menu_hotkey',
+    'mods/cowboybingus/flame_damage_fixed', 'mods/cowboybingus/mod_options_menu', 'mods/cowboybingus/mod_bindings_menu'}
 local folders = {'', 'BetterStratagemBounce', 'HellpodSteeringUnlocked', 'ReinforcementBeaconsFixed',
     'ConsistentVaulting', 'ShallowWaterDiving', 'SentryAimRetention', 'EnemyCollisionSynchronized', 'ControllableHoverPack', 'KnowYourConstellation', 'ArmoryPreviewCache',
-    'ClickableScrollbars', 'ArcThrowerRevamped', 'GalacticMenuHotkey'}
+    'ClickableScrollbars', 'ArcThrowerRevamped', 'GalacticMenuHotkey', 'FlameDamageFixed', 'ModOptionsMenu', 'ModBindingsMenu'}
 -- The shared loader build carries a built-in registry written before this
 -- component existed, so the registry path cannot see it: in game it is loaded
 -- through declared-entry discovery, which the 'discovery' pass below proves by
 -- running with that registry emptied. Both paths are asserted separately here
 -- instead of pretending the older registry knows the new module.
-local registry_cannot_see = {['mods/cowboybingus/clickable_scrollbars'] = true, ['mods/cowboybingus/arc_thrower_auto'] = true, ['mods/cowboybingus/galactic_menu_hotkey'] = true}
+local registry_cannot_see = {['mods/cowboybingus/clickable_scrollbars'] = true, ['mods/cowboybingus/arc_thrower_auto'] = true, ['mods/cowboybingus/galactic_menu_hotkey'] = true,
+    ['mods/cowboybingus/flame_damage_fixed'] = true, ['mods/cowboybingus/mod_options_menu'] = true, ['mods/cowboybingus/mod_bindings_menu'] = true}
 local function read(path)
     local file = assert(io.open(path, 'rb'))
     local bytes = file:read('*a'); file:close(); return bytes
@@ -70,7 +100,13 @@ for _, scenario in ipairs(scenarios) do
             local ffi, bit = require('ffi'), require('bit')
             local archives, index = {}, 0
             for i = 2, #names do
-                if available[names[i]] then archives[#archives + 1] = build .. '/options/' .. folders[i] .. '/9ba626afa44a3aa3.patch_0' end
+                if available[names[i]] then
+                    archives[#archives + 1] = build .. '/options/' .. folders[i] .. '/9ba626afa44a3aa3.patch_0'
+                    -- The bindings option also deploys its input actions (a config archive): discovery must skip it.
+                    if folders[i] == 'ModBindingsMenu' then
+                        archives[#archives + 1] = build .. '/options/' .. folders[i] .. '/9ba626afa44a3aa3.patch_1'
+                    end
+                end
             end
             local function fill(buffer)
                 ffi.fill(buffer, 320)
@@ -111,10 +147,10 @@ for _, scenario in ipairs(scenarios) do
         env.stingray = {Application = {build = function() return 'release' end,
             can_get = function(kind, name) assert(kind == 'lua'); return available[name] or false end}}
         local function execute(bytes)
-            return setfenv(assert(loadstring(bytes)), env)()
+            return setfenv(assert(load_chunk(bytes)), env)()
         end
         env.loadstring = function(bytes, name)
-            local chunk, reason = loadstring(bytes, name)
+            local chunk, reason = load_chunk(bytes, name)
             if chunk then setfenv(chunk, env) end
             return chunk, reason
         end
@@ -155,7 +191,7 @@ for _, scenario in ipairs(scenarios) do
             end
             local identity = env.CowboyBingusModLoader.megapack
             if installed_pack and failure ~= 1 and failure ~= #names + 1 then
-                assert(identity.name == 'Vanilla Plus Megapack' and identity.revision == 'megapack-v32')
+                assert(identity.name == 'Vanilla Plus Megapack' and identity.revision == 'megapack-v33')
                 -- A loader that manages the LuaJIT cache (v18+) sets loader.jit; the pack then leaves it alone.
                 local managed = env.CowboyBingusModLoader.jit and env.CowboyBingusModLoader.jit.managed
                 assert((identity.jit_fallback == nil) == (managed == true))

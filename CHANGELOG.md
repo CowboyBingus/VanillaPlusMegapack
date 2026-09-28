@@ -1,4 +1,12 @@
-# v32
+# v33
+
+- New option: [Flame Damage Fixed](https://github.com/CowboyBingus/FlameDamageFixed) v1.0. The Lumberer's flamethrower arm and the Flame Sentry share one flame, and two of its five damaging parts never spawned: their start-up curves assume the Cremator's 64 s effect lifetime, but the shared flame's is 1e10 s. They now start with the Cremator's timing, the flame starts at the Cremator's distances from the nozzle, and it no longer hits the Lumberer itself. In recorded play on bugs the Lumberer averaged 4.7 hits per damage window without the fix and 14.7 with it; the Cremator averaged 14.6 (different fights, so a rough comparison). Measured cost: 0.0015 ms per frame aboard the ship and 0.008 ms per frame in missions.
+- New option: [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) v1.0.1, the native MODS tab on the Options screen, where Shallow Water Diving sets its maximum dive depth. It was a separate install before.
+- New option: [Mod Bindings Menu](https://github.com/CowboyBingus/ModBindingsMenu) v2.0, the native MODS tab on the keyboard and controller binding pages, where Ship Station Hotkeys' shortcuts are rebound. It was a separate install before. Like its standalone release, the option also deploys its `content/input.config` override with the native input actions; another mod that replaces that resource must be merged with it.
+- Sixteen independent options. Use one copy of each of the three: the standalone package or the pack option.
+- The other thirteen bundled mods are unchanged from v32.
+
+## v32
 
 - Shallow Water Diving v3.8: with [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) installed, MODS > SHALLOW WATER DIVING > Max Dive Water Depth sets the deepest water a dive can start in, from 0.20 (lower shin; the previous fixed limit and still the default) up to 1.30, where the Helldiver starts swimming. It applies with the menu's Apply (Tab). Without Mod Options Menu nothing changes.
 - Shallow Water Diving checks the water record's memory page once per record table instead of before every write. A protection query costs about 0.2-0.3 ms in game; v31 made four at every dive start and two at every landing, now the first assisted dive after loading into a mission makes one and later dives and landings none.

@@ -1,4 +1,4 @@
-Vanilla Plus Megapack Rows - v32
+Vanilla Plus Megapack Rows - v33
 
 Supports Steam build 25480438 / EXE 1.8.46015.0.
 Requires the separate Bingus Shared Loader v18 / API 1.
@@ -6,26 +6,28 @@ Requires the separate Bingus Shared Loader v18 / API 1.
 1. Close Helldivers 2 and use either Arsenal or HD2MM.
 2. Disable previous megapacks and standalone copies of features you want off.
    Enable only one Megapack variant (standard or Rows).
-3. Import Vanilla-Plus-Megapack-Rows-v32.zip and Bingus Shared Loader v18.
+3. Import Vanilla-Plus-Megapack-Rows-v33.zip and Bingus Shared Loader v18.
 4. With Arsenal's default priority, place the loader LAST. If first-mod
    priority is enabled, place the loader FIRST instead.
-5. Open the pack's Options and select any of the thirteen independent mods.
+5. Open the pack's Options and select any of the sixteen independent mods.
    Review these choices after updates; defaults depend on your manager.
 6. Purge / Deploy, then start the game. Close the game before changing options.
 
-Install Mod Bindings Menu v2.0 separately to rebind Ship Station Hotkeys on
-the MODS tab of Mouse & Keyboard or Controller. Without it, the shortcuts use
-Tab, F1 and F5-F8 aboard the ship while no menu is open. The option was named
-Galactic Menu Hotkey before v29; confirm it is still checked after updating.
-Mod Bindings Menu is not bundled in either Megapack variant.
+Enable the Mod Bindings Menu option to rebind Ship Station Hotkeys on the MODS
+tab of Mouse & Keyboard or Controller. Without it, the shortcuts use Tab, F1
+and F5-F8 aboard the ship while no menu is open. The option was named Galactic
+Menu Hotkey before v29; confirm it is still checked after updating. Mod
+Bindings Menu ships its own content/input.config override; another mod that
+replaces that resource must be merged with it.
 
-Install Mod Options Menu v1.0 separately to set Shallow Water Diving's
-maximum dive depth on the MODS tab of the escape menu. It is optional and not
-bundled in either Megapack variant.
+Enable the Mod Options Menu option to set Shallow Water Diving's maximum dive
+depth on the MODS tab of the escape menu.
+
+Mod Bindings Menu, Mod Options Menu and Flame Damage Fixed are also released
+on their own. Use one copy of each: disable the standalone package or the
+pack option.
 
 https://github.com/CowboyBingus/BingusSharedLoader/releases/latest
-https://github.com/CowboyBingus/ModBindingsMenu/releases/latest
-https://github.com/CowboyBingus/ModOptionsMenu/releases/latest
 
 Included revisions:
 - Better Stratagem Bounce v15.3
@@ -41,11 +43,14 @@ Included revisions:
 - Clickable Scrollbars v2.14
 - Arc Thrower Revamped v1.6
 - Ship Station Hotkeys v1.7
+- Flame Damage Fixed v1.0
+- Mod Options Menu v1.0.1
+- Mod Bindings Menu v2.0
 
 Rows uses the static constellation forecast layout. All other resources match
 the standard package. An unchecked option cannot disable a separately enabled
 standalone copy. Remove older startup-replacing packages when migrating.
 
-Offline regression, package and option-selection checks passed. New gameplay
-fixes and current-build multiplayer behavior still need in-game confirmation.
+Offline regression, package and option-selection checks passed. Current-build
+multiplayer behavior still needs in-game confirmation.
 Logs: %LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs

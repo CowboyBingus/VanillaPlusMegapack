@@ -14,7 +14,7 @@
       "tests/test_archive.lua": "D66816CDE9E384C5FC34BE40504AA29AA846FE8294C2421DD3A04854C7236AEC",
       "tests/test_windows_interop.lua": "66EF3BB6238BA8BD1119913993019F3F83594F51B493ECA3D29D31E839F8A957"
     },
-    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
+    "source_origin": "Standalone v15.3 release source for Steam build 25480438; offline checks passed; its log showed the navigation settings applied in live play."
   },
   {
     "slug": "HellpodSteeringUnlocked",
@@ -271,7 +271,7 @@
       "revision": "v3.16-rows-v1",
       "resource_sha256": "C8D2AD02BFA7B536D09F79D8385A425616DFB430BAD9A07D7E633374618A8281"
     },
-    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
+    "source_origin": "Standalone v3.16 release source for Steam build 25480438; offline checks passed; loads and runs its forecast on the galactic map in live play (on-screen layouts last confirmed with v3.12)."
   },
   {
     "name": "Armory Preview Cache",
@@ -310,7 +310,7 @@
       "tests/fixtures/ui_loadout_25327279.lua": "3791B0430A2CDEC631245B333DF70C84F49570042224766F4A7101E933B5A3B0",
       "tests/test_current_ui.lua": "EE794BF1A5FA4AC8B6439C5DD73CD13BDDC14EC8F1D88C93A9012A2F0F2F31E0"
     },
-    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
+    "source_origin": "Standalone v22 release source for Steam build 25480438; offline checks passed; caching confirmed in live play."
   },
   {
     "slug": "ClickableScrollbars",
@@ -336,7 +336,7 @@
       "tests/test_settings_input.lua": "514B24FF47727D2661A06492028A24F3FC2FC038FD3897862DD8422137EF6245",
       "tests/test_ui_sim.lua": "761735BE834A4EED4042DCC777E32A1CF31772CDF8D04AFC38BAF3304D4BEBE7"
     },
-    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
+    "source_origin": "Standalone v2.14 release source for Steam build 25480438; offline checks passed; scrollbar dragging confirmed in live play."
   },
   {
     "slug": "ArcThrowerRevamped",
@@ -352,7 +352,7 @@
       "tests/test_bindings.lua": "CE2212A99787D20DC747BC6D530806F4D2AD0DC199346F7AB4620761268B5079",
       "tests/test_work_budget.lua": "822EF958BB70D9FB620432DD7B61AEE9EBD3D57404E698CB7A9C785FD56D6B53"
     },
-    "source_origin": "Prepared standalone source for Steam build 25480438; live gameplay pending."
+    "source_origin": "Standalone v1.6 release source for Steam build 25480438; offline checks passed; loads and finds its charge record in live play."
   },
   {
     "slug": "GalacticMenuHotkey",
@@ -367,5 +367,56 @@
       "tests/test_hotkey.lua": "CB9FB84B5775225B95C6417CA20B45F13A554CB3C77110587789C80E963C64E9"
     },
     "source_origin": "Standalone Ship Station Hotkeys v1.7 for Steam build 25480438; offline checks passed; F8 and backing out live-verified."
+  },
+  {
+    "slug": "FlameDamageFixed",
+    "name": "Flame Damage Fixed",
+    "revision": "v1.0",
+    "repository": "https://github.com/CowboyBingus/FlameDamageFixed",
+    "module": "mods/cowboybingus/flame_damage_fixed",
+    "entry": "direct",
+    "source": "src/flame_damage_fixed.lua",
+    "resource_sha256": "AF8423FC1BBA17C99C1522F7172C0256848EE046AE5874A6E1B011B71353BE68",
+    "source_sha256": {
+      "src/flame_damage_fixed.lua": "6D31D2158075A75B68FEEBD72C07116F04E207F274EF20F60491343726A2B564",
+      "tests/frame_budget.lua": "4E1E9F47EE7FCCFD24F6C79D475103ABF77989FC344EBB527869029793654E49",
+      "tests/test_fix.lua": "D84775BD85805455F702FB37AC05ED8D25470197436079D6DD4CD2F048FC95C3",
+      "tests/test_fix_adapter.lua": "BB77CDCB84C45F37780967A3573FC66AA4B305BF5973FE65F88109B9B4E1B0A4"
+    },
+    "source_origin": "Standalone v1.0 release source for Steam build 25480438; offline checks passed; spawn fix, Cremator emitter distances and self-hit layer checked in live play with the Lumberer (Flame Sentry offline only)."
+  },
+  {
+    "slug": "ModOptionsMenu",
+    "name": "Mod Options Menu",
+    "revision": "v1.0.1",
+    "repository": "https://github.com/CowboyBingus/ModOptionsMenu",
+    "module": "mods/cowboybingus/mod_options_menu",
+    "entry": "direct",
+    "source": "src/mod_options_menu.lua",
+    "resource_sha256": "981DDB1947F2B7E2CD5A15723910BCF800EC65AE3AD9FBF857B3B0E9351F6EFC",
+    "source_sha256": {
+      "src/mod_options_menu.lua": "FAFD20922AD283D9F4894EE5DD45FBA5C3040246F6B886D468A271ECC46A7E93",
+      "tests/test_options_tab.lua": "CEF2EBF99BC781C17EB968492EDE72EBF3F496DEE96BA6DA4BDA9B60AFDD8F52"
+    },
+    "source_origin": "Standalone v1.0.1 release source for Steam build 25480438; offline checks passed; MODS tab, toggles, sliders, APPLY, the unapplied-changes prompt and saved values checked in live play (controller navigation offline only)."
+  },
+  {
+    "slug": "ModBindingsMenu",
+    "name": "Mod Bindings Menu",
+    "revision": "v2.0",
+    "repository": "https://github.com/CowboyBingus/ModBindingsMenu",
+    "module": "mods/cowboybingus/mod_bindings_menu",
+    "entry": "direct",
+    "source": "src/mod_bindings_menu.lua",
+    "resource_sha256": "93C04070296AFBF8DF3CAED46D9DF5673C7756E9B99C06F5848978C246EE2015",
+    "input_config_sha256": "E509D85AC3603721E5AFE5686C7041798587A108AA86E2DA961A2EA451881A1B",
+    "input_archive_sha256": "841BB0C3445E772F1EBCCD1208CD9ED9A6872701EAAAC8DA749F29B3F26464DB",
+    "source_sha256": {
+      "scripts/build.py": "F9BA057F08A7EAD73E8427EEB1C6DA9D11CEADFB10943A51B63EB994C9A51A0A",
+      "src/mod_bindings_menu.lua": "EC650592AAD9137585FF323CEB01CD0D90F1AD329C64E8EEAB1DD046F7F16B20",
+      "tests/test_api.lua": "6416A8D8304D2C2B79428ABCA53DF61AA1144774303C05719FCDA0BF7E3C0101",
+      "tests/test_mods_tab.lua": "51C9CBEB68D2E9E02FBA4E8FE4084E722546AEE6204DC3717160824E554F575C"
+    },
+    "source_origin": "Standalone v2.0 release source for Steam build 25480438; offline checks passed; MODS tab on both binding pages, section headers, automatic bindings, Double Tap and persistence checked in live play (controller activation offline only)."
   }
 ]

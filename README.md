@@ -2,23 +2,23 @@
 
 # Vanilla Plus Megapack
 
-Choose which of the thirteen bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, Ship Station Hotkeys, and Clickable Scrollbars.
+Choose which of the sixteen bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, Ship Station Hotkeys, Clickable Scrollbars, and the Mod Options Menu and Mod Bindings Menu tabs.
 
-**Requires the separately built Bingus Shared Loader v18.** Install two ZIPs: `Vanilla-Plus-Megapack-v32.zip` and `Bingus-Shared-Loader-v18.zip`. Mod managers do not install the dependency automatically.
+**Requires the separately built Bingus Shared Loader v18.** Install two ZIPs: `Vanilla-Plus-Megapack-v33.zip` and `Bingus-Shared-Loader-v18.zip`. Mod managers do not install the dependency automatically.
 
 
-The release also provides an optional [Rows package](docs/ROWS.md), `Vanilla-Plus-Megapack-Rows-v32.zip`. It displays every constellation section at once with the same native styling. Enable either the standard pack or Rows with the shared loader. All other bundled resources are identical.
+The release also provides an optional [Rows package](docs/ROWS.md), `Vanilla-Plus-Megapack-Rows-v33.zip`. It displays every constellation section at once with the same native styling. Enable either the standard pack or Rows with the shared loader. All other bundled resources are identical.
 
 ## Install with Arsenal or HD2MM
 
 1. Close Helldivers 2. Use one mod manager.
 2. Replace any previous loader entry with v18. Disable old megapacks and standalone copies of features you want turned off.
-3. Import `Vanilla-Plus-Megapack-v32.zip` and `Bingus-Shared-Loader-v18.zip`, then enable both.
+3. Import `Vanilla-Plus-Megapack-v33.zip` and `Bingus-Shared-Loader-v18.zip`, then enable both.
 4. With Arsenal's default priority, put **Bingus Shared Loader last**, at the bottom. If first-mod priority is enabled, put the loader first.
 5. Open the Megapack's **Options** (sliders button) in Arsenal, or its mod options in HD2MM. Check each mod you want and uncheck each mod you do not want. Confirm/save the selection.
 6. **Purge / Deploy**, then launch the game normally. Close the game and repeat these steps whenever you change options.
 
-Each of the thirteen options is independent. Select all for the complete pack, any subset for a custom pack, or none to deploy no features from the pack. Install Mod Bindings Menu v2.0 separately and enable Ship Station Hotkeys to rebind its six shortcuts, including controller buttons. Install [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) v1.0 separately to set Shallow Water Diving's maximum dive depth. The option was named Galactic Menu Hotkey before v29; confirm it is still checked after updating. Review your choices after importing or updating: initial selections depend on the manager's settings. Both standard and Rows ZIPs offer the same thirteen toggles; Rows changes the Know Your Constellation layout.
+Each of the sixteen options is independent. Select all for the complete pack, any subset for a custom pack, or none to deploy no features from the pack. Enable Mod Bindings Menu with Ship Station Hotkeys to rebind its six shortcuts, including controller buttons. Enable Mod Options Menu to set Shallow Water Diving's maximum dive depth. The option was named Galactic Menu Hotkey before v29; confirm it is still checked after updating. Review your choices after importing or updating: initial selections depend on the manager's settings. Both standard and Rows ZIPs offer the same sixteen toggles; Rows changes the Know Your Constellation layout.
 
 An unchecked option removes only the pack's copy. An enabled standalone package or another megapack can still activate that feature, so disable those copies as well. Overlapping gameplay entries run once and their callbacks do not stack. If versions differ, manager priority selects the winner.
 
@@ -26,7 +26,7 @@ An unchecked option removes only the pack's copy. An enabled standalone package 
 
 The game runs every Lua mod in its own LuaJIT, whose code cache keeps its 2015 limits (512 KB of machine code, 1,000 traces) for the game and all mods together. When it fills, LuaJIT discards all compiled code and recompiles it during play. Bingus Shared Loader v18, required by this pack, raises and manages these limits. If an older loader is still installed, this pack raises them once at startup to the same starting values (16 MB, 8,000 traces), with no per-frame work and without the loader's growth or log line.
 
-## Included in v32
+## Included in v33
 
 | Mod | Version | Effect |
 | --- | --- | --- |
@@ -43,14 +43,17 @@ The game runs every Lua mod in its own LuaJIT, whose code cache keeps its 2015 l
 | [Arc Thrower Revamped](https://github.com/CowboyBingus/ArcThrowerRevamped) | v1.6 | Hold the fire button to keep the Arc Thrower firing; stock charge, damage and arc settings. |
 | [Clickable Scrollbars](https://github.com/CowboyBingus/ClickableScrollbars) | v2.14 | Drag equipment, Career, bindings and settings scrollbars. |
 | [Ship Station Hotkeys](https://github.com/CowboyBingus/ShipStationHotkeys) | v1.7 | Shortcuts aboard the ship: Tab map, F1 Armory, F5 Control Center, F6 Ship Management, F7 Stratagem Hero, F8 instant Hellpod entry. |
+| [Flame Damage Fixed](https://github.com/CowboyBingus/FlameDamageFixed) | v1.0 | Fixes the Lumberer's and Flame Sentry's flame: two flame parts spawn again, the flame starts at the Cremator's distances and no longer hits the Lumberer. |
+| [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) | v1.0.1 | Native MODS tab on the Options screen, where mods such as Shallow Water Diving offer their settings. |
+| [Mod Bindings Menu](https://github.com/CowboyBingus/ModBindingsMenu) | v2.0 | Native MODS tab on the keyboard and controller binding pages, where mods such as Ship Station Hotkeys offer rebindable keys. |
 
-All gameplay components are pinned to the source and compiled-resource hashes in `components.lock.json`. Third-party HUD mods and the reserved, unreleased Wide Angle Stratagems module are not included. Mod Bindings Menu is not included in either Megapack variant. It is a separate dependency for rebinding Ship Station Hotkeys on keyboard or controller. Mod Options Menu is not included either; it is an optional dependency for Shallow Water Diving's depth slider. The shared loader remains a separate dependency with its own repository and updates.
+All bundled components are pinned to the source and resource hashes in `components.lock.json`. Third-party HUD mods and the reserved, unreleased Wide Angle Stratagems module are not included. Mod Bindings Menu, Mod Options Menu and Flame Damage Fixed are also released on their own: use one copy of each, the standalone package or the pack option. The shared loader remains a separate dependency with its own repository and updates.
 
 Supported game: Steam build 25480438 / EXE 1.8.46015.0. Each bundled mod retains its behavior and compatibility checks.
 
 ## Compatibility and updates
 
-The pack preserves all public gameplay resource names and embeds the exact pinned bytecode inside plaintext discovery entries. It contains no shared startup loader, `boot` replacement or Wwise callback replacement. Existing HUD+ and supported HUD Ballistic Trajectory Overlay compatibility is handled by Bingus Shared Loader. Give the loader winning priority over the supported overlay as described in its instructions.
+The pack preserves all public gameplay resource names and embeds the exact pinned bytecode inside plaintext discovery entries. It contains no shared startup loader, `boot` replacement or Wwise callback replacement. The Mod Bindings Menu option is the only one that also replaces a game resource: its `content/input.config` override with the native input actions, byte for byte the standalone release's. Another mod that replaces that resource must be merged with it. Existing HUD+ and supported HUD Ballistic Trajectory Overlay compatibility is handled by Bingus Shared Loader. Give the loader winning priority over the supported overlay as described in its instructions.
 
 Replace the megapack ZIP to update its bundled gameplay versions. Updating an individual mod repository does not silently change this pinned pack. The loader can be updated separately.
 
@@ -62,6 +65,6 @@ With at least one pack option selected, check `%LOCALAPPDATA%/CowboyBingus/Helld
 
 The prior performance improvements remain included: bounded Arc Thrower scanning, update-only assist, and reduced scrollbar capture and logging.
 
-Current-build mission and multiplayer checks for the earlier gameplay components remain pending.
+Current-build multiplayer checks for the earlier gameplay components remain pending.
 
-Current version: **v32**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).
+Current version: **v33**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).

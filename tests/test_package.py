@@ -6,7 +6,18 @@ import struct
 import sys
 import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from build import ARCHIVE, BUILD, GUID, ROWS_GUID, MODULE, VERSION, REVISION, ROWS_REVISION, ROOT, load_components, resource_hash, sha
+from build import ARCHIVE, BUILD, GUID, INPUT_ARCHIVE, ROWS_GUID, MODULE, VERSION, REVISION, ROWS_REVISION, ROOT, load_components, resource_hash, sha
+
+INPUT, CONFIG = resource_hash('content/input'), resource_hash('config')
+
+
+def input_actions(data):
+    """Mod Bindings Menu's second archive: exactly one config resource, content/input."""
+    assert struct.unpack_from('<III', data) == (0xF0000011, 1, 1) and struct.unpack_from('<I', data, 88)[0] == 1
+    key, kind, offset = struct.unpack_from('<7Q6I', data, 104)[:3]
+    size = struct.unpack_from('<7Q6I', data, 104)[7]
+    assert key == INPUT and kind == CONFIG and offset % 16 == 0 and offset + size <= len(data)
+    return {key: data[offset:offset + size]}
 
 
 def resources(data):
@@ -40,11 +51,13 @@ def main():
     with zipfile.ZipFile(sys.argv[1]) as package:
         expected = {f'options/{c["slug"]}/{ARCHIVE}{s}' for c in components
                     for s in ('', '.stream', '.gpu_resources')}
+        expected |= {f'options/{c["slug"]}/{INPUT_ARCHIVE}{s}' for c in components if c.get('input_archive_sha256')
+                     for s in ('', '.stream', '.gpu_resources')}
         expected |= {'manifest.json', 'thumbnail.png', slug+'-manifest.json', slug+'-README.txt'}
         assert len(package.namelist()) == len(expected) and set(package.namelist()) == expected
         manager = json.loads(package.read('manifest.json'))
         assert manager['Version'] == 1 and manager['Name'] == name+f' - v{VERSION}' and manager['Guid'] == (ROWS_GUID if rows else GUID)
-        assert len(manager['Options']) == len(components) == 13
+        assert len(manager['Options']) == len(components) == 16
         assert manager['IconPath'] == 'thumbnail.png'
         png = package.read('thumbnail.png')
         assert png[:8] == b'\x89PNG\r\n\x1a\n'
@@ -53,6 +66,7 @@ def main():
         report = json.loads(package.read(slug+'-manifest.json'))
         assert report['revision'] == (ROWS_REVISION if rows else REVISION) and report['runtime_verified'] is False
         assert report['requires'][0]['revision'] == 'loader-v18' and report['requires'][0]['api'] == 1
+        assert len(report['requires']) == 1, 'Mod Bindings Menu is bundled, not a separate requirement'
         assert report['loader_bundled'] is False and report['boot_replaced'] is False
         assert len(report['components']) == len(components)
         for name, digest in report['files'].items():
@@ -72,6 +86,16 @@ def main():
                 payloads[key] = value
             for suffix in ('.stream', '.gpu_resources'):
                 assert package.read(folder + '/' + ARCHIVE + suffix) == b''
+            if component.get('input_archive_sha256'):
+                # The bindings option also carries its input actions, byte for byte its standalone archive.
+                data = package.read(folder + '/' + INPUT_ARCHIVE)
+                assert sha(data) == component['input_archive_sha256']
+                extra = input_actions(data)
+                assert not set(extra) & set(payloads)
+                payloads.update(extra)
+                choice = {**choice, **extra}
+                for suffix in ('.stream', '.gpu_resources'):
+                    assert package.read(folder + '/' + INPUT_ARCHIVE + suffix) == b''
             choices.append(choice)
         # Exercise every checkbox combination, including no selection. No disabled
         # feature may leak into an enabled option's archive or a root fallback.
@@ -81,16 +105,21 @@ def main():
                 if mask & (1 << i):
                     selected.update(choice)
                     wanted.add(resource_hash(component['module']))
+                    if component.get('input_archive_sha256'):
+                        wanted.add(INPUT)
             if mask:
                 wanted.add(resource_hash(MODULE))
             assert set(selected) == wanted
-        assert set(payloads) == {resource_hash(c['module']) for c in components} | {resource_hash(MODULE)}
+        assert set(payloads) == {resource_hash(c['module']) for c in components} | {resource_hash(MODULE), INPUT}
         for component in components:
             original = (build / component['slug'] / 'mod.lua.main').read_bytes()
             assert sha(original) == component['resource_sha256']
         for component in [*components, {'module': MODULE, 'slug': ''}]:
             module = component['module']
             entry = payloads[resource_hash(module)]
+            if component.get('source'):
+                # Shipped verbatim: the pinned standalone source is the whole entry.
+                assert entry[8:] == (ROOT / 'components' / component['slug'] / component['source']).read_bytes()
             assert entry == (build / component['slug'] / 'entry.lua.main').read_bytes()
             body = entry[8:]
             marker = ('-- HD2-Addon: ' + module + '\n').encode()
@@ -114,20 +143,19 @@ def main():
                 original = {}
                 for component in components:
                     original.update(resources(baseline.read('options/'+component['slug']+'/'+ARCHIVE)))
+                    if component.get('input_archive_sha256'):
+                        original.update(input_actions(baseline.read('options/'+component['slug']+'/'+INPUT_ARCHIVE)))
             assert set(original) == set(payloads)
             changed = {key for key in original if original[key] != payloads[key]}
             assert changed == {resource_hash('mods/cowboybingus/enemy_intelligence')}
             print(f'PASS: only the forecast payload differs from the standard v{VERSION} package')
-        assert resource_hash('mods/cowboybingus/mod_bindings_menu') not in payloads
-        assert resource_hash('content/input') not in payloads
-        assert all(c['slug'] != 'ModBindingsMenu' for c in components)
-        assert report['requires'][1]['bundled'] is False
+        assert [c['slug'] for c in components if c.get('input_archive_sha256')] == ['ModBindingsMenu']
         assert resource_hash('boot') not in payloads
         assert resource_hash('core/wwise/lua/wwise_flow_callbacks') not in payloads
         for name in package.namelist():
             data = package.read(name).lower()
             assert b'users\\' not in data and b'users/' not in data
-    print(f'PASS: {len(components)} independent options, all {1 << len(components)} selections, exact pinned payloads, no bundled bindings menu, boot or shared loader')
+    print(f'PASS: {len(components)} independent options, all {1 << len(components)} selections, exact pinned payloads, bindings input actions only in their option, no boot or shared loader')
 
 
 if __name__ == '__main__':
