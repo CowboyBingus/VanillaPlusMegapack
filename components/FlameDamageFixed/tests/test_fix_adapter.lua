@@ -5,7 +5,8 @@ local ffi = require('ffi')
 _G.FLAME_DAMAGE_FIXED_ADAPTER_TEST = true
 local api = dofile(root .. '/src/flame_damage_fixed.lua')
 _G.FLAME_DAMAGE_FIXED_ADAPTER_TEST = nil
-assert(type(api) == 'table' and api.u32 and api.write_raw and api.writable_region, 'adapter returned')
+assert(type(api) == 'table' and api.u32 and api.write_raw and api.writable_region and api.load and api.write_u32,
+    'adapter returned')
 
 local buffer = ffi.new('uint32_t[16]', {0x11223344, 0xa5a5a5a5})
 local address = tonumber(ffi.cast('uintptr_t', buffer))
@@ -17,6 +18,11 @@ assert(api.writable_data(address, 64), 'LuaJIT heap is committed private read-wr
 local base, size = api.writable_region(address)
 assert(base and size and base <= address and address + 64 <= base + size, 'region covers the buffer')
 assert(api.write_raw(address + 8, '\1\2\3\4') and buffer[2] == 0x04030201, 'raw write lands in place')
+local words = api.load(address, 16)
+assert(words and words[0] == 0x11223344 and words[1] == 0xa5a5a5a5 and words[2] == 0x04030201, 'block read: u32 view')
+assert(api.load(address, 65537) == nil and api.load(address, 2) == nil, 'block reads outside 4 B..64 KB are refused')
+assert(api.load(16, 16) == nil, 'unmapped block reads fail cleanly')
+assert(api.write_u32(address + 12, 0xffe0000b) and buffer[3] == 0xffe0000b, 'u32 write keeps the full unsigned range')
 assert(api.u32(16) == nil, 'unmapped address reads fail cleanly')
 -- The loaded lua51.dll image is never writable private data.
 pcall(ffi.cdef, 'void *GetModuleHandleA(const char *name);')
@@ -37,8 +43,11 @@ end
 jit.off(); jit.flush() -- test only: no earlier trace runs, so every call below is interpreted
 local read_bytes = garbage_per_call(function() return api.u32(address) end, 10000)
 local region_bytes = garbage_per_call(function() return api.writable_region(address) end, 2000)
+local load_bytes = garbage_per_call(function() local w = api.load(address, 64); return w[3] end, 10000)
+local write_bytes = garbage_per_call(function() return api.write_u32(address + 12, 0x0000000b) end, 10000)
 jit.on()
-assert(read_bytes < 1 and region_bytes < 1,
-    string.format('interpreted garbage: %.1f B per u32, %.1f B per region query', read_bytes, region_bytes))
-print('PASS: real adapter reads, bulk reads, guarded writes, region query; image and unmapped pages refused; '
-    .. 'no garbage per read or region query when interpreted')
+assert(read_bytes < 1 and region_bytes < 1 and load_bytes < 1 and write_bytes < 1, string.format(
+    'interpreted garbage: %.1f B per u32, %.1f B per region query, %.1f B per block read, %.1f B per u32 write',
+    read_bytes, region_bytes, load_bytes, write_bytes))
+print('PASS: real adapter reads, bulk and block reads, raw and u32 writes, region query; image and unmapped pages '
+    .. 'refused; no garbage per read, block read, u32 write or region query when interpreted')

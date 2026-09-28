@@ -1,4 +1,11 @@
-# v33
+# v34
+
+- [Flame Damage Fixed](https://github.com/CowboyBingus/FlameDamageFixed) v1.1 fixes v1.0's flame passing through armoured targets. v1.0 kept the flame off the Lumberer by moving it to a copy of its collision layer without layer 20, which is also the game's heavy-armour and vehicle layer: Chargers, the Factory Strider, tank turrets, the Illuminate dropship and more could not be hit. Now each Lumberer or Flame Sentry shares a private Havok collision group with its own flame, from its first burst until it is gone, and members of that group skip each other; no collision layer is changed, so everything else collides with the flame as in the base game. In recorded play the flame landed 4,822 hits on layer-20 hit-boxes (acid Chargers, Chargers, Impalers) and none on the Lumberer that fired it while the fix was running.
+- The two flame parts Flame Damage Fixed restored are no longer drawn: they still hit, but the flame no longer shows a second short, wide cone near the nozzle.
+- Flame Damage Fixed's measured cost: 0.008 ms per frame in missions and 0.002 ms per frame aboard the ship; most burst starts under 0.5 ms, and 0.8-1.7 ms once for a Lumberer's first burst.
+- The other fifteen bundled mods are unchanged from v33. Use one copy of Flame Damage Fixed: the standalone package or the pack option.
+
+## v33
 
 - New option: [Flame Damage Fixed](https://github.com/CowboyBingus/FlameDamageFixed) v1.0. The Lumberer's flamethrower arm and the Flame Sentry share one flame, and two of its five damaging parts never spawned: their start-up curves assume the Cremator's 64 s effect lifetime, but the shared flame's is 1e10 s. They now start with the Cremator's timing, the flame starts at the Cremator's distances from the nozzle, and it no longer hits the Lumberer itself. In recorded play on bugs the Lumberer averaged 4.7 hits per damage window without the fix and 14.7 with it; the Cremator averaged 14.6 (different fights, so a rough comparison). Measured cost: 0.0015 ms per frame aboard the ship and 0.008 ms per frame in missions.
 - New option: [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) v1.0.1, the native MODS tab on the Options screen, where Shallow Water Diving sets its maximum dive depth. It was a separate install before.

@@ -1,4 +1,4 @@
-Vanilla Plus Megapack - v33
+Vanilla Plus Megapack - v34
 
 Supports Steam build 25480438 / EXE 1.8.46015.0.
 Requires the separate Bingus Shared Loader v18 / API 1.
@@ -6,7 +6,7 @@ Requires the separate Bingus Shared Loader v18 / API 1.
 1. Close Helldivers 2 and use either Arsenal or HD2MM.
 2. Disable previous megapacks and standalone copies of features you want off.
    Enable only one Megapack variant (standard or Rows).
-3. Import Vanilla-Plus-Megapack-v33.zip and Bingus Shared Loader v18.
+3. Import Vanilla-Plus-Megapack-v34.zip and Bingus Shared Loader v18.
 4. With Arsenal's default priority, place the loader LAST. If first-mod
    priority is enabled, place the loader FIRST instead.
 5. Open the pack's Options and select any of the sixteen independent mods.
@@ -43,7 +43,7 @@ Included revisions:
 - Clickable Scrollbars v2.14
 - Arc Thrower Revamped v1.6
 - Ship Station Hotkeys v1.7
-- Flame Damage Fixed v1.0
+- Flame Damage Fixed v1.1
 - Mod Options Menu v1.0.1
 - Mod Bindings Menu v2.0
 

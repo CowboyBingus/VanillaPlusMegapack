@@ -1,5 +1,7 @@
 # Bundle contract
 
+v34 updates Flame Damage Fixed to v1.1 (a private Havok system group per weapon instead of v1.0's collision-layer copy; the restored flame parts are not drawn). Its option still ships the standalone addon resource byte for byte (lock field `source`). The other fifteen components are unchanged from v33.
+
 v33 adds three options: Flame Damage Fixed v1.0, Mod Options Menu v1.0.1 and Mod Bindings Menu v2.0. Each ships its standalone addon resource byte for byte, a plaintext discovery entry like Clickable Scrollbars, Arc Thrower Revamped and Ship Station Hotkeys (lock field `source`). The Mod Bindings Menu option also carries a second triplet, `9ba626afa44a3aa3.patch_1`, with its `content/input` config override: the build recreates it with Mod Bindings Menu's own pinned `scripts/build.py` from the builder's unmodified `content/input.config` (`HD2_INPUT_CONFIG`, checksum-checked) and requires it to match the standalone v2.0 archive byte for byte (lock fields `input_config_sha256` and `input_archive_sha256`). The other thirteen components are unchanged from v32.
 
 v32 updates Shallow Water Diving to v3.8 (optional Mod Options Menu depth slider; one protection query per write; allocation-free checks with a one-read idle gate; one protection query per water-record table). The other bundled components are unchanged from v31.

@@ -371,19 +371,19 @@
   {
     "slug": "FlameDamageFixed",
     "name": "Flame Damage Fixed",
-    "revision": "v1.0",
+    "revision": "v1.1",
     "repository": "https://github.com/CowboyBingus/FlameDamageFixed",
     "module": "mods/cowboybingus/flame_damage_fixed",
     "entry": "direct",
     "source": "src/flame_damage_fixed.lua",
-    "resource_sha256": "AF8423FC1BBA17C99C1522F7172C0256848EE046AE5874A6E1B011B71353BE68",
+    "resource_sha256": "329CA6C977B1E889162E294930A07F0EC326FCF16631CB8269D81E735EC0AC67",
     "source_sha256": {
-      "src/flame_damage_fixed.lua": "6D31D2158075A75B68FEEBD72C07116F04E207F274EF20F60491343726A2B564",
+      "src/flame_damage_fixed.lua": "39451F8975714D8C0E524BFCF99073CAF6A486D4FB4DD61E90610428F5CE50D6",
       "tests/frame_budget.lua": "4E1E9F47EE7FCCFD24F6C79D475103ABF77989FC344EBB527869029793654E49",
-      "tests/test_fix.lua": "D84775BD85805455F702FB37AC05ED8D25470197436079D6DD4CD2F048FC95C3",
-      "tests/test_fix_adapter.lua": "BB77CDCB84C45F37780967A3573FC66AA4B305BF5973FE65F88109B9B4E1B0A4"
+      "tests/test_fix.lua": "7DA3F3A831CF85AF05C0258F0784D11A1A0D5448A8A782AEF4999C2F5B1B3280",
+      "tests/test_fix_adapter.lua": "1CDCE289870B7056B30B02FA4C77E91270B3F13BB903CCBFF17A7D03EA2902E9"
     },
-    "source_origin": "Standalone v1.0 release source for Steam build 25480438; offline checks passed; spawn fix, Cremator emitter distances and self-hit layer checked in live play with the Lumberer (Flame Sentry offline only)."
+    "source_origin": "Standalone v1.1 release source for Steam build 25480438; offline checks passed; spawn fix, Cremator emitter distances, undrawn restored parts and the private-group self-hit fix checked in live play with the Lumberer (Flame Sentry offline only)."
   },
   {
     "slug": "ModOptionsMenu",
