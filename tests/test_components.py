@@ -1,8 +1,10 @@
-"""Exercise the vendored upstream gameplay tests in isolated LuaJIT processes."""
+"""Exercise the vendored upstream gameplay tests in isolated LuaJIT processes, several at a time."""
+from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from build import ROOT, BUILD, LUA, run, sha
+from build import ROOT, BUILD, LUA, load_components, run, sha
 
 
 def main():
@@ -93,10 +95,38 @@ def main():
     for name in ('test_api', 'test_mods_tab'):
         commands.append([mods / 'ModBindingsMenu/tests' / (name + '.lua'),
                          mods / 'ModBindingsMenu/src/mod_bindings_menu.lua'])
-    for command in commands:
-        result = run([LUA, *command])
-        print(result.strip())
+    blm = mods / 'BetterLobbyManagement'
+    for name in ('test_game', 'test_lobby', 'test_region', 'test_menu', 'test_chat', 'test_scanner', 'test_addon',
+                 'test_windows_api'):
+        commands.append([blm / 'tests' / (name + '.lua'), blm / 'src'])
+    version = next(c['version'] for c in load_components() if c['slug'] == 'BetterLobbyManagement')
+    commands.append([blm / 'tests/test_entry.lua', build / 'BetterLobbyManagement/better_lobby_management.lua',
+                     'v' + version])
+    for output in run_all(commands):
+        print(output.strip())
     print(f'PASS: {len(commands)} upstream gameplay and cross-module test processes')
+
+
+# Suites that measure time or machine code run alone, after the others finish.
+SERIAL = ('test_performance', 'benchmark_synthetic', 'test_perf_contract', 'test_synthetic_harness',
+          'test_work_budget', 'test_windows_api', 'test_platform')
+
+
+def run_all(commands):
+    """Every command's output, in the given order: independent suites run in parallel, then SERIAL ones."""
+    outputs = [None] * len(commands)
+    serial = [i for i, c in enumerate(commands) if any(name in Path(c[0]).stem for name in SERIAL)]
+    parallel = [i for i in range(len(commands)) if i not in serial]
+
+    def execute(i):
+        outputs[i] = run([LUA, *commands[i]])
+
+    with ThreadPoolExecutor(max_workers=max(1, min(8, (os.cpu_count() or 2) - 1))) as pool:
+        for future in [pool.submit(execute, i) for i in parallel]:
+            future.result()
+    for i in serial:
+        execute(i)
+    return outputs
 
 
 if __name__ == '__main__':

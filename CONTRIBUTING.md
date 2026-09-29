@@ -7,7 +7,7 @@ $env:HD2_LUAJIT = (Resolve-Path 'tools/LuaJIT/src/luajit.exe').Path
 python -B scripts/build.py
 ```
 
-The output is the workspace root `releases/Vanilla-Plus-Megapack-v34.zip` (or local `releases/` when built standalone). Generated wrappers, component bytecode, checksums and test reports stay in ignored `build/`. The build does not install mods, access a live game process, or launch the game.
+The output is the workspace root `releases/Vanilla-Plus-Megapack-v35.zip` (or local `releases/` when built standalone). Generated wrappers, component bytecode, checksums and test reports stay in ignored `build/`. The build does not install mods, access a live game process, or launch the game.
 
 The Mod Bindings Menu option ships that mod's input actions, which extend the game's own `content/input.config`. This repository contains no game files: extract the unmodified file from your Steam build 25480438 installation, for example with `hd2-resource-extract -type config -name content/input -out input.config` from [Better Stratagem Bounce](https://github.com/CowboyBingus/BetterStratagemBounce), and set `HD2_INPUT_CONFIG` to it. The build checks its checksum and requires the result to match Mod Bindings Menu v2.0 byte for byte. Gameplay sources are vendored. Build Bingus Shared Loader first. its compiled fixtures are used by the startup integration gate. For standalone checkouts, set `HD2_SHARED_LOADER_BUILD` to the loader build directory. The compiled modules retain their existing runtime game-fingerprint checks.
 
@@ -17,7 +17,9 @@ Git attributes preserve component snapshot bytes, including upstream line ending
 
 The normal build runs the vendored gameplay and interoperability tests and package checks. Those tests use synthetic data in the test process. They do not test live gameplay.
 
-Run `python scripts/build.py --rows` after building or downloading the standard v34 ZIP to create the alternate static forecast layout. The [Rows build notes](docs/ROWS.md) describe the pinned payload and comparison checks.
+Run `python scripts/build.py --rows` after building or downloading the standard v35 ZIP to create the alternate static forecast layout. The [Rows build notes](docs/ROWS.md) describe the pinned payload and comparison checks.
+
+The option-selection suites (`tests/test_loader.lua`, `tests/test_duplicates.lua`, `tests/test_package.py`) replay every selection of at most two options, every selection missing at most two, and 256 seeded pseudo-random selections: 564 of the 131,072 at seventeen options. Interactions between options are pairwise, which the first two groups cover exactly; replaying every selection took minutes per build and doubled with each option. `tests/test_components.py` runs the bundled suites in parallel and the timing-sensitive ones (performance, benchmarks, work budgets, Windows API) alone afterwards.
 
 To test the actual compiled loader with the pack, first build Bingus Shared Loader v18, then run:
 
@@ -32,8 +34,8 @@ For future component updates, import the reviewed source/tests, rebuild the stan
 These harnesses require local copies of the managers, use unique fixture directories under `build/`, and never use the live library or game installation. Run them for both standard and Rows ZIPs. Supply an extracted Arsenal 0.36.0 application directory containing `obfuscated_src/main` and its Node dependencies; supply an HD2MM application directory containing `Helldivers2ModManager.dll` and its dependencies.
 
 ```powershell
-node tests/test_arsenal.cjs ../releases/Vanilla-Plus-Megapack-v34.zip fixtures/arsenal build/arsenal-options
-dotnet run --project tests/hd2mm/Harness.csproj -c Release -- fixtures/hd2mm ../releases/Vanilla-Plus-Megapack-v34.zip build/hd2mm-options
+node tests/test_arsenal.cjs ../releases/Vanilla-Plus-Megapack-v35.zip fixtures/arsenal build/arsenal-options
+dotnet run --project tests/hd2mm/Harness.csproj -c Release -- fixtures/hd2mm ../releases/Vanilla-Plus-Megapack-v35.zip build/hd2mm-options
 ```
 
-The HD2MM harness targets .NET 9 Windows/WPF and uses no external NuGet packages. Each backend checks every subset of the sixteen options, every deployed archive byte for byte (the Mod Bindings Menu option deploys two), empty selection, purge, disable/re-enable and removal. JSON reports record the exact release checksum and manager version. Manager defaults are observed, not forced by the manifest.
+The HD2MM harness targets .NET 9 Windows/WPF and uses no external NuGet packages. Each backend checks every subset of the seventeen options, every deployed archive byte for byte (the Mod Bindings Menu option deploys two), empty selection, purge, disable/re-enable and removal. JSON reports record the exact release checksum and manager version. Manager defaults are observed, not forced by the manifest.

@@ -26,13 +26,15 @@ local entries = {KnowYourConstellation = 'install.lua', ArmoryPreviewCache = 'in
                  GalacticMenuHotkey = 'galactic_menu_hotkey.lua',
                  FlameDamageFixed = 'flame_damage_fixed.lua',
                  ModOptionsMenu = 'mod_options_menu.lua',
-                 ModBindingsMenu = 'mod_bindings_menu.lua'}
+                 ModBindingsMenu = 'mod_bindings_menu.lua',
+                 BetterLobbyManagement = 'addon.lua'}
 local guards = {ClickableScrollbars = 'ClickableScrollbars',
                 ArcThrowerRevamped = 'ArcThrowerRevampedInstalled',
                 GalacticMenuHotkey = 'GalacticMenuHotkeyInstalled',
                 FlameDamageFixed = 'FlameDamageFixedInstalled',
                 ModOptionsMenu = 'ModOptionsMenu',
-                ModBindingsMenu = 'ModBindingsMenu'}
+                ModBindingsMenu = 'ModBindingsMenu',
+                BetterLobbyManagement = 'BetterLobbyManagement'}
 for i = 4, #arg, 2 do
     local module, slug = arg[i], assert(arg[i + 1])
     local entry = entries[slug] or 'archive_loader.lua'
@@ -54,9 +56,30 @@ local registry_cannot_see = {['mods/cowboybingus/clickable_scrollbars'] = true,
                              ['mods/cowboybingus/galactic_menu_hotkey'] = true,
                              ['mods/cowboybingus/flame_damage_fixed'] = true,
                              ['mods/cowboybingus/mod_options_menu'] = true,
-                             ['mods/cowboybingus/mod_bindings_menu'] = true}
+                             ['mods/cowboybingus/mod_bindings_menu'] = true,
+                             ['mods/cowboybingus/better_lobby_management'] = true}
+-- The option selections to replay: every selection of at most two options, every one missing at most
+-- two, and 256 seeded pseudo-random ones. Interactions between options are pairwise, which the first two
+-- groups cover exactly; replaying all 2^n selections took minutes per build (65536 at sixteen options)
+-- and doubled with each option.
+local function selections(n)
+    local full, masks, seen = 2 ^ n - 1, {}, {}
+    local function add(mask) if not seen[mask] then seen[mask] = true; masks[#masks + 1] = mask end end
+    add(0); add(full)
+    for i = 0, n - 1 do
+        add(2 ^ i); add(full - 2 ^ i)
+        for j = i + 1, n - 1 do add(2 ^ i + 2 ^ j); add(full - 2 ^ i - 2 ^ j) end
+    end
+    local state = 20260929
+    for _ = 1, 256 do
+        state = state * 48271 % 2147483647
+        add(math.floor(state / 2147483647 * (full + 1)))
+    end
+    return masks
+end
 local cases = 0
-for mask = 0, 2 ^ #components - 1 do
+local subsets = selections(#components)
+for _, mask in ipairs(subsets) do
   for _, pack_wins in ipairs({false, true}) do
     local env = {}; for key, value in pairs(_G) do env[key] = value end
     env._G, env.print = env, function() end
@@ -133,4 +156,5 @@ for mask = 0, 2 ^ #components - 1 do
     cases = cases + 1
   end
 end
-print('PASS: ' .. cases .. ' duplicate-install combinations; both priorities, one module state, no stacked callbacks, original return tuples preserved')
+print('PASS: ' .. cases .. ' duplicate-install combinations (' .. #subsets .. ' of the ' .. 2 ^ #components
+    .. ' selections, each of at most two options or missing at most two, 256 seeded random); both priorities, one module state, no stacked callbacks, original return tuples preserved')

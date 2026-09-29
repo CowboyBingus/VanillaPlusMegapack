@@ -57,7 +57,7 @@ def main():
         assert len(package.namelist()) == len(expected) and set(package.namelist()) == expected
         manager = json.loads(package.read('manifest.json'))
         assert manager['Version'] == 1 and manager['Name'] == name+f' - v{VERSION}' and manager['Guid'] == (ROWS_GUID if rows else GUID)
-        assert len(manager['Options']) == len(components) == 16
+        assert len(manager['Options']) == len(components) == 17
         assert manager['IconPath'] == 'thumbnail.png'
         png = package.read('thumbnail.png')
         assert png[:8] == b'\x89PNG\r\n\x1a\n'
@@ -97,9 +97,11 @@ def main():
                 for suffix in ('.stream', '.gpu_resources'):
                     assert package.read(folder + '/' + INPUT_ARCHIVE + suffix) == b''
             choices.append(choice)
-        # Exercise every checkbox combination, including no selection. No disabled
-        # feature may leak into an enabled option's archive or a root fallback.
-        for mask in range(1 << len(components)):
+        # Checkbox combinations: none, all, each of at most two options or missing at most two, and 256
+        # seeded random ones (tests/test_loader.lua's selections). No disabled feature may leak into an
+        # enabled option's archive or a root fallback.
+        masks = selections(len(components))
+        for mask in masks:
             selected, wanted = {}, set()
             for i, (component, choice) in enumerate(zip(components, choices)):
                 if mask & (1 << i):
@@ -155,7 +157,30 @@ def main():
         for name in package.namelist():
             data = package.read(name).lower()
             assert b'users\\' not in data and b'users/' not in data
-    print(f'PASS: {len(components)} independent options, all {1 << len(components)} selections, exact pinned payloads, bindings input actions only in their option, no boot or shared loader')
+    print(f'PASS: {len(components)} independent options, {len(masks)} of the {1 << len(components)} selections, exact pinned payloads, bindings input actions only in their option, no boot or shared loader')
+
+
+def selections(n):
+    """tests/test_loader.lua's selections: at most two options, missing at most two, 256 seeded random."""
+    full, masks, seen = (1 << n) - 1, [], set()
+
+    def add(mask):
+        if mask not in seen:
+            seen.add(mask)
+            masks.append(mask)
+    add(0)
+    add(full)
+    for i in range(n):
+        add(1 << i)
+        add(full - (1 << i))
+        for j in range(i + 1, n):
+            add((1 << i) + (1 << j))
+            add(full - (1 << i) - (1 << j))
+    state = 20260929
+    for _ in range(256):
+        state = state * 48271 % 2147483647
+        add(int(state / 2147483647 * (full + 1)))
+    return masks
 
 
 if __name__ == '__main__':

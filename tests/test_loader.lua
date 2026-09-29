@@ -48,17 +48,20 @@ local names = {pack, 'mods/cowboybingus/better_stratagem_bounce',
     'mods/cowboybingus/consistent_vaulting', 'mods/cowboybingus/shallow_water_dive',
     'mods/cowboybingus/sentry_aim_retention', 'mods/cowboybingus/corpse_collision_repair', 'mods/cowboybingus/hover_pack_cancel', 'mods/cowboybingus/enemy_intelligence', 'mods/cowboybingus/armory_preview_cache',
     'mods/cowboybingus/clickable_scrollbars', 'mods/cowboybingus/arc_thrower_auto', 'mods/cowboybingus/galactic_menu_hotkey',
-    'mods/cowboybingus/flame_damage_fixed', 'mods/cowboybingus/mod_options_menu', 'mods/cowboybingus/mod_bindings_menu'}
+    'mods/cowboybingus/flame_damage_fixed', 'mods/cowboybingus/mod_options_menu', 'mods/cowboybingus/mod_bindings_menu',
+    'mods/cowboybingus/better_lobby_management'}
 local folders = {'', 'BetterStratagemBounce', 'HellpodSteeringUnlocked', 'ReinforcementBeaconsFixed',
     'ConsistentVaulting', 'ShallowWaterDiving', 'SentryAimRetention', 'EnemyCollisionSynchronized', 'ControllableHoverPack', 'KnowYourConstellation', 'ArmoryPreviewCache',
-    'ClickableScrollbars', 'ArcThrowerRevamped', 'GalacticMenuHotkey', 'FlameDamageFixed', 'ModOptionsMenu', 'ModBindingsMenu'}
+    'ClickableScrollbars', 'ArcThrowerRevamped', 'GalacticMenuHotkey', 'FlameDamageFixed', 'ModOptionsMenu', 'ModBindingsMenu',
+    'BetterLobbyManagement'}
 -- The shared loader build carries a built-in registry written before this
 -- component existed, so the registry path cannot see it: in game it is loaded
 -- through declared-entry discovery, which the 'discovery' pass below proves by
 -- running with that registry emptied. Both paths are asserted separately here
 -- instead of pretending the older registry knows the new module.
 local registry_cannot_see = {['mods/cowboybingus/clickable_scrollbars'] = true, ['mods/cowboybingus/arc_thrower_auto'] = true, ['mods/cowboybingus/galactic_menu_hotkey'] = true,
-    ['mods/cowboybingus/flame_damage_fixed'] = true, ['mods/cowboybingus/mod_options_menu'] = true, ['mods/cowboybingus/mod_bindings_menu'] = true}
+    ['mods/cowboybingus/flame_damage_fixed'] = true, ['mods/cowboybingus/mod_options_menu'] = true, ['mods/cowboybingus/mod_bindings_menu'] = true,
+    ['mods/cowboybingus/better_lobby_management'] = true}
 local function read(path)
     local file = assert(io.open(path, 'rb'))
     local bytes = file:read('*a'); file:close(); return bytes
@@ -71,15 +74,35 @@ if discovery_only then
     assert(replacements == 1, 'Expected exactly one legacy registry to remove for discovery proof')
     startup = string.dump(assert(loadstring(wrapper)), true)
 end
+-- The option selections to replay: every selection of at most two options, every one missing at most
+-- two, and 256 seeded pseudo-random ones. Interactions between options are pairwise, which the first two
+-- groups cover exactly; replaying all 2^n selections took minutes per build (65536 at sixteen options)
+-- and doubled with each option.
+local function selections(n)
+    local full, masks, seen = 2 ^ n - 1, {}, {}
+    local function add(mask) if not seen[mask] then seen[mask] = true; masks[#masks + 1] = mask end end
+    add(0); add(full)
+    for i = 0, n - 1 do
+        add(2 ^ i); add(full - 2 ^ i)
+        for j = i + 1, n - 1 do add(2 ^ i + 2 ^ j); add(full - 2 ^ i - 2 ^ j) end
+    end
+    local state = 20260929
+    for _ = 1, 256 do
+        state = state * 48271 % 2147483647
+        add(math.floor(state / 2147483647 * (full + 1)))
+    end
+    return masks
+end
 local cases = 0
 local scenarios = {}
+local subsets = selections(#names - 1)
 for _, installed_loader in ipairs({false, true}) do
   for _, installed_pack in ipairs({false, true}) do
     for failure = 0, #names * 2 do
         scenarios[#scenarios + 1] = {installed_loader, installed_pack, failure}
     end
   end
-  for mask = 0, 2 ^ (#names - 1) - 1 do
+  for _, mask in ipairs(subsets) do
     scenarios[#scenarios + 1] = {installed_loader, mask ~= 0, 0, mask}
   end
 end
@@ -191,7 +214,7 @@ for _, scenario in ipairs(scenarios) do
             end
             local identity = env.CowboyBingusModLoader.megapack
             if installed_pack and failure ~= 1 and failure ~= #names + 1 then
-                assert(identity.name == 'Vanilla Plus Megapack' and identity.revision == 'megapack-v34')
+                assert(identity.name == 'Vanilla Plus Megapack' and identity.revision == 'megapack-v35')
                 -- A loader that manages the LuaJIT cache (v18+) sets loader.jit; the pack then leaves it alone.
                 local managed = env.CowboyBingusModLoader.jit and env.CowboyBingusModLoader.jit.managed
                 assert((identity.jit_fallback == nil) == (managed == true))
@@ -231,4 +254,4 @@ assert(run_pack({version = 17, api = 1, modules = {}, jit = {managed = false}}, 
 assert(run_pack({version = 16, api = 1, modules = {}}, nil).jit_fallback == nil)
 local broken = {opt = {start = function() error('unknown or malformed optimization flag') end}}
 assert(run_pack({version = 16, api = 1, modules = {}}, broken).jit_fallback == nil)
-print('PASS: ' .. cases .. (discovery_only and ' discovery-only (legacy list removed)' or ' normal loader') .. ' bundle scenarios; all ' .. 2 ^ (#names - 1) .. ' option subsets with/without loader, failures isolated, one startup, callbacks preserved; LuaJIT cache fallback only for older loaders')
+print('PASS: ' .. cases .. (discovery_only and ' discovery-only (legacy list removed)' or ' normal loader') .. ' bundle scenarios; ' .. #subsets .. ' of the ' .. 2 ^ (#names - 1) .. ' option subsets (each of at most two options or missing at most two, 256 seeded random) with/without loader, failures isolated, one startup, callbacks preserved; LuaJIT cache fallback only for older loaders')

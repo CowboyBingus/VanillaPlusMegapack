@@ -1,4 +1,11 @@
-# v34
+# v35
+
+- New option: [Better Lobby Management](https://github.com/CowboyBingus/BetterLobbyManagement) v1.0, host tools in the escape menu's GAME tab. DISBAND SQUAD kicks every other player back to their own ship. PROMOTE announces the new host with the game's own "*name* is the new squad leader" line, kicks them home with the game's own player-menu KICK, finds their new lobby and moves the whole squad to their ship; only the host needs the mod. It also shortens the Galactic Map lobby scanner's recharge from 20 to 5 seconds (adjustable in Mod Options Menu, never longer than the game's own) and offers an own-continent lobby filter. Measured in recorded play, as separate mods before the merge: 0.003 ms per frame for the lobby tools and 0.001 ms for the scanner.
+- Seventeen independent options. Use one copy of Better Lobby Management: the standalone package or the pack option.
+- Faster build: the option-selection checks replay every selection of at most two options, every selection missing at most two and 256 seeded random selections (564 of 131,072) instead of every one, and the bundled mods' own test suites run in parallel. Each package builds in about 15 seconds instead of over 4 minutes.
+- The other sixteen bundled mods are unchanged from v34.
+
+## v34
 
 - [Flame Damage Fixed](https://github.com/CowboyBingus/FlameDamageFixed) v1.1 fixes v1.0's flame passing through armoured targets. v1.0 kept the flame off the Lumberer by moving it to a copy of its collision layer without layer 20, which is also the game's heavy-armour and vehicle layer: Chargers, the Factory Strider, tank turrets, the Illuminate dropship and more could not be hit. Now each Lumberer or Flame Sentry shares a private Havok collision group with its own flame, from its first burst until it is gone, and members of that group skip each other; no collision layer is changed, so everything else collides with the flame as in the base game. In recorded play the flame landed 4,822 hits on layer-20 hit-boxes (acid Chargers, Chargers, Impalers) and none on the Lumberer that fired it while the fix was running.
 - The two flame parts Flame Damage Fixed restored are no longer drawn: they still hit, but the flame no longer shows a second short, wide cone near the nozzle.

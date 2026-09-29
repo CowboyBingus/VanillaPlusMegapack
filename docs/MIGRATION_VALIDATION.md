@@ -1,6 +1,9 @@
 Supports Helldivers 2 Steam build 25480438 / EXE 1.8.46015.0.
 
-Offline source, package and read-only module checks passed. v34 changes only
+Offline source, package and read-only module checks passed. v35 adds only
+Better Lobby Management (v1.0), checked in recorded live play as its release
+candidate with a host and one friend (its scanner as the earlier Fast Lobby
+Scanner); the v35 package itself has not yet run in game. v34 changes only
 Flame Damage Fixed (v1.1), checked in recorded live play as its standalone
 release; the v34 package itself has not yet run in game. The v33 package ran in
 recorded real play on this build with loader v18 and fifteen of its options (its

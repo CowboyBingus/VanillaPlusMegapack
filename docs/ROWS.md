@@ -15,7 +15,7 @@ separately. Disable the standard megapack before enabling Rows. Give Rows
 priority over standalone forecast packages to use its layout. Purge / Deploy
 with the game closed. The loader priority rules are the same for both packs.
 
-The same sixteen independent mod options are available in Arsenal and HD2MM.
+The same seventeen independent mod options are available in Arsenal and HD2MM.
 Enable Know Your Constellation to use the Rows forecast; uncheck it to omit
 the forecast. Disable any standalone forecast copy as well if you want it off.
 

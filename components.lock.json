@@ -418,5 +418,38 @@
       "tests/test_mods_tab.lua": "51C9CBEB68D2E9E02FBA4E8FE4084E722546AEE6204DC3717160824E554F575C"
     },
     "source_origin": "Standalone v2.0 release source for Steam build 25480438; offline checks passed; MODS tab on both binding pages, section headers, automatic bindings, Double Tap and persistence checked in live play (controller activation offline only)."
+  },
+  {
+    "slug": "BetterLobbyManagement",
+    "name": "Better Lobby Management",
+    "revision": "v1.0",
+    "version": "1.0",
+    "repository": "https://github.com/CowboyBingus/BetterLobbyManagement",
+    "module": "mods/cowboybingus/better_lobby_management",
+    "entry": "direct",
+    "resource_sha256": "81833CA5FFC94619FC291B8DD04D770DD159E3E988A24A232657CEC2BE54E949",
+    "source_sha256": {
+      "src/addon.lua": "A4811A28CD03288F55B4E3986FA5D92BC12087BF9FE1ECA2A4697D81FB6E7200",
+      "src/chat.lua": "6254255AE6C67BDA90638EAF49A616A6367D50938CB55657150992E7B4A725A0",
+      "src/game.lua": "23E3ED0195196AEAAB63610FB8D8453D57E2C1569E7E1CD2AC8914ABB2A681F1",
+      "src/lobby.lua": "89BC5F1219D01CF5FAAB0971D610649D5F6E5A831810410BF445059C7A009E27",
+      "src/menu.lua": "ABAAF37C3D261D1005DAEA1C603E1EBF613ACC26686FED24C9E450EF9EDFF6CD",
+      "src/region.lua": "1F1F4F3DAB9D32D08BD9DF044CA5C37E5C59181C6A75BC59A3DC2460733EE7CA",
+      "src/scanner.lua": "621DFB0C03B6E98B335F5FC48E5338B2B280250B40A4299F8D9DE1A4DBD7E64E",
+      "src/windows_api.lua": "99462A69EF99840A5A976702FA764A019FC93A7E8B21AF890D5D1FD781BA6BBC",
+      "scripts/entry.py": "A07E581F7617E285C7FD9249D64A865ABB4C7378EAECDB80F6611E1A6158B34A",
+      "tests/fake_game.lua": "C860D4C3180445BACA7D143E10D0F43C4EBBAA4A574D6F05B3127C7E18F1B858",
+      "tests/frame_budget.lua": "4E1E9F47EE7FCCFD24F6C79D475103ABF77989FC344EBB527869029793654E49",
+      "tests/test_addon.lua": "C3E3A5E5AF80587214E7449D6F8CBE5600F8263AC4258320103B5B1D7F8E1F77",
+      "tests/test_chat.lua": "B102AFE3D38DB835F09C52DF095E0BA139B64A9B35BE28AC1CEBC6C292040AE8",
+      "tests/test_entry.lua": "38C3ADB47853D2DF6A7A2DC324518CA71C94C9C1156589D0713B2746B71E8D20",
+      "tests/test_game.lua": "EAB786CFB916D3478F0A4B926CEFBBB52B80DFB8C14012D1F8DFEF8DED972635",
+      "tests/test_lobby.lua": "0FB65954653C188C0D37886FADD7F87821A81C04B607D273EC97858F8EDB7026",
+      "tests/test_menu.lua": "43D9EAE6CC20F177B964E6F1307AD0D193C526E8A7AB4C946003A7637FA32476",
+      "tests/test_region.lua": "1ECDD7847D9DF1C03E769D498E312263B1D441C8BA855CF53B14ECEE7A7EAE59",
+      "tests/test_scanner.lua": "DAE464A84262104A9C8B3F3420EF25359086F1DAAD07207579C7992C20517D4C",
+      "tests/test_windows_api.lua": "DFA68BEE2E6CC2C2AF824630217411374EA827FC5B213BBB093039565C310810"
+    },
+    "source_origin": "Standalone v1.0 release source for Steam build 25480438; offline checks passed; DISBAND SQUAD, PROMOTE with the new squad leader notice and the escape menu close checked in live play with a host and one friend (larger squads offline only); the scanner recharge live-tested as the standalone Fast Lobby Scanner."
   }
 ]

@@ -14,7 +14,7 @@ from package import package_release, release_directory
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build'
 MODULE = 'mods/cowboybingus/vanilla_plus_megapack'
-VERSION = '34'
+VERSION = '35'
 REVISION = f'megapack-v{VERSION}'
 GUID = '876060ae-0640-4ac5-95b6-ec7c9a0567d3'
 ROWS_GUID = 'fb497df5-080b-48a5-b31d-103ccb060e1c'
@@ -38,6 +38,7 @@ OPTION_DESCRIPTIONS = {
     'FlameDamageFixed': 'Fixes the Lumberer\'s and Flame Sentry\'s flame: two flame parts spawn again, it starts at the Cremator\'s distances and no longer hits the weapon that fires it, while still hitting Chargers and every other target.',
     'ModOptionsMenu': 'Adds a native MODS tab to the Options screen, where mods such as Shallow Water Diving offer their settings.',
     'ModBindingsMenu': 'Adds a native MODS tab to the keyboard and controller binding pages, where mods such as Ship Station Hotkeys offer rebindable keys.',
+    'BetterLobbyManagement': 'Host tools in the escape menu: DISBAND SQUAD, and PROMOTE, which moves the whole squad to the new host\'s ship (only the host needs the mod). Also a 5-second Galactic Map lobby scanner and an own-continent lobby filter.',
 }
 
 
@@ -107,6 +108,22 @@ def build_component(component, build=BUILD, rows=False):
     for relative, expected in component['source_sha256'].items():
         if sha((root / relative).read_bytes()) != expected:
             raise ValueError('Pinned source changed: ' + component['slug'] + '/' + relative)
+    if component['slug'] == 'BetterLobbyManagement':
+        # The standalone build assembles its plaintext entry from src/ with scripts/entry.py; the option ships
+        # those exact bytes, which carry the discovery declaration, so they are also its entry.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('lobby_entry', root / 'scripts/entry.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        body = module.entry_text(root, component['version'])
+        payload = struct.pack('<II', len(body), 2) + body
+        if sha(payload) != component['resource_sha256']:
+            raise ValueError('Addon resource differs from the verified standalone release: ' + component['slug'])
+        directory = build / component['slug']
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'mod.lua.main').write_bytes(payload)
+        (directory / 'better_lobby_management.lua').write_bytes(body)  # the plain entry, for its test_entry
+        return payload
     if component.get('source'):
         # A standalone addon that declares itself on its first line: the option
         # ships the standalone resource byte for byte, with no wrapper and no
@@ -291,7 +308,7 @@ def main():
                         'Include': [folder]})
     report = {
         'name': 'Vanilla Plus Megapack', 'slug': 'VanillaPlusMegapack', 'revision': REVISION, 'guid': GUID,
-        'description': 'Choose any of the sixteen bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v18. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. With default Arsenal priority put the loader last.',
+        'description': 'Choose any of the seventeen bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v18. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. With default Arsenal priority put the loader last.',
         'requires': [{'name': 'Bingus Shared Loader', 'guid': '612eaf70-d682-43c7-9efd-16dcc695f977', 'api': 1, 'revision': 'loader-v18'}],
         'game_exe_sha256': EXE_SHA, 'game_dll_sha256': GAME_DLL_SHA,
         'deployment_files': files, 'options': options,
