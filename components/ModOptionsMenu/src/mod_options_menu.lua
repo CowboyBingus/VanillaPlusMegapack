@@ -2,6 +2,11 @@
 -- Native MODS tab on the Options screen for Steam build 25480438.
 if rawget(_G, 'ModOptionsMenu') then return end
 local ffi, bit = require('ffi'), require('bit')
+-- Texts and translations: mom_text = {module = src/bingus_text.lua, locales =
+-- locales/}, which the build places ahead of this file as a local (tests
+-- provide it as a global). This chunk is near Lua's limit of 200 locals, so
+-- every translation helper lives in this one table.
+local translation = {T = mom_text.module}
 
 ffi.cdef [[
 typedef unsigned char MOM_u8;
@@ -43,6 +48,9 @@ end
 local function note(message)
     if log_file then pcall(function() log_file:write(message .. '\n'); log_file:flush() end) end
 end
+-- MOM's own texts, in the game's language when a translation has them.
+translation.tr = translation.T.new(mom_text.locales.en, mom_text.locales.bundled,
+                                   function(message) note('Text: ' .. message) end)
 
 local GAME_SHA256 = '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
 local EXE_SHA256 = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
@@ -56,7 +64,6 @@ local TAB_BAR, TAB_COUNT, TAB_CURRENT, TAB_LABELS = 1248, 57448, 57452, 57320
 local TAB_BUTTON_STATE, TAB_BUTTON_ACTIVE, TAB_TEXT, TAB_STRIDE = 11004, 11021, 8296, 3400
 local TAB_LABELS_RVA = 0x33114d0
 local NATIVE_TABS, OPTIONS_TAB, MODS_TAB = 3, 2, 3
-local MODS_TITLE = 'MODS'
 -- OPTIONS content: a column of nine category buttons and one panel per category.
 local OPTIONS_CONTENT = 3010456
 local CATEGORY_BUTTON, CATEGORY_STRIDE, CATEGORY_TEXT = 816, 14920, 1928
@@ -200,10 +207,12 @@ local NATIVE_LABELS = {
 }
 
 -- values: applied values; pending: the player's unapplied edits, by option id.
+-- mods_title, empty_text: MOM's own texts, resolved when the escape menu opens.
 local state = {initialized = false, base = nil, native = nil, errors = 0,
                mods = {}, options = {}, option_count = 0, values = {}, pending = {}, pending_count = 0,
                saved = nil, callbacks = {}, texts = {}, text_addresses = {}, revision = 0,
-               dirty = false, save_timer = 0, view = nil, mods_tab_logged = false, overflow_logged = false}
+               dirty = false, save_timer = 0, view = nil, mods_tab_logged = false, overflow_logged = false,
+               menu_seen = false, language = nil, mods_title = 'MODS', empty_text = 'NO MOD OPTIONS INSTALLED'}
 
 -- Memory ---------------------------------------------------------------------
 
@@ -222,6 +231,12 @@ local function read_pointer(address)
     if not fill(word, address, 8) then return nil end
     local value = word[0] + word[1] * 4294967296
     return valid_pointer(value) and value or nil
+end
+-- translation.read: up to 16 bytes as a string, for the game's Text Language.
+translation.bytes = ffi.new('MOM_u8[16]')
+function translation.read(address, size)
+    if size > 16 or not fill(translation.bytes, address, size) then return nil end
+    return ffi.string(translation.bytes, size)
 end
 -- Everything else is loaded and stored directly: game.dll's image stays
 -- mapped, and the escape menu screen is in use by the game while it is on top
@@ -318,6 +333,23 @@ local function display_text(text)
     return (text:gsub('[%c]', ' '):gsub('^%s+', ''):gsub('%s+$', ''))
 end
 
+-- A registered text: a string, or (API version 2) a function returning one,
+-- which is called now and again whenever the escape menu opens, so the text
+-- can follow the game's language. Limits count characters, so a Chinese or
+-- Cyrillic text gets the same room as an English one. Returns the text to
+-- show, or nil when the value is not a usable text.
+function translation.resolve(value, limit)
+    if type(value) == 'function' then
+        local ok, result = pcall(value)
+        if not ok then return nil end
+        value = result
+    end
+    if type(value) ~= 'string' or translation.T.length(value) > limit then return nil end
+    local text = display_text(value)
+    if text == '' or not translation.T.check(text) then return nil end
+    return text
+end
+
 -- Text buffers live as long as the addon: a hidden widget may still point at
 -- one after the MODS view closes, until the game re-initialises that widget.
 -- Their addresses are kept as numbers, so a check compares without allocating.
@@ -355,6 +387,50 @@ end
 local function show_label(widget, label)
     state.native.clear_args(widget + LABEL)
     state.native.set_label(widget, label)
+end
+
+-- Registered texts given as functions follow the game's language: they are
+-- called again whenever the escape menu opens (never per frame). A result
+-- that is no longer a usable text keeps the text shown before. Mods keep the
+-- category they registered under; only its shown name changes.
+function translation.refresh()
+    local changed = false
+    local function refreshed(value, source, limit, upper)
+        if type(source) ~= 'function' then return value end
+        local text = translation.resolve(source, limit)
+        if not text then return value end
+        if upper then text = translation.T.upper(text) end
+        changed = changed or text ~= value
+        return text
+    end
+    for _, mod in pairs(state.mods) do mod.title = refreshed(mod.title, mod.source, 40, true) end
+    for _, option in pairs(state.options) do
+        local sources = option.sources
+        option.label = refreshed(option.label, sources.label, 64)
+        if option.description then
+            option.description = refreshed(option.description, sources.description, DESCRIPTION_LIMIT)
+        end
+        for index, source in ipairs(sources.choices) do
+            -- The game's own words keep the game's label.
+            if option.labels[index] == TEXT_TEMPLATE then
+                option.choices[index] = refreshed(option.choices[index], source, 48, true)
+            end
+        end
+    end
+    local title, empty = translation.tr('tab.mods'), translation.tr('category.none')
+    changed = changed or title ~= state.mods_title or empty ~= state.empty_text
+    state.mods_title, state.empty_text = title, empty
+    if changed then state.revision = state.revision + 1 end
+end
+
+-- The game's Text Language (5 guarded reads), logged when it changes.
+function translation.observe()
+    local tag, code = translation.T.observe(translation.read, state.base)
+    local seen = tag and (tag .. ' (game setting ' .. code .. ')') or (translation.T.language() .. ' (Steam)')
+    if seen ~= state.language then
+        state.language = seen
+        note('Text language: ' .. seen .. '.')
+    end
 end
 
 -- Values ---------------------------------------------------------------------
@@ -610,7 +686,7 @@ local function ensure_mods_tab(screen)
     local title = bar + TAB_TEXT + TAB_STRIDE * MODS_TAB
     if count == NATIVE_TABS + 1 then
         if get32(bar + TAB_LABELS + 4 * MODS_TAB) ~= TEXT_TEMPLATE then return false end
-        if not shows_text(title, MODS_TITLE) then show_text(title, MODS_TITLE) end
+        if not shows_text(title, state.mods_title) then show_text(title, state.mods_title) end
         return true
     end
     if count ~= NATIVE_TABS then return false end
@@ -625,7 +701,7 @@ local function ensure_mods_tab(screen)
     local button = bar + TAB_STRIDE * current
     put32(button + TAB_BUTTON_STATE, 3)
     put8(button + TAB_BUTTON_ACTIVE, 1)
-    show_text(title, MODS_TITLE)
+    show_text(title, state.mods_title)
     if not state.mods_tab_logged then
         state.mods_tab_logged = true
         note('Added native MODS tab (current tab ' .. current .. ').')
@@ -643,7 +719,7 @@ local function label_categories(view)
         local button = category_button(view.content, index)
         local mod = index < MOD_BUTTONS and view.mods[index + 1]
         if mod or (index == 0 and #view.mods == 0) then
-            show_text(button + CATEGORY_TEXT, mod and mod.title or 'NO MOD OPTIONS INSTALLED')
+            show_text(button + CATEGORY_TEXT, mod and mod.title or state.empty_text)
             native.set_visible(button, 1)
         else
             native.set_visible(button, 0)
@@ -985,11 +1061,21 @@ local function step(dt)
     -- A view dropped with the menu (closed or rebuilt) never applies its edits;
     -- reopening the escape menu re-initialises every widget we touched.
     if status == 'closed' then
+        state.menu_seen = false
         if view then state.view = nil; drop_pending(); note('Escape menu closed on the MODS tab.') end
         if state.dirty then save_values() end
         return
     end
     if status ~= 'open' then return end
+    if not state.menu_seen then
+        -- The menu just opened. Its OPTIONS tab is where the game's Text
+        -- Language changes, so the language is read and the texts refreshed
+        -- here, once per opening.
+        state.menu_seen = true
+        translation.observe()
+        translation.tr:refresh()
+        translation.refresh()
+    end
     if view and view.screen ~= screen then state.view, view = nil, nil; drop_pending() end
     if not ensure_mods_tab(screen) then
         if view then state.view = nil; drop_pending() end
@@ -1023,19 +1109,17 @@ local function caller_mod()
             if name ~= '' then return name end
         end
     end
-    return 'MODS'
+    return translation.tr('mod.unnamed')
 end
 
-local function plain_text(value, limit)
-    return type(value) == 'string' and display_text(value) ~= '' and #value <= limit
-end
-
+-- sources: the registered values (strings or functions), for translation.refresh.
 local function new_option(id, spec)
     local kind = spec.type
-    local option = {id = id, kind = kind, label = display_text(spec.label), gap = spec.gap == true}
+    local option = {id = id, kind = kind, label = translation.resolve(spec.label, 64), gap = spec.gap == true,
+                    sources = {label = spec.label, description = spec.description, choices = {}}}
     if spec.description ~= nil then
-        if not plain_text(spec.description, DESCRIPTION_LIMIT) then return nil, 'invalid description' end
-        option.description = display_text(spec.description)
+        option.description = translation.resolve(spec.description, DESCRIPTION_LIMIT)
+        if not option.description then return nil, 'invalid description' end
     end
     if kind == 'toggle' then
         option.labels, option.default = {OFF_TEXT, ON_TEXT}, spec.default == true
@@ -1047,9 +1131,12 @@ local function new_option(id, spec)
         end
         option.choices, option.labels = {}, {}
         for index, choice in ipairs(choices) do
-            if not plain_text(choice, 48) then return nil, 'invalid choice name' end
-            option.choices[index] = display_text(choice):upper()
+            local text = translation.resolve(choice, 48)
+            if not text then return nil, 'invalid choice name' end
+            option.choices[index] = translation.T.upper(text)
+            -- A word the game translates itself (ON, OFF, LOW...) shows the game's own label.
             option.labels[index] = NATIVE_WORDS[option.choices[index]] or TEXT_TEMPLATE
+            option.sources.choices[index] = choice
         end
         option.default = spec.default == nil and 1 or spec.default
     elseif kind == 'slider' then
@@ -1073,26 +1160,46 @@ local function new_option(id, spec)
     return option
 end
 
+-- Texts given as functions may differ between registrations (another
+-- language): only texts given as strings are compared.
 local function same_option(a, b)
-    if a.kind ~= b.kind or a.label ~= b.label or a.default ~= b.default or a.description ~= b.description then
+    local function same_text(x, y, source_x, source_y)
+        return type(source_x) == 'function' or type(source_y) == 'function' or x == y
+    end
+    local sa, sb = a.sources, b.sources
+    if a.kind ~= b.kind or a.default ~= b.default or not same_text(a.label, b.label, sa.label, sb.label)
+       or not same_text(a.description, b.description, sa.description, sb.description) then
         return false
     end
-    if a.kind == 'choice' then return table.concat(a.choices, '\n') == table.concat(b.choices, '\n') end
+    if a.kind == 'choice' then
+        if #a.choices ~= #b.choices then return false end
+        for index = 1, #a.choices do
+            if not same_text(a.choices[index], b.choices[index], sa.choices[index], sb.choices[index]) then
+                return false
+            end
+        end
+        return true
+    end
     if a.kind == 'slider' then return a.min == b.min and a.max == b.max and a.step == b.step end
     return true
 end
 
-local api = {api = 1, version = 1, max_mods = MOD_BUTTONS, max_options = MAX_ROWS}
+-- Version 2 (v1.1): texts may be functions; limits count characters.
+local api = {api = 1, version = 2, max_mods = MOD_BUTTONS, max_options = MAX_ROWS}
 -- id: stable unique string that keys the saved value. spec: {type = 'toggle'
 -- | 'choice' | 'slider', label = 'Row text', mod = 'Mod name', default = ...,
 -- choices = {...} (choice), min/max/step (slider), gap = true (space above),
 -- description = 'Shown beside the rows while the option is selected'}.
+-- label, mod, description and each choice may be a function returning the
+-- text in the current language (see translation.refresh). Limits in characters:
+-- label 64, mod 40, choice 48, description 400.
 function api.register_option(id, spec)
     if type(id) ~= 'string' or id == '' or #id > 96 or id:find('[%c]') or type(spec) ~= 'table'
-       or not plain_text(spec.label, 64) then
+       or not translation.resolve(spec.label, 64) then
         return false, 'invalid option registration'
     end
-    if spec.mod ~= nil and not plain_text(spec.mod, 40) then return false, 'invalid mod name' end
+    local mod_name = spec.mod ~= nil and translation.resolve(spec.mod, 40)
+    if spec.mod ~= nil and not mod_name then return false, 'invalid mod name' end
     local option, reason = new_option(id, spec)
     if not option then return false, reason end
     local existing = state.options[id]
@@ -1100,10 +1207,11 @@ function api.register_option(id, spec)
         if same_option(existing, option) then return true end
         return false, 'option already registered differently'
     end
-    local title = display_text(spec.mod or caller_mod()):upper()
+    -- Options group under the mod's name as first registered.
+    local title = translation.T.upper(mod_name or caller_mod())
     local mod = state.mods[title]
     if not mod then
-        mod = {title = title, order = {}}
+        mod = {title = title, source = spec.mod, order = {}}
         state.mods[title] = mod
     end
     if #mod.order >= MAX_ROWS then return false, 'mod already has ' .. MAX_ROWS .. ' options' end

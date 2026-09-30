@@ -233,3 +233,36 @@ local found=false
 for _,tag in ipairs(horde.tags)do if tag==31 then found=true end end
 assert(found,'HordeOnly mission mode must add its native tag')
 print('PASS: inserted native tag preserves catalogue IDs; all eight mission exclusions supported')
+
+-- Spawn-weight multipliers: category-72 campaign modifiers on the hovered
+-- planet (deduplicated by modifier ID) and type-15 war effects in scope.
+overrides={}
+local function float(n) return ffi.string(ffi.new('float[1]',n),4) end
+local war_strider,tank=0xbfb1567b,0x72c5564a
+local other_campaign=remote_sample.board+1053752
+local other_defs=api.pointer(api.read(other.game+0x347cd98,8))
+local function weight_row(id,family,factor)
+    return word(id)..word(72)..word(9000+id)..string.rep('\0',12)..word(13)..word(family)
+        ..word(0)..word(2)..word(math.floor(factor*100))..float(factor)..word(1)
+end
+local base_row=api.read(other_defs,52)
+put(other_defs+53248,word(3))
+put(other_defs,base_row..weight_row(501,war_strider,5)..weight_row(502,tank,0.5))
+-- The hovered planet carries 501 twice and 502 once; planet 76 is not hovered.
+put(other_campaign+304*268+286952,word(501)..word(501)..word(502)..string.rep('\0',116)..word(3))
+put(other_campaign+304*76+286952,word(502)..string.rep('\0',124)..word(1))
+local function war_effect(scope,value,family,factor)
+    return string.char(15)..string.rep('\0',3)..word(family)..float(factor)..string.rep('\0',68)
+        ..word(1)..string.char(scope,0,0,0)..word(value)..word(0)..string.rep('\0',260)
+end
+put(globals,war_effect(3,0,tank,0.25)..war_effect(0,76,war_strider,9)..string.rep('\0',30*356))
+local weighted=other_reader:sample('map')
+assert(weighted and weighted.complete,table.concat(weighted and weighted.unresolved or {},','))
+assert(weighted.zone and weighted.zone[war_strider]==5 and weighted.zone[tank]==0.5,
+    'Category-72 weights must apply once per modifier ID on the hovered planet only')
+assert(weighted.war and weighted.war[tank]==0.25 and not weighted.war[war_strider],
+    'War effects must follow their scope: global applies, another planet does not')
+overrides={}
+local plain=other_reader:sample('map')
+assert(plain.zone==nil and plain.war==nil,'No multipliers without applicable rows')
+print('PASS: category-72 spawn weights on the hovered planet, deduplicated IDs, scoped type-15 war effects')

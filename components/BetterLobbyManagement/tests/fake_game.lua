@@ -101,6 +101,12 @@ function F.new(modules)
         for i = 0, size - 1 do bytes[buffer + i] = bytes[address + i] end
         return true
     end
+    function api.read_bytes(address, size)
+        if size > 16 or not mapped(address) then return nil end
+        local out = {}
+        for i = 0, size - 1 do out[i + 1] = string.char(bytes[address + i] or 0) end
+        return table.concat(out)
+    end
     function api.writable_data() api.queries = api.queries + 1; return not world.readonly end
     function api.write_f32(address, value)
         if not api.writable_data(address, 4) then return false end
@@ -395,6 +401,148 @@ function F.install_scanner(world, S)
     world.put64(F.GAME + S.CONFIG_PTR_RVA, F.SCANNER_CONFIG)
     world.put32(F.SCANNER_CONFIG + S.RECHARGE, world.scanner_value or 20)
     world.putf(F.MATCH + S.COUNTDOWN, 0)
+end
+
+-- The SOS system and the lobby wrapper (src/sos.lua), laid out like the
+-- game's: the SOS object (world.sos = {active, enabled, time}), the lobby's
+-- key cache, pending-post mask and post countdown, and the host's privacy
+-- setting (world.privacy). The game's own functions, as it has them:
+--   0x67AA20, the native the mod calls (recorded as 'sos_deactivate'; the
+--     game's own calls are not recorded): as host, lobby key 8 = 0, then its
+--     privacy setter (0x134FCA0): key 19 = 0 while PlayFab's copy of the lobby
+--     (world.playfab) still has key 8 on, else the privacy setting; then the
+--     SOS off.
+--   0x10925D0, the key setter the mod calls (recorded as 'lobby_set' {key, value}).
+--   world.sos_on(): 0x67A9A0, as host key 8 = 1 and key 19 = 0 (Public); on.
+--   world.sos_beacon(): a beacon called in: one SOS Beacon use spent (while
+--     one is left), one more enabled component, then its activation while the
+--     session holds fewer than 4 peers.
+-- The stratagems: the SOS Beacon's settings (world.sos_limit uses per
+-- mission, 1) and the host's player record with three slots, the SOS
+-- Beacon's in the middle (world.sos_uses()).
+--   world.player_joins(peer) / world.player_leaves(peer): the session changes,
+--     then the game's SOS rules: off once 4 peers are in (0xB5EA90), on again
+--     after a leave while a beacon stands and it is off (0xB5F140).
+--   world.lobby_update(dt): the lobby's post countdown; at <= 0 the pending
+--     keys go to PlayFab (world.playfab, recorded as 'lobby_post' {key 8,
+--     key 19}) and it restarts at 30 s.
+F.SOS, F.SOS_SETTINGS, F.PLAYERS = 0x2c700000000, 0x2c800000000, 0x2c900000000
+function F.install_sos(world, B, G)
+    local put32, get32 = world.put32, world.get32
+    world.put64(F.GAME + B.STRATAGEMS + 8 * B.SOS_STRATAGEM, F.SOS_SETTINGS)
+    put32(F.SOS_SETTINGS, B.SOS_STRATAGEM)
+    world.sos_limit = 1
+    put32(F.SOS_SETTINGS + B.STRATAGEM_USES, world.sos_limit)
+    put32(F.SOS_SETTINGS + B.STRATAGEM_SHARED, 0)
+    world.put64(F.GAME + B.PLAYERS_PTR, F.PLAYERS)
+    put32(F.PLAYERS + B.PLAYER_COUNT, 1)
+    put32(F.PLAYERS + B.SLOT_COUNT, 3)
+    for i, kind in ipairs({0x7c, B.SOS_STRATAGEM, 0x21}) do
+        local slot = F.PLAYERS + B.SLOTS + (i - 1) * B.SLOT_SIZE
+        put32(slot, kind)
+        put32(slot + B.SLOT_USES, kind == B.SOS_STRATAGEM and world.sos_limit or B.NO_LIMIT)
+    end
+    world.sos_slot = F.PLAYERS + B.SLOTS + B.SLOT_SIZE
+    function world.sos_uses() return get32(world.sos_slot + B.SLOT_USES) end
+    world.code[F.GAME + B.DEACTIVATE.rva] = B.DEACTIVATE.bytes
+    world.code[F.GAME + B.SET_KEY.rva] = B.SET_KEY.bytes
+    for _, code in ipairs(B.CODE) do world.code[F.GAME + code.rva] = code.bytes end
+    world.put64(F.GAME + B.SOS_PTR, F.SOS)
+    local lobby = F.CTX + G.LOBBY
+    world.lobby = lobby
+    local function key_address(index) return lobby + B.KEYS + index * B.KEY_SIZE end
+    function world.key(index) return world.get_string(key_address(index), 16) end
+    -- The game's key setter: the text, and the key's pending bit when it changed.
+    local function set_key(index, value)
+        local text = tostring(value)
+        if world.key(index) == text then return end
+        world.put_string(key_address(index), text)
+        local mask, bit = get32(lobby + B.PENDING), 2 ^ index
+        if math.floor(mask / bit) % 2 == 0 then put32(lobby + B.PENDING, mask + bit) end
+    end
+    world.set_key = set_key
+    world.put_string(key_address(B.KEY_SOS), '0')
+    world.put_string(key_address(B.KEY_PRIVACY), '1')
+    world.playfab = {[B.KEY_SOS] = '0', [B.KEY_PRIVACY] = '1'}
+    world.putf(lobby + B.COUNTDOWN, 30)
+    world.privacy = 1
+    world.sos = {active = 0, enabled = 0, time = 0}
+    local function write_sos()
+        world.put8(F.SOS + B.ACTIVE, world.sos.active)
+        put32(F.SOS + B.ENABLED, world.sos.enabled)
+        world.put64(F.SOS, world.sos.time)
+    end
+    local sync = world.sync
+    function world.sync()
+        sync()
+        write_sos()
+        put32(F.STATE + B.PRIVACY, world.privacy)
+        put32(F.PLAYERS, world.local_peer.lo); put32(F.PLAYERS + 4, world.local_peer.hi)
+    end
+    local function hosting() return F.key(world.host) == F.key(world.local_peer) end
+    -- The game's privacy setter: Public while PlayFab shows the SOS flag on.
+    local function set_privacy(value)
+        set_key(B.KEY_PRIVACY, world.playfab[B.KEY_SOS] ~= '0' and 0 or value)
+    end
+    local function off()
+        if hosting() then
+            set_key(B.KEY_SOS, 0)
+            set_privacy(world.privacy)
+        end
+        world.sos.active, world.sos.time = 0, 0
+        write_sos()
+    end
+    world.natives[F.GAME + B.DEACTIVATE.rva] = function(sos)
+        world.calls[#world.calls + 1] = {name = 'sos_deactivate', sos}
+        assert(sos == F.SOS, 'the SOS object')
+        off()
+    end
+    world.natives[F.GAME + B.SET_KEY.rva] = function(address, index, value)
+        world.calls[#world.calls + 1] = {name = 'lobby_set', index, value}
+        assert(address == lobby, 'the lobby wrapper')
+        set_key(index, value)
+    end
+    function world.sos_on()
+        if hosting() then
+            set_key(B.KEY_SOS, 1)
+            set_privacy(0)
+        end
+        world.sos.active, world.sos.time = 1, world.frame + 1
+        write_sos()
+    end
+    function world.sos_beacon()
+        local uses = world.sos_uses()
+        if uses > 0 and uses ~= B.NO_LIMIT then put32(world.sos_slot + B.SLOT_USES, uses - 1) end
+        world.sos.enabled = world.sos.enabled + 1
+        write_sos()
+        if #world.session < 4 then world.sos_on() end
+    end
+    function world.player_joins(peer)
+        world.session[#world.session + 1] = peer
+        world.sync()
+        if #world.session >= 4 and world.sos.enabled > 0 and world.sos.active ~= 0 then off() end
+    end
+    function world.player_leaves(peer)
+        world.remove_from_session(F.key(peer))
+        world.sync()
+        if world.sos.enabled > 0 and world.sos.active == 0 then world.sos_on() end
+    end
+    function world.lobby_update(dt)
+        local left = world.api.loadf(lobby + B.COUNTDOWN) - (dt or 0.016)
+        if left > 0 then
+            world.putf(lobby + B.COUNTDOWN, left)
+            return
+        end
+        world.putf(lobby + B.COUNTDOWN, 30)
+        local mask = get32(lobby + B.PENDING)
+        if mask == 0 then return end
+        for _, index in ipairs({B.KEY_SOS, B.KEY_PRIVACY}) do
+            if math.floor(mask / 2 ^ index) % 2 == 1 then world.playfab[index] = world.key(index) end
+        end
+        world.calls[#world.calls + 1] = {name = 'lobby_post', world.playfab[B.KEY_SOS], world.playfab[B.KEY_PRIVACY]}
+        put32(lobby + B.PENDING, 0)
+    end
+    world.sync()
 end
 
 -- The escape menu's GAME tab laid out like the game's (see src/menu.lua), with

@@ -77,6 +77,7 @@ function M.new(api,game)
         box.font = hash(game+0x3772268)
         box.material = hash(pointer(game+0x37c5478)+24)
         box.atlas = hash(game+0x3772ee8)
+        box.screen = screen
         -- No guessed coordinates if the native panel is absent or mid-layout.
         return box
     end

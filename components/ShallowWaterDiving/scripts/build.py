@@ -7,11 +7,13 @@ import sys
 sys.dont_write_bytecode=True
 ROOT=Path(__file__).resolve().parents[1]
 from archive import GAME,LUA,EXE_SHA,GAME_DLL_SHA,ARCHIVE,sha,make_archive
-from module import build_module
+from module import build_module,locale_files
+import translations
 from package import package_release
 
 MODULE='mods/cowboybingus/shallow_water_dive'
-REVISION='data-v3.8'
+REVISION='data-v3.9'
+VERSION='v3.9'
 FORBIDDEN=('VirtualAlloc','VirtualProtect','FlushInstructionCache','CreateRemoteThread',
            'RtlAddFunctionTable','RtlDeleteFunctionTable','LoadLibrary')
 def run(args,**kwargs):
@@ -26,15 +28,20 @@ def main():
     for path in (ROOT/'src').glob('*.lua'):
         if any(api in path.read_text(encoding='utf-8') for api in FORBIDDEN):
             raise ValueError('Unsupported executable modification API in '+path.name)
+    # Bundled translations must be data only and free of errors.
+    for path in locale_files(ROOT)[1:]:
+        problems=translations.check(ROOT/'locales',path.stem,out=lambda line:None)
+        if problems.errors: raise SystemExit(chr(10).join(problems.errors))
     resources=build_module(ROOT,build,MODULE,'dive_data.lua',REVISION)
     env=dict(os.environ,LUA_PATH=str(LUA.parent/'?.lua')+';;')
     tests=''
+    tests+=run([LUA,ROOT/'tests/test_bingus_text.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_dive.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_loader.lua',ROOT/'src'],env=env)
     (build/ARCHIVE).write_bytes(make_archive(resources))
     for suffix in ('.stream','.gpu_resources'): (build/(ARCHIVE+suffix)).write_bytes(b'')
     files={f'data/{ARCHIVE}{suffix}':f'build/{ARCHIVE}{suffix}' for suffix in ('','.stream','.gpu_resources')}
-    report={'name':'Shallow Water Diving','slug':'ShallowWaterDiving','revision':REVISION,
+    report={'name':'Shallow Water Diving','slug':'ShallowWaterDiving','revision':REVISION,'version':VERSION,
         'guid':'d93cfc97-0e42-47d6-936a-30e96a7fa539',
         'description':'Preserves the launch of a shallow-water dive until landing or deep-water entry; the depth limit is adjustable in Mod Options Menu. Requires Bingus Shared Loader v18.',
         'game_exe_sha256':EXE_SHA,'game_dll_sha256':GAME_DLL_SHA,'deployment_files':files,
@@ -49,12 +56,12 @@ def main():
         'water_depth_limit':{'default_game_units':0.20,'max_game_units':1.30,'setting':'optional Mod Options Menu slider, 0.05 steps; 1.30 is the standing drowning reference, where swimming begins','reference':'water surface minus native avatar root','tolerance':0.00001,'visual_calibration':'0.20 default tightened after user reported 0.30 allowing knee-depth dives'},
         'offline_tests':tests.strip(),
         'source_sha256':{p.relative_to(ROOT).as_posix():sha(p.read_bytes())
-            for folder,pattern in [('src','*.lua'),('tests','*.*'),('scripts','*.py')]
+            for folder,pattern in [('src','*.lua'),('tests','*.*'),('scripts','*.py'),('locales','*.lua')]
             for p in (ROOT/folder).glob(pattern)}}
     release=package_release(ROOT,build,report)
     tests+=run([sys.executable,ROOT/'tests/test_package.py',release])
     report['release']={'path':Path(os.path.relpath(release,ROOT)).as_posix(),'sha256':sha(release.read_bytes())}
     (build/'build-report.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
     (build/'offline-tests.txt').write_text(tests,encoding='utf-8')
-    print(tests.strip());print('Built '+str(release)+'; in-game validation pending.')
+    print(tests.strip());print('Built '+str(release)+'.')
 if __name__=='__main__': main()

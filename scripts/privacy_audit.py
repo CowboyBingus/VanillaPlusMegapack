@@ -130,8 +130,7 @@ def audit(packages=(), history=False):
             assert manager['Version'] == 1 and len(manager['Options']) == len(components)
             for component, option in zip(components, manager['Options']):
                 folder = 'options/' + component['slug']
-                variant = component.get('rows', {}) if slug == 'VanillaPlusMegapackRows' else {}
-                assert option['Name'] == variant.get('name', component['name'])
+                assert option['Name'] == component['name']
                 assert option['Include'] == [folder]
                 expected |= {folder + '/9ba626afa44a3aa3.patch_0' + s
                              for s in ('', '.stream', '.gpu_resources')}

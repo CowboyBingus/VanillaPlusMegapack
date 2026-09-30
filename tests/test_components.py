@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from build import ROOT, BUILD, LUA, load_components, run, sha
+import translations  # noqa: E402  (scripts/translations.py, the translators' tool)
 
 
 def main():
@@ -23,11 +24,13 @@ def main():
     for order in ('hellpod-first', 'bounce-first'):
         commands.append([steering / 'tests/test_api_coexistence.lua', steering / 'src', bounce / 'src', order])
     suites = {
-        'KnowYourConstellation': [(n,None) for n in ('test_resolve','test_panel','test_install','test_mission','test_heavy','test_presentation','test_rows')],
+        'KnowYourConstellation': [(n, None) for n in ('test_bingus_text', 'test_locales', 'test_resolve', 'test_roster',
+                                                      'test_panel', 'test_install', 'test_mission', 'test_presentation',
+                                                      'test_budget')],
         'ControllableHoverPack': [(n,None) for n in ('test_cancel','test_snapshot','test_settings','test_loader','test_replay')],
         'ReinforcementBeaconsFixed': [('test_data', 'solo_scenarios'), ('test_startup', None)],
         'ConsistentVaulting': [(n, None) for n in ('test_vault', 'test_geometry', 'test_raised_approach', 'test_slope', 'test_loader')],
-        'ShallowWaterDiving': [('test_dive', None), ('test_loader', None)],
+        'ShallowWaterDiving': [('test_bingus_text', None), ('test_dive', None), ('test_loader', None)],
         'SentryAimRetention': [('test_aim', 'gatling_target_loss'), ('test_firing', 'firing_sweeps'),
                                ('test_loader', None), ('test_snapshot', None), ('test_windows_api', None)],
     }
@@ -86,7 +89,8 @@ def main():
         commands.append(command)
     commands.append([mods / 'GalacticMenuHotkey/tests/test_hotkey.lua',
                      mods / 'GalacticMenuHotkey/src/galactic_menu_hotkey.lua'])
-    # Flame Damage Fixed takes its component root; the two menus take their source file.
+    # Flame Damage Fixed takes its component root; the menus and the hotkeys take their main source file (the
+    # suites load src/bingus_text.lua and locales/en.lua beside it), their text module suites the src folder.
     flame = mods / 'FlameDamageFixed'
     commands.append([flame / 'tests/test_fix.lua', flame])
     commands.append([flame / 'tests/test_fix_adapter.lua', flame])
@@ -95,16 +99,39 @@ def main():
     for name in ('test_api', 'test_mods_tab'):
         commands.append([mods / 'ModBindingsMenu/tests' / (name + '.lua'),
                          mods / 'ModBindingsMenu/src/mod_bindings_menu.lua'])
+    for slug in ('ModOptionsMenu', 'ModBindingsMenu', 'GalacticMenuHotkey'):
+        commands.append([mods / slug / 'tests/test_bingus_text.lua', mods / slug / 'src'])
     blm = mods / 'BetterLobbyManagement'
-    for name in ('test_game', 'test_lobby', 'test_region', 'test_menu', 'test_chat', 'test_scanner', 'test_addon',
-                 'test_windows_api'):
+    for name in ('test_bingus_text', 'test_locales', 'test_game', 'test_lobby', 'test_region', 'test_menu', 'test_chat',
+                 'test_scanner', 'test_sos', 'test_addon', 'test_windows_api'):
         commands.append([blm / 'tests' / (name + '.lua'), blm / 'src'])
     version = next(c['version'] for c in load_components() if c['slug'] == 'BetterLobbyManagement')
-    commands.append([blm / 'tests/test_entry.lua', build / 'BetterLobbyManagement/better_lobby_management.lua',
+    commands.append([blm / 'tests/test_entry.lua', build / 'BetterLobbyManagement/entry.lua',
                      'v' + version])
+    print(translation_kit(mods))
     for output in run_all(commands):
         print(output.strip())
     print(f'PASS: {len(commands)} upstream gameplay and cross-module test processes')
+
+
+# The components that show text: each keeps its English texts in locales/en.lua.
+TEXT_COMPONENTS = ('BetterLobbyManagement', 'GalacticMenuHotkey', 'KnowYourConstellation', 'ModBindingsMenu',
+                   'ModOptionsMenu', 'ShallowWaterDiving')
+
+
+def translation_kit(mods):
+    """TRANSLATING.md: components/ is a translation kit of every mod with text. Check it the way a translator's
+    scripts/translations.py does: every English master parses as data, within its own limits."""
+    lines = []
+    problems = translations.check(mods, 'en', out=lines.append)
+    if problems.errors:
+        raise AssertionError('\n'.join(problems.errors))
+    folders = translations.mod_folders(mods)
+    found = tuple(sorted(translations.mod_label(folder) for folder in folders))
+    if found != TEXT_COMPONENTS:
+        raise AssertionError(f'Translation kit holds {found}, expected {TEXT_COMPONENTS}')
+    texts = sum(len(translations.strings_of(translations.load(folder / 'en.lua'))) for folder in folders)
+    return f'PASS: translation kit: components/ holds the English texts of {len(folders)} mods ({texts} texts)'
 
 
 # Suites that measure time or machine code run alone, after the others finish.

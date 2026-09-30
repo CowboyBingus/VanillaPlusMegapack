@@ -1,4 +1,7 @@
-- New option: [Better Lobby Management](https://github.com/CowboyBingus/BetterLobbyManagement) v1.0, host tools in the escape menu's GAME tab. DISBAND SQUAD kicks every other player back to their own ship. PROMOTE announces the new host with the game's own "*name* is the new squad leader" line, kicks them home with the game's own player-menu KICK, finds their new lobby and moves the whole squad to their ship; only the host needs the mod. It also shortens the Galactic Map lobby scanner's recharge from 20 to 5 seconds (adjustable in Mod Options Menu, never longer than the game's own) and offers an own-continent lobby filter. Measured in recorded play, as separate mods before the merge: 0.003 ms per frame for the lobby tools and 0.001 ms for the scanner.
-- Seventeen independent options. Use one copy of Better Lobby Management: the standalone package or the pack option.
-- Faster build: the option-selection checks replay every selection of at most two options, every selection missing at most two and 256 seeded random selections (564 of 131,072) instead of every one, and the bundled mods' own test suites run in parallel. Each package builds in about 15 seconds instead of over 4 minutes.
-- The other sixteen bundled mods are unchanged from v34.
+- Know Your Constellation v4.0: lists every enemy a mission can spawn, named as on the Helldivers wiki, with spawn-rate meters for large enemies.
+- Better Lobby Management v1.1: adds CANCEL SOS, which stops the host's SOS Beacon in a mission.
+- Mod Options Menu v1.1, Mod Bindings Menu v2.1, Ship Station Hotkeys v1.8 and Shallow Water Diving v3.9: texts follow the game's Text Language when a translation is installed.
+- Adds the translation kit: this repository's `components` folder covers all six mods with text (see TRANSLATING.md).
+- Discontinues the Rows package, since Know Your Constellation v4 has a single layout; Rows users should switch to this pack.
+- Measured in live play with all 17 options: the updated mods cost the same as their previous versions (Know Your Constellation about 0.05 ms per frame while its forecast is shown).
+- The other eleven mods are unchanged from v35.

@@ -1,9 +1,10 @@
 -- Startup checks, the escape-menu buttons, squad messages, the Galactic Map
 -- scanner, Mod Options Menu settings and the update hook. C: squad chat
--- (src/chat.lua). S: the scanner's recharge (src/scanner.lua). build:
--- {version, game_sha256, exe_sha256, diag}. D: the diagnostic recorder
--- (src/diag.lua), in diagnostic test builds only.
-return function(create_api, G, L, R, M, C, S, build, D)
+-- (src/chat.lua). S: the scanner's recharge (src/scanner.lua). B: CANCEL SOS
+-- (src/sos.lua). T: texts and translations (src/bingus_text.lua) with the
+-- locales ({en, bundled}). build: {version, game_sha256, exe_sha256, diag}.
+-- D: the diagnostic recorder (src/diag.lua), in diagnostic test builds only.
+return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
     if rawget(_G, 'BetterLobbyManagement') then return end
     local state = {version = build.version, status = 'starting', menu = 'pending', options = 'pending',
                    errors = 0, revision = 0}
@@ -20,6 +21,9 @@ return function(create_api, G, L, R, M, C, S, build, D)
             pcall(function() log_file:write(string.format('[%9.2f] %s\n', clock, message)); log_file:flush() end)
         end
     end
+    -- Every text the player sees, in the game's language when a translation
+    -- has it (locales/, translation packs), else English.
+    local tr = T.new(locales.en, locales.bundled, function(message) note('text: ' .. message) end)
 
     -- Startup refusals carry a plain reason (LuaJIT's assert would prefix a file position).
     local function expect(condition, message) if not condition then error(message, 0) end end
@@ -40,6 +44,17 @@ return function(create_api, G, L, R, M, C, S, build, D)
     end
     state.api = api
     local lobby = L.new(api, game, G, natives, state, note)
+    lobby.text = tr
+    -- The game's Text Language (5 guarded reads), logged when it changes.
+    local language
+    local function observe_language()
+        local tag, code = T.observe(api.read_bytes, game)
+        local seen = tag and (tag .. ' (game setting ' .. code .. ')') or (T.language() .. ' (Steam)')
+        if seen ~= language then
+            language = seen
+            note('text language: ' .. seen)
+        end
+    end
     local region = R.new(api, game, natives, state, note)
     local region_ok, region_why = region.verify()
 
@@ -83,6 +98,15 @@ return function(create_api, G, L, R, M, C, S, build, D)
         end
     end
     state.menu = menu and 'ready' or 'disabled: ' .. menu_why
+
+    -- CANCEL SOS, after its own code checks; a mismatch disables only it.
+    local sos, sos_why = nil, 'not built in'
+    if B then
+        local candidate = B.new(api, game, G, state, note)
+        local ok, why = candidate.verify()
+        if ok then sos = candidate else sos_why = why end
+    end
+    state.sos = sos and 'ready' or 'unavailable: ' .. sos_why
     state.status = 'ready'
     -- Kicks are the game's own player-menu KICK, run by the game in its own
     -- update (any other kick left the kicked player's Helldiver behind and
@@ -125,23 +149,18 @@ return function(create_api, G, L, R, M, C, S, build, D)
     end
     set_messages(true)
 
-    -- Settings (Mod Options Menu, optional).
+    -- Settings (Mod Options Menu, optional). Texts are keys in locales/en.lua;
+    -- 'On' and 'Off' are the game's own words, which the menu translates.
     local OPTIONS = {
-        {id = 'better_lobby_management.region', key = 'region', spec = {type = 'choice', label = 'Lobby Region',
-            mod = 'Better Lobby Management', choices = {'Game Default', 'My Continent Only'}, default = 1,
-            description = 'My Continent Only limits the Galactic Map scanner and quickplay to lobbies hosted on '
-                .. 'your continent (the lowest-latency hosts the game can tell apart). It adds no searches; '
-                .. 'fewer lobbies may be listed.'}},
-        {id = 'better_lobby_management.messages', key = 'messages', spec = {type = 'choice',
-            label = 'Squad Messages', mod = 'Better Lobby Management', choices = {'On', 'Off'}, default = 1,
-            description = 'Before kicking, the squad is told why. PROMOTE shows the game\'s own "<name> is the new '
-                .. 'squad leader" line; DISBAND posts a chat message from you.'}},
-        {id = 'better_lobby_management.scanner_seconds', key = 'scanner', spec = {type = 'slider',
-            label = 'Scanner Recharge (Seconds)', mod = 'Better Lobby Management', min = S and S.MIN_SECONDS or 5,
-            max = S and S.MAX_SECONDS or 20, step = 1, default = S and S.DEFAULT_SECONDS or 5,
-            description = 'Seconds the Galactic Map lobby scanner recharges between scans, from 5 to 20. The '
-                .. 'game currently uses 20; the mod never makes the wait longer than the game\'s own. '
-                .. 'Every scan is a lobby search, so a shorter wait searches more often.'}},
+        {id = 'better_lobby_management.region', key = 'region', texts = {type = 'choice',
+            label = 'option.region.label', choices = {'option.region.default', 'option.region.continent'},
+            default = 1, description = 'option.region.description'}},
+        {id = 'better_lobby_management.messages', key = 'messages', texts = {type = 'choice',
+            label = 'option.messages.label', native_choices = {'On', 'Off'}, default = 1,
+            description = 'option.messages.description'}},
+        {id = 'better_lobby_management.scanner_seconds', key = 'scanner', texts = {type = 'slider',
+            label = 'option.scanner.label', min = S and S.MIN_SECONDS or 5, max = S and S.MAX_SECONDS or 20,
+            step = 1, default = S and S.DEFAULT_SECONDS or 5, description = 'option.scanner.description'}},
     }
     local KICK_TESTS = {{'game', 'Game Kick'}, {'render', 'Kick From Render'}, {'message', 'Message First'},
                         {'hold', 'Hold Unloads'}, {'plain', 'Plain Kick (v0.3)'}}
@@ -185,11 +204,38 @@ return function(create_api, G, L, R, M, C, S, build, D)
             end
         end
     end
+    -- Mod Options Menu v1.1 and later (version 2) take texts as functions and
+    -- call them whenever they build the MODS page, so the texts follow the
+    -- game's language. v1.0 takes strings with byte limits: a translation
+    -- that does not fit stays English there.
+    local function option_text(options_menu, key, bytes)
+        if (tonumber(options_menu.version) or 1) >= 2 then return function() return tr(key) end end
+        local text = tr(key)
+        return #text <= bytes and text or tr.english[key]
+    end
+    local function spec_of(option, options_menu)
+        if option.spec then
+            -- Test-build options: English texts under the same (translated) mod name.
+            local spec = {}
+            for field, value in pairs(option.spec) do spec[field] = value end
+            spec.mod = option_text(options_menu, 'option.mod', 40)
+            return spec
+        end
+        local texts = option.texts
+        local spec = {type = texts.type, default = texts.default, min = texts.min, max = texts.max, step = texts.step,
+            mod = option_text(options_menu, 'option.mod', 40), label = option_text(options_menu, texts.label, 64),
+            description = option_text(options_menu, texts.description, 400), choices = texts.native_choices}
+        if texts.choices then
+            spec.choices = {}
+            for i, key in ipairs(texts.choices) do spec.choices[i] = option_text(options_menu, key, 48) end
+        end
+        return spec
+    end
     local function register_options()
         local options_menu = rawget(_G, 'ModOptionsMenu')
         if type(options_menu) ~= 'table' or options_menu.api ~= 1 then return 'not installed (defaults in use)' end
         for _, option in ipairs(OPTIONS) do
-            local ok, why = options_menu.register_option(option.id, option.spec)
+            local ok, why = options_menu.register_option(option.id, spec_of(option, options_menu))
             if not ok then return 'not registered: ' .. tostring(why) end
             apply_setting(option.key, options_menu.get(option.id))
             options_menu.on_change(option.id, function(value) apply_setting(option.key, value) end)
@@ -198,64 +244,105 @@ return function(create_api, G, L, R, M, C, S, build, D)
     end
 
     -- Idle gate: the context pointer and the peer count answer "could an action
-    -- run?"; the escape menu is looked at only while hosting a squad.
+    -- run?". Hosting a squad, the escape menu is looked at; alone, CANCEL SOS
+    -- is the only action, so the mode is looked at first (see offer_screen).
     local gate = {ctx = 0}
+    local function hosts(ctx)
+        return api.load32(ctx + G.HOST) == api.load32(ctx + G.LOCAL)
+            and api.load32(ctx + G.HOST + 4) == api.load32(ctx + G.LOCAL + 4)
+    end
     local function hosting_squad()
         local ctx = G.context(api, game, gate)
         if ctx == 0 or api.load32(ctx + G.PEER_COUNT) < 2 then return false end
-        return api.load32(ctx + G.HOST) == api.load32(ctx + G.LOCAL)
-            and api.load32(ctx + G.HOST + 4) == api.load32(ctx + G.LOCAL + 4)
+        return hosts(ctx)
     end
 
     -- The successor: the squad member whose player menu the host opened last,
     -- else the automatic choice. Button and dialog texts are rebuilt only when
-    -- the mode, the squad or that choice changes.
+    -- the mode, the squad, that choice or the SOS offer changes.
     local chosen = nil
-    local shown = {mode = -1, count = -1, peers = {}, chosen = nil, target = nil}
+    local shown = {mode = -1, count = -1, peers = {}, chosen = nil, target = nil, sos = false}
     local offer, order, dialogs = {}, {}, {}
-    local ORDER_SHIP = {'disband', 'promote'}
-    local function changed(snap)
-        if shown.mode ~= snap.mode or shown.count ~= snap.peer_count or shown.chosen ~= chosen then return true end
+
+    -- The open escape screen when an action could be offered, else 0. Alone,
+    -- that is CANCEL SOS: in a mission, while the menu is open and an SOS is
+    -- on, and until the button is gone again (the game rebuilds its list when
+    -- players come and go, not when the SOS stops).
+    local function offer_screen()
+        local ctx = G.context(api, game, gate)
+        if ctx == 0 then return 0 end
+        if api.load32(ctx + G.PEER_COUNT) < 2 then
+            if not sos then return 0 end
+            local game_state = api.load64(game + G.GAME_STATE_PTR)
+            if game_state == 0 or api.load32(game_state + G.MODE) ~= G.MODE_MISSION then return 0 end
+            local screen = menu.screen()
+            if screen == 0 or not (shown.sos or sos.active()) or not hosts(ctx) then return 0 end
+            return screen
+        end
+        if not hosts(ctx) then return 0 end
+        return menu.screen()
+    end
+    local ORDER_SHIP, ORDER_SOS = {'disband', 'promote'}, {'cancel_sos'}
+    local function changed(snap, sos_state)
+        if shown.mode ~= snap.mode or shown.count ~= snap.peer_count or shown.chosen ~= chosen
+            or shown.sos ~= sos_state then
+            return true
+        end
         for i = 1, snap.peer_count do
             local peer, seen = snap.peers[i], shown.peers[i]
             if not seen or seen.lo ~= peer.lo or seen.hi ~= peer.hi then return true end
         end
         return false
     end
-    local function rebuild_offer(snap)
-        shown.mode, shown.count, shown.chosen = snap.mode, snap.peer_count, chosen
+    -- sos_state: the privacy setting while CANCEL SOS can be offered, else false.
+    local function rebuild_offer(snap, sos_state)
+        tr:refresh()
+        shown.mode, shown.count, shown.chosen, shown.sos = snap.mode, snap.peer_count, chosen, sos_state
+        shown.generation = tr.generation -- the texts' language, to rebuild after a change
         for i = 1, snap.peer_count do shown.peers[i] = {lo = snap.peers[i].lo, hi = snap.peers[i].hi} end
-        offer, order, dialogs = {}, {}, {}
+        offer, order, dialogs, shown.target = {}, {}, {}, nil
+        if sos_state then
+            order = ORDER_SOS
+            offer.cancel_sos = tr('button.cancel_sos')
+            dialogs.cancel_sos = {title = tr('dialog.cancel_sos.title'), body = B.body(sos_state, tr)}
+            return
+        end
+        if snap.mode ~= G.MODE_SHIP then return end
         local target = chosen and lobby.choose_successor(snap, chosen)
         if chosen and not target then chosen, shown.chosen = nil, nil end
         target = target or lobby.choose_successor(snap, nil)
         shown.target = target
         if not target then return end
-        local name = G.names(api, game)[G.peer_key(target.lo, target.hi)] or ('player ' .. api.u64_hex(target.lo, target.hi))
-        local upper = name:upper()
+        local name = G.names(api, game)[G.peer_key(target.lo, target.hi)]
+            or tr('player.unknown', {id = api.u64_hex(target.lo, target.hi)})
+        -- Upper case for every script the game's fonts carry, not only a-z.
+        local upper = T.upper(name)
         -- Short: the dialog box holds about three lines. Without a pick, say
         -- the player was chosen for the host (the README says how).
-        local how = chosen and '' or ' Picked automatically; select a player\'s card to change.'
-        if snap.mode == G.MODE_SHIP then
-            order = ORDER_SHIP
-            offer.disband, offer.promote = 'DISBAND SQUAD', 'PROMOTE ' .. upper
-            dialogs.disband = {title = 'DISBAND SQUAD', body = 'Kick every other player. They return to their own ships.'}
-            dialogs.promote = {title = 'PROMOTE ' .. upper, body = name .. ' hosts from their own ship; you and the '
-                .. 'squad follow.' .. how}
-        end
+        order = ORDER_SHIP
+        offer.disband, offer.promote = tr('button.disband'), tr('button.promote', {name = upper})
+        dialogs.disband = {title = tr('dialog.disband.title'), body = tr('dialog.disband.body')}
+        dialogs.promote = {title = tr('dialog.promote.title', {name = upper}),
+            body = tr(chosen and 'dialog.promote.body' or 'dialog.promote.body_automatic', {name = name})}
     end
     local function run_action(action)
         local target = shown.target and {lo = shown.target.lo, hi = shown.target.hi}
         if action == 'disband' then return lobby.disband(clock) end
         if action == 'promote' then return lobby.promote(target, clock) end
+        if action == 'cancel_sos' then return sos.cancel(clock) end
     end
 
     -- Lua entry points (console or other addons). target: {lo, hi} or nil.
     function state.disband() return lobby.disband(clock) end
     function state.promote(target) return lobby.promote(target, clock) end
     function state.cancel() return lobby.cancel('requested') end
+    function state.cancel_sos()
+        if not sos then return false, state.sos end
+        return sos.cancel(clock)
+    end
 
     local step
+    local menu_seen = false
     local function run(dt)
         clock = clock + (dt or 0)
         if scanner then
@@ -266,16 +353,30 @@ return function(create_api, G, L, R, M, C, S, build, D)
             end
         end
         if diag then diag.frame(clock, hosting_squad) end
+        -- A cancelled SOS stays off: the game lists it again when a player leaves.
+        if sos and sos.cancelled() then sos.keep(clock) end
         if lobby.holding() then lobby.tick(clock) end
         if lobby.arrival then lobby.check_arrival(clock) end -- once, after a promote's move
         if lobby.busy() then
             lobby.step(clock)
-        elseif menu and hosting_squad() then
-            local screen = menu.screen()
+        elseif menu then
+            local screen = offer_screen()
+            if screen == 0 then menu_seen = false end
             if screen ~= 0 then
+                if not menu_seen then
+                    -- The game's Text Language can change in the escape menu's
+                    -- own OPTIONS tab: read it once each time the menu opens
+                    -- with something to offer, and rebuild the texts if the
+                    -- language or the installed translations changed.
+                    menu_seen = true
+                    observe_language()
+                    tr:refresh()
+                    if tr.generation ~= shown.generation then shown.mode = -1 end
+                end
                 local snap = lobby.snapshot()
                 if snap then
-                    if changed(snap) then rebuild_offer(snap) end
+                    local sos_state = sos and sos.offer(snap) or false
+                    if changed(snap, sos_state) then rebuild_offer(snap, sos_state) end
                     local lo, hi = menu.step(screen, snap.local_lo, snap.local_hi, offer, order, dialogs, run_action)
                     if lo and (not chosen or chosen.lo ~= lo or chosen.hi ~= hi) then
                         chosen = {lo = lo, hi = hi}
@@ -288,6 +389,9 @@ return function(create_api, G, L, R, M, C, S, build, D)
         region.step()
     end
     step = function(dt)
+        -- Translations register when their addon loads, before this first
+        -- update; the language decides the Mod Options Menu texts below.
+        observe_language()
         local called, result = pcall(register_options)
         state.options = called and result or 'failed: ' .. tostring(result)
         note('Mod Options Menu: ' .. state.options)
@@ -308,6 +412,7 @@ return function(create_api, G, L, R, M, C, S, build, D)
         pcall(lobby.release_hold, 'error')
         local restored = pcall(region.restore)
         if scanner then pcall(scanner.stop, 'stopped_after_error') end
+        if sos and sos.cancelled() then note('CANCEL SOS: no longer kept off; a player leaving lists the SOS again') end
         note('Error: ' .. tostring(err))
         note('Better Lobby Management stopped for this session' .. (restored and '; region flags restored' or ''))
     end
@@ -334,12 +439,14 @@ return function(create_api, G, L, R, M, C, S, build, D)
     shutdown = function(...)
         pcall(lobby.release_hold, 'shutdown')
         local restored = region.mode() == 2 and region.restore() or 0
-        note(string.format('Shutdown: %d actions; region flags restored %d; page checks %d; errors %d%s',
-            state.actions or 0, restored, api.queries, state.errors, scanner and '; ' .. scanner_summary() or ''))
+        note(string.format('Shutdown: %d actions; region flags restored %d; page checks %d; errors %d%s%s',
+            state.actions or 0, restored, api.queries, state.errors, scanner and '; ' .. scanner_summary() or '',
+            sos and string.format('; SOS cancels %d, re-arms caught %d (%d already posted)', state.sos_cancels,
+                state.sos_rearms, state.sos_leaks) or ''))
         if type(previous_shutdown) == 'function' then return previous_shutdown(...) end
     end
     note('Better Lobby Management ' .. build.version .. ' ready: game code and natives verified; menu '
         .. state.menu .. (region_ok and '' or '; Lobby Region disabled: ' .. region_why)
         .. '; squad messages ' .. state.chat .. '; scanner ' .. (scanner and 'ready' or 'disabled: ' .. scanner_why)
-        .. (state.diag and '; diagnostics ' .. state.diag or ''))
+        .. '; CANCEL SOS ' .. state.sos .. (state.diag and '; diagnostics ' .. state.diag or ''))
 end

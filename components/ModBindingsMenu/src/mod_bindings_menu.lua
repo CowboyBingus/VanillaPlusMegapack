@@ -3,6 +3,10 @@
 if rawget(_G, 'ModBindingsMenu') then return end
 local ffi = require('ffi')
 local bit = require('bit')
+-- Texts and translations: mbm_text = {module = src/bingus_text.lua, locales =
+-- locales/}, which the build places ahead of this file as a local (tests
+-- provide it as a global).
+local translation = {T = mbm_text.module}
 
 ffi.cdef [[
 typedef unsigned char MBM_u8;
@@ -45,6 +49,9 @@ end
 local function note(message)
     if log_file then pcall(function() log_file:write(message .. '\n'); log_file:flush() end) end
 end
+-- MBM's own texts, in the game's language when a translation has them.
+translation.tr = translation.T.new(mbm_text.locales.en, mbm_text.locales.bundled,
+                                   function(message) note('Text: ' .. message) end)
 
 local GAME_SHA256 = '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
 local EXE_SHA256 = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
@@ -120,8 +127,6 @@ local LABEL_POOL = {
     {0x4777d7c3, 0x3328488}, {0x4b7ce100, 0x3328490}, {0x74f55d93, 0x3328498},
     {0x59500445, 0x33284b8}, {0x8bc421a5, 0x33284c0}, {0xacf702d0, 0x3328500},
 }
-local DEFAULT_CATEGORY = 'MODS'
-local EMPTY_TEXT = 'NO MOD BINDINGS INSTALLED'
 local ROW_LIST_OFFSET = 338344
 local ROW_STRIDE, ROW_START = 24784, 7856
 -- Native tab bar shared by the keyboard and controller binding pages. The
@@ -143,7 +148,11 @@ local state = {initialized = false, base = nil, build_rows = nil,
                claims = {}, pooled = {}, action_labels = {},
                default_buckets = {}, clear_pending = {}, assignments = nil,
                auto_codes = {}, code_order = {}, sweep_timer = 0, swept_counts = {},
-               mods_text = ffi.new('char[5]', 'MODS')}
+               -- The MODS title's buffer, pointed at by a game slot while the
+               -- page shows the tab; replaced only while no slot points at it.
+               -- Earlier buffers stay referenced in titles.
+               mods_text = ffi.new('char[5]', 'MODS'), titles = {},
+               empty_text = 'NO MOD BINDINGS INSTALLED', page_open = false, language = nil}
 for index, entry in ipairs(DORMANT_ACTIONS) do
     local code = entry[1] * 65536 + entry[2]
     state.code_order[code] = index
@@ -526,8 +535,59 @@ local function mods_title(active)
     end
 end
 
+-- Upper case in every script the game's fonts carry (string.upper: a to z only).
 local function display_text(text)
-    return (text:gsub('[%c]', ' '):gsub('^%s+', ''):gsub('%s+$', ''):upper())
+    return translation.T.upper((text:gsub('[%c]', ' '):gsub('^%s+', ''):gsub('%s+$', '')))
+end
+
+-- A registered text: a string, or (API version 3) a function returning one,
+-- which is called now and again whenever a binding page opens, so the text
+-- can follow the game's language. Limits count characters. Returns the text
+-- to show (upper case), or nil when the value is not a usable text.
+function translation.resolve(value, limit)
+    if type(value) == 'function' then
+        local ok, result = pcall(value)
+        if not ok then return nil end
+        value = result
+    end
+    if type(value) ~= 'string' or translation.T.length(value) > limit then return nil end
+    local text = display_text(value)
+    if text == '' or not translation.T.check(text) then return nil end
+    return text
+end
+
+-- The game's Text Language (5 guarded reads), then the registered texts given
+-- as functions, MBM's own texts and the MODS title: refreshed each time a
+-- binding page opens, never per frame. A function that fails keeps the text
+-- shown before. The title buffer changes only while no game slot points at it.
+function translation.refresh()
+    local tag, code = translation.T.observe(read, state.base)
+    local seen = tag and (tag .. ' (game setting ' .. code .. ')') or (translation.T.language() .. ' (Steam)')
+    if seen ~= state.language then
+        state.language = seen
+        note('Text language: ' .. seen .. '.')
+    end
+    local tr = translation.tr
+    tr:refresh()
+    local changed = false
+    for _, record in ipairs(state.order) do
+        if type(record.label) == 'function' then
+            local text = translation.resolve(record.label, 127)
+            if text and text ~= record.text then record.text, changed = text, true end
+        end
+        if type(record.category_source) == 'function' then
+            local text = translation.resolve(record.category_source, 64)
+            if text and text ~= record.category then record.category, changed = text, true end
+        end
+    end
+    local empty = display_text(tr('section.none'))
+    if empty ~= state.empty_text then state.empty_text, changed = empty, true end
+    local title = display_text(tr('tab.mods'))
+    if not state.title_active and title ~= ffi.string(state.mods_text) then
+        state.titles[#state.titles + 1] = state.mods_text
+        state.mods_text = ffi.new('char[?]', #title + 1, title)
+    end
+    if changed then state.revision = (state.revision or 0) + 1 end
 end
 
 -- Names a caller's section after its addon entry, e.g.
@@ -545,36 +605,44 @@ local function caller_category()
         sources[#sources + 1] = tostring(info.source):sub(1, 80)
     end
     note('No addon entry on the registration stack (' .. table.concat(sources, ', ') ..
-         '); using ' .. DEFAULT_CATEGORY .. '.')
-    return DEFAULT_CATEGORY
+         '); using the unnamed section.')
+    return display_text(translation.tr('section.unnamed'))
 end
 
 local active_screen -- Defined with the page code below.
 
-local api = {api = 1, version = 2, capacity = #DORMANT_ACTIONS}
+local api = {api = 1, version = 3, capacity = #DORMANT_ACTIONS}
 -- slot: 1-7 selects a fixed v1 slot; nil or 0 (version 2) assigns a free native
 -- action automatically and keeps it for this id in later sessions. A slot 2
 -- request that another addon already holds is assigned automatically too.
 -- options (optional, version 2): {category = 'Mod display name'}. Bindings are
 -- grouped under one native section header per category on the MODS tab.
+-- label: a game localization ID (number) or text; text and category are UTF-8
+-- in any script, limited in characters (127 and 64) and shown upper-cased.
+-- Version 3: both may be functions returning the text in the current
+-- language, called now and whenever a binding page opens.
 function api.register_binding(id, label, slot, options)
     if slot == 0 then slot = nil end
+    local text = type(label) ~= 'number' and translation.resolve(label, 127) or nil
     if type(id) ~= 'string' or id == '' or id:find('[\t\r\n]')
-       or not (type(label) == 'number' and label >= 1 and label < 0x100000000
-               or type(label) == 'string' and label ~= '' and #label < 128)
+       or not (type(label) == 'number' and label >= 1 and label < 0x100000000 or text)
        or slot ~= nil and (type(slot) ~= 'number' or slot < 1 or slot > SLOTS
                            or slot % 1 ~= 0)
        or options ~= nil and type(options) ~= 'table' then
         return false, 'invalid binding registration'
     end
     local category = options and options.category
-    if category ~= nil and (type(category) ~= 'string' or #category > 64
-                            or display_text(category) == '') then
+    local category_text = category ~= nil and translation.resolve(category, 64) or nil
+    if category ~= nil and not category_text then
         return false, 'invalid binding category'
     end
     local existing = state.registry[id]
     if existing then
-        if existing.requested == slot and existing.label == label then return true end
+        -- A text given as a function may differ between registrations (another language).
+        if existing.requested == slot and (existing.label == label or type(existing.label) == 'function'
+                                           or type(label) == 'function') then
+            return true
+        end
         return false, 'binding already registered differently'
     end
     local code
@@ -596,8 +664,8 @@ function api.register_binding(id, label, slot, options)
     local record = {id = id, label = label, requested = slot,
                     slot = not state.auto_codes[code] and slot or nil, code = code,
                     group = math.floor(code / 65536), action = code % 65536,
-                    category = category and display_text(category) or caller_category()}
-    if type(label) == 'string' then record.text = display_text(label) end
+                    category = category_text or caller_category(), category_source = category}
+    record.text = text
     state.registry[id] = record
     state.order[#state.order + 1] = record
     table.sort(state.order, function(a, b)
@@ -736,7 +804,7 @@ local function mods_layout()
     local fallback_header = state.title_active and MODS_TITLE_ID or nil
     local list = sections()
     if #list == 0 then
-        local empty = claim_label(EMPTY_TEXT) or fallback_header
+        local empty = claim_label(state.empty_text) or fallback_header
         if not empty then return nil end
         rows[1] = {13, 0, empty}
         return rows
@@ -838,6 +906,14 @@ local function step(dt)
     activate_actions()
     if not state.build_rows then return end
     local screen = active_screen()
+    if screen and not state.page_open then
+        -- A binding page just opened: the game's Text Language may have changed
+        -- since the last one, so the texts are refreshed here, once.
+        state.page_open = true
+        translation.refresh()
+    elseif not screen then
+        state.page_open = false
+    end
     -- Leave the bindings page's rows alone while it is open; sweep after.
     state.sweep_timer = state.sweep_timer - (type(dt) == 'number' and dt or 0)
     if not screen and state.sweep_timer <= 0 then

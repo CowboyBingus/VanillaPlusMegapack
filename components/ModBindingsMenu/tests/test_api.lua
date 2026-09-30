@@ -5,6 +5,13 @@ local directory = assert(os.getenv('TEMP') or os.getenv('TMP'))
 local assignments = directory .. '/ModBindingsMenu.assignments'
 os.remove(assignments)
 _G.CowboyBingusModLoader = {log_directory = directory}
+-- The build puts the text module and the locales ahead of the main file as
+-- the local mbm_text; here it is a global.
+local root = source:match('^(.*)[/\\]src[/\\][^/\\]+$') or '.'
+local Text = dofile(root .. '/src/bingus_text.lua')
+_G.BingusTranslations = nil
+Text.registry().steam_language = 'en'
+_G.mbm_text = {module = Text, locales = {en = dofile(root .. '/locales/en.lua'), bundled = {}}}
 dofile(source)
 
 local host = assert(ModBindingsMenu)
@@ -57,7 +64,7 @@ assert(not host.register_binding('control', 0x3ef7f7ad, 4))
 assert(not host.register_binding('control', 0x3ef7f7ad, 5))
 assert(state.registry.control.text == 'CONTROL CENTER')
 assert(state.registry.arcade.text == 'STRATAGEM HERO')
-assert(host.version == 2)
+assert(host.version == 3) -- version 3: texts may be functions
 -- Callers outside a mods/<author>/<entry> resource fall back to MODS.
 assert(state.registry.map.category == 'MODS')
 print('Seven fixed slot registrations OK')

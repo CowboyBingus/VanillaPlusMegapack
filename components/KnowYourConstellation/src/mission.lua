@@ -187,7 +187,7 @@ function M.new(api, game, resolve)
         local defs = ptr(game + 0x347cd98)
         local dn = count(defs+53248,1024)
         local rows = dn > 0 and read(defs,dn*52) or ''
-        local by_id, by_hash = {}, {}
+        local by_id, by_hash, weights = {}, {}, {}
         for i = 0, dn - 1 do
             local at = i * 52
             if u32(rows,at+4) == 40 and u32(rows,at+24) == 13 then
@@ -195,11 +195,26 @@ function M.new(api, game, resolve)
                 assert(tag, 'Unknown campaign enemy tag')
                 by_id[u32(rows,at)] = tag
             end
+            -- Category 72 scales the spawn weight of groups containing one enemy
+            -- family (native group weight 0x94a0a0).
+            if u32(rows,at+4) == 72 and u32(rows,at+24) == 13 and u32(rows,at+36) == 2 then
+                weights[u32(rows,at)] = {u32(rows,at+28), f32(rows,at+44)}
+            end
             if by_hash[u32(rows,at+8)] == nil then by_hash[u32(rows,at+8)] = u32(rows,at) end
+        end
+        local zone, applied = {}, {}
+        local function apply(id)
+            if not id then return end
+            resolve.add(initial, by_id[id])
+            local weight = weights[id]
+            if weight and not applied[id] then
+                applied[id] = true
+                zone[weight[1]] = (zone[weight[1]] or 1) * weight[2]
+            end
         end
         local function add_ids(bytes, at, length, maximum)
             assert(length <= maximum, 'Too many campaign modifiers')
-            for i = 0, length - 1 do resolve.add(initial, by_id[u32(bytes,at+i*4)]) end
+            for i = 0, length - 1 do apply(u32(bytes,at+i*4)) end
         end
         if not gated then
             local selected = read(data+304*planet+286952,132)
@@ -259,7 +274,7 @@ function M.new(api, game, resolve)
                                     if total_mods > 0 then
                                         local list = read(ptr(template+88),total_mods*4)
                                         for j = 0, total_mods-1 do
-                                            resolve.add(initial,by_id[by_hash[u32(list,4*j)]])
+                                            apply(by_hash[u32(list,4*j)])
                                         end
                                     end
                                     break
@@ -271,7 +286,7 @@ function M.new(api, game, resolve)
             end
         end
         local faction, region = u32(dynamic,36), u32(dynamic,64)
-        local globals = read(ptr(game+0x346d518),32*356)
+        local globals, war = read(ptr(game+0x346d518),32*356), {}
         for i = 0, 31 do
             local at = i*356
             local scope, value, filter = globals:byte(at+85), u32(globals,at+88), u32(globals,at+92)
@@ -281,10 +296,19 @@ function M.new(api, game, resolve)
                 local total = u32(globals,at+80)
                 assert(total <= 5, 'Too many global modifier entries')
                 for j = 0, total - 1 do
-                    if globals:byte(at+16*j+1) == 17 then resolve.add(initial,resolve.from_native(u32(globals,at+16*j+4))) end
+                    local kind = globals:byte(at+16*j+1)
+                    if kind == 17 then resolve.add(initial,resolve.from_native(u32(globals,at+16*j+4))) end
+                    -- Type 15 war effects also scale one family's group weights
+                    -- (native 0x12e3c00).
+                    if kind == 15 then
+                        local family = u32(globals,at+16*j+4)
+                        war[family] = (war[family] or 1) * f32(globals,at+16*j+8)
+                    end
                 end
             end
         end
+        if next(zone) then snapshot.zone = zone end
+        if next(war) then snapshot.war = war end
         return complete
     end
 

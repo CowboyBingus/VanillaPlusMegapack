@@ -3,6 +3,13 @@ local source = arg[1] or ((arg[0]:match('^(.*[/\\])') or '') .. '../src/mod_bind
 local directory = assert(os.getenv('TEMP') or os.getenv('TMP'))
 os.remove(directory .. '/ModBindingsMenu.assignments')
 _G.CowboyBingusModLoader = {log_directory = directory}
+-- The build puts the text module and the locales ahead of the main file as
+-- the local mbm_text; here it is a global.
+local root = source:match('^(.*)[/\\]src[/\\][^/\\]+$') or '.'
+local Text = dofile(root .. '/src/bingus_text.lua')
+_G.BingusTranslations = nil
+Text.registry().steam_language = 'en'
+_G.mbm_text = {module = Text, locales = {en = dofile(root .. '/locales/en.lua'), bundled = {}}}
 dofile(source)
 local ffi = require('ffi')
 
@@ -303,4 +310,64 @@ refuse = false
 release_labels()
 assert(next(state.claims) == nil and slot_text(0x3328230) == nil)
 print('Refused memory writes degrade safely OK')
+os.remove(directory .. '/ModBindingsMenu.assignments')
+
+-- Translations (API version 3): limits count characters, names are
+-- upper-cased beyond a-z, and texts given as functions, MBM's own texts and
+-- the MODS title follow the language when a binding page opens.
+do
+    local translation = upvalue(host.register_binding, 'translation')
+    local function cjk(count, from)
+        local parts = {}
+        for index = 1, count do parts[index] = Text.encode(0x4E00 + (from or 0) + index) end
+        return table.concat(parts)
+    end
+    -- 100 CJK characters (300 bytes) fit the 127-character label limit; 128 do not.
+    assert(host.register_binding('zh.long', cjk(100), nil, {category = cjk(20, 50)}))
+    assert(not host.register_binding('zh.too_long', cjk(128)))
+    assert(not host.register_binding('zh.bad', 'bad \255 bytes'), 'invalid UTF-8')
+    assert(host.register_binding('ru.jump', 'x', nil, {category = '\208\191\209\128\209\139\208\182\208\186\208\184'}))
+    assert(state.registry['ru.jump'].category == '\208\159\208\160\208\171\208\150\208\154\208\152', 'Cyrillic upper case')
+    -- Texts as functions.
+    local language = 'en'
+    local words = {en = {label = 'Toggle Map', category = 'Map Tools'},
+                   zh = {label = cjk(4, 100), category = cjk(3, 200)}}
+    local function word(field) return function() return words[language][field] end end
+    assert(host.register_binding('fn.map', word('label'), nil, {category = word('category')}))
+    assert(host.register_binding('fn.map', word('label'), nil, {category = word('category')}), 'new closures: same binding')
+    local record = state.registry['fn.map']
+    assert(record.text == 'TOGGLE MAP' and record.category == 'MAP TOOLS')
+    -- The language changes; a pack translates MBM's own texts.
+    language = 'zh'
+    Text.register({language = 'zh-Hans', name = 'test', mods = {mod_bindings_menu = {
+        ['tab.mods'] = cjk(2, 300), ['section.none'] = cjk(8, 400)}}})
+    Text.registry().game_language = 'zh-Hans'
+    -- While a game slot points at the MODS title buffer, the buffer stays.
+    state.title_active = true
+    local kept = state.mods_text
+    local revision = state.revision
+    translation.refresh()
+    assert(state.mods_text == kept and record.text == words.zh.label and record.category == words.zh.category)
+    assert(state.empty_text == cjk(8, 400) and state.revision > revision, 'the layout is rebuilt')
+    -- Once the slot is released, the next page opening swaps in a buffer of the new title.
+    state.title_active = false
+    translation.refresh()
+    assert(state.mods_text ~= kept and ffi.string(state.mods_text) == cjk(2, 300))
+    assert(state.titles[#state.titles] == kept, 'the old buffer stays referenced')
+    -- The rebuilt MODS tab shows the translated section and binding names.
+    state.layout = nil
+    put32(screen + 8, 3)
+    put32(listing + 7856 + 4264 + 272, 0x12345678)
+    fill_mods_tab(screen)
+    local texts = {}
+    for _, claim in pairs(state.claims) do texts[ffi.string(claim.buffer)] = true end
+    assert(texts[words.zh.label] and texts[words.zh.category], 'translated rows and headers')
+    release_labels()
+    -- A text function that fails keeps the text shown before.
+    words.zh.label = nil
+    translation.refresh()
+    assert(record.text == cjk(4, 100))
+end
+print('Translations: character limits, upper case in every script, function texts, own texts and the MODS title '
+      .. 'buffer refreshed when a page opens OK')
 os.remove(directory .. '/ModBindingsMenu.assignments')

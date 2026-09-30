@@ -1,4 +1,8 @@
 local source=assert(arg[1])
+-- The build passes the text module and the locales to the loader.
+local Text=assert(loadfile(source..'/bingus_text.lua'))()
+local LOCALES={en=assert(loadfile(source..'/../locales/en.lua'))(),bundled={}}
+Text.registry().steam_language='en'
 local function test(kind,loader,rejected)
     local env=setmetatable({print=function()end,os={getenv=function()end}},{__index=_G});env._G=env
     if loader==nil then loader={api=1,version=kind=='old_loader' and 5 or 6} end
@@ -19,7 +23,7 @@ local function test(kind,loader,rejected)
         return true,'ready',true
     end,restore=function(a,p)restores=restores+1;return true end}
     local install=setfenv(assert(loadfile(source..'/archive_loader.lua')),env)()
-    install(function()return api end,patch,{revision='test',game_sha256='game',exe_sha256='exe'})
+    install(function()return api end,patch,{revision='test',game_sha256='game',exe_sha256='exe'},Text,LOCALES)
     if kind=='old_loader' or rejected then
         assert(env.update==original and calls==0 and not env.ShallowWaterDive.active)
         assert(env.ShallowWaterDive.status:find('Bingus Shared Loader',1,true))
@@ -64,7 +68,7 @@ local function menu_test(menu)
     local patch={apply=function() return true,'ready',true end,restore=function() return true end,
         MIN_WATER_DEPTH=0.20,SWIM_DEPTH=1.30,set_max_water_depth=function(d) depths[#depths+1]=d;return true end}
     local install=setfenv(assert(loadfile(source..'/archive_loader.lua')),env)()
-    install(function()return api end,patch,{revision='test',game_sha256='game',exe_sha256='exe'})
+    install(function()return api end,patch,{revision='test',game_sha256='game',exe_sha256='exe'},Text,LOCALES)
     assert(env.update()==1 and env.update()==1 and updates==2)
     return env.ShallowWaterDive,depths
 end
@@ -85,6 +89,20 @@ do
     state=menu_test({api=1,register_option=function() error('menu error',0) end})
     assert(state.depth_option=='failed: menu error')
     assert(menu_test(nil).depth_option=='not installed' and menu_test({api=2}).depth_option=='not installed')
+    -- Mod Options Menu v1.1 (version 2): texts are functions that follow the
+    -- game's language; the numbers stay as they are.
+    registered={}
+    state=menu_test({api=1,version=2,
+        register_option=function(id,spec) registered[#registered+1]={id,spec};return true end,
+        get=function() return 0.2 end,on_change=function() return true end})
+    spec=registered[1][2]
+    assert(state.depth_option=='registered' and type(spec.label)=='function' and type(spec.mod)=='function')
+    assert(spec.label()=='Max Dive Water Depth' and spec.mod()=='Shallow Water Diving' and spec.min==0.20)
+    local zh=Text.encode(0x6700)..Text.encode(0x5927)
+    Text.register({language='zh-Hans',name='test',mods={shallow_water_diving={['option.depth.label']=zh}}})
+    Text.registry().game_language='zh-Hans'
+    assert(spec.label()==zh and spec.mod()=='Shallow Water Diving','translated where a translation exists')
+    Text.registry().game_language='en'
 end
 -- The after-update boundary is checked only while a lease or a retry is in
 -- progress or a local avatar exists (the patch's idle gate then costs one read).
@@ -96,7 +114,7 @@ local function checks_per_update(set)
         restore=function() return true end}
     setfenv(assert(loadfile(source..'/archive_loader.lua')),env)()(function()
         return {module=function(n)return n and 1 or 2 end,module_hash=function(n)return n==1 and 'game' or 'exe' end}
-    end,patch,{revision='test',game_sha256='game',exe_sha256='exe'})
+    end,patch,{revision='test',game_sha256='game',exe_sha256='exe'},Text,LOCALES)
     env.update();return calls
 end
 assert(checks_per_update(function() end)==1)
@@ -123,7 +141,7 @@ for _,diagnostics in ipairs({false,true}) do
     local patch={apply=function(a,g,e,state) i=i+1;state.observed=i;return true,reasons[i%4+1],false end,
         restore=function() return true end,MIN_WATER_DEPTH=0.20,SWIM_DEPTH=1.30,set_max_water_depth=function() return true end}
     setfenv(assert(loadfile(source..'/archive_loader.lua')),env)()(function() return api end,patch,
-        {revision='fixture',game_sha256='game',exe_sha256='exe'})
+        {revision='fixture',game_sha256='game',exe_sha256='exe'},Text,LOCALES)
     assert(opens==1 and lines[1]=='fixture\nwaiting_for_mission\n','startup report')
     local a,b,c=env.update();assert(a==1 and b==nil and c==3)
     assert(opens==2 and lines[#lines]=='depth_option=not installed\n','menu registration report')

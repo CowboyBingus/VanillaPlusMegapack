@@ -15,6 +15,7 @@ local R = dofile(source .. '/region.lua')
 local M = dofile(source .. '/menu.lua')
 local C = dofile(source .. '/chat.lua')
 local S = dofile(source .. '/scanner.lua')
+local B = dofile(source .. '/sos.lua')
 local api = create_api()
 assert(create_api() ~= api, 'each call builds its own api') -- repeated setup must not fail
 local function address(pointer) return tonumber(ffi.cast('uintptr_t', pointer)) end
@@ -33,6 +34,10 @@ local copy = api.buffer(64)
 assert(api.read_block(a, copy, 64) and api.load32(copy) == 0xbe929838 and api.load64(copy) == 0x1bebe929838)
 assert(api.read_block(16, copy, 64) == false, 'an unmapped block read fails without faulting')
 assert(api.load32(copy + 8) == 20, 'a failed block read leaves the buffer')
+-- Short guarded string reads (the game's Text Language): up to 16 bytes.
+assert(api.read_bytes(a, 8) == ffi.string(block, 8) and api.read_bytes(a, 16) == ffi.string(block, 16))
+assert(api.read_bytes(16, 8) == nil, 'an unmapped string read fails without faulting')
+assert(api.read_bytes(a, 17) == nil, 'longer than the reused buffer')
 
 -- Page checks: private read/write memory yes; module images, free memory and
 -- ranges past the region end no.
@@ -92,7 +97,9 @@ assert(api.u64(lo, hi) == 728224406569967729ULL)
 for _, native in pairs(G.NATIVES) do assert(pcall(ffi.typeof, native.type), native.type) end
 for _, slot in pairs(G.ENGINE_SLOTS) do assert(pcall(ffi.typeof, slot.type), slot.type) end
 for _, slot in pairs(G.PACKAGE_SLOTS) do assert(pcall(ffi.typeof, slot.type), slot.type) end
-for _, native in ipairs({C.SEND, C.RPC}) do assert(pcall(ffi.typeof, native.type), native.type) end
+for _, native in ipairs({C.SEND, C.RPC, B.DEACTIVATE, B.SET_KEY}) do
+    assert(pcall(ffi.typeof, native.type), native.type)
+end
 for _, native in pairs(M.NATIVES) do assert(pcall(ffi.typeof, native.type), native.type) end
 local got = {}
 local on_kick = ffi.cast('LmKickPeer', function(host_sync, peer)
@@ -112,6 +119,8 @@ local on_join = ffi.cast('LmStartJoin', function(join, info, kind, unused, reaso
     got.kind, got.reason_join = kind, reason
     return 1
 end)
+local on_sos = ffi.cast('LmSosCall', function(sos) got.sos = sos end)
+local on_set = ffi.cast('LmLobbySetInt', function(lobby, key, value) got.set = {lobby, key, value} end)
 jit.off()
 api.native('LmKickPeer', address(on_kick))(0x20000000000 + G.HOST_SYNC, api.u64(lo, hi))
 local text = ffi.new('char[8]', 'PROMOTE')
@@ -121,8 +130,10 @@ api.native('LmDialogSetup', address(on_dialog))(0x30000000010, M.TEXT_TEMPLATE, 
 api.native('LmRpcSend', address(on_rpc))(C.NEW_HOST, api.u64(C.EVERY_PEER, C.EVERY_PEER), api.scratch, 1)
 local joined = api.native('LmStartJoin', address(on_join))(0x20000000000 + G.JOIN, api.scratch, G.JOIN_PARTY, 0,
     G.JOIN_REASON_QUICKPLAY)
+api.native('LmSosCall', address(on_sos))(0x1d843dc55d0)
+api.native('LmLobbySetInt', address(on_set))(0x20000000000 + G.LOBBY, B.KEY_PRIVACY, 3)
 jit.on()
-on_kick:free(); on_rpc:free(); on_join:free(); on_text:free(); on_dialog:free()
+on_kick:free(); on_rpc:free(); on_join:free(); on_text:free(); on_dialog:free(); on_sos:free(); on_set:free()
 assert(got.peer == api.u64(lo, hi) and tonumber(got.host_sync) == 0x20000000000 + G.HOST_SYNC)
 assert(tonumber(got.widget) == 0x30000000000 and got.key == M.TEXT_KEY and got.text == 'PROMOTE')
 assert(got.dialog[1] == 0x30000000010 and got.dialog[2] == M.TEXT_TEMPLATE and got.dialog[4] == M.CONFIRM_LABEL
@@ -130,6 +141,8 @@ assert(got.dialog[1] == 0x30000000010 and got.dialog[2] == M.TEXT_TEMPLATE and g
 assert(got.hash == C.NEW_HOST and got.target == 0xffffffffffffffffULL and tonumber(got.args) == api.scratch
     and got.count == 1, 'a hash above 2^31 and the target -1 reach the RPC send intact')
 assert(joined == 1 and got.kind == 2 and got.reason_join == 5)
+assert(got.set[1] == 0x20000000000ULL + G.LOBBY and got.set[2] == B.KEY_PRIVACY and got.set[3] == 3)
+assert(got.sos == 0x1d843dc55d0ULL, 'the SOS object reaches the game\'s SOS off intact')
 
 -- Modules and hashes.
 assert(type(api.module(nil)) == 'number' and type(api.module('kernel32.dll')) == 'number')
@@ -160,7 +173,8 @@ print(string.format('PASS: 100,000 x (3 loads + 2 guarded reads) allocated %.3f 
 -- A game on real memory: a zeroed game.dll image with the verified code in
 -- place, a helldivers2.exe image, the engine lobby API table, the network
 -- context, the game state and the override config.
-local image = ffi.new('uint8_t[?]', 0x3480000)
+-- Up to the stratagem settings table (0x37CB600) in the game's data section.
+local image = ffi.new('uint8_t[?]', 0x37d8000)
 local game = address(image)
 local exe_image = ffi.new('uint8_t[?]', 0x8f0000)
 local exe = address(exe_image)
@@ -175,6 +189,9 @@ for _, check in ipairs(C.CODE) do place(game, check.rva, check.bytes) end
 place(game, C.SEND.rva, C.SEND.bytes)
 place(game, C.RPC.rva, C.RPC.bytes)
 for _, check in ipairs(S.CODE) do place(game, check.rva, check.bytes) end
+for _, check in ipairs(B.CODE) do place(game, check.rva, check.bytes) end
+place(game, B.DEACTIVATE.rva, B.DEACTIVATE.bytes)
+place(game, B.SET_KEY.rva, B.SET_KEY.bytes)
 local function object(size) local o = ffi.new('uint8_t[?]', size + 16); return o, math.ceil(address(o) / 16) * 16 end
 local tables_block, tables = object(0x200)
 local lobby_block, lobby_api = object(0x200)
@@ -197,7 +214,7 @@ for name, slot in pairs(G.PACKAGE_SLOTS) do
 end
 local playfab_block, playfab = object(64)
 local ctx_block, ctx = object(0x20000)
-local state_block, state = object(G.MODE + 16)
+local state_block, state = object(B.PRIVACY + 16)
 local roster_block, roster = object(4 * 0xc0)
 ffi.cast('uint64_t *', game + G.GAME_STATE_PTR)[0] = state
 ffi.cast('uint64_t *', game + G.ROSTER_PTR)[0] = roster
@@ -233,13 +250,28 @@ addon_api.module = function(name)
 end
 addon_api.module_sha256 = function(module) return module == game and 'G' or 'E' end
 addon_api.export = function(module, name) return module == playfab and playfab + #name or nil end
+-- The game's SOS off and key setter are callbacks here (the placed bytes are
+-- not runnable): the SOS off switches the SOS off.
+local sos_off_calls, key_sets = 0, 0
+local on_sos_off = ffi.cast(B.DEACTIVATE.type, function(sos)
+    sos_off_calls = sos_off_calls + 1
+    ffi.cast('uint8_t *', sos)[B.ACTIVE] = 0
+end)
+local on_key_set = ffi.cast(B.SET_KEY.type, function() key_sets = key_sets + 1 end)
+addon_api.native = function(type_name, at)
+    if type_name == B.DEACTIVATE.type then return api.native(type_name, address(on_sos_off)) end
+    if type_name == B.SET_KEY.type then return api.native(type_name, address(on_key_set)) end
+    return api.native(type_name, at)
+end
 local installer = setfenv(assert(loadfile(source .. '/addon.lua')), installed)()
-installer(function() return addon_api end, G, L, R, M, C, S, {version = 'test', game_sha256 = 'G', exe_sha256 = 'E'})
+local Text = dofile(source .. '/bingus_text.lua')
+installer(function() return addon_api end, G, L, R, M, C, S, B, Text, {en = dofile(source .. '/../locales/en.lua'),
+    bundled = {}}, {version = 'test', game_sha256 = 'G', exe_sha256 = 'E'})
 local mod = installed.BetterLobbyManagement
 assert(mod.status == 'ready', mod.status)
 local update = installed.update
 update(0.016)
-assert(mod.menu == 'ready' and mod.options == 'not installed (defaults in use)', mod.menu)
+assert(mod.menu == 'ready' and mod.sos == 'ready' and mod.options == 'not installed (defaults in use)', mod.sos)
 
 -- Measures n update hooks: garbage (interpreted and compiled), machine code and time.
 local util = require('jit.util')
@@ -288,13 +320,30 @@ local mcode_client = measure('idle hook, in another host\'s squad', 2000000)
 set_peers({me, other}, me, me)
 local mcode_host = measure('idle hook, hosting a squad, escape menu closed', 2000000)
 assert(api.queries == queries, 'idle hooks never check pages')
+-- CANCEL SOS kept, alone in a mission with the escape menu closed (6 more loads a frame).
+local sos_block, sos_object = object(128)
+ffi.cast('uint64_t *', game + B.SOS_PTR)[0] = sos_object
+ffi.cast('uint32_t *', sos_object)[B.ENABLED / 4] = 1
+ffi.cast('uint8_t *', sos_object)[B.ACTIVE] = 1
+ffi.cast('uint32_t *', state + G.MODE)[0] = G.MODE_MISSION
+set_peers({me}, me, me)
+jit.off()
+assert(mod.cancel_sos() and sos_off_calls == 1 and key_sets == 1 and ffi.cast('uint8_t *', sos_object)[B.ACTIVE] == 0,
+    'cancelled')
+jit.on()
+queries = api.queries
+local mcode_kept = measure('idle hook, alone in a mission, SOS cancel kept, escape menu closed', 2000000)
+assert(api.queries == queries and sos_off_calls == 1 and key_sets == 1,
+    'a kept cancel checks no pages and calls nothing meanwhile')
+ffi.cast('uint32_t *', state + G.MODE)[0] = G.MODE_SHIP
+update(0.016) -- the mission ended: no longer kept
 -- Since v1.0 every idle hook includes the Galactic Map scanner's check (formerly the standalone Fast Lobby
 -- Scanner, 1.1 KB in 2 traces of its own), and trace formation varies between runs: the title-screen hook
 -- measured 2.6 to 5.0 KB, so its guard is 8 KB like the other idle paths (was 4 KB).
-assert(mcode_title < 8192 and mcode_alone < 8192 and mcode_client < 8192 and mcode_host < 16384,
-    'idle hook machine code grew')
-print('PASS: the update hook on real memory: no session, alone, as a client and hosting a squad with the escape menu '
-    .. 'closed: no page checks, no garbage (interpreted or compiled)')
+assert(mcode_title < 8192 and mcode_alone < 8192 and mcode_client < 8192 and mcode_host < 16384
+    and mcode_kept < 16384, 'idle hook machine code grew')
+print('PASS: the update hook on real memory: no session, alone, as a client, hosting a squad with the escape menu '
+    .. 'closed and alone in a mission keeping an SOS cancelled: no page checks, no garbage (interpreted or compiled)')
 
 -- The region check on real memory: a config object laid out like the game's,
 -- the server's 16 pairs, own continent NA; the flags are written once, then

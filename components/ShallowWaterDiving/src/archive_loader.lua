@@ -1,9 +1,16 @@
-return function(create_api,patch,build)
+-- text: src/bingus_text.lua; locales: {en, bundled} (locales/).
+return function(create_api,patch,build,text,locales)
     if rawget(_G,'ShallowWaterDive') then return end
     local state={revision=build.revision,active=false,observed=0,protected=0,
         restored=0,startup_clears=0,short_ends=0,table_moves=0}
     rawset(_G,'ShallowWaterDive',state)
     local api,game,exe,last_log
+    -- The slider's texts, in the game's language when a translation has them;
+    -- the translator's notes (language, refused entries) go to the log.
+    local text_notes={}
+    local tr=text.new(locales.en,locales.bundled,function(message)
+        if #text_notes<20 then text_notes[#text_notes+1]=message end
+    end)
     -- Status and counts are kept in ShallowWaterDive on every check. The log
     -- file is written on startup, after the menu registration, when the mod
     -- stops and at shutdown; routine updates only with CowboyBingusDiagnostics
@@ -25,6 +32,7 @@ return function(create_api,patch,build)
             -- Memory protection queries this session (about 0.2-0.3 ms each in game).
             file:write('protection_queries='..tostring(api and api.queries or 0)..'\n')
             if state.depth_option then file:write('depth_option='..state.depth_option..'\n') end
+            for _,line in ipairs(text_notes) do file:write('text: '..line..'\n') end
             file:close()
         end)
     end
@@ -32,15 +40,22 @@ return function(create_api,patch,build)
     -- in. Every addon has loaded before the first update, so one attempt there
     -- suffices; the applied value reaches the patch through on_change.
     local DEPTH_OPTION='shallow_water_diving.max_water_depth'
+    -- Mod Options Menu v1.1 and later (version 2) take texts as functions and
+    -- call them whenever the escape menu opens, so they follow the game's
+    -- language; v1.0 takes strings with byte limits, where a translation that
+    -- does not fit stays English.
+    local function option_text(menu,key,bytes)
+        if (tonumber(menu.version) or 1)>=2 then return function() return tr(key) end end
+        local value=tr(key)
+        return #value<=bytes and value or tr.english[key]
+    end
     local function register_depth_option()
         local menu=rawget(_G,'ModOptionsMenu')
         if type(menu)~='table' or menu.api~=1 then return 'not installed' end
         local registered,reason=menu.register_option(DEPTH_OPTION,{type='slider',
-            label='Max Dive Water Depth',mod='Shallow Water Diving',min=patch.MIN_WATER_DEPTH,
-            max=patch.SWIM_DEPTH,step=0.05,default=patch.MIN_WATER_DEPTH,
-            description='Deepest water, measured up from your feet, that a dive can start in: from 0.20 '..
-                '(lower shin, the original limit) up to 1.30, where your Helldiver starts swimming. Deeper '..
-                'water always keeps the game\'s normal behavior.'})
+            label=option_text(menu,'option.depth.label',64),mod=option_text(menu,'option.mod',40),
+            min=patch.MIN_WATER_DEPTH,max=patch.SWIM_DEPTH,step=0.05,default=patch.MIN_WATER_DEPTH,
+            description=option_text(menu,'option.depth.description',400)})
         if not registered then return 'not registered: '..tostring(reason) end
         patch.set_max_water_depth(menu.get(DEPTH_OPTION))
         menu.on_change(DEPTH_OPTION,function(depth) patch.set_max_water_depth(depth) end)

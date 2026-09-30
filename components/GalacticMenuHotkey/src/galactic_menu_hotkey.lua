@@ -6,6 +6,11 @@
 if rawget(_G, 'GalacticMenuHotkeyInstalled') then return end
 local ffi = require('ffi')
 local bit = require('bit')
+-- Texts and translations: ssh_text = {module = src/bingus_text.lua, locales =
+-- locales/}, which the build places ahead of this file as a local (tests
+-- provide it as a global). functions: one text function per key, so repeated
+-- registrations pass the same function.
+local translation = {T = ssh_text.module, functions = {}}
 
 ffi.cdef [[
 typedef unsigned short GMH_u16;
@@ -39,18 +44,19 @@ local kernel32, user32, bcrypt =
     ffi.load('kernel32'), ffi.load('user32'), ffi.load('bcrypt')
 local process = kernel32.GetCurrentProcess()
 local process_id = tonumber(kernel32.GetCurrentProcessId())
-local BINDING_OPTIONS = {category = 'Ship Station Hotkeys'}
+-- label: the game's own localization ID (translated by the game), or text:
+-- a key in locales/en.lua.
 local MAP_SHORTCUT = {name = 'Galactic Map', id = 'cowboybingus.galactic_menu',
                       label = 0xb46c8096, slot = 1, key = 0x09, presenter = 15}
 local MENU_SHORTCUTS = {
     {name = 'Armory', id = 'cowboybingus.armory', label = 0x19e97f02,
      slot = 3, key = 0x70, presenter = 5}, -- F1
     {name = 'Control Center', id = 'cowboybingus.control_center',
-     label = 'CONTROL CENTER', slot = 4, key = 0x74, presenter = 6}, -- F5
+     text = 'binding.control_center', slot = 4, key = 0x74, presenter = 6}, -- F5
     {name = 'Ship Management', id = 'cowboybingus.ship_management',
      label = 0x2716885e, slot = 5, key = 0x75, presenter = 8}, -- F6
     {name = 'Stratagem Hero', id = 'cowboybingus.stratagem_hero',
-     label = 'STRATAGEM HERO', slot = 6, key = 0x76, arcade = true}, -- F7
+     text = 'binding.stratagem_hero', slot = 6, key = 0x76, arcade = true}, -- F7
     {name = 'Hellpod Deployment', id = 'cowboybingus.hellpod',
      label = 0xe89a91ef, slot = 7, key = 0x77, hellpod = true}, -- F8
 }
@@ -124,6 +130,23 @@ local log_file
 if loader and type(loader.open_log) == 'function' then
     pcall(function() log_file = loader.open_log('GalacticMenuHotkey.log') end)
 end
+-- Texts for Mod Bindings Menu. Version 3 and later take functions and call
+-- them whenever a binding page opens, so the texts follow the game's
+-- language; version 2 takes strings with byte limits, where a translation
+-- that does not fit stays English.
+function translation.binding_text(host, key, bytes)
+    local tr = translation.tr
+    if (tonumber(host.version) or 1) >= 3 then
+        local fn = translation.functions[key]
+        if not fn then
+            fn = function() return tr(key) end
+            translation.functions[key] = fn
+        end
+        return fn
+    end
+    local text = tr(key)
+    return #text <= bytes and text or tr.english[key]
+end
 local function note(message)
     if log_file then
         pcall(function()
@@ -132,6 +155,9 @@ local function note(message)
         end)
     end
 end
+-- The binding names, in the game's language when a translation has them.
+translation.tr = translation.T.new(ssh_text.locales.en, ssh_text.locales.bundled,
+                                   function(message) note('Text: ' .. message) end)
 local function world_status(message)
     if state.world_status ~= message then
         state.world_status = message
@@ -697,10 +723,12 @@ local function binding_host()
             for _, shortcut in ipairs(MENU_SHORTCUTS) do
                 shortcuts[#shortcuts + 1] = shortcut
             end
+            -- Mod Bindings Menu v2 groups rows under this header; v1 ignores it.
+            local options = {category = translation.binding_text(host, 'binding.section', 64)}
             for _, shortcut in ipairs(shortcuts) do
-                -- Mod Bindings Menu v2 groups rows under this header; v1 ignores it.
+                local label = shortcut.label or translation.binding_text(host, shortcut.text, 127)
                 local called, result, reason = pcall(host.register_binding,
-                    shortcut.id, shortcut.label, shortcut.slot, BINDING_OPTIONS)
+                    shortcut.id, label, shortcut.slot, options)
                 if called and result then
                     state.binding_slots[shortcut.id] = true
                     note('Using Mod Bindings Menu slot ' .. shortcut.slot ..

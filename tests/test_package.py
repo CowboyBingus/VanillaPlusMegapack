@@ -6,7 +6,7 @@ import struct
 import sys
 import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from build import ARCHIVE, BUILD, GUID, INPUT_ARCHIVE, ROWS_GUID, MODULE, VERSION, REVISION, ROWS_REVISION, ROOT, load_components, resource_hash, sha
+from build import ARCHIVE, ASSEMBLED, BUILD, GUID, INPUT_ARCHIVE, MODULE, VERSION, REVISION, ROOT, load_components, resource_hash, sha
 
 INPUT, CONFIG = resource_hash('content/input'), resource_hash('config')
 
@@ -43,10 +43,9 @@ def resources(data):
 
 
 def main():
-    rows = '--rows' in sys.argv
     build = Path(sys.argv[2]) if len(sys.argv)>2 else BUILD
-    components = load_components(rows)
-    name = 'Vanilla Plus Megapack Rows' if rows else 'Vanilla Plus Megapack'
+    components = load_components()
+    name = 'Vanilla Plus Megapack'
     slug = name.replace(' ', '')
     with zipfile.ZipFile(sys.argv[1]) as package:
         expected = {f'options/{c["slug"]}/{ARCHIVE}{s}' for c in components
@@ -56,7 +55,7 @@ def main():
         expected |= {'manifest.json', 'thumbnail.png', slug+'-manifest.json', slug+'-README.txt'}
         assert len(package.namelist()) == len(expected) and set(package.namelist()) == expected
         manager = json.loads(package.read('manifest.json'))
-        assert manager['Version'] == 1 and manager['Name'] == name+f' - v{VERSION}' and manager['Guid'] == (ROWS_GUID if rows else GUID)
+        assert manager['Version'] == 1 and manager['Name'] == name+f' - v{VERSION}' and manager['Guid'] == GUID
         assert len(manager['Options']) == len(components) == 17
         assert manager['IconPath'] == 'thumbnail.png'
         png = package.read('thumbnail.png')
@@ -64,7 +63,7 @@ def main():
         width, height = struct.unpack_from('>II', png, 16)
         assert width == height and width >= 512
         report = json.loads(package.read(slug+'-manifest.json'))
-        assert report['revision'] == (ROWS_REVISION if rows else REVISION) and report['runtime_verified'] is False
+        assert report['revision'] == REVISION and report['runtime_verified'] is False
         assert report['requires'][0]['revision'] == 'loader-v18' and report['requires'][0]['api'] == 1
         assert len(report['requires']) == 1, 'Mod Bindings Menu is bundled, not a separate requirement'
         assert report['loader_bundled'] is False and report['boot_replaced'] is False
@@ -122,6 +121,9 @@ def main():
             if component.get('source'):
                 # Shipped verbatim: the pinned standalone source is the whole entry.
                 assert entry[8:] == (ROOT / 'components' / component['slug'] / component['source']).read_bytes()
+            if component.get('slug') in ASSEMBLED:
+                # Assembled by its own scripts/entry.py from src/ and locales/, byte for byte the standalone entry.
+                assert entry[8:] == (build / component['slug'] / 'entry.lua').read_bytes()
             assert entry == (build / component['slug'] / 'entry.lua.main').read_bytes()
             body = entry[8:]
             marker = ('-- HD2-Addon: ' + module + '\n').encode()
@@ -140,17 +142,6 @@ def main():
             bytecode = bytes(int(x) for x in re.findall(rb'\\([0-9]{3})', match[1]))
             original = (build / component['slug'] / 'mod.lua.main').read_bytes()
             assert bytecode == original[8:] and bytecode[:5] == b'\x1bLJ\x02\x02'
-        if rows:
-            with zipfile.ZipFile(sys.argv[sys.argv.index('--rows')+1]) as baseline:
-                original = {}
-                for component in components:
-                    original.update(resources(baseline.read('options/'+component['slug']+'/'+ARCHIVE)))
-                    if component.get('input_archive_sha256'):
-                        original.update(input_actions(baseline.read('options/'+component['slug']+'/'+INPUT_ARCHIVE)))
-            assert set(original) == set(payloads)
-            changed = {key for key in original if original[key] != payloads[key]}
-            assert changed == {resource_hash('mods/cowboybingus/enemy_intelligence')}
-            print(f'PASS: only the forecast payload differs from the standard v{VERSION} package')
         assert [c['slug'] for c in components if c.get('input_archive_sha256')] == ['ModBindingsMenu']
         assert resource_hash('boot') not in payloads
         assert resource_hash('core/wwise/lua/wwise_flow_callbacks') not in payloads

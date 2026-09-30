@@ -8,6 +8,14 @@ CowboyBingusModLoader = {open_log = function()
     }
 end}
 local source = arg[1] or ((arg[0]:match('^(.*[/\\])') or '') .. '../src/galactic_menu_hotkey.lua')
+-- The build puts the text module and the locales ahead of the main file as
+-- the local ssh_text; here it is a global.
+local root = source:match('^(.*)[/\\]src[/\\][^/\\]+$') or '.'
+local Text = dofile(root .. '/src/bingus_text.lua')
+_G.BingusTranslations = nil
+Text.registry().steam_language = 'en'
+local ENGLISH = dofile(root .. '/locales/en.lua')
+_G.ssh_text = {module = Text, locales = {en = ENGLISH, bundled = {}}}
 dofile(source)
 
 local function upvalue(fn, wanted)
@@ -444,3 +452,45 @@ for _, message in ipairs(messages) do
     assert(not message:find('Update error:', 1, true), message)
 end
 print('Native ship menu dispatch, menu guards and saved map binding integration OK')
+
+-- Translations: with Mod Bindings Menu version 3 the section and the two text
+-- labels are functions (the same function on every registration) that follow
+-- the game's language; the game's own IDs stay numbers.
+do
+    local zh_section, zh_control = Text.encode(0x8230) .. Text.encode(0x822a), Text.encode(0x63a7) .. Text.encode(0x5236)
+    Text.register({language = 'zh-Hans', name = 'test', mods = {ship_station_hotkeys = {
+        ['binding.section'] = zh_section, ['binding.control_center'] = zh_control}}})
+    local seen = {}
+    ModBindingsMenu = {
+        version = 3,
+        register_binding = function(id, label, slot, options)
+            assert(type(options.category) == 'function' and (type(label) == 'number' or type(label) == 'function'))
+            seen[id] = {label = label, category = options.category}
+            return true
+        end,
+        is_down = function() return false end,
+    }
+    shortcut_down(map_shortcut)
+    local control, hero = seen['cowboybingus.control_center'], seen['cowboybingus.stratagem_hero']
+    assert(control.category() == 'Ship Station Hotkeys' and control.label() == 'CONTROL CENTER')
+    assert(seen['cowboybingus.armory'].label == 0x19e97f02, 'the game translates its own names')
+    Text.registry().game_language = 'zh-Hans'
+    assert(control.category() == zh_section and control.label() == zh_control, 'the functions follow the language')
+    assert(hero.label() == 'STRATAGEM HERO', 'untranslated texts stay English')
+    assert(control.category == hero.category, 'one function per text')
+    -- Version 2: strings in the current language, English when over its byte limits.
+    Text.registry().game_language = 'en'
+    local strings = {}
+    ModBindingsMenu = {
+        version = 2,
+        register_binding = function(id, label, slot, options)
+            assert(type(options.category) == 'string')
+            strings[id] = label
+            return true
+        end,
+        is_down = function() return false end,
+    }
+    shortcut_down(map_shortcut)
+    assert(strings['cowboybingus.control_center'] == 'CONTROL CENTER')
+end
+print('Translations: binding names as functions for Mod Bindings Menu v2.1, strings for v2.0 OK')

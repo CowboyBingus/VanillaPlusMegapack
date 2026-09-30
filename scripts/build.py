@@ -9,17 +9,18 @@ import sys
 
 sys.dont_write_bytecode = True
 from archive import ARCHIVE, LUA, EXE_SHA, GAME_DLL_SHA, make_archive, resource_hash, sha
-from package import package_release, release_directory
+from package import package_release
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build'
 MODULE = 'mods/cowboybingus/vanilla_plus_megapack'
-VERSION = '35'
+VERSION = '36'
 REVISION = f'megapack-v{VERSION}'
 GUID = '876060ae-0640-4ac5-95b6-ec7c9a0567d3'
-ROWS_GUID = 'fb497df5-080b-48a5-b31d-103ccb060e1c'
-ROWS_REVISION = REVISION + '-rows-v1'
 INPUT_ARCHIVE = ARCHIVE.replace('patch_0', 'patch_1')  # Mod Bindings Menu's input actions, beside its addon
+# Standalone addons whose scripts/entry.py assembles src/ and locales/ into one plaintext entry that carries the
+# discovery declaration; the option ships those exact bytes. A component with a 'version' passes it on.
+ASSEMBLED = ('BetterLobbyManagement', 'ModOptionsMenu', 'ModBindingsMenu', 'GalacticMenuHotkey')
 
 OPTION_DESCRIPTIONS = {
     'ArcThrowerRevamped': 'Hold the fire button to keep the Arc Thrower firing.',
@@ -32,23 +33,27 @@ OPTION_DESCRIPTIONS = {
     'SentryAimRetention': 'Retains sentry aim and improves target handoffs and firing checks.',
     'EnemyCollisionSynchronized': 'Aligns displaced corpse collision and curbs renewed movement after large remote corpses settle.',
     'ControllableHoverPack': 'Press the Jump Pack action again to descend early with native landing assistance.',
-    'KnowYourConstellation': 'Shows local enemy forecasts on mission previews and briefing.',
+    'KnowYourConstellation': 'Shows every enemy a mission can spawn, weighted by how often it spawns, on the war table and the briefing screen.',
     'ClickableScrollbars': 'Smoothly drag equipment and Career scrollbars, even with the pointer away from the track.',
     'GalacticMenuHotkey': 'Ship station shortcuts: Tab map, F1 Armory, F5 Control Center, F6 Ship Management, F7 Stratagem Hero, F8 instant Hellpod entry. Enable Mod Bindings Menu to rebind them.',
     'FlameDamageFixed': 'Fixes the Lumberer\'s and Flame Sentry\'s flame: two flame parts spawn again, it starts at the Cremator\'s distances and no longer hits the weapon that fires it, while still hitting Chargers and every other target.',
     'ModOptionsMenu': 'Adds a native MODS tab to the Options screen, where mods such as Shallow Water Diving offer their settings.',
     'ModBindingsMenu': 'Adds a native MODS tab to the keyboard and controller binding pages, where mods such as Ship Station Hotkeys offer rebindable keys.',
-    'BetterLobbyManagement': 'Host tools in the escape menu: DISBAND SQUAD, and PROMOTE, which moves the whole squad to the new host\'s ship (only the host needs the mod). Also a 5-second Galactic Map lobby scanner and an own-continent lobby filter.',
+    'BetterLobbyManagement': 'Host tools in the escape menu: DISBAND SQUAD, PROMOTE, which moves the whole squad to the new host\'s ship, and CANCEL SOS in a mission (only the host needs the mod). Also a 5-second Galactic Map lobby scanner and an own-continent lobby filter.',
 }
 
 
-def load_components(rows=False):
-    components = json.loads((ROOT / 'components.lock.json').read_text(encoding='utf-8'))
-    if rows:
-        for component in components:
-            if component['slug'] == 'KnowYourConstellation':
-                component.update(component['rows'])
-    return components
+def load_components():
+    return json.loads((ROOT / 'components.lock.json').read_text(encoding='utf-8'))
+
+
+def load_script(root, relative, name):
+    """A component's own build helper (scripts/entry.py or scripts/module.py), imported under a private name."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, root / relative)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def run(args):
@@ -103,26 +108,33 @@ def discoverable_resource(name, resource, directory):
     return entry
 
 
-def build_component(component, build=BUILD, rows=False):
+def build_component(component, build=BUILD):
     root = ROOT / 'components' / component['slug']
     for relative, expected in component['source_sha256'].items():
         if sha((root / relative).read_bytes()) != expected:
             raise ValueError('Pinned source changed: ' + component['slug'] + '/' + relative)
-    if component['slug'] == 'BetterLobbyManagement':
-        # The standalone build assembles its plaintext entry from src/ with scripts/entry.py; the option ships
-        # those exact bytes, which carry the discovery declaration, so they are also its entry.
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('lobby_entry', root / 'scripts/entry.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        body = module.entry_text(root, component['version'])
+    if component['slug'] in ASSEMBLED:
+        # The standalone build assembles its plaintext entry from src/ and locales/ with scripts/entry.py; the
+        # option ships those exact bytes, which carry the discovery declaration, so they are also its entry.
+        module = load_script(root, 'scripts/entry.py', component['slug'] + '_entry')
+        body = (module.entry_text(root, component['version']) if component.get('version')
+                else module.entry_text(root))
         payload = struct.pack('<II', len(body), 2) + body
         if sha(payload) != component['resource_sha256']:
             raise ValueError('Addon resource differs from the verified standalone release: ' + component['slug'])
         directory = build / component['slug']
         directory.mkdir(parents=True, exist_ok=True)
         (directory / 'mod.lua.main').write_bytes(payload)
-        (directory / 'better_lobby_management.lua').write_bytes(body)  # the plain entry, for its test_entry
+        (directory / 'entry.lua').write_bytes(body)  # the plain entry, for suites that load it
+        return payload
+    if component['slug'] == 'ShallowWaterDiving':
+        # Its scripts/module.py compiles the text module and locales with the gameplay files (with this
+        # build's archive module: the same LuaJIT and fingerprints), exactly as the standalone release.
+        module = load_script(root, 'scripts/module.py', 'shallow_water_module')
+        (payload,) = module.build_module(root, build / component['slug'], component['module'], component['patch'],
+                                         component['revision']).values()
+        if sha(payload) != component['resource_sha256']:
+            raise ValueError('Shallow Water Diving resource differs from the verified standalone release')
         return payload
     if component.get('source'):
         # A standalone addon that declares itself on its first line: the option
@@ -157,16 +169,6 @@ def build_component(component, build=BUILD, rows=False):
         directory.mkdir(parents=True, exist_ok=True)
         (directory / 'mod.lua.main').write_bytes(payload)
         return payload
-    if component['slug'] == 'GalacticMenuHotkey':
-        filename = 'galactic_menu_hotkey.lua'
-        body = (root / 'src' / filename).read_bytes()
-        payload = struct.pack('<II', len(body), 2) + body
-        if sha(payload) != component['resource_sha256']:
-            raise ValueError('Addon resource differs from verified standalone: ' + component['slug'])
-        directory = build / component['slug']
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / 'mod.lua.main').write_bytes(payload)
-        return payload
     if component['slug'] == 'ArcThrowerRevamped':
         # Same shape as the scrollbar option: the standalone addon is a
         # plaintext discovery entry, so the pack ships those exact bytes.
@@ -182,11 +184,8 @@ def build_component(component, build=BUILD, rows=False):
         (directory / 'entry.lua.main').write_bytes(payload)
         return payload
     if component['slug'] == 'KnowYourConstellation':
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('constellation_module', root / 'scripts/module.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        payload = compile_resource(module.wrapper(root, GAME_DLL_SHA, EXE_SHA, rows=rows), build / component['slug'])
+        module = load_script(root, 'scripts/module.py', 'constellation_module')
+        payload = compile_resource(module.wrapper(root, GAME_DLL_SHA, EXE_SHA), build / component['slug'])
         if sha(payload) != component['resource_sha256']:
             raise ValueError('Constellation runtime differs from the tested standalone release')
         return payload
@@ -250,15 +249,14 @@ def input_actions_archive(component):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--rows', action='store_true', help='Build the static forecast rows alternative')
     parser.add_argument('--skip-desktop-capture', action='store_true',
                         help='Skip interactive capture and record it as unverified')
     args = parser.parse_args()
-    build = BUILD / 'rows' if args.rows else BUILD
-    components = load_components(args.rows)
+    build = BUILD
+    components = load_components()
     if not components or len({c['module'] for c in components}) != len(components):
         raise ValueError('Expected distinct gameplay components')
-    resources = {resource_hash(c['module']): build_component(c, build, args.rows) for c in components}
+    resources = {resource_hash(c['module']): build_component(c, build) for c in components}
     resources[resource_hash(MODULE)] = compile_resource(
         (ROOT / 'src/megapack.lua').read_text(encoding='utf-8'), build)
     def entry(component):
@@ -301,10 +299,7 @@ def main():
                 path = directory / (INPUT_ARCHIVE + suffix)
                 path.write_bytes(data)
                 files[folder + '/' + path.name] = path.relative_to(ROOT).as_posix()
-        description = OPTION_DESCRIPTIONS[component['slug']]
-        if args.rows and component['slug'] == 'KnowYourConstellation':
-            description += ' Uses the static Rows layout.'
-        options.append({'Name': component['name'], 'Description': description,
+        options.append({'Name': component['name'], 'Description': OPTION_DESCRIPTIONS[component['slug']],
                         'Include': [folder]})
     report = {
         'name': 'Vanilla Plus Megapack', 'slug': 'VanillaPlusMegapack', 'revision': REVISION, 'guid': GUID,
@@ -318,15 +313,8 @@ def main():
         'components': [{k: c[k] for k in ('name', 'slug', 'revision', 'module', 'resource_sha256')} for c in components],
         'resource_sha256': {f'{key:016x}': sha(value) for key, value in sorted(resources.items())},
     }
-    if args.rows:
-        report.update(name='Vanilla Plus Megapack Rows', slug='VanillaPlusMegapackRows',
-                      revision=ROWS_REVISION, version=VERSION, guid=ROWS_GUID,
-                      install_instructions='INSTALL-ROWS.txt')
-        report['description'] = report['description'].replace(';', '.') + ' Alternate with the static constellation rows. Enable only one megapack variant.'
     release = package_release(ROOT, build, report)
     check = [sys.executable, ROOT / 'tests/test_package.py', release, build]
-    if args.rows:
-        check += ['--rows', release_directory(ROOT) / f'Vanilla-Plus-Megapack-v{VERSION}.zip']
     tests += run_parallel(check, [LUA, ROOT / 'tests/test_loader.lua', build, loader_build, 'discovery'])
     report['offline_tests'] = tests.strip()
     report['release_sha256'] = sha(release.read_bytes())

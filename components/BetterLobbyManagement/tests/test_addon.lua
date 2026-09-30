@@ -14,11 +14,15 @@ local R = dofile(source .. '/region.lua')
 local M = dofile(source .. '/menu.lua')
 local C = dofile(source .. '/chat.lua')
 local S = dofile(source .. '/scanner.lua')
+local B = dofile(source .. '/sos.lua')
+local Text = dofile(source .. '/bingus_text.lua')
+local ENGLISH = dofile(source .. '/../locales/en.lua')
+local function english(key, values) return Text.format(assert(ENGLISH.strings[key], key), values or {}) end
 local BUILD = {version = 'v-test', game_sha256 = 'GAME', exe_sha256 = 'EXE'}
 local TANGO, CHARLIE = Fake.peer(0x01000000, 0x00000005), Fake.peer(0x0a000000, 0x00000007)
 
-local function options_menu(saved, behaviour)
-    local menu = {api = 1, registered = {}, callbacks = {}}
+local function options_menu(saved, behaviour, version)
+    local menu = {api = 1, version = version, registered = {}, callbacks = {}}
     function menu.register_option(id, spec)
         if behaviour == 'refuse' then return false, 'too many mods' end
         if behaviour == 'error' then error('menu broke', 0) end
@@ -31,13 +35,19 @@ local function options_menu(saved, behaviour)
 end
 
 -- Loads src/addon.lua into a fresh global table over a fresh fake game.
+-- setup.language: the Steam language the game would report (default English);
+-- setup.packs: translation packs registered before the addon, as pack add-ons are.
 local function install(setup)
     setup = setup or {}
+    rawset(_G, 'BingusTranslations', nil)
+    Text.registry().steam_language = setup.language or 'en'
+    for _, pack in ipairs(setup.packs or {}) do Text.register(pack) end
     local world = Fake.new({G = G, R = R})
     Fake.install_config(world, R, setup.config)
     Fake.install_menu(world, M, setup.menu)
     Fake.install_chat(world, C, G)
     Fake.install_scanner(world, S)
+    Fake.install_sos(world, B, G)
     -- Squad messages are unavailable unless asked for: the chat send's code differs.
     if not setup.chat then world.code[Fake.GAME + C.SEND.rva] = ('x'):rep(#C.SEND.bytes) end
     world.names[Fake.key(TANGO)], world.names[Fake.key(CHARLIE)] = 'Tango', 'Charlie'
@@ -54,8 +64,8 @@ local function install(setup)
     env.shutdown = function(...) shutdowns = shutdowns + 1; return select('#', ...), ... end
     local original_update = env.update
     local installer = setfenv(assert(loadfile(source .. '/addon.lua')), env)()
-    installer(function() if setup.api_error then error('no api', 0) end return world.api end, G, L, R, M, C, S,
-        BUILD)
+    installer(function() if setup.api_error then error('no api', 0) end return world.api end, G, L, R, M, C, S, B,
+        Text, {en = ENGLISH, bundled = setup.bundled or {}}, BUILD)
     return {env = env, world = world, lines = lines, updates = updates, original_update = original_update,
             state = env.BetterLobbyManagement, shutdowns = function() return shutdowns end}
 end
@@ -112,18 +122,21 @@ do
     local t = install({options = options_menu()})
     local world, state = t.world, t.state
     frames(t, 1)
-    assert(state.options == 'registered' and state.menu == 'ready', state.menu)
+    assert(state.options == 'registered' and state.menu == 'ready' and state.sos == 'ready', state.sos)
     assert(state.scanner.status == 'active' and world.get32(Fake.SCANNER_CONFIG + S.RECHARGE) == 5, state.scanner.status)
     local counts = budget.wrap(world.api)
     local lines, queries = #t.lines, world.api.queries
     local function idle(label, limits, n)
         for i = 1, n or 300 do budget.check(budget.frame(counts, t.env.update, 0.016), limits, label .. ' ' .. i) end
     end
-    idle('alone on the ship', {load32 = 2, load64 = 2})
+    -- Alone, CANCEL SOS is the only action: the mode is looked at (2 loads
+    -- since v1.1), the escape menu only in a mission, the SOS only while the
+    -- menu is open.
+    idle('alone on the ship', {load32 = 3, load64 = 3})
     world.put64(Fake.GAME + G.CONTEXT_PTR, 0)
     idle('no session', {load32 = 1, load64 = 2})
     world.put64(Fake.GAME + G.CONTEXT_PTR, Fake.CTX)
-    budget.check(budget.frame(counts, t.env.update, 0.016), {load32 = 2, load64 = 3, read32 = 2}, 'new session')
+    budget.check(budget.frame(counts, t.env.update, 0.016), {load32 = 3, load64 = 4, read32 = 2}, 'new session')
     world.session, world.host = {TANGO, world.local_peer}, TANGO
     world.sync()
     idle('client of another host', {load32 = 4, load64 = 2})
@@ -131,11 +144,22 @@ do
     budget.check(budget.frame(counts, t.env.update, 0.016), {load32 = 6, load64 = 4, read64 = 1},
         'first hosting frame: the menu system confirmed once')
     idle('hosting a squad, menu closed', {load32 = 6, load64 = 4})
+    squad(world, {})
+    world.mode = G.MODE_MISSION
+    world.sync()
+    world.sos_beacon()
+    idle('alone in a mission, SOS on, menu closed', {load32 = 3, load64 = 5})
+    world.sos.active, world.sos.enabled = 0, 0
+    world.sync()
+    world.open_menu()
+    t.env.update(0.016) -- the new screen and the SOS object, each confirmed once
+    idle('alone in a mission, escape menu open, no SOS', {load32 = 3, load64 = 6, load8 = 1})
+    world.close_menu()
     assert(#t.lines == lines, 'idle updates log nothing')
     assert(world.api.queries == queries, 'no page checks while idle')
 end
-print('PASS: idle frames cost 3 loads with no session, 4 alone, 6 as a client and 10 hosting a squad with the menu '
-    .. 'closed (2 of them the scanner\'s); no page checks')
+print('PASS: idle frames cost 3 loads with no session, 6 alone on the ship, 6 as a client, 10 hosting a squad with the '
+    .. 'menu closed and 8 alone in a mission (10 with the menu open; 2 of them the scanner\'s); no page checks')
 
 -- The escape menu while hosting a squad on the ship.
 do
@@ -197,7 +221,7 @@ do
         state.lobby)
     assert(logged(t, 'menu: disband confirmed') and logged(t, 'disband: kicked Tango'))
 end
--- In a mission nothing is offered: the game's own buttons stay as they are.
+-- In a mission without an SOS nothing is offered: the game's own buttons stay as they are.
 do
     local t = install({})
     local world = t.world
@@ -213,7 +237,118 @@ do
     assert(world.api.queries == queries, 'no page checks')
 end
 print('PASS: hosting a squad on the ship, the escape menu gets DISBAND SQUAD and PROMOTE (the player menu opened last '
-    .. 'picks who); confirmed dialogs kick with the game\'s own kick; missions get nothing')
+    .. 'picks who); confirmed dialogs kick with the game\'s own kick; missions without an SOS get nothing')
+
+-- CANCEL SOS, alone in a mission: after the game's two buttons; a confirm
+-- stops the SOS with the game's own function, the lobby posts in the same
+-- frame and the button goes again.
+do
+    local t = install({})
+    local world = t.world
+    world.mode = G.MODE_MISSION
+    world.native_types = {2, 3}
+    world.sync()
+    frames(t, 1) -- the scanner's first write
+    world.sos_beacon()
+    world.open_menu()
+    frames(t, 1)
+    assert(world.our_buttons() == 'cancel_sos=CANCEL SOS', world.our_buttons())
+    assert(world.bytes[world.content + M.COUNT] == 3 and world.bytes[world.content + M.TYPES] == 2
+        and world.bytes[world.content + M.TYPES + 1] == 3, 'the game\'s own two buttons kept')
+    local counts = budget.wrap(world.api)
+    local calls, f = #world.calls, nil
+    for _ = 1, 60 do f = budget.frame(counts, t.env.update, 0.016) end
+    assert(#world.calls == calls and (f.writable_data or 0) == 0 and (f.read32 or 0) == 0, budget.describe(f))
+    budget.check(f, {load8 = 10, load32 = 25, load64 = 9}, 'alone in a mission, SOS on, menu open, nothing to do')
+    world.focus(4 + 2)
+    frames(t, 1)
+    assert(world.texts[world.dialog + M.DIALOG_TITLE] == 'CANCEL SOS')
+    assert(world.texts[world.dialog + M.DIALOG_BODY] == B.body(1, english), world.texts[world.dialog + M.DIALOG_BODY])
+    world.select(); frames(t, 1)
+    world.answer(true); frames(t, 1)
+    assert(world.count('sos_deactivate') == 1 and world.key(B.KEY_SOS) == '0' and world.key(B.KEY_PRIVACY) == '1')
+    assert(world.api.loadf(world.lobby + B.COUNTDOWN) == 0, 'the lobby posts in the game\'s update of this frame')
+    assert(world.sos_uses() == 1, 'the SOS Beacon can be called in again')
+    assert(logged(t, 'menu: cancel_sos confirmed')
+        and logged(t, 'SOS cancelled: lobby SOS flag 1, privacy 0 -> SOS flag 0, privacy 1')
+        and logged(t, 'SOS Beacon uses 0 -> 1'))
+    frames(t, 1)
+    assert(world.count('rebuild') == 1 and world.our_buttons() == '', 'the button goes: the game rebuilt its list')
+    -- Kept off, the menu closed: the cancel's 6 loads a frame on top of the alone path.
+    world.hide_dialog()
+    world.close_menu()
+    frames(t, 2)
+    for _ = 1, 60 do f = budget.frame(counts, t.env.update, 0.016) end
+    budget.check(f, {load8 = 1, load32 = 5, load64 = 8}, 'alone in a mission, SOS cancelled, menu closed')
+    -- The host changes their mind: a new SOS Beacon lists the mission again,
+    -- the mod lets it, and the escape menu offers CANCEL SOS again.
+    world.sos_beacon()
+    frames(t, 1)
+    assert(world.sos_uses() == 0 and world.sos.active == 1 and world.key(B.KEY_SOS) == '1')
+    assert(logged(t, '(a new SOS beacon was called in)'))
+    world.open_menu()
+    frames(t, 1)
+    assert(world.our_buttons() == 'cancel_sos=CANCEL SOS' and world.count('sos_deactivate') == 1, world.our_buttons())
+end
+-- CANCEL SOS with a squad in a mission: after the game's three buttons; the
+-- dialog follows the privacy setting; a player leaving re-arms the SOS in the
+-- game's update and the mod turns it off in the next frame.
+do
+    local t = install({})
+    local world = t.world
+    squad(world, {TANGO, CHARLIE})
+    world.mode = G.MODE_MISSION
+    world.native_types = {0, 2, 3}
+    world.sync()
+    frames(t, 1)
+    world.sos_beacon()
+    world.open_menu()
+    frames(t, 1)
+    assert(world.our_buttons() == 'cancel_sos=CANCEL SOS' and world.bytes[world.content + M.COUNT] == 4,
+        world.our_buttons())
+    local counts = budget.wrap(world.api)
+    local f
+    for _ = 1, 60 do f = budget.frame(counts, t.env.update, 0.016) end
+    -- The ship's 45 loads with a squad of three, + the SOS (2) and the privacy setting (2).
+    budget.check(f, {load8 = 11, load32 = 30, load64 = 8}, 'hosting a squad in a mission, SOS on, menu open')
+    world.privacy = 0
+    frames(t, 1)
+    world.focus(4 + 3)
+    frames(t, 1)
+    assert(world.texts[world.dialog + M.DIALOG_BODY] == B.body(0, english), world.texts[world.dialog + M.DIALOG_BODY])
+    world.select(); frames(t, 1)
+    world.answer(true); frames(t, 1)
+    assert(world.count('sos_deactivate') == 1)
+    world.lobby_update()
+    assert(world.playfab[B.KEY_SOS] == '0' and world.playfab[B.KEY_PRIVACY] == '0', 'Public stays Public')
+    world.player_leaves(CHARLIE) -- the game's re-arm
+    frames(t, 1)
+    assert(world.count('sos_deactivate') == 2 and world.key(B.KEY_SOS) == '0' and world.our_buttons() == '')
+    assert(logged(t, 'SOS: the game listed it again (a player left or a new host); cancelled again'))
+    t.env.shutdown()
+    assert(t.lines[#t.lines]:find('SOS cancels 1, re-arms caught 1 (0 already posted)', 1, true), t.lines[#t.lines])
+end
+-- Changed SOS code: CANCEL SOS stays off; everything else runs.
+do
+    local t = install({world = function(w) w.changed = Fake.GAME + B.CODE[1].rva end})
+    local world, state = t.world, t.state
+    assert(state.status == 'ready' and state.menu == 'ready' and state.sos == 'unavailable: SOS activate changed',
+        state.sos)
+    assert(logged(t, 'CANCEL SOS unavailable: SOS activate changed'))
+    world.mode = G.MODE_MISSION
+    world.native_types = {2, 3}
+    world.sync()
+    frames(t, 1)
+    world.sos_beacon()
+    world.open_menu()
+    frames(t, 2)
+    assert(world.our_buttons() == '' and world.count('sos_deactivate') == 0)
+    local ok, why = state.cancel_sos()
+    assert(ok == false and why == 'unavailable: SOS activate changed', why)
+end
+print('PASS: CANCEL SOS shows in a mission with an SOS on (alone or with a squad), its dialog names the privacy the '
+    .. 'lobby returns to, a confirm stops the SOS and posts the lobby at once, the button goes, and a re-arm after a '
+    .. 'player leaves is turned off in the next frame; changed SOS code disables only CANCEL SOS')
 
 -- Lua entry points.
 do
@@ -232,8 +367,16 @@ do
     squad(world, {})
     local ok, why = state.promote()
     assert(ok == false and why == 'no other players' and logged(t, 'promote refused: no other players'))
+    ok, why = state.cancel_sos()
+    assert(ok == false and why == 'not in a mission' and logged(t, 'cancel SOS refused: not in a mission'), why)
+    world.mode = G.MODE_MISSION
+    world.sync()
+    ok, why = state.cancel_sos()
+    assert(ok == false and why == 'no SOS is on', why)
+    world.sos_beacon()
+    assert(state.cancel_sos() and world.count('sos_deactivate') == 1 and world.key(B.KEY_SOS) == '0')
 end
-print('PASS: Lua entry points (disband, promote, cancel) work and refuse cleanly')
+print('PASS: Lua entry points (disband, promote, cancel, cancel_sos) work and refuse cleanly')
 
 -- Squad messages: on by default, a chat line before the kick; the option switches it off.
 do
@@ -365,7 +508,7 @@ do
     local t = install({})
     local update = t.env.update
     setfenv(assert(loadfile(source .. '/addon.lua')), t.env)()(function() error('second copy built an api') end,
-        G, L, R, M, C, S, BUILD)
+        G, L, R, M, C, S, B, Text, {en = ENGLISH, bundled = {}}, BUILD)
     assert(t.env.update == update)
     local e = install({options = options_menu()})
     e.env.update(0.016)
@@ -387,3 +530,104 @@ do
 end
 print('PASS: a second copy does nothing; an error stops the mod for the session, cancels the action, restores the '
     .. 'region flags and the scanner\'s field and keeps the game update running')
+
+-- Translations: a Chinese pack is installed and the game's Text Language is
+-- Chinese (read from game memory; Steam still says English). Buttons, dialogs,
+-- the chat line and the Mod Options Menu texts follow; player names are
+-- upper-cased beyond a-z; Mod Options Menu v1.0 gets byte-capped strings,
+-- later versions get functions.
+do
+    local n = 0
+    local function cjk(count)
+        local parts = {}
+        for k = 1, count do n = n + 1; parts[k] = Text.encode(0x4E00 + (n * 37) % 20000) end
+        return table.concat(parts)
+    end
+    local zh = {}
+    for key, value in pairs(ENGLISH.strings) do
+        local names = {}
+        for name in value:gmatch('{[%a_]+}') do names[#names + 1] = name end
+        zh[key] = cjk(4) .. table.concat(names, cjk(1))
+    end
+    zh['option.scanner.description'] = cjk(150) -- 450 bytes: too long for v1.0's 400-byte cap
+    local pack = {language = 'zh-Hans', name = 'test pack', mods = {better_lobby_management = zh}}
+    local function chinese_game(world)
+        local settings = world.get64(Fake.GAME + G.GAME_STATE_PTR)
+        world.put32(settings + Text.GAME.index, 11)
+        world.put64(Fake.GAME + Text.GAME.table + 8 * 11, 0x2f000000000)
+        world.put64(0x2f000000000 + 8, 0x2f000000100)
+        world.put_string(0x2f000000100, 'zh-CN')
+    end
+    local mom = options_menu(nil, nil, 2)
+    local t = install({chat = true, options = mom, packs = {pack}, world = chinese_game})
+    local world, state = t.world, t.state
+    frames(t, 1)
+    assert(logged(t, 'text language: zh-Hans (game setting zh-CN)'), table.concat(t.lines))
+    local total = 0
+    for _ in pairs(ENGLISH.strings) do total = total + 1 end
+    -- Mod Options Menu v1.1+: functions, read when the menu builds its page
+    -- (nothing is resolved before that).
+    local spec = mom.registered[1].spec
+    assert(type(spec.label) == 'function' and spec.label() == zh['option.region.label'])
+    assert(logged(t, 'language zh-Hans: ' .. total .. ' of ' .. total .. ' texts translated'), table.concat(t.lines))
+    assert(spec.mod() == zh['option.mod'] and spec.choices[2]() == zh['option.region.continent'])
+    assert(mom.registered[2].spec.choices[1] == 'On', 'ON and OFF stay the game\'s own words')
+    assert(mom.registered[3].spec.description() == zh['option.scanner.description'])
+    -- Buttons and dialogs; a Cyrillic name upper-cased.
+    world.names[Fake.key(TANGO)] = '\208\154\208\176\209\130\209\143' -- Katya
+    squad(world, {TANGO})
+    world.open_menu()
+    frames(t, 1)
+    local promote = Text.format(zh['button.promote'], {name = '\208\154\208\144\208\162\208\175'})
+    assert(world.our_buttons() == 'disband=' .. zh['button.disband'] .. ' promote=' .. promote, world.our_buttons())
+    world.focus(4 + 2)
+    frames(t, 1)
+    assert(world.texts[world.dialog + M.DIALOG_TITLE] == zh['dialog.disband.title'])
+    assert(world.texts[world.dialog + M.DIALOG_BODY] == zh['dialog.disband.body'])
+    -- The chat line goes out in the host's language.
+    assert(state.disband())
+    assert(world.last('chat_send')[3] == zh['chat.disband'], 'the translated chat line')
+    frames(t, 80)
+    -- Mod Options Menu v1.0: strings, and a translation over its byte cap stays English.
+    local old = options_menu()
+    local u = install({options = old, packs = {pack}, world = chinese_game})
+    frames(u, 1)
+    local v1 = old.registered[1].spec
+    assert(v1.label == zh['option.region.label'] and v1.choices[2] == zh['option.region.continent'])
+    assert(old.registered[3].spec.description == ENGLISH.strings['option.scanner.description'], 'over 400 bytes')
+    -- A bad translation entry is refused alone, logged, and English shows.
+    local broken = {language = 'zh-Hans', name = 'broken', mods = {better_lobby_management = {
+        ['button.promote'] = 'no placeholder'}}}
+    local b = install({packs = {pack, broken}, world = chinese_game})
+    squad(b.world, {TANGO})
+    b.world.open_menu()
+    frames(b, 2)
+    assert(logged(b, 'button.promote: placeholders differ from English'), table.concat(b.lines))
+    assert(b.world.our_buttons():find('promote=' .. Text.format(zh['button.promote'], {name = 'TANGO'}), 1, true),
+        b.world.our_buttons())
+    -- The player switches the game to Chinese between two openings of the
+    -- escape menu: the next opening reads the setting and rebuilds the buttons.
+    local s = install({packs = {pack}})
+    squad(s.world, {TANGO})
+    s.world.open_menu()
+    frames(s, 2)
+    assert(s.world.our_buttons() == 'disband=DISBAND SQUAD promote=PROMOTE TANGO', s.world.our_buttons())
+    s.world.close_menu()
+    frames(s, 1)
+    chinese_game(s.world)
+    s.world.open_menu()
+    frames(s, 2)
+    assert(s.world.our_buttons():find('disband=' .. zh['button.disband'], 1, true), s.world.our_buttons())
+    assert(logged(s, 'text language: zh-Hans (game setting zh-CN)'), table.concat(s.lines))
+    -- No pack and a Chinese game: English, and the log says nothing is translated.
+    local e = install({world = chinese_game})
+    squad(e.world, {TANGO})
+    e.world.open_menu()
+    frames(e, 2)
+    assert(e.world.our_buttons() == 'disband=DISBAND SQUAD promote=PROMOTE TANGO', e.world.our_buttons())
+    assert(logged(e, 'language zh-Hans: 0 of'), table.concat(e.lines))
+end
+rawset(_G, 'BingusTranslations', nil)
+print('PASS: translations: the game\'s Text Language picks the pack\'s texts for buttons, dialogs, the chat line and '
+    .. 'Mod Options Menu (functions for v1.1+, byte-capped strings for v1.0); names upper-cased beyond a-z; bad '
+    .. 'entries and missing packs fall back to English')

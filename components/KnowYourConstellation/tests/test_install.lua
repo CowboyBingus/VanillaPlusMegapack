@@ -1,9 +1,14 @@
 local source = assert(arg[1])
 local install = assert(loadfile(source..'/install.lua'))()
 local model = assert(loadfile(source..'/model.lua'))()
-local catalogue = assert(loadfile(source..'/catalogue.lua'))()
-local heavy = assert(loadfile(source..'/heavy.lua'))()
-local heavy_data = assert(loadfile(source..'/heavy_data.lua'))()
+local roster = assert(loadfile(source..'/roster.lua'))()
+local roster_data = assert(loadfile(source..'/roster_data.lua'))()
+local text = assert(loadfile(source..'/bingus_text.lua'))()
+local english = assert(loadfile(source..'/../locales/en.lua'))()
+local FOOTER = english.strings['panel.footer']
+-- Count roster computations: repeated samples of one mission must reuse it.
+local computations,compute = 0,roster.compute
+roster.compute = function(...) computations=computations+1 return compute(...) end
 local screen,key,valid = nil,'first',true
 local ready,complete,matches = true,true,true
 local draws,clears,suspends,previous_calls,samples = 0,0,0,0,0
@@ -47,10 +52,11 @@ env.update = function(dt,marker) previous_calls=previous_calls+1 return 1,nil,ma
 local function api()
     return {module=function() return 1 end,module_hash=function() return 'same' end}
 end
-setfenv(install,env)(api,{new=function() return source_object end},{},catalogue,
+setfenv(install,env)(api,{new=function() return source_object end},{},roster,roster_data,
     model,{new=function() return surface end},
-    {revision='test',game_sha256='same',exe_sha256='same'},heavy,heavy_data,
-    {new=function() return {sample=function() return ready and {client=client,active=active} or nil end} end})
+    {revision='test',game_sha256='same',exe_sha256='same'},
+    {new=function() return {sample=function() return ready and {client=client,active=active} or nil end} end},
+    text,{en=english,bundled={}})
 local a,b,c = env.update(0.1,'marker')
 assert(a==1 and b==nil and c=='marker' and draws==0)
 screen='map'
@@ -81,11 +87,7 @@ local before=draws
 env.update(0.1,'marker')
 assert(draws==before and clears>=5 and previous_calls==8)
 
--- The real model reproduces the reported one-section/two-section change.
-local preliminary={key='rapid',screen='map',tags={1},difficulty=10,faction=2,complete=false}
-preliminary.heavies=heavy.possible(preliminary,heavy_data)
-assert(not model.make(preliminary,catalogue).marquee:find('[HEAVY ENEMIES]',1,true))
-assert(model.make(preliminary,catalogue).footer:find('Base forecast',1,true))
+-- Pending data never publishes; the report appears only once complete.
 screen,key,complete,matches='map','rapid',false,true
 env.update(.001)
 assert(not visible,'A pending snapshot must not publish its preliminary sections or footer')
@@ -97,13 +99,16 @@ env.update(.011)
 assert(samples==pending_samples+1 and not visible,'Pending data must retry after 100 ms without showing a base report')
 complete=true
 env.update(.101)
-assert(visible and visible.key=='rapid' and visible.marquee:find('[HEAVY ENEMIES]',1,true))
+assert(visible and visible.key=='rapid' and #visible.large>0 and visible.headline=='BILE BUGS')
 assert(visible.footer=='Possible encounters. Spawns are not guaranteed.')
-local resolved_samples=samples
+local resolved_samples,resolved_computations=samples,computations
 for _=1,4 do env.update(.1) end
 assert(samples==resolved_samples,'Resolved reports must retain the slower refresh cadence')
 env.update(.101)
 assert(samples==resolved_samples+1)
+for _=1,6 do env.update(.501) end
+assert(samples>=resolved_samples+6 and computations==resolved_computations,
+    'Refreshing an unchanged mission must reuse its roster')
 
 local rapid_clears=clears
 for _,next_key in ipairs({'other','rapid','other','rapid'}) do
@@ -128,7 +133,7 @@ env.update(.001)
 assert(not visible,'Matched identity alone cannot authorize an incomplete snapshot')
 complete=true
 env.update(.101)
-assert(visible and visible.marquee:find('[HEAVY ENEMIES]',1,true) and clears==rapid_clears)
+assert(visible and #visible.large>0 and clears==rapid_clears)
 complete=false
 env.update(.501)
 assert(not visible,'An incomplete refresh must hide rather than replace the complete report')
@@ -184,9 +189,8 @@ on_sample=nil
 -- Complete reports may legitimately have one section on low difficulties.
 screen,key,difficulty,complete='map','low-difficulty',2,true
 env.update(.001)
-assert(visible and visible.marquee:find('[BILE BUGS]',1,true)
-    and not visible.marquee:find('[HEAVY ENEMIES]',1,true))
-assert(visible.footer=='Composition traits. Units vary with difficulty.')
+assert(visible and visible.headline=='BILE BUGS' and #visible.large==0 and #visible.small>0)
+assert(visible.footer==FOOTER)
 
 -- Loading or expiring remote packets are normal pending states. They must
 -- clear the old report without destroying the frame or resetting its scroll.
@@ -261,7 +265,7 @@ env.update(.001)
 assert(not frame_visible,'Loadout must stay hidden')
 descriptor_pending=false
 for _,m in ipairs(published) do
-    assert(m.complete and not m.footer:find('Base forecast',1,true),
+    assert(m.complete and m.footer==FOOTER,
         'Only complete reports and their matching footer may be published')
 end
 assert(suspends>0 and env.EnemyIntelligence.failures==1,'Expected pending states must not become reader failures')

@@ -13,14 +13,18 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "BingusSharedLoader" / "scripts"))
+LOADER = Path(os.environ.get("BINGUS_SHARED_LOADER", ROOT / "BingusSharedLoader"))
+sys.path.insert(0, str(LOADER / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from archive import ARCHIVE, make_archive, resource_hash  # noqa: E402
 from build_addon import entry_source  # noqa: E402
+from entry import entry_text, locale_files  # noqa: E402
+import translations  # noqa: E402
 
 
 HERE = Path(__file__).resolve().parents[1]
 BASE_CONFIG = Path(os.environ.get("HD2_INPUT_CONFIG", str(HERE / "research" / "input.config")))
-VERSION = "2.0"
+VERSION = "2.1"
 CONFIG_SHA256 = "E509D85AC3603721E5AFE5686C7041798587A108AA86E2DA961A2EA451881A1B"
 CONFIG_NAME = resource_hash("content/input")
 CONFIG_TYPE = resource_hash("config")
@@ -139,7 +143,12 @@ def build(output: Path) -> Path:
     if digest != CONFIG_SHA256:
         raise ValueError(f"Unexpected input.config SHA256 {digest}")
     config = extend_input_config(base)
-    source = entry_source(LUA_NAME, (HERE / "src" / "mod_bindings_menu.lua").read_bytes())
+    # Bundled translations must be data only and free of errors.
+    for path in locale_files(HERE)[1:]:
+        problems = translations.check(HERE / "locales", path.stem, out=lambda line: None)
+        if problems.errors:
+            raise SystemExit(chr(10).join(problems.errors))
+    source = entry_source(LUA_NAME, entry_text(HERE))
     lua = struct.pack("<II", len(source), 2) + source
     manifest = {
         "Version": 1, "Guid": str(uuid.UUID(GUID)), "Name": "Mod Bindings Menu v" + VERSION,

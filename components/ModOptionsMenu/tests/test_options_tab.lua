@@ -1,9 +1,16 @@
 -- Drive the MODS tab against fake escape-menu memory and emulated native calls.
 local source = arg[1] or ((arg[0]:match('^(.*[/\\])') or '') .. '../src/mod_options_menu.lua')
+local root = source:match('^(.*)[/\\]src[/\\][^/\\]+$') or '.'
 local directory = assert(os.getenv('TEMP') or os.getenv('TMP'))
 os.remove(directory .. '/ModOptionsMenu.values')
 _G.CowboyBingusModLoader = {log_directory = directory}
-_G.ModOptionsMenu, _G.update = nil, nil
+_G.ModOptionsMenu, _G.update, _G.BingusTranslations = nil, nil, nil
+-- The build puts the text module and the locales ahead of the main file as
+-- the local mom_text; here it is a global.
+local Text = dofile(root .. '/src/bingus_text.lua')
+local ENGLISH = dofile(root .. '/locales/en.lua')
+Text.registry().steam_language = 'en'
+_G.mom_text = {module = Text, locales = {en = ENGLISH, bundled = {}}}
 dofile(source)
 local ffi = require('ffi')
 local bit = require('bit')
@@ -319,7 +326,7 @@ end
 
 -- Registration contract.
 local changes = {}
-assert(menu.api == 1 and menu.version == 1 and menu.ready())
+assert(menu.api == 1 and menu.version == 2 and menu.ready()) -- version 2: texts may be functions
 assert(not menu.register_option('bad', {type = 'toggle'}))
 assert(not menu.register_option('bad', {type = 'dial', label = 'Dial'}))
 assert(not menu.register_option('bad', {type = 'choice', label = 'One', choices = {'A'}}))
@@ -660,3 +667,68 @@ do
 end
 print('MODS tab, pages, layout pass, descriptions, apply and unapplied-changes discard, value persistence '
       .. 'and restoration, idle, open and MODS frame budgets and a late registration OK')
+
+-- Translations (API version 2). Limits count characters; mod names and
+-- choices are upper-cased beyond a-z; texts given as functions and MOM's own
+-- texts follow the language each time the escape menu opens, never per frame.
+do
+    _G.ModOptionsMenu, _G.update, _G.BingusTranslations = nil, nil, nil
+    Text.registry().steam_language = 'en'
+    dofile(source)
+    local menu3 = ModOptionsMenu
+    local st, step3 = upvalue(menu3.register_option, 'state'), upvalue(update, 'step')
+    st.initialized, st.base, st.native = true, base, native
+    local function cjk(count, from)
+        local parts = {}
+        for index = 1, count do parts[index] = Text.encode(0x4E00 + (from or 0) + index) end
+        return table.concat(parts)
+    end
+    -- 60 CJK characters (180 bytes) fit the 64-character label limit; 65 do not.
+    assert(menu3.register_option('zh.long', {type = 'toggle', label = cjk(60), mod = cjk(13, 100)}))
+    assert(not menu3.register_option('zh.too_long', {type = 'toggle', label = cjk(65)}))
+    assert(not menu3.register_option('zh.bad', {type = 'toggle', label = 'bad \255 bytes'}), 'invalid UTF-8')
+    -- A Russian mod name, upper-cased as Cyrillic.
+    assert(menu3.register_option('ru.depth', {type = 'toggle', label = 'x', mod = '\208\191\208\187\208\176\208\178'}))
+    assert(st.mods['\208\159\208\155\208\144\208\146'], 'mod names are upper-cased in every script')
+    -- Texts as functions (as Better Lobby Management passes them).
+    local language = 'en'
+    local words = {en = {label = 'Depth', mod = 'Diving', choice = 'Deep', description = 'How deep.'},
+                   zh = {label = cjk(2, 200), mod = cjk(3, 300), choice = cjk(1, 400), description = cjk(8, 500)}}
+    local function word(field) return function() return words[language][field] end end
+    local function spec()
+        return {type = 'choice', label = word('label'), mod = word('mod'), choices = {word('choice'), 'On'},
+                description = word('description')}
+    end
+    assert(menu3.register_option('fn.depth', spec()))
+    local option = st.options['fn.depth']
+    assert(option.label == 'Depth' and option.choices[1] == 'DEEP' and option.choices[2] == 'ON')
+    assert(option.description == 'How deep.' and st.mods['DIVING'].title == 'DIVING')
+    assert(menu3.register_option('fn.depth', spec()), 'new closures register the same option')
+    -- The game's language changes (and a pack translates MOM's own texts):
+    -- nothing happens until the escape menu opens again.
+    language = 'zh'
+    Text.register({language = 'zh-Hans', name = 'test', mods = {mod_options_menu = {
+        ['tab.mods'] = cjk(2, 600), ['category.none'] = cjk(6, 700)}}})
+    Text.registry().game_language = 'zh-Hans'
+    set_stack({})
+    step3(0.016)
+    assert(option.label == 'Depth', 'texts change only when the menu opens')
+    set_stack({1})
+    put32(bar + 57452, 2)
+    put32(screen + 8, 2)
+    local revision = st.revision
+    step3(0.016)
+    assert(option.label == words.zh.label and option.choices[1] == words.zh.choice and option.choices[2] == 'ON')
+    assert(option.description == words.zh.description and st.revision > revision, 'the view is rebuilt')
+    assert(st.mods['DIVING'] and st.mods['DIVING'].title == words.zh.mod, 'same category, new name')
+    assert(st.mods_title == cjk(2, 600) and st.empty_text == cjk(6, 700))
+    assert(shown(bar + 8296 + 3400 * 3) == cjk(2, 600), 'the MODS tab shows the translated title')
+    -- A text function that fails keeps the text shown before.
+    words.zh.label = nil
+    set_stack({}); step3(0.016); set_stack({1}); step3(0.016)
+    assert(option.label == cjk(2, 200))
+    set_stack({})
+    step3(0.016)
+end
+print('Translations: character limits, upper case in every script, function texts and MOM\'s own texts '
+      .. 'refreshed when the escape menu opens, failing texts kept OK')

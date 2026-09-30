@@ -69,6 +69,8 @@ return function()
             typedef int32_t (*LmGetAccess)(uint64_t lobby, uint64_t policy_out);
             typedef void (*LmChatSend)(uint64_t chat, uint64_t unused, uint64_t text);
             typedef void (*LmRpcSend)(uint32_t hash, uint64_t target, uint64_t args, uint32_t count);
+            typedef void (*LmSosCall)(uint64_t sos);
+            typedef void (*LmLobbySetInt)(uint64_t lobby, uint32_t key, int32_t value);
         ]]
     end
     local kernel, bcrypt = ffi.load('kernel32'), ffi.load('bcrypt')
@@ -119,8 +121,18 @@ return function()
         blocks[#blocks + 1] = block
         return tonumber(ffi.cast('uintptr_t', block))
     end
-    function api.read_block(address, buffer, size)
+    local function read_block(address, buffer, size)
         return read_memory(process, address, buffer, size, count) ~= 0 and count[0] == size and count[1] == 0
+    end
+    api.read_block = read_block
+    -- Up to 16 bytes as a string through ReadProcessMemory (a stale address
+    -- fails, never faults): the reads of the game's Text Language, which
+    -- bingus_text makes when the escape menu opens.
+    local small = ffi.new('uint8_t[16]')
+    local small_address = tonumber(ffi.cast('uintptr_t', small))
+    function api.read_bytes(address, size)
+        if size > 16 or not read_block(address, small_address, size) then return nil end
+        return ffi.string(small, size)
     end
 
     -- True when every byte of [address, address + size) is committed private

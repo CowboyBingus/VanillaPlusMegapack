@@ -107,7 +107,9 @@ function L.new(api, game, G, natives, status, note)
     -- Squad messages: announcer(text) posts a chat line to the squad (set by
     -- the addon; nil while the option is off). Returns when the first kick may
     -- start: L.CHAT_LEAD later once a line went out, so it arrives first.
+    -- text(key) gives the line in the host's language (the addon's translator).
     self.announcer = nil
+    self.text = function(key) return key end
     local function announce(text, now)
         if not self.announcer then return now end
         local sent, detail = self.announcer(text)
@@ -333,7 +335,7 @@ function L.new(api, game, G, natives, status, note)
                step = 'kick', since = now, started = now}
         note('disband: kicking ' .. #peers .. ' player(s)')
         set_status('disband: kicking ' .. #peers .. ' player(s)')
-        job.kick_at = announce('The host disbanded the squad.', now)
+        job.kick_at = announce(self.text('chat.disband'), now)
         return self.step(now)
     end
 

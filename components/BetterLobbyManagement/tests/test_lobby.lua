@@ -8,6 +8,9 @@ local budget = dofile(tests .. 'frame_budget.lua')
 local Fake = dofile(tests .. 'fake_game.lua')
 local G = dofile(source .. '/game.lua')
 local L = dofile(source .. '/lobby.lua')
+local Text = dofile(source .. '/bingus_text.lua')
+Text.registry().game_language = 'en'
+local tr = Text.new(dofile(source .. '/../locales/en.lua'))
 
 local DT = 1 / 60
 local T = Fake.peer(0x01000000, 0x00000005)    -- successor candidate (lowest id)
@@ -24,6 +27,7 @@ local function setup(configure)
     local natives = G.bind(world.api, Fake.GAME, Fake.EXE)
     local status, lines = {}, {}
     local lobby = L.new(world.api, Fake.GAME, G, natives, status, function(message) lines[#lines + 1] = message end)
+    lobby.text = tr
     return world, lobby, status, lines
 end
 

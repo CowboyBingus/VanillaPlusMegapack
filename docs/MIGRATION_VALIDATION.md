@@ -1,6 +1,11 @@
 Supports Helldivers 2 Steam build 25480438 / EXE 1.8.46015.0.
 
-Offline source, package and read-only module checks passed. v35 adds only
+Offline source, package and read-only module checks passed. v36 updates Know
+Your Constellation (v4.0), Better Lobby Management (v1.1), Mod Options Menu
+(v1.1), Mod Bindings Menu (v2.1), Ship Station Hotkeys (v1.8) and Shallow
+Water Diving (v3.9). The v36 package ran in recorded real play on this build
+with loader v18 and all seventeen options, aboard the ship and in a joined
+mission: every option loaded and none reported a failure. v35 adds only
 Better Lobby Management (v1.0), checked in recorded live play as its release
 candidate with a host and one friend (its scanner as the earlier Fast Lobby
 Scanner); the v35 package itself has not yet run in game. v34 changes only

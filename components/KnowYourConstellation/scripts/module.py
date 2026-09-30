@@ -1,26 +1,46 @@
 """Build the stable runtime wrapper shared by standalone and megapack builds."""
-REVISION = 'v3.16'
-ROWS_REVISION = REVISION + '-rows-v1'
+from pathlib import Path
+
+REVISION = 'v4.0'
 MODULE = 'mods/cowboybingus/enemy_intelligence'
-TESTED_RESOURCE_SHA = '8B0929FB67A59AD5D950D231D059650894DE0472F053FC1F86DF8DFD0F01A60E'
-TESTED_ROWS_RESOURCE_SHA = 'A295CA7C367FF69D63D3D5346A610034A7B6A9BE1472434F061D322190D96689'
+# Resource hash of the runtime confirmed in game (CONTRIBUTING.md). v4.0 ran in
+# game on 2026-09-30 inside Megapack v36, whose option carries these exact bytes.
+TESTED_RESOURCE_SHA = '863B5782BBAE280ADB250593185B455DAF711162E4AE1E3E26F12FA3D5719FF1'
+# (variable, file); every chunk receives the text module as its argument.
+SOURCES = [('text', 'bingus_text'), ('create_api', 'read_api'), ('resolve', 'resolve'), ('mission', 'mission'),
+           ('roster', 'roster'), ('roster_data', 'roster_data'), ('model', 'model'), ('panel', 'panel'),
+           ('install', 'install'), ('presentation', 'presentation')]
+FORBIDDEN = ('WriteProcessMemory', 'VirtualProtect', 'VirtualAlloc', 'CreateRemoteThread', 'Network.', 'RPC.',
+             "ffi.cast('void (*")
 
 
-def wrapper(root, game_sha, exe_sha, rows=False):
+def read_source(path):
+    """UTF-8 Lua with LF line endings (translations are UTF-8)."""
+    source = path.read_bytes().decode('utf-8')
+    assert '\r' not in source, f'{path.name} must use LF line endings'
+    return source
+
+
+def locale_files(root):
+    """en.lua first, then every bundled translation (<tag>.lua)."""
+    folder = Path(root) / 'locales'
+    others = sorted(p for p in folder.glob('*.lua') if p.name != 'en.lua')
+    return [folder / 'en.lua'] + others
+
+
+def wrapper(root, game_sha, exe_sha):
     result = ''
-    for variable, filename in [('create_api','read_api'), ('resolve','resolve'), ('mission','mission'),
-                               ('catalogue','catalogue'), ('model','model'), ('panel','panel'), ('install','install'),
-                               ('heavy','heavy'), ('heavy_data','heavy_data'), ('presentation','presentation')]:
-        source = (root / 'src' / (filename + '.lua')).read_text(encoding='ascii')
-        for forbidden in ('WriteProcessMemory', 'VirtualProtect', 'VirtualAlloc', 'CreateRemoteThread',
-                          'Network.', 'RPC.', "ffi.cast('void (*"):
+    for variable, filename in SOURCES:
+        source = read_source(Path(root) / 'src' / (filename + '.lua'))
+        for forbidden in FORBIDDEN:
             assert forbidden not in source, 'Unexpected side effect API: ' + forbidden
-        result += 'local ' + variable + ' = (function()\n' + source + '\nend)()\n'
-    revision = REVISION
-    if rows:
-        source = (root / 'src/rows.lua').read_text(encoding='ascii')
-        result += 'panel = (function()\n' + source + '\nend)()(panel)\n'
-        revision = ROWS_REVISION
-    result += "install(create_api,mission,resolve,catalogue,model,panel,{revision='" + revision
-    result += "',game_sha256='" + game_sha + "',exe_sha256='" + exe_sha + "'},heavy,heavy_data,presentation)\n"
+        argument = '' if variable == 'text' else 'text'
+        result += 'local ' + variable + ' = (function(...)\n' + source + '\nend)(' + argument + ')\n'
+    # Locale files are data: `return {...}` tables, checked by tests/test_locales.lua.
+    result += 'local locales = {bundled = {}}\n'
+    for path in locale_files(root):
+        target = 'locales.en' if path.name == 'en.lua' else "locales.bundled['" + path.stem + "']"
+        result += target + ' = (function()\n' + read_source(path) + '\nend)()\n'
+    result += "install(create_api,mission,resolve,roster,roster_data,model,panel,{revision='" + REVISION
+    result += "',game_sha256='" + game_sha + "',exe_sha256='" + exe_sha + "'},presentation,text,locales)\n"
     return result

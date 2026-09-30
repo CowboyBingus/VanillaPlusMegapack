@@ -1,12 +1,12 @@
-Vanilla Plus Megapack - v35
+Vanilla Plus Megapack - v36
 
 Supports Steam build 25480438 / EXE 1.8.46015.0.
 Requires the separate Bingus Shared Loader v18 / API 1.
 
 1. Close Helldivers 2 and use either Arsenal or HD2MM.
-2. Disable previous megapacks and standalone copies of features you want off.
-   Enable only one Megapack variant (standard or Rows).
-3. Import Vanilla-Plus-Megapack-v35.zip and Bingus Shared Loader v18.
+2. Disable previous megapacks (including Vanilla Plus Megapack Rows, which
+   ended with v35) and standalone copies of features you want off.
+3. Import Vanilla-Plus-Megapack-v36.zip and Bingus Shared Loader v18.
 4. With Arsenal's default priority, place the loader LAST. If first-mod
    priority is enabled, place the loader FIRST instead.
 5. Open the pack's Options and select any of the seventeen independent mods.
@@ -21,11 +21,17 @@ Bindings Menu ships its own content/input.config override; another mod that
 replaces that resource must be merged with it.
 
 Enable the Mod Options Menu option to set Shallow Water Diving's maximum dive
-depth on the MODS tab of the escape menu.
+depth and Better Lobby Management's options on the MODS tab of the escape menu.
 
-Mod Bindings Menu, Mod Options Menu and Flame Damage Fixed are also released
-on their own. Use one copy of each: disable the standalone package or the
-pack option.
+Mod Bindings Menu, Mod Options Menu, Flame Damage Fixed and Better Lobby
+Management are also released on their own. Use one copy of each: disable the
+standalone package or the pack option.
+
+Translations: Know Your Constellation, Better Lobby Management, Mod Options
+Menu, Mod Bindings Menu, Ship Station Hotkeys and Shallow Water Diving follow
+the game's Text Language when a translation pack is installed. Texts without
+a translation show in English. Translators: see TRANSLATING.md in the
+repository.
 
 https://github.com/CowboyBingus/BingusSharedLoader/releases/latest
 
@@ -34,22 +40,22 @@ Included revisions:
 - Hellpod Steering Unlocked v7.4
 - Reinforcement Beacons Fixed v4.5
 - Consistent Vaulting v8.8
-- Shallow Water Diving v3.8
+- Shallow Water Diving v3.9
 - Sentry Aim Retention v1.0.13
 - Enemy Collision Synchronized v2.11.0
 - Controllable Hover Pack v1.7
-- Know Your Constellation v3.16
+- Know Your Constellation v4.0
 - Armory Preview Cache v22
 - Clickable Scrollbars v2.14
 - Arc Thrower Revamped v1.6
-- Ship Station Hotkeys v1.7
+- Ship Station Hotkeys v1.8
 - Flame Damage Fixed v1.1
-- Mod Options Menu v1.0.1
-- Mod Bindings Menu v2.0
+- Mod Options Menu v1.1
+- Mod Bindings Menu v2.1
+- Better Lobby Management v1.1
 
-Rows uses the static constellation forecast layout. All other resources match
-the standard package. An unchecked option cannot disable a separately enabled
-standalone copy. Remove older startup-replacing packages when migrating.
+An unchecked option cannot disable a separately enabled standalone copy.
+Remove older startup-replacing packages when migrating.
 
 Offline regression, package and option-selection checks passed. Current-build
 multiplayer behavior still needs in-game confirmation.

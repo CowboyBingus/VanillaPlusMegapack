@@ -1,6 +1,5 @@
 local source = assert(arg[1])
 local resolve = assert(loadfile(source..'/resolve.lua'))()
-local catalogue = assert(loadfile(source..'/catalogue.lua'))()
 local model = assert(loadfile(source..'/model.lua'))()
 local function settings(weights)
     local ids = {1,2,3,5,7,6}
@@ -23,23 +22,22 @@ assert(table.concat(resolve.base(3,fallback,{26}),',') == '26')
 local filtered = resolve.filter({1,11,9},1,{[9]=true})
 assert(#filtered == 1 and filtered[1] == 11)
 assert(not pcall(resolve.base,1,{draws=17,candidates={},blockers={},fallback=0},{}))
-for id, entry in pairs(catalogue) do
-    assert(id >= 1 and id <= 31)
-    model.ascii(entry[1])
-    model.ascii(entry[2])
+local T = assert(loadfile(source..'/bingus_text.lua'))()
+T.registry().game_language = 'en'
+local tr = T.new(assert(loadfile(source..'/../locales/en.lua'))())
+for id = 1, 31 do
+    assert(model.TITLES[id], 'Missing title for tag '..id)
+    T.display(tr(model.TITLES[id]))
 end
-local m = model.make({key='mission',screen='map',difficulty=10,tags={1,11},complete=false},catalogue)
-assert(m.footer:find('incomplete'))
-assert(m.marquee=='[BILE BUGS] Bile Spewers, Spitters, Bile Warriors    //    '..
-    '[DRAGONROACH ACTIVITY] Dragon unit enabled by mission modifier    /// END REPORT ///')
-assert(not pcall(model.ascii,'bad'..string.char(226,128,148)))
-assert(not pcall(model.ascii,'bad'..string.char(59)))
-local standard=model.make({key='standard',screen='map',difficulty=1,tags={},complete=true},catalogue)
-assert(standard.marquee=='[STANDARD FORCES] No special constellation selected    /// END REPORT ///')
-local unavailable=model.make({key='pending',screen='map',difficulty=1,tags={},complete=false},catalogue)
-assert(unavailable.marquee:find('COMPOSITION UNAVAILABLE',1,true),
-    'Unresolved data must not be presented as a standard composition')
-print('PASS: recorded seed predictions, fallback, exclusions, modifier display and ASCII text')
+-- Subfactions, strains and operation modifiers lead; the base constellation follows.
+assert(model.headline({1,11},tr) == 'DRAGONROACH ACTIVITY // BILE BUGS')
+assert(model.headline({15,22},tr) == 'INCINERATION CORPS // ARTILLERY FORCES')
+assert(model.headline({27},tr) == 'INVASION FLEET')
+assert(model.headline({},tr) == 'STANDARD FORCES')
+-- Display text is any script (translations); control characters never are.
+assert(T.display('bad'..string.char(226,128,148)) and T.display('semi;colon'))
+assert(not pcall(T.display,'bad'..string.char(1)) and not pcall(T.display,'bad'..string.char(255)))
+print('PASS: recorded seed predictions, fallback, exclusions, subfaction headlines and display text')
 assert(resolve.from_native(0)==0 and resolve.from_native(1)==31)
 for id=2,31 do assert(resolve.from_native(id)==id-1) end
 assert(not pcall(resolve.from_native,32))

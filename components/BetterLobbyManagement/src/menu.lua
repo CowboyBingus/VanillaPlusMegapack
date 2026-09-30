@@ -3,14 +3,15 @@
 -- confirm dialog.
 --
 -- The tab keeps a list of up to five native buttons and one type byte per
--- button; the game uses types 0-4 and on the ship a host uses two slots. The
--- mod adds its buttons with types 5+ in the free slots. The game's select
--- handler and its dialog result dispatch act only on types 0-4, but the select
--- handler still shows the shared confirm dialog for any type, so the mod fills
--- that dialog while it is hidden, as soon as the focus lands on one of its
--- buttons, and runs the action when the dialog comes back confirmed. The
--- escape screen, and with it every button, is freed when the menu closes; the
--- buttons are added again whenever they are missing.
+-- button; the game uses types 0-4, and a host uses two slots on the ship and
+-- two (alone) or three in a mission. The mod adds its buttons with types 5+
+-- in the free slots. The game's select handler and its dialog result
+-- dispatch act only on types 0-4, but the select handler still shows the
+-- shared confirm dialog for any type, so the mod fills that dialog while it is
+-- hidden, as soon as the focus lands on one of its buttons, and runs the
+-- action when the dialog comes back confirmed. The escape screen, and with it
+-- every button, is freed when the menu closes; the buttons are added again
+-- whenever they are missing.
 local M = {}
 
 M.MENU_SYSTEM_PTR = 0x347ce38
@@ -40,7 +41,7 @@ M.TEXT_TEMPLATE, M.TEXT_KEY = 0xc67c7faf, 0xab2a7b35
 M.NATIVE_LABELS = {[0] = 0x42d7cf06, [1] = 0x65e0947b, [2] = 0x801ec7e7, [3] = 0x1f6ff863, [4] = 0xcc934148}
 M.CONFIRM_LABEL, M.CANCEL_LABEL = 0xd94b7608, 0x8a36d40a
 M.FIRST_TYPE = 5
-M.ACTIONS = {'disband', 'promote'}
+M.ACTIONS = {'disband', 'promote', 'cancel_sos'}
 -- The player menu's own KICK (game_kick). The tab update takes input only
 -- while the dialog fade is 0, the dialog is inactive and not opening and the
 -- squad panel is in state 2; then it runs the focused card's popup (state 2),
