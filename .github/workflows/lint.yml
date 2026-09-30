@@ -53,7 +53,10 @@ jobs:
         # time; only fail the build on 2+ so real errors still block merges
         # while legacy warning noise stays visible but non-blocking.
         run: |
-          luacheck . --config .luacheckrc; code=$?
+          set +e
+          luacheck . --config .luacheckrc
+          code=$?
+          set -e
           if [ "$code" -ge 2 ]; then exit 1; fi
           exit 0
 
