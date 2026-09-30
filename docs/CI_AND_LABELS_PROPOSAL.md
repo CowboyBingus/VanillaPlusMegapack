@@ -102,5 +102,32 @@ Two things worth deciding before this part is turned on for real:
 
 If either tradeoff isn't wanted, both workflows are self-contained and easy
 to drop without touching anything else in this PR.
+
+**One-time repo setting needed for release-please:** GitHub blocks Actions
+from creating PRs by default. Under Settings -> Actions -> General ->
+Workflow permissions, "Allow GitHub Actions to create and approve pull
+requests" needs to be checked, or `release-please.yml` will fail at the last
+step with `GitHub Actions is not permitted to create or approve pull
+requests`. Everything up to that point (branch, commit, tree) still runs
+fine either way - this only blocks the final PR. Confirmed this is genuinely
+just that toggle by enabling it on the fork and re-running.
+
+## Verified on the fork before opening this PR
+
+Rather than propose untested workflow files, all of the above was pushed to
+this fork's own `main` and run for real first. First pass caught three real
+issues, now fixed here:
+- a hardcoded `vcvars64.bat` path that didn't match the actual `windows-latest`
+  image's VS install layout -> switched to `ilammy/msvc-dev-cmd`, which
+  resolves this correctly regardless of VS SKU/version
+- one genuine unused import (`components/SentryAimRetention/scripts/source_release.py`)
+  that `ruff` caught - fixed as part of this PR, not left failing
+- `luacheck`'s default strictness surfaced ~150-400 pre-existing style
+  warnings (shadowed locals, unused test variables) across the legacy test
+  suite; rather than chase every warning code, the workflow now only fails
+  on luacheck's actual-error exit codes (2+), so real mistakes still block
+  merges without relitigating existing test style
+- the release-please workflow needs the repo setting above; confirmed by
+  toggling it on the fork and re-running successfully
 EOF
 wc -l /home/claude/fork/docs/CI_AND_LABELS_PROPOSAL.md

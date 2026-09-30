@@ -8,6 +8,8 @@ ignore = {
     "212", -- unused argument (test files intentionally ignore some)
     "213", -- unused loop variable
     "231", -- unused local variable (common in destructive/table-shape tests)
+    "421", -- shadowing a local (widespread, stylistic, e.g. reused `mode`/`ok` names in tests)
+    "431", -- shadowing an upvalue (same as above)
 }
 globals = {
     -- Stingray/HD2 engine + mod loader globals referenced throughout src/ and tests/

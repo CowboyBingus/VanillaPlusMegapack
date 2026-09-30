@@ -62,13 +62,17 @@ jobs:
           git clone https://github.com/LuaJIT/LuaJIT.git tools/src/LuaJIT
           git -C tools/src/LuaJIT checkout ${{ steps.pin.outputs.commit }}
 
+      - name: Set up MSVC x64 dev environment
+        if: steps.cache-luajit.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Build LuaJIT (nogc64, x64 Native Tools)
         if: steps.cache-luajit.outputs.cache-hit != 'true'
         shell: cmd
-        run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" || call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          cd tools\src\LuaJIT\src
-          call msvcbuild.bat nogc64
+        working-directory: tools/src/LuaJIT/src
+        run: call msvcbuild.bat nogc64
 
       - name: Set HD2_LUAJIT
         shell: bash
