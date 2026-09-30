@@ -1,0 +1,79 @@
+name: Windows LuaJIT tests
+
+# The loader is Windows x64 LuaJIT, and several component test suites assert
+# `ffi.os == 'Windows' and ffi.arch == 'x64'` directly (see e.g.
+# components/ArcThrowerRevamped/tests/test_bindings.lua), so they can only
+# run on a real Windows LuaJIT interpreter - not on Linux.
+#
+# What this job CAN do on a GitHub-hosted runner, fully from public sources:
+#   - build the pinned LuaJIT commit (dependencies.json) with msvcbuild.bat
+#     nogc64, exactly as CONTRIBUTING.md describes
+#   - run a component's own synthetic/offline test suite against its source
+#     directly (no game process, no live install)
+#
+# What it deliberately does NOT attempt here, and why:
+#   - the full `python scripts/build.py` package build needs HD2_INPUT_CONFIG,
+#     a file extracted from the tester's own Steam build - CONTRIBUTING.md is
+#     explicit that this repo contains no game files, so a hosted runner
+#     can't legally have this input
+#   - tests/test_loader.lua, tests/test_duplicates.lua and tests/test_package.py
+#     need that same full build output plus a Bingus Shared Loader build
+#     directory (HD2_SHARED_LOADER_BUILD) - buildable in principle since
+#     BingusSharedLoader is public too, just left out of this first pass so
+#     this PR stays reviewable; see the write-up for wiring it in as a
+#     follow-up once the input-config question is settled
+#   - the optional Arsenal/HD2MM manager backend harnesses need local copies
+#     of those third-party applications and are explicitly "optional manager
+#     backend checks" per CONTRIBUTING.md - left as a manual/local step
+#
+# So today this job is a real, if partial, safety net: it proves the pinned
+# LuaJIT toolchain still builds and that ArcThrowerRevamped's native-binding,
+# work-budget and recovery suites still pass. Expanding it to more components
+# is mechanical (same check.py-style pattern) once this shape looks right.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  luajit-toolchain:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned LuaJIT commit
+        id: pin
+        shell: bash
+        run: |
+          commit=$(python3 -c "import json;print(json.load(open('dependencies.json'))['dependencies'][0]['commit'])")
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Cache built LuaJIT
+        id: cache-luajit
+        uses: actions/cache@v4
+        with:
+          path: tools/src/LuaJIT
+          key: luajit-nogc64-${{ steps.pin.outputs.commit }}
+
+      - name: Clone LuaJIT at pinned commit
+        if: steps.cache-luajit.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/LuaJIT/LuaJIT.git tools/src/LuaJIT
+          git -C tools/src/LuaJIT checkout ${{ steps.pin.outputs.commit }}
+
+      - name: Build LuaJIT (nogc64, x64 Native Tools)
+        if: steps.cache-luajit.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" || call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          cd tools\src\LuaJIT\src
+          call msvcbuild.bat nogc64
+
+      - name: Set HD2_LUAJIT
+        shell: bash
+        run: echo "HD2_LUAJIT=${{ github.workspace }}/tools/src/LuaJIT/src/luajit.exe" >> "$GITHUB_ENV"
+
+      - name: ArcThrowerRevamped - native bindings, work budget, recovery suites
+        working-directory: components/ArcThrowerRevamped
+        run: python3 check.py

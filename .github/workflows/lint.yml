@@ -1,0 +1,70 @@
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  privacy-audit:
+    name: Privacy audit (source tree)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No --git/--zip: this pass is author/build-output independent, so it
+      # runs the same for every contributor's branch. The full --git history
+      # audit is owner-specific (it asserts every commit is authored by
+      # CowboyBingus's noreply address) and stays a maintainer-run check -
+      # see docs in this PR for why.
+      - name: Scan allowlisted source files for leaked personal data
+        run: python3 scripts/privacy_audit.py
+
+  python-lint:
+    name: Python lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Run ruff
+        run: uvx ruff check .
+
+  lua-syntax:
+    name: Lua syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install luajit + luacheck
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y luajit luarocks
+          sudo luarocks install luacheck
+      - name: Parse every .lua file (catches syntax errors; no FFI/Windows needed)
+        run: |
+          status=0
+          while IFS= read -r -d '' file; do
+            luajit -e "local f, err = loadfile('$file'); if not f then print('$file: ' .. err); os.exit(1) end" || status=1
+          done < <(find . -name '*.lua' -print0)
+          exit $status
+      - name: luacheck
+        run: luacheck . --config .luacheckrc
+
+  json-validity:
+    name: JSON validity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate pinned/manifest JSON files
+        run: |
+          set -e
+          for f in components.lock.json dependencies.json publication-files.json; do
+            python3 -c "import json,sys; json.load(open('$f')); print('$f: ok')"
+          done
+          find components -name '*.json' -print0 | xargs -0 -n1 -I{} python3 -c "import json,sys; json.load(open('{}')); print('{}: ok')"
+
+  editorconfig:
+    name: EditorConfig conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: editorconfig-checker/action-editorconfig-checker@v2
+      - run: editorconfig-checker
