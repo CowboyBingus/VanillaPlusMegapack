@@ -22,7 +22,18 @@ import urllib.request
 
 START = "<!-- ai-audit:start -->"
 END = "<!-- ai-audit:end -->"
+# Release-please always writes its newest entry as "## [x.y.z](...)"; that's
+# specific enough to reliably mean "the current release", so it's what marks
+# the start of the block to insert into. The boundary for where that block
+# ENDS has to be more general than that same bracket pattern, though: this
+# repo's older, hand-written entries use plain "## v34" / "# v19" headings
+# with no bracket, and release-please's own entry contains "### Features" /
+# "### Bug Fixes" sub-headings that must NOT be mistaken for a boundary.
+# So: start is bracket-specific (H1 or H2), end is "the next H1 or H2
+# heading of any style" - which correctly stops before the next version,
+# whatever it's formatted like, without tripping on the H3s in between.
 VERSION_HEADING = re.compile(r"^## \[", re.MULTILINE)
+ANY_TOP_HEADING = re.compile(r"^#{1,2} ", re.MULTILINE)
 
 
 def upsert_block(text, audit_md):
@@ -56,7 +67,7 @@ def update_changelog(path, audit_md):
         print(f"No '## [' version heading found in {path}; skipping changelog insertion",
               file=sys.stderr)
         return False
-    next_match = VERSION_HEADING.search(content, match.end())
+    next_match = ANY_TOP_HEADING.search(content, match.end())
     insert_at = next_match.start() if next_match else len(content)
     block = f"\n{START}\n{audit_md.strip()}\n{END}\n\n"
     new_content = content[:insert_at] + block + content[insert_at:]
