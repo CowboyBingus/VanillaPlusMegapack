@@ -103,6 +103,59 @@ Two things worth deciding before this part is turned on for real:
 If either tradeoff isn't wanted, both workflows are self-contained and easy
 to drop without touching anything else in this PR.
 
+## AI audit on every release PR (optional, off by default)
+
+`.github/workflows/ai-audit.yml` sends the source diff since the last
+release tag to Claude or GPT (whichever secret is set) and inserts the
+resulting report - a security/malware-pattern review, code-quality notes,
+and a short improvement list - into both `CHANGELOG.md` (as a section of
+the current version's entry) and the release PR's own description, so it's
+part of the permanent release record rather than a one-off comment.
+
+**To enable it:** add one of these under Settings -> Secrets and variables
+-> Actions -> Secrets - either works, Anthropic is checked first if both are
+set:
+- `ANTHROPIC_API_KEY` (Claude)
+- `OPENAI_API_KEY` (GPT)
+
+Optionally set the `AI_AUDIT_MODEL` repo/environment *variable* (not
+secret) to pin an exact model - see `.github/scripts/ai_audit.py` for the
+built-in defaults if you leave it unset. If neither secret is present, the
+workflow logs a notice and exits cleanly - nothing else in this PR depends
+on it.
+
+It only ever runs against release-please's own PRs (checked via the branch
+name), never a contributor's PR, since it calls a paid third-party API with
+a source diff.
+
+**Worth knowing before turning it on:**
+- The diff is sent to whichever provider's API you configure - i.e. leaves
+  this repo. It's already public source, so this is about API-provider
+  terms/cost, not confidentiality.
+- The prompt explicitly tells the model that this project's Windows-FFI
+  memory read/write is a normal, declared mechanism (not a red flag by
+  itself) and asks it to judge changes against that stated purpose - see
+  the prompt in `ai_audit.py` if you want to adjust the framing.
+- It's a second, context-aware pass alongside the existing
+  `scripts/privacy_audit.py` (which is pattern-matching, not judgment) -
+  not a replacement for either that or human review, and the report says so.
+- Cost is bounded per release (diff truncated to 200 KB, ~1500 output
+  tokens) but is real API spend on every release, however small.
+
+**Verified on the fork**, same as everything else here - and this one
+actually caught a real bug worth calling out: the first version placed the
+audit at the very end of `CHANGELOG.md` (after 20+ versions of history)
+instead of right after the release being audited, because the boundary
+regex only recognized release-please's own `## [x.y.z]` heading style and
+this repo's older entries use plain `## v34` / `# v19` headings with no
+brackets - so it never found a second match and fell through to end-of-file.
+Fixed and re-verified against a real release-please PR/branch on the fork;
+the block now lands exactly between the current release's content and the
+next version's heading. Also surfaced, separately: `scripts/privacy_audit.py`'s
+`--git` mode aside, this is the only workflow in this whole PR that talks to
+a service outside GitHub, which is why it's the one gated behind explicit
+opt-in secrets rather than ever running by default.
+
 **One-time repo setting needed for release-please:** GitHub blocks Actions
 from creating PRs by default. Under Settings -> Actions -> General ->
 Workflow permissions, "Allow GitHub Actions to create and approve pull
