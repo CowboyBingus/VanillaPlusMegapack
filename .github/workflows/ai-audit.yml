@@ -1,0 +1,98 @@
+name: AI audit (release PR)
+
+# Adds a malware/security-pattern review, code-quality notes and a short
+# improvement list to every release-please release PR - both as a section
+# of CHANGELOG.md (so it's a permanent, versioned part of the release
+# record) and in the PR's own description (which release-please also uses
+# as the eventual GitHub Release body).
+#
+# Requires exactly one of these repo secrets (Settings -> Secrets and
+# variables -> Actions -> Secrets):
+#   ANTHROPIC_API_KEY   (Claude - checked first if both are set)
+#   OPENAI_API_KEY      (GPT)
+# Neither is required for the rest of this CI setup to work - if neither
+# secret is present, this workflow just skips (see the `provider` step)
+# rather than failing the release.
+#
+# Optional repo/environment VARIABLE (not secret) to pick a specific model:
+#   AI_AUDIT_MODEL, e.g. "claude-opus-4-5" or "gpt-4o" - see
+#   .github/scripts/ai_audit.py for the built-in defaults if unset.
+#
+# Only ever runs against release-please's own PRs (see the `if:` below),
+# never a contributor's PR - this calls a paid third-party API and sends it
+# a source diff, which shouldn't happen on every random fork PR.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  audit:
+    if: startsWith(github.head_ref, 'release-please--branches--')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          # Default token: pushes made with it don't retrigger workflows,
+          # so the commit this job makes later can't cause an audit loop.
+
+      - name: Check which AI provider is configured
+        id: provider
+        run: |
+          if [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
+            echo "name=anthropic" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ secrets.OPENAI_API_KEY }}" ]; then
+            echo "name=openai" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=none" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip notice
+        if: steps.provider.outputs.name == 'none'
+        run: echo "::notice::Neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set - skipping the AI audit. The release PR still works fine without it."
+
+      - name: Build the diff since the last release tag
+        if: steps.provider.outputs.name != 'none'
+        run: |
+          git fetch --tags -q
+          base=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -n "$base" ]; then
+            echo "Diffing against $base"
+            git diff "$base"...HEAD -- components src scripts > /tmp/diff.txt || true
+          else
+            echo "No previous tag found; diffing against the parent commit"
+            git diff HEAD~1...HEAD -- components src scripts > /tmp/diff.txt || true
+          fi
+          # Keep the request bounded regardless of how large a release is.
+          head -c 200000 /tmp/diff.txt > /tmp/diff.trimmed.txt
+          wc -c /tmp/diff.trimmed.txt
+
+      - name: Run AI audit
+        if: steps.provider.outputs.name != 'none'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AI_AUDIT_MODEL: ${{ vars.AI_AUDIT_MODEL }}
+        run: |
+          python3 .github/scripts/ai_audit.py \
+            --provider "${{ steps.provider.outputs.name }}" \
+            --diff /tmp/diff.trimmed.txt \
+            --out /tmp/audit.md
+
+      - name: Insert audit into CHANGELOG.md and the PR description
+        if: steps.provider.outputs.name != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/insert_audit.py \
+            --audit /tmp/audit.md \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --token "${{ github.token }}"

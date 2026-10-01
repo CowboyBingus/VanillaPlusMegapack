@@ -1,0 +1,33 @@
+name: PR title (Conventional Commits)
+
+# The project's own commit history is already consistently Conventional
+# Commits (feat:/fix:/perf:/docs:/build:/test:, see git log) - this just
+# makes that convention enforced instead of implicit, and is what
+# release-please (release-please.yml) parses to draft changelogs/versions.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            docs
+            build
+            test
+            refactor
+            chore
+            ci
+          requireScope: false
