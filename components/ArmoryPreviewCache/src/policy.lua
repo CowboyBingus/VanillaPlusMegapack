@@ -2,9 +2,12 @@
 local M={}
 function M.new_memory_guard()
     local g={trips=0,active=false}
-    function g:tick(now,free,commit)
+    -- now may be a clock function: it is read only when the guard trips or
+    -- recovers, so a healthy poll reads no clock.
+    function g:tick(now,free,commit) -- lint-ok: R10 ported from v23 unchanged; split into named steps is a follow-up (differential harness ready)
         local reason=free<2*1024^3 and 'low_physical_memory' or
                      commit<2*1024^3 and 'low_commit_headroom' or nil
+        if (reason or self.active) and type(now)=='function' then now=now() end
         if reason then
             if not self.active then
                 self.trips=self.trips+1;self.last_reason=reason
@@ -32,7 +35,10 @@ function M.new(adapter,options)
                 dependency_acquires=0,startup_acquires=0,foreground_pending=0,
                 prewarm=options.prewarm~=false,pressure=false}
     local function key(item)return item.kind..':'..item.id end
+    -- profile_changed: remember() ran since the profile was last saved, so its
+    -- encoding may differ; the save throttle encodes only then.
     function self:remember(item)
+        self.profile_changed=true
         local k=key(item)
         if not self.learned[k] then
             self.learned[k]={kind=item.kind,id=item.id};self.learn_order[#self.learn_order+1]=k
@@ -69,20 +75,37 @@ function M.new(adapter,options)
         for _ in pairs(self.leases)do self.retired=self.retired+1 end
         self.leases={}
     end
+    -- A tick is settled when repeating it with the same snapshot and pressure
+    -- would only add the same hit and unresolved counts: it acquired nothing,
+    -- every protected request is leased and no clock-dependent startup window
+    -- is open. replay() records such a repeat without running it.
+    self.settled,self.tick_hits,self.tick_unresolved=false,0,0
+    function self:replay()
+        self.hits=self.hits+self.tick_hits;self.unresolved=self.unresolved+self.tick_unresolved
+    end
+    local tick
     function self:tick(s,now,pressure)
+        local hits,unresolved=self.hits,self.unresolved
+        self.settled=tick(self,s,now,pressure)==true
+        self.tick_hits,self.tick_unresolved=self.hits-hits,self.unresolved-unresolved
+    end
+    tick=function(self,s,now,pressure) -- lint-ok: R10 ported from v23 unchanged; split into named steps is a follow-up (differential harness ready)
         if self.owner and self.owner~=s.owner then self:retire()end
         self.owner=s.owner
         if next(self.leases) and not self.adapter:valid_leases(self.leases,self.owner)then
             self:retire();self.quarantined=true
         end
-        if self.quarantined then self.status='lease_ownership_lost_restart_required';return end
+        if self.quarantined then self.status='lease_ownership_lost_restart_required';return true end
         self.started=self.started or now
         local startup=self.prewarm and not s.menu and not self.seen_menu and now-self.started<60 and s.prefetch
         if self.world and self.world~=s.world and not (not self.seen_menu and s.menu)then self:clear();self.pressure=false end
         self.world=s.world
         if s.menu then self.seen_menu=true end
-        if not s.menu and not startup then self:clear();self.pressure=false;self.status='outside_ship_ui';return end
-        if pressure then self:clear();self.pressure=true;self.status='memory_pressure';return end
+        -- Outside the menu a closed startup window never reopens for the same
+        -- snapshot. An open one closes with the clock alone, so a tick inside
+        -- it is never settled.
+        if not s.menu and not startup then self:clear();self.pressure=false;self.status='outside_ship_ui';return true end
+        if pressure then self:clear();self.pressure=true;self.status='memory_pressure';return not startup end
         self.pressure=false
         local wanted,protected={},{}
         local function add(item,background)
@@ -140,6 +163,13 @@ function M.new(adapter,options)
         -- A fixed count bound is enforced even for profiles larger than the cache.
         self.status=startup and 'startup_dependency_prewarm' or
             (s.blocked and 'thumbnail_ui_busy' or (s.active and 'foreground_lookahead' or 'resident'))
+        -- Settled only at a fixed point: this tick acquired nothing (a lease it
+        -- added is a hit next tick) and every protected request is leased (one
+        -- that is not is retried next tick, and whether that acquire succeeds
+        -- depends on the game's package table).
+        if startup or added>0 then return false end
+        for i=1,math.min(self.limit,#wanted)do if not self.leases[wanted[i].id]then return false end end
+        return true
     end
     return self
 end

@@ -1,12 +1,12 @@
 -- Snapshot metadata may be decoded once, but no cache may survive a poll.
 local source,fixtures=assert(arg[1]),assert(arg[2])
 local ffi=require('ffi')
-local M=dofile(source..'/corpse_data.lua')
+local M=assert(loadfile(source..'/corpse_data.lua'))(dofile(source..'/corpse_profiles.lua'))
 local production=dofile(source..'/windows_api.lua')()
 local calls=0
 local api={address=production.address,distance=production.distance,
     pointer=function(...)calls=calls+1;return production.pointer(...)end,
-    read=function(at,size)return ffi.string(at,size)end}
+    read=function(at,size)return ffi.string(type(at)=='number' and ffi.cast('uint8_t *',at) or at,size)end}
 local _,g,e,state,f=dofile(fixtures..'/perf_scene.lua')(M,api,0,0,1)
 assert(M.apply(api,g,e,state));assert(state.observed==1 and not state.realignments)
 assert(calls<32,'One unit repeatedly decodes the same world/pool metadata: '..calls)

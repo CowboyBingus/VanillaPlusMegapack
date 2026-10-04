@@ -4,43 +4,45 @@ if rawget(_G, 'ModBindingsMenu') then return end
 local ffi = require('ffi')
 local bit = require('bit')
 -- Texts and translations: mbm_text = {module = src/bingus_text.lua, locales =
--- locales/}, which the build places ahead of this file as a local (tests
--- provide it as a global).
+-- locales/}; the other source files: mbm_files.<name> = src/<name>.lua as a
+-- function, each run once below: Mod Bindings Menu's own with the shared table
+-- mbm, Bingus Shared Runtime's vendored copies (bingus_runtime.lua,
+-- bingus_memory.lua) without arguments, returning their tables. The build
+-- places both ahead of this file as locals (tests provide them as globals).
 local translation = {T = mbm_text.module}
+-- Bingus Shared Runtime: the update guard (the family's update-chain policy) and
+-- the module hashes every mod shares, read once per session.
+local runtime = mbm_files.bingus_runtime()
+local memory = mbm_files.bingus_memory().new(runtime)
+local guard -- The update guard, installed at the end of this file.
 
+-- Windows functions under private names: ffi.cdef keeps the first prototype
+-- declared for a name in the whole game and silently ignores later ones, so a
+-- plain name would bind to whatever another mod declared first (a textbook
+-- VirtualQuery with its own MEMORY_BASIC_INFORMATION made every page write
+-- raise). The __asm__ label names the real export; types are private too.
 ffi.cdef [[
 typedef unsigned char MBM_u8;
 typedef unsigned short MBM_u16;
 typedef unsigned int MBM_u32;
 typedef unsigned long long MBM_u64;
-void *GetModuleHandleA(const char *name);
-MBM_u32 GetModuleFileNameW(void *module, MBM_u16 *path, MBM_u32 capacity);
-void *GetCurrentProcess(void);
-int ReadProcessMemory(void *process, const void *address, void *buffer,
-                      size_t size, size_t *received);
-int VirtualProtect(void *address, size_t size, MBM_u32 protection, MBM_u32 *old);
 typedef struct {
     void *BaseAddress; void *AllocationBase; MBM_u32 AllocationProtect;
     MBM_u16 PartitionId; size_t RegionSize; MBM_u32 State; MBM_u32 Protect; MBM_u32 Type;
 } MBM_MEMORY_BASIC_INFORMATION;
-size_t VirtualQuery(const void *address, MBM_MEMORY_BASIC_INFORMATION *info, size_t length);
-MBM_u32 GetLastError(void);
-void *CreateFileW(const MBM_u16 *path, MBM_u32 access, MBM_u32 share,
-                  void *security, MBM_u32 disposition, MBM_u32 flags, void *template_file);
-int ReadFile(void *file, void *buffer, MBM_u32 size, MBM_u32 *received, void *overlapped);
-int CloseHandle(void *handle);
-int BCryptOpenAlgorithmProvider(void **algorithm, const MBM_u16 *name,
-                                const MBM_u16 *provider, MBM_u32 flags);
-int BCryptCloseAlgorithmProvider(void *algorithm, MBM_u32 flags);
-int BCryptCreateHash(void *algorithm, void **hash, void *object, MBM_u32 object_size,
-                     const void *secret, MBM_u32 secret_size, MBM_u32 flags);
-int BCryptHashData(void *hash, const void *data, MBM_u32 size, MBM_u32 flags);
-int BCryptFinishHash(void *hash, void *digest, MBM_u32 size, MBM_u32 flags);
-int BCryptDestroyHash(void *hash);
+void *MBM_GetCurrentProcess(void) __asm__("GetCurrentProcess");
+int MBM_ReadProcessMemory(void *process, const void *address, void *buffer,
+                          size_t size, size_t *received) __asm__("ReadProcessMemory");
+int MBM_read_at(void *process, MBM_u64 address, void *buffer, size_t size,
+                size_t *received) __asm__("ReadProcessMemory");
+int MBM_VirtualProtect(void *address, size_t size, MBM_u32 protection, MBM_u32 *old) __asm__("VirtualProtect");
+size_t MBM_VirtualQuery(const void *address, MBM_MEMORY_BASIC_INFORMATION *info,
+                        size_t length) __asm__("VirtualQuery");
+MBM_u32 MBM_GetLastError(void) __asm__("GetLastError");
 ]]
 
-local kernel32, bcrypt = ffi.load('kernel32'), ffi.load('bcrypt')
-local process = kernel32.GetCurrentProcess()
+local kernel32 = ffi.load('kernel32')
+local process = kernel32.MBM_GetCurrentProcess()
 local loader = rawget(_G, 'CowboyBingusModLoader')
 local log_file
 if loader and type(loader.open_log) == 'function' then
@@ -58,6 +60,8 @@ local EXE_SHA256 = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D
 local INPUT_OWNER_PTR_RVA = 0x347cf18
 local MENU_SYSTEM_PTR_RVA = 0x347ce38
 local UI_STATE_PTR_RVA = 0x347ce28
+-- The menu system pointer's first 32-bit word in a read at the UI state pointer.
+local MENU_WORD = (MENU_SYSTEM_PTR_RVA - UI_STATE_PTR_RVA) / 4
 local ACTION_LABELS_RVA = 0x26438a0
 local BUILD_ROWS_RVA = 0x1812940
 local ACTION_STATE_OFFSET, ACTION_STATE_STRIDE = 808, 32
@@ -89,12 +93,6 @@ for index, entry in ipairs(DORMANT_ACTIONS) do
     if index <= SLOTS then SLOT_CODES[index] = {entry[1], entry[2]} end
     ORIGINAL_LABELS[entry[1] * 65536 + entry[2]] = entry[3]
 end
--- Fixed slots whose keyboard default is Mod Bindings Menu's own (input.config).
-local SHIPPED_KEYBOARD_DEFAULT = {
-    [12 * 65536 + 1] = true, [10 * 65536 + 1] = true, [10 * 65536 + 4] = true,
-    [10 * 65536 + 8] = true, [10 * 65536 + 14] = true, [10 * 65536 + 9] = true,
-}
-local KEYBOARD_DEVICE = 3
 local BINDING_MAP, DEFAULTS_MAP = 686800, 686968
 local MAPPINGS_OFFSET, MAPPING_SIZE, MAX_MAPPINGS = 8, 20, 16
 local ASSIGNMENTS_FILE = 'ModBindingsMenu.assignments'
@@ -141,13 +139,14 @@ local TAB_BUTTON_STATE, TAB_BUTTON_ACTIVE, TAB_BUTTON_STRIDE = 11004, 11021, 340
 local NATIVE_TABS, MODS_TAB = 3, 3
 local state = {initialized = false, base = nil, build_rows = nil,
                screen = nil, last_action = nil,
-               registry = {}, order = {}, errors = 0, input_logged = false,
+               registry = {}, order = {}, input_logged = false,
                buckets = {}, title_active = false,
                set_tab_labels = nil, reset_list = nil, tab_labels = nil,
                last_tab = nil,
                claims = {}, pooled = {}, action_labels = {},
-               default_buckets = {}, clear_pending = {}, assignments = nil,
+               default_buckets = {}, assignments = nil, page_visited = false,
                auto_codes = {}, code_order = {}, sweep_timer = 0, swept_counts = {},
+               used = {}, refused = {}, revision = 0,
                -- The MODS title's buffer, pointed at by a game slot while the
                -- page shows the tab; replaced only while no slot points at it.
                -- Earlier buffers stay referenced in titles.
@@ -159,9 +158,19 @@ for index, entry in ipairs(DORMANT_ACTIONS) do
     if index > SLOTS then state.auto_codes[code] = true end
 end
 
+-- The API other mods use, published as the global ModBindingsMenu below.
+-- revision grows by one whenever something other mods can see changes: a
+-- binding registered, native input became ready, or the bindings' texts
+-- changed. A mod that retries a failed registration can retry when it changed.
+local api = {api = 1, version = 3, capacity = #DORMANT_ACTIONS, revision = 0}
+local function revise()
+    state.revision = state.revision + 1
+    api.revision = state.revision
+end
+
 local function read(address, size)
     local buffer, received = ffi.new('MBM_u8[?]', size), ffi.new('size_t[1]')
-    if kernel32.ReadProcessMemory(process, ffi.cast('const void *', address),
+    if kernel32.MBM_ReadProcessMemory(process, ffi.cast('const void *', address),
             buffer, size, received) == 0 or tonumber(received[0]) ~= size then return nil end
     return ffi.string(buffer, size)
 end
@@ -177,41 +186,30 @@ local function u64(blob)
     ffi.copy(number, blob, 8)
     return tonumber(number[0])
 end
-local function pointer(blob)
-    local value = u64(blob)
-    if not value then return nil end
+-- Per-frame reads (is_down and the binding page check) allocate nothing:
+-- ReadProcessMemory under a private name that takes the address as a number,
+-- so no pointer cdata is made per call, into one reused 24-byte buffer that is
+-- decoded in place. read() stays for the binding page and the sweep.
+local words = ffi.new('MBM_u32[6]')
+local words_read = ffi.new('size_t[1]')
+local words_read_low = ffi.cast('MBM_u32 *', words_read)
+-- Reads size bytes (at most 24) at address into words; false unless all were read.
+local function read_words(address, size)
+    return kernel32.MBM_read_at(process, address, words, size, words_read) ~= 0
+        and words_read_low[0] == size
+end
+-- The u32 at address, read into words, or nil. words is shared: the value is
+-- returned as a number before the next read replaces it.
+local function word_at(address)
+    if not read_words(address, 4) then return nil end
+    return words[0]
+end
+-- The user-mode pointer in words[index] and words[index + 1], or nil.
+local function word_pointer(index)
+    local value = words[index] + words[index + 1] * 4294967296
     if value < 0x10000 or value >= 0x800000000000 then return nil end
     return value
 end
-local function module_sha256(module)
-    local path = ffi.new('MBM_u16[32768]')
-    local length = kernel32.GetModuleFileNameW(module, path, 32768)
-    assert(length > 0 and length < 32768, 'cannot resolve module path')
-    local file = kernel32.CreateFileW(path, 0x80000000, 7, nil, 3, 0x08000000, nil)
-    assert(file ~= ffi.NULL and file ~= ffi.cast('void *', -1), 'cannot read module file')
-    local algorithm, hash = ffi.new('void *[1]'), ffi.new('void *[1]')
-    local ok, result = pcall(function()
-        local name = ffi.new('MBM_u16[7]', {83, 72, 65, 50, 53, 54, 0})
-        assert(bcrypt.BCryptOpenAlgorithmProvider(algorithm, name, nil, 0) == 0)
-        assert(bcrypt.BCryptCreateHash(algorithm[0], hash, nil, 0, nil, 0, 0) == 0)
-        local buffer, received = ffi.new('MBM_u8[1048576]'), ffi.new('MBM_u32[1]')
-        while true do
-            assert(kernel32.ReadFile(file, buffer, 1048576, received, nil) ~= 0)
-            if received[0] == 0 then break end
-            assert(bcrypt.BCryptHashData(hash[0], buffer, received[0], 0) == 0)
-        end
-        local digest, parts = ffi.new('MBM_u8[32]'), {}
-        assert(bcrypt.BCryptFinishHash(hash[0], digest, 32, 0) == 0)
-        for i = 0, 31 do parts[#parts + 1] = string.format('%02X', digest[i]) end
-        return table.concat(parts)
-    end)
-    if hash[0] ~= nil then bcrypt.BCryptDestroyHash(hash[0]) end
-    if algorithm[0] ~= nil then bcrypt.BCryptCloseAlgorithmProvider(algorithm[0], 0) end
-    kernel32.CloseHandle(file)
-    if not ok then error(result) end
-    return result
-end
-
 -- Every address this addon writes lies in game.dll's read-write data section,
 -- so pages are normally writable as they are. Changing page protection is only
 -- a fallback: the game's protection layer can start refusing VirtualProtect
@@ -223,7 +221,7 @@ local refusals_logged = 0
 local function write_memory(address, size, fn)
     local info = ffi.new('MBM_MEMORY_BASIC_INFORMATION')
     local pointer_value = ffi.cast('const void *', address)
-    if kernel32.VirtualQuery(pointer_value, info, ffi.sizeof(info)) == 0
+    if kernel32.MBM_VirtualQuery(pointer_value, info, ffi.sizeof(info)) == 0
        or info.State ~= MEM_COMMIT then return false end
     local region_end = tonumber(ffi.cast('MBM_u64', info.BaseAddress)) + tonumber(info.RegionSize)
     if WRITABLE_PAGES[bit.band(info.Protect, 0xff)] and bit.band(info.Protect, PAGE_GUARD) == 0
@@ -232,17 +230,17 @@ local function write_memory(address, size, fn)
         return true
     end
     local old = ffi.new('MBM_u32[1]')
-    if kernel32.VirtualProtect(ffi.cast('void *', address), size, 0x04, old) == 0 then
+    if kernel32.MBM_VirtualProtect(ffi.cast('void *', address), size, 0x04, old) == 0 then
         if refusals_logged < 4 then
             refusals_logged = refusals_logged + 1
             note(string.format('Write refused at game.dll+0x%x (protection 0x%x, error %d).',
-                               address - (state.base or 0), info.Protect, kernel32.GetLastError()))
+                               address - (state.base or 0), info.Protect, kernel32.MBM_GetLastError()))
         end
         return false
     end
     local ok, result = pcall(fn)
     local ignored = ffi.new('MBM_u32[1]')
-    kernel32.VirtualProtect(ffi.cast('void *', address), size, old[0], ignored)
+    kernel32.MBM_VirtualProtect(ffi.cast('void *', address), size, old[0], ignored)
     if not ok then error(result) end
     return true
 end
@@ -250,23 +248,45 @@ end
 -- Binding records live in fixed 256-entry hash maps on the input owner: the
 -- live bindings (+686800) and the shipped defaults (+686968). Each 328-byte
 -- record is {u32 code, u32 count, 16 x 20-byte mappings}.
+local RECORD_SIZE = MAPPINGS_OFFSET + MAX_MAPPINGS * MAPPING_SIZE
+local MAP_RECORDS, SCAN_RECORDS = 256, 32
+local scan, scan_words -- 32 records, allocated on the first scan and reused.
+-- Reads size bytes at address into buffer, in place; false unless all were read.
+local function read_into(address, buffer, size)
+    return kernel32.MBM_read_at(process, address, buffer, size, words_read) ~= 0
+        and words_read_low[0] == size
+end
+-- Finds the record of every dormant action in a binding map, 32 records per
+-- read, and caches their addresses. False when the map cannot be read.
+local function index_map(map_offset, cache)
+    if not read_words(state.base + INPUT_OWNER_PTR_RVA, 8) then return false end
+    local owner = word_pointer(0)
+    if not owner or not read_words(owner + map_offset, 12) then return false end
+    local buckets = word_pointer(0)
+    if not buckets or words[2] ~= MAP_RECORDS then return false end
+    if not scan then
+        scan = ffi.new('MBM_u8[?]', SCAN_RECORDS * RECORD_SIZE)
+        scan_words = ffi.cast('MBM_u32 *', scan)
+    end
+    for code in pairs(cache) do cache[code] = nil end
+    for first = 0, MAP_RECORDS - 1, SCAN_RECORDS do
+        local address = buckets + first * RECORD_SIZE
+        if not read_into(address, scan, SCAN_RECORDS * RECORD_SIZE) then return false end
+        for index = 0, SCAN_RECORDS - 1 do
+            local code = scan_words[index * RECORD_SIZE / 4]
+            if state.code_order[code] then cache[code] = address + index * RECORD_SIZE end
+        end
+    end
+    return true
+end
+-- The record of code in a binding map: the cached address while it still
+-- holds the code (one read), else the map is indexed again.
 local function map_bucket(map_offset, code, cache)
     if not state.base then return nil end
     local cached = cache[code]
-    if cached and u32(read(cached, 4)) == code then return cached end
-    local owner = pointer(read(state.base + INPUT_OWNER_PTR_RVA, 8))
-    if not owner then return nil end
-    local buckets = pointer(read(owner + map_offset, 8))
-    local capacity = u32(read(owner + map_offset + 8, 4))
-    if not buckets or capacity ~= 256 then return nil end
-    for index = 0, capacity - 1 do
-        local bucket = buckets + index * 328
-        if u32(read(bucket, 4)) == code then
-            cache[code] = bucket
-            return bucket
-        end
-    end
-    return nil
+    if cached and read_words(cached, 4) and words[0] == code then return cached end
+    if not index_map(map_offset, cache) then return nil end
+    return cache[code]
 end
 local function action_bucket(group, action)
     return map_bucket(BINDING_MAP, group * 65536 + action, state.buckets)
@@ -275,164 +295,17 @@ local function action_present(group, action)
     return action_bucket(group, action) ~= nil
 end
 
--- Mapping identity without bytes 6-7, which the config parser leaves unset.
-local function mapping_key(blob)
-    return blob:sub(1, 6) .. blob:sub(9, MAPPING_SIZE)
-end
-
--- v1.2.2 cloned some developer defaults with the RepeatInterval trigger, which
--- repeats while held and has no type selector on the bindings page. Button
--- mappings on mod actions use Press instead. The trigger is stored twice: in
--- flag bits 16-19 and in bytes 8-11.
-local BUTTON_INPUT, REPEAT_INTERVAL, PRESS = 4, 8, 0
-local function press_trigger(blob)
-    local flags = u32(blob:sub(1, 4))
-    if bit.band(bit.rshift(flags, 4), 0xf) ~= BUTTON_INPUT
-       or u32(blob:sub(9, 12)) ~= REPEAT_INTERVAL then return blob end
-    local value = bit.bor(bit.band(flags, bit.bnot(0xf0000)), bit.lshift(PRESS, 16))
-    if value < 0 then value = value + 0x100000000 end -- bit ops are signed 32-bit.
-    local cleared = ffi.new('MBM_u32[1]', value)
-    return ffi.string(cleared, 4) .. blob:sub(5, 8) .. string.rep('\0', 4) .. blob:sub(13)
-end
-
-local function read_mappings(bucket)
-    local count = u32(read(bucket + 4, 4))
-    if not count or count > MAX_MAPPINGS then return nil end
-    local mappings = {}
-    for index = 0, count - 1 do
-        local blob = read(bucket + MAPPINGS_OFFSET + index * MAPPING_SIZE, MAPPING_SIZE)
-        if not blob then return nil end
-        mappings[#mappings + 1] = blob
-    end
-    return mappings
-end
-
-local function write_mappings(bucket, mappings)
-    local records = ffi.cast('MBM_u8 *', bucket + MAPPINGS_OFFSET)
-    ffi.fill(records, MAX_MAPPINGS * MAPPING_SIZE)
-    for index, blob in ipairs(mappings) do
-        ffi.copy(records + (index - 1) * MAPPING_SIZE, blob, MAPPING_SIZE)
-    end
-    ffi.cast('MBM_u32 *', bucket + 4)[0] = #mappings
-end
-
--- The dormant actions keep their developer defaults (controller buttons, the
--- mouse, Enter, Escape...) in input.config and in saved settings from v1. They
--- must never fire a mod binding, so every live mapping identical to one of the
--- action's shipped defaults is removed, except Mod Bindings Menu's own
--- keyboard default on the fixed slots. Reclaimed actions are cleared entirely.
-local function sweep_inherited_mappings()
-    local removed = 0
-    for _, entry in ipairs(DORMANT_ACTIONS) do
-        local code = entry[1] * 65536 + entry[2]
-        local live = action_bucket(entry[1], entry[2])
-        local defaults = map_bucket(DEFAULTS_MAP, code, state.default_buckets)
-        local current = live and read_mappings(live)
-        local shipped = defaults and read_mappings(defaults)
-        if current and shipped then
-            local inherited = {}
-            for _, blob in ipairs(shipped) do
-                local own = SHIPPED_KEYBOARD_DEFAULT[code] and
-                            bit.band(blob:byte(1), 0xf) == KEYBOARD_DEVICE
-                if not own then inherited[mapping_key(blob)] = true end
-            end
-            local kept, changed = {}, false
-            if not state.clear_pending[code] then
-                for _, blob in ipairs(current) do
-                    if not inherited[mapping_key(blob)] then
-                        local press = press_trigger(blob)
-                        changed = changed or press ~= blob
-                        kept[#kept + 1] = press
-                    end
-                end
-            end
-            state.clear_pending[code] = nil
-            if changed or #kept ~= #current then
-                write_mappings(live, kept)
-                removed = removed + #current - #kept
-            end
-            state.swept_counts[code] = #kept
-        end
-    end
-    if removed > 0 then note('Removed ' .. removed .. ' inherited developer mappings.') end
-end
-
-local function assignments_path()
-    local loader_api = rawget(_G, 'CowboyBingusModLoader')
-    local directory = type(loader_api) == 'table' and loader_api.log_directory
-    if type(directory) ~= 'string' or directory == '' then
-        local local_app_data = os.getenv('LOCALAPPDATA')
-        if not local_app_data then return nil end
-        directory = local_app_data .. '/CowboyBingus/Helldivers2'
-    end
-    return directory .. '/' .. ASSIGNMENTS_FILE
-end
-
--- Automatic bindings keep their native action across sessions, because the
--- game saves each action's keys under the action's name.
-local function load_assignments()
-    if state.assignments then return state.assignments end
-    state.assignments = {}
-    local path = assignments_path()
-    local file = path and io.open(path, 'rb')
-    if not file then return state.assignments end
-    local text = file:read('*a') or ''
-    file:close()
-    for id, group, action in text:gmatch('([^\t\r\n]+)\t(%d+)\t(%d+)') do
-        local code = tonumber(group) * 65536 + tonumber(action)
-        if state.auto_codes[code] then state.assignments[id] = code end
-    end
-    return state.assignments
-end
-
-local function save_assignments()
-    local path = assignments_path()
-    if not path then return end
-    local lines = {}
-    for id, code in pairs(state.assignments) do
-        lines[#lines + 1] = id .. '\t' .. math.floor(code / 65536) .. '\t' .. code % 65536
-    end
-    table.sort(lines)
-    local file, reason = io.open(path, 'wb')
-    if not file then note('Cannot save binding assignments: ' .. tostring(reason)); return end
-    file:write(table.concat(lines, '\n'), '\n')
-    file:close()
-end
-
-local function assign_action(id)
-    local assignments = load_assignments()
-    local used, reserved = {}, {}
-    for _, record in ipairs(state.order) do used[record.code] = true end
-    for owner, code in pairs(assignments) do reserved[code] = owner end
-    local previous = assignments[id]
-    if previous and not used[previous] then return previous end
-    for index = SLOTS + 1, #DORMANT_ACTIONS do
-        local entry = DORMANT_ACTIONS[index]
-        local code = entry[1] * 65536 + entry[2]
-        if not used[code] and not reserved[code] then
-            assignments[id] = code
-            save_assignments()
-            return code
-        end
-    end
-    -- Reuse an action reserved by an addon that did not register this session;
-    -- its old keys are cleared so they do not carry over to the new binding.
-    for index = SLOTS + 1, #DORMANT_ACTIONS do
-        local entry = DORMANT_ACTIONS[index]
-        local code = entry[1] * 65536 + entry[2]
-        local owner = reserved[code]
-        if not used[code] and owner and not state.registry[owner] then
-            assignments[owner] = nil
-            assignments[id] = code
-            state.clear_pending[code] = true
-            save_assignments()
-            note('Reassigned native action ' .. entry[1] .. ':' .. entry[2] ..
-                 ' from ' .. owner .. ' to ' .. id .. '.')
-            return code
-        end
-    end
-    return nil
-end
+-- The assignments file and the automatic actions (src/assignments.lua).
+local mbm = {state = state, note = note, DORMANT_ACTIONS = DORMANT_ACTIONS, SLOTS = SLOTS,
+             ASSIGNMENTS_FILE = ASSIGNMENTS_FILE}
+mbm_files.assignments(mbm)
+local flush_assignments, assign_action = mbm.flush_assignments, mbm.assign_action
+-- The sweep of the bindings' native actions (src/sweep.lua).
+mbm.read_into, mbm.map_bucket = read_into, map_bucket
+mbm.BINDING_MAP, mbm.DEFAULTS_MAP, mbm.RECORD_SIZE = BINDING_MAP, DEFAULTS_MAP, RECORD_SIZE
+mbm.MAPPINGS_OFFSET, mbm.MAPPING_SIZE, mbm.MAX_MAPPINGS = MAPPINGS_OFFSET, MAPPING_SIZE, MAX_MAPPINGS
+mbm_files.sweep(mbm)
+local sweep_bindings = mbm.sweep_bindings
 
 local function log_input_probe()
     if state.input_logged then return end
@@ -466,35 +339,56 @@ local function log_input_probe()
     end
 end
 
+-- The addon ships a whole-file content/input.config replacement beside this
+-- code, pinned to one game build. When the build check fails the bindings go
+-- inert, but the game keeps loading that file in place of its own.
+local INPUT_CONFIG_WARNING = 'WARNING: Mod Bindings Menu is inactive, but its input.config replacement ' ..
+    'is still deployed with it and replaces the input configuration the game ships, which can break or reset ' ..
+    'key bindings on this game build. Remove Mod Bindings Menu (or its Vanilla Plus Megapack option), or update ' ..
+    'it to a release for this game build.'
+-- Raises reason as it is, without a position, for the guard's stop line.
+local function check(condition, reason)
+    if not condition then error(reason, 0) end
+end
+-- The build check, on the first frame. A build this release does not support
+-- stops the update for the session, the family's refusal: BingusRuntime.statuses
+-- shows "stopped: unsupported game build" (or the native change found), the log
+-- has that stop line and the input.config warning, and no step runs again. The
+-- bindings stay inert: is_down and poll answer nil.
 local function initialize()
     if state.initialized then return end
     state.initialized = true
     local ok, err = pcall(function()
-        local game, exe = kernel32.GetModuleHandleA('game.dll'), kernel32.GetModuleHandleA(nil)
-        assert(game ~= nil and game ~= ffi.NULL and exe ~= nil and exe ~= ffi.NULL)
-        assert(module_sha256(game) == GAME_SHA256, 'unsupported game.dll build')
-        assert(module_sha256(exe) == EXE_SHA256, 'unsupported helldivers2.exe build')
-        state.base = tonumber(ffi.cast('MBM_u64', game))
-        assert(read(state.base + BUILD_ROWS_RVA, 13) ==
-               '\x48\x8b\xc4\x53\x41\x56\x48\x81\xec\xd8\x00\x00\x00',
-               'binding list builder changed')
-        assert(read(state.base + SET_TAB_LABELS_RVA, 16) ==
-               '\x48\x89\x54\x24\x10\x53\x56\x48\x83\xec\x68\x0f\x29\x74\x24\x30',
-               'tab bar label setter changed')
-        assert(read(state.base + LIST_RESET_RVA, 16) ==
-               '\x40\x53\x48\x83\xec\x20\x48\x8b\xd9\x85\xd2\x74\x30\x83\xea\x01',
-               'binding list reset changed')
-        assert(read(state.base + TAB_LABELS_RVA, 12) ==
-               '\x51\xf4\x70\x8d\x60\x5c\x5e\xf1\xeb\x7f\x84\x00',
-               'binding tab labels changed')
+        -- Each module file is hashed at most once per session for every mod
+        -- (Bingus Shared Runtime's cache); 'game modules unavailable' or
+        -- 'unsupported game build' when they do not match.
+        check(memory.verify_build({exe_sha256 = EXE_SHA256, game_sha256 = GAME_SHA256}))
+        state.base = memory.address(memory.module('game.dll'))
+        check(read(state.base + BUILD_ROWS_RVA, 13) ==
+              '\x48\x8b\xc4\x53\x41\x56\x48\x81\xec\xd8\x00\x00\x00',
+              'binding list builder changed')
+        check(read(state.base + SET_TAB_LABELS_RVA, 16) ==
+              '\x48\x89\x54\x24\x10\x53\x56\x48\x83\xec\x68\x0f\x29\x74\x24\x30',
+              'tab bar label setter changed')
+        check(read(state.base + LIST_RESET_RVA, 16) ==
+              '\x40\x53\x48\x83\xec\x20\x48\x8b\xd9\x85\xd2\x74\x30\x83\xea\x01',
+              'binding list reset changed')
+        check(read(state.base + TAB_LABELS_RVA, 12) ==
+              '\x51\xf4\x70\x8d\x60\x5c\x5e\xf1\xeb\x7f\x84\x00',
+              'binding tab labels changed')
         for _, entry in ipairs(DORMANT_ACTIONS) do
-            assert(u32(read(state.base + ACTION_LABELS_RVA +
-                   (entry[1] * 97 + entry[2]) * 4, 4)) == entry[3],
-                   'input action label table changed at ' .. entry[1] .. ':' .. entry[2])
+            check(u32(read(state.base + ACTION_LABELS_RVA +
+                  (entry[1] * 97 + entry[2]) * 4, 4)) == entry[3],
+                  'input action label table changed at ' .. entry[1] .. ':' .. entry[2])
         end
     end)
-    if ok then note('Native binding layout verified for current game build.')
-    else state.base = nil; note('Mod binding integration unavailable: ' .. tostring(err)) end
+    if ok then
+        note('Native binding layout verified for current game build.')
+        return
+    end
+    state.base = nil
+    guard.stop(tostring(err))
+    note(INPUT_CONFIG_WARNING)
 end
 
 local function activate_actions()
@@ -506,11 +400,13 @@ local function activate_actions()
     state.reset_list = ffi.cast('void (__fastcall *)(void *, int)',
                                 state.base + LIST_RESET_RVA)
     note('Mod input actions loaded; native keyboard and controller bindings ready.')
+    revise()
     log_input_probe()
 end
 
 local function mods_title(active)
-    if not state.base then return end
+    -- Nothing to change (every frame outside a binding page): no read.
+    if not state.base or active == state.title_active then return end
     local address = state.base + MODS_TITLE_PTR_RVA
     local current = read(address, 8)
     if not current then return end
@@ -587,7 +483,7 @@ function translation.refresh()
         state.titles[#state.titles + 1] = state.mods_text
         state.mods_text = ffi.new('char[?]', #title + 1, title)
     end
-    if changed then state.revision = (state.revision or 0) + 1 end
+    if changed then revise() end
 end
 
 -- Names a caller's section after its addon entry, e.g.
@@ -611,7 +507,6 @@ end
 
 local active_screen -- Defined with the page code below.
 
-local api = {api = 1, version = 3, capacity = #DORMANT_ACTIONS}
 -- slot: 1-7 selects a fixed v1 slot; nil or 0 (version 2) assigns a free native
 -- action automatically and keeps it for this id in later sessions. A slot 2
 -- request that another addon already holds is assigned automatically too.
@@ -658,8 +553,9 @@ function api.register_binding(id, label, slot, options)
         end
     end
     if not code then
-        code = assign_action(id)
-        if not code then return false, 'all ' .. api.capacity .. ' binding actions in use' end
+        local reason
+        code, reason = assign_action(id)
+        if not code then return false, reason end
     end
     local record = {id = id, label = label, requested = slot,
                     slot = not state.auto_codes[code] and slot or nil, code = code,
@@ -668,50 +564,76 @@ function api.register_binding(id, label, slot, options)
     record.text = text
     state.registry[id] = record
     state.order[#state.order + 1] = record
+    state.used[code] = record
     table.sort(state.order, function(a, b)
         return state.code_order[a.code] < state.code_order[b.code]
     end)
-    state.revision = (state.revision or 0) + 1
+    revise()
     note('Registered ' .. id .. ' on native action ' .. record.group .. ':' .. record.action ..
          (record.slot and ' (slot ' .. record.slot .. ')' or '') .. ' under ' ..
          record.category .. '.')
     return true
 end
+-- A registered action's live binding record and its mapping count, from one
+-- 8-byte read of the record's {code, count} header. A record that no longer
+-- holds the action is searched for again, as before.
+local function live_header(record)
+    local bucket = state.buckets[record.code]
+    if not (bucket and read_words(bucket, 8) and words[0] == record.code) then
+        state.buckets[record.code] = nil
+        bucket = action_bucket(record.group, record.action)
+        if not (bucket and read_words(bucket, 8)) then return nil end
+    end
+    return bucket, words[1]
+end
+
 -- The game evaluates every action once per frame into a 32-byte state entry
 -- at owner + 808 + 32 * (97 * group + action); byte 0 is set while any of the
 -- action's mappings satisfies its own trigger (Press, Hold, Tap, DoubleTap,
--- LongPress, ...) on keyboard, mouse or controller.
+-- LongPress, ...) on keyboard, mouse or controller. Three reads (the record
+-- header, the input owner, the state byte) and no allocation per call.
 function api.is_down(id)
     local record = state.registry[id]
     if not record or not state.build_rows then return nil end
-    local bucket = action_bucket(record.group, record.action)
+    local bucket, count = live_header(record)
     if not bucket then return nil end
-    -- A config re-parse (device change) or Revert restores inherited defaults;
-    -- clean them up before trusting this frame's state.
-    if u32(read(bucket + 4, 4)) ~= state.swept_counts[record.code] and not active_screen() then
-        sweep_inherited_mappings()
+    -- A config re-parse (device change) or a Revert can restore inherited
+    -- defaults; the sweep cleans them up before this frame's state is trusted.
+    if count ~= state.swept_counts[record.code] and not active_screen() then
+        sweep_bindings()
         return false
     end
-    local owner = pointer(read(state.base + INPUT_OWNER_PTR_RVA, 8))
-    if not owner then return nil end
-    local triggered = read(owner + ACTION_STATE_OFFSET +
-                           ACTION_STATE_STRIDE * (record.group * 97 + record.action), 1)
-    if not triggered then return nil end
-    return triggered ~= '\0'
+    local owner = read_words(state.base + INPUT_OWNER_PTR_RVA, 8) and word_pointer(0)
+    if not owner or not read_words(owner + ACTION_STATE_OFFSET +
+            ACTION_STATE_STRIDE * (record.group * 97 + record.action), 1) then
+        return nil
+    end
+    return bit.band(words[0], 0xff) ~= 0
 end
 function api.ready() return state.build_rows ~= nil end
 _G.ModBindingsMenu = api
 
+-- The binding page's screen object while a binding page is on top of the UI,
+-- else nil. Two reads on every frame, without allocation: the UI state and menu
+-- system pointers (16 bytes apart in game.dll), then the UI's screen stack
+-- (five screen types, then the depth); a third for the screen while a page is open.
 active_screen = function()
-    local ui = pointer(read(state.base + UI_STATE_PTR_RVA, 8))
-    if not ui then return nil end
-    local depth = u32(read(ui + 0x429c + 20, 4))
-    if not depth or depth < 1 or depth > 5
-       or u32(read(ui + 0x429c + 4 * (depth - 1), 4)) ~= 26 then return nil end
-    local menu = pointer(read(state.base + MENU_SYSTEM_PTR_RVA, 8))
-    if not menu then return nil end
-    return pointer(read(menu + 208, 8))
+    if not read_words(state.base + UI_STATE_PTR_RVA, 24) then return nil end
+    local ui, menu = word_pointer(0), word_pointer(MENU_WORD)
+    if not ui or not read_words(ui + 0x429c, 24) then return nil end
+    local depth = words[5]
+    if depth < 1 or depth > 5 or words[depth - 1] ~= 26 then return nil end
+    if not menu or not read_words(menu + 208, 8) then return nil end
+    return word_pointer(0)
 end
+
+-- Polling several bindings in one call (src/poll.lua): ModBindingsMenu.poll.
+mbm.live_header, mbm.active_screen, mbm.words, mbm.read_words, mbm.word_pointer =
+    live_header, active_screen, words, read_words, word_pointer
+mbm.INPUT_OWNER_PTR_RVA, mbm.ACTION_STATE_OFFSET, mbm.ACTION_STATE_STRIDE =
+    INPUT_OWNER_PTR_RVA, ACTION_STATE_OFFSET, ACTION_STATE_STRIDE
+mbm_files.poll(mbm)
+api.poll = mbm.poll
 
 local function write_u64(address, value)
     return write_memory(address, 8, function() ffi.cast('MBM_u64 *', address)[0] = value end)
@@ -837,10 +759,10 @@ end
 -- the current tab's selected state is restored as the page's opener does.
 local function ensure_mods_tab(screen)
     local bar = screen + TAB_BAR_OFFSET
-    local count = u32(read(bar + TAB_COUNT, 4))
+    local count = word_at(bar + TAB_COUNT)
     if count == NATIVE_TABS + 1 then return true end
     if count ~= NATIVE_TABS then return false end
-    local current = u32(read(bar + TAB_CURRENT, 4))
+    local current = word_at(bar + TAB_CURRENT)
     if not current or current >= NATIVE_TABS then return false end
     mods_title(true)
     if not state.title_active then return false end
@@ -858,25 +780,45 @@ local function ensure_mods_tab(screen)
     return true
 end
 
+local ROW_COUNT = 2411916
 local function mods_tab_built(listing, layout)
-    if u32(read(listing + 2411916, 4)) ~= #layout then return false end
+    if word_at(listing + ROW_COUNT) ~= #layout then return false end
     for index, descriptor in ipairs(layout) do
         local row = listing + ROW_START + ROW_STRIDE * (index - 1)
         if descriptor[3] ~= 0 then
-            if u32(read(row + 24752, 4)) ~= 4
-               or u32(read(row + 4264 + 272, 4)) ~= descriptor[3] then return false end
-        elseif u32(read(row + 24760, 4)) ~= descriptor[1] * 65536 + descriptor[2] then
+            if word_at(row + 24752) ~= 4
+               or word_at(row + 4264 + 272) ~= descriptor[3] then return false end
+        elseif word_at(row + 24760) ~= descriptor[1] * 65536 + descriptor[2] then
             return false
         end
     end
     return true
 end
 
+-- The listing and layout whose rows were last found built, and the seconds
+-- since every row was checked. While the MODS tab stays selected the game
+-- leaves the rows alone, so a frame re-reads only the row count; every row is
+-- checked again when the count, the layout or the listing changes, after
+-- another tab was selected, and every ROWS_RECHECK seconds.
+local ROWS_RECHECK = 0.5
+local built_listing, built_layout, built_age = nil, nil, 0
+local function forget_rows() built_listing, built_layout = nil, nil end
+local function rows_built(listing, layout, seconds)
+    built_age = built_age + seconds
+    if listing == built_listing and layout == built_layout and built_age < ROWS_RECHECK
+       and word_at(listing + ROW_COUNT) == #layout then
+        return true
+    end
+    forget_rows()
+    if not mods_tab_built(listing, layout) then return false end
+    built_listing, built_layout, built_age = listing, layout, 0
+    return true
+end
+
 -- The game's tab switch leaves the previous tab's rows in place for tabs it
 -- does not know, so the MODS tab rebuilds the list with the native builder:
 -- one native section header per mod, followed by that mod's bindings.
-local function fill_mods_tab(screen)
-    if u32(read(screen + SELECTED_TAB_OFFSET, 4)) ~= MODS_TAB then return end
+local function fill_mods_tab(screen, seconds)
     if not state.layout or state.layout_revision ~= state.revision then
         state.layout = mods_layout()
         state.layout_revision = state.revision
@@ -884,7 +826,7 @@ local function fill_mods_tab(screen)
     end
     local layout = state.layout
     local listing = screen + ROW_LIST_OFFSET
-    if mods_tab_built(listing, layout) then return end
+    if rows_built(listing, layout, seconds) then return end
     local rows = ffi.new('MBM_u32[?]', #layout * 3)
     for index, descriptor in ipairs(layout) do
         for field = 1, 3 do rows[(index - 1) * 3 + field - 1] = descriptor[field] end
@@ -900,9 +842,44 @@ end
 
 local SWEEP_INTERVAL = 2
 
+-- A frame with a binding page on top of the UI: the MODS tab. The selected tab
+-- is read once; adding the MODS tab relabels the tab bar but does not select
+-- a tab.
+local function page_frame(screen, seconds)
+    local tab = word_at(screen + SELECTED_TAB_OFFSET)
+    if ensure_mods_tab(screen) and tab == MODS_TAB then
+        fill_mods_tab(screen, seconds)
+    else
+        forget_rows()
+    end
+    if tab ~= state.last_tab then
+        state.last_tab = tab
+        note('Bindings tab ' .. tostring(tab) .. ' selected.')
+    end
+end
+
+-- A frame without a binding page: the sweep when it is due (never while a page
+-- is open, so the page's rows are left alone), and whatever the page borrowed
+-- goes back.
+local function away_frame()
+    if state.page_open then state.page_open, state.page_visited = false, true end
+    if state.sweep_timer <= 0 then
+        state.sweep_timer = SWEEP_INTERVAL
+        sweep_bindings()
+    end
+    state.last_tab = nil
+    state.layout = nil
+    forget_rows()
+    mods_title(false)
+    release_labels()
+end
+
 local function step(dt)
     if not state.initialized then initialize() end
     if not state.base then return end
+    local seconds = type(dt) == 'number' and dt or 0
+    local book = state.assignments
+    if book and book.dirty then flush_assignments(seconds) end
     activate_actions()
     if not state.build_rows then return end
     local screen = active_screen()
@@ -911,36 +888,48 @@ local function step(dt)
         -- since the last one, so the texts are refreshed here, once.
         state.page_open = true
         translation.refresh()
-    elseif not screen then
-        state.page_open = false
     end
-    -- Leave the bindings page's rows alone while it is open; sweep after.
-    state.sweep_timer = state.sweep_timer - (type(dt) == 'number' and dt or 0)
-    if not screen and state.sweep_timer <= 0 then
-        state.sweep_timer = SWEEP_INTERVAL
-        sweep_inherited_mappings()
-    end
-    if screen then
-        if ensure_mods_tab(screen) then fill_mods_tab(screen) end
-        local tab = u32(read(screen + SELECTED_TAB_OFFSET, 4))
-        if tab ~= state.last_tab then
-            state.last_tab = tab
-            note('Bindings tab ' .. tostring(tab) .. ' selected.')
-        end
-    else
-        state.last_tab = nil
-        state.layout = nil
-        mods_title(false)
-        release_labels()
-    end
+    state.sweep_timer = state.sweep_timer - seconds
+    if screen then page_frame(screen, seconds) else away_frame() end
 end
-local previous_update = rawget(_G, 'update')
-update = function(dt)
-    local ok, err = xpcall(function() return step(dt) end, debug.traceback)
-    if not ok then
-        state.errors = state.errors + 1
-        if state.errors <= 8 then note('Menu update error: ' .. tostring(err)) end
+
+-- The update stops (the 8th error of a burst) or the game shuts down: the MODS
+-- title and the borrowed text slots go back to the game, as when a binding page
+-- closes. While a page is open they stay borrowed for the session, and their
+-- buffers with them, since the page may still show them.
+local function shut_down()
+    if not state.base then return end
+    if active_screen() then
+        note('A binding page is open; its borrowed text slots stay borrowed.')
+        return
     end
-    if type(previous_update) == 'function' then return previous_update(dt) end
+    mods_title(false)
+    release_labels()
 end
+
+-- An update below this mod raised: the menu pauses, and its next step starts
+-- afresh. A binding page that was open counts as visited, so the next sweep
+-- treats the player's changes on it as after any page; the page's own state
+-- goes, and so do the MODS title and the borrowed text slots unless a page is
+-- open. The binding maps (the player's mappings), the registrations, the
+-- reservations and the assignments file stay as they are; nothing is swept here.
+local function pause_menu()
+    if state.page_open then state.page_open, state.page_visited = false, true end
+    state.last_tab, state.layout = nil, nil
+    forget_rows()
+    shut_down()
+end
+
+-- The update chain, through Bingus Shared Runtime's guard: the previous update
+-- runs outside pcall, so its errors reach the game unchanged; the step's errors
+-- count in bursts (the 8th of a burst stops it for the session, 3600 error-free
+-- frames end a burst); after an error below this mod the menu pauses
+-- (pause_menu) and resumes once the updates below have returned on 60 frames in
+-- a row, and 8 such errors in a burst stop it; a stop or the game's shutdown
+-- runs shut_down; the first failure survives shutdown in
+-- BingusRuntime.statuses.ModBindingsMenu. Every argument and return value pass
+-- through. Per frame: the step under pcall and a few tests and stores, no
+-- allocation (pinned in tests/test_mods_tab.lua).
+guard = runtime.guard({name = 'ModBindingsMenu', step = step, stop = shut_down, pause = pause_menu, log = note,
+                       env = _G}).install()
 note('Mod Bindings Menu initialized; waiting for native input actions.')

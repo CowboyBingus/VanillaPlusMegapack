@@ -16,7 +16,8 @@ function api.pointer(bytes,off)
     local n=tonumber(q[0])
     return n>=65536 and n<0x800000000000 and n or nil
 end
-function api.read(address,size)
+-- Like the game's reader: a string, or the bytes copied into a caller buffer.
+function api.read(address,size,into,offset)
     assert(size<=1024)
     reads=reads+1
     local result={}
@@ -28,7 +29,9 @@ function api.read(address,size)
         end
     end
     for i=1,size do assert(result[i],string.format('Unexpected presentation read 0x%x + %d',address,size)) end
-    return table.concat(result)
+    if not into then return table.concat(result) end
+    ffi.copy(into.data+(offset or 0),table.concat(result),size)
+    return true
 end
 local function put(address,bytes) overrides[#overrides+1]={address=address,bytes=bytes} end
 local function word(n) return ffi.string(ffi.new('uint32_t[1]',n),4) end

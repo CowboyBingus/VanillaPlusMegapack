@@ -1,5 +1,5 @@
 local source=assert(arg[1])
-local M=dofile(source..'/corpse_data.lua')
+local M=assert(loadfile(source..'/corpse_data.lua'))(dofile(source..'/corpse_profiles.lua'))
 local function clone(x)
     if type(x)~='table' then return x end
     local y={};for k,v in pairs(x) do y[k]=clone(v) end;return y

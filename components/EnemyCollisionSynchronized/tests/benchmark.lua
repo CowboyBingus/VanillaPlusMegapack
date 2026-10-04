@@ -6,7 +6,7 @@ local frequency, counter = ffi.new('int64_t[1]'), ffi.new('int64_t[1]')
 assert(kernel.QueryPerformanceFrequency(frequency) ~= 0)
 local hz = tonumber(frequency[0])
 local function clock() kernel.QueryPerformanceCounter(counter); return tonumber(counter[0])/hz end
-local M = dofile(source..'/corpse_data.lua')
+local M = assert(loadfile(source..'/corpse_data.lua'))(dofile(source..'/corpse_profiles.lua'))
 local scene = dofile(fixture_path)
 local api = dofile(source..'/windows_api.lua')()
 api.clock = clock

@@ -14,7 +14,9 @@ def locale_files(root):
 def build_module(root, build, module_name, patch_name, revision):
     build.mkdir(parents=True, exist_ok=True)
     module = ''
-    for variable, filename in [('text', 'bingus_text.lua'), ('create_api', 'windows_api.lua'),
+    for variable, filename in [('text', 'bingus_text.lua'), ('runtime', 'bingus_runtime.lua'),
+                               ('runtime_memory', 'bingus_memory.lua'), ('runtime_write', 'bingus_write.lua'),
+                               ('create_api', 'windows_api.lua'),
                                ('patch', patch_name), ('install_loader', 'archive_loader.lua')]:
         code = (root / 'src' / filename).read_text(encoding='utf-8')
         for forbidden in ('VirtualProtect', 'FlushInstructionCache', 'CreateRemoteThread', 'LoadLibrary'):
@@ -26,8 +28,13 @@ def build_module(root, build, module_name, patch_name, revision):
     for path in locale_files(root):
         target = 'locales.en' if path.name == 'en.lua' else f"locales.bundled['{path.stem}']"
         module += f'{target} = (function()\n' + path.read_text(encoding='utf-8') + '\nend)()\n'
-    module += f"install_loader(create_api, patch, {{revision = '{revision}', "
-    module += f"exe_sha256 = '{EXE_SHA}', game_sha256 = '{GAME_DLL_SHA}'" + '}, text, locales)\n'
+    # The adapter takes the shared runtime's core (src/bingus_runtime.lua) and its
+    # memory api (src/bingus_memory.lua, extended with the checked writes of
+    # src/bingus_write.lua); the loader creates it once, after its duplicate-load
+    # check, and installs the core's update guard.
+    module += ("install_loader(function() return create_api(runtime, runtime_write.extend(runtime_memory.new(runtime))) "
+               f"end, patch, {{revision = '{revision}', ")
+    module += f"exe_sha256 = '{EXE_SHA}', game_sha256 = '{GAME_DLL_SHA}'" + '}, text, locales, runtime)\n'
     path, output = build / 'mod.wrapper.lua', build / 'mod.ljbc'
     path.write_text(module, encoding='utf-8', newline='\n')
     env = dict(os.environ, LUA_PATH=str(LUA.parent / '?.lua') + ';;')

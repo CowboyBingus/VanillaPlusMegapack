@@ -39,8 +39,8 @@ loader.megapack = pack
 if not (type(loader.jit) == 'table' and loader.jit.managed) then
     local library = rawget(_G, 'jit')
     local opt = type(library) == 'table' and type(library.opt) == 'table' and library.opt.start
-    if type(opt) == 'function' and pcall(opt, 'maxmcode=16384', 'maxtrace=8000') then
-        pack.jit_fallback = 'maxmcode=16384 maxtrace=8000'
+    if type(opt) == 'function' and pcall(opt, 'maxmcode=65536', 'maxtrace=8000') then
+        pack.jit_fallback = 'maxmcode=65536 maxtrace=8000'
     end
 end
 return pack

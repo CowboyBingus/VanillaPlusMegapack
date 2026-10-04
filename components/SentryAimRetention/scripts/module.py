@@ -8,15 +8,21 @@ from archive import LUA, EXE_SHA, GAME_DLL_SHA, resource_hash
 def build_module(root, build, module_name, patch_name, revision):
     build.mkdir(parents=True, exist_ok=True)
     module = ''
-    for variable, filename in [('create_api', 'windows_api.lua'), ('patch', patch_name),
-                               ('install_loader', 'archive_loader.lua')]:
+    # The shared runtime comes first: its core (guard), read side and write side.
+    # The adapter takes its memory API from the read side extended by the write side.
+    for variable, filename in [('runtime', 'bingus_runtime.lua'), ('runtime_memory', 'bingus_memory.lua'),
+                               ('runtime_write', 'bingus_write.lua'), ('create_api', 'windows_api.lua'),
+                               ('patch', patch_name), ('install_loader', 'archive_loader.lua')]:
         code = (root / 'src' / filename).read_text(encoding='utf-8')
         for forbidden in ('VirtualProtect', 'FlushInstructionCache', 'CreateRemoteThread', 'LoadLibrary'):
             if forbidden in code:
                 raise ValueError(f'Unsupported native modification API in {filename}: {forbidden}')
         module += f'local {variable} = (function()\n{code}\nend)()\n'
-    module += f"install_loader(create_api, patch, {{revision = '{revision}', "
-    module += f"exe_sha256 = '{EXE_SHA}', game_sha256 = '{GAME_DLL_SHA}'" + '})\n'
+    # The loader takes its update guard from the same runtime.
+    module += ("install_loader(function() return create_api(runtime, "
+               "runtime_write.extend(runtime_memory.new(runtime))) end, patch, ")
+    module += f"{{revision = '{revision}', "
+    module += f"exe_sha256 = '{EXE_SHA}', game_sha256 = '{GAME_DLL_SHA}'" + '}, runtime)\n'
     path, output = build / 'mod.wrapper.lua', build / 'mod.ljbc'
     path.write_text(module, encoding='utf-8', newline='\n')
     env = dict(os.environ, LUA_PATH=str(LUA.parent / '?.lua') + ';;')

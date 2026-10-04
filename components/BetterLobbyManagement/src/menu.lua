@@ -318,6 +318,13 @@ function M.new(api, game, natives, status, note)
         release, prepared = false, nil
     end
 
+    -- The addon's fresh start (a pause after an error below it): the dialog in
+    -- progress is forgotten, so an answer given meanwhile runs nothing, and the
+    -- focus sets the dialog up again. Our buttons and texts stay as they are.
+    function self.reset()
+        prepared, pending, last_answered = nil, nil, 0
+    end
+
     -- The open escape screen, or 0 (two direct loads while the menu is closed).
     function self.screen()
         local screen = open_screen()

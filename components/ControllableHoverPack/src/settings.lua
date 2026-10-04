@@ -66,6 +66,31 @@ function M.inspect(api,game,target)
     end
     return s
 end
+-- Undo creation writes i..1 after write i failed (failure path only: each
+-- undo write is checked again).
+local function undo(api,writes,i)
+    for j=i,1,-1 do assert(api.write(writes[j][1],writes[j][2]),'Settings rollback failed')end
+end
+-- Publish a normal engine-owned override in existing free storage. No
+-- allocations or native function calls. Native pack destruction removes and
+-- compacts these records through both maps. Returns the override, inspected again.
+local function create(api,game,target,s,original)
+    local writes={{s.address,s.previous,s.bytes},{s.reverse.address,s.reverse.bytes,word(s.index)..word(target.pack)},
+        {s.count_address,s.count_bytes,word(s.index+1)},
+        {s.forward.address,s.forward.bytes,word(target.pack)..word(s.index)}}
+    -- All or nothing: every destination is checked (one protection query each)
+    -- before anything is written, so a refused one leaves memory untouched.
+    -- The writes follow in this same call and are not checked a second time.
+    -- No frame/native callback occurs between them; a failed write undoes the
+    -- earlier ones.
+    for _,w in ipairs(writes)do assert(api.writable_data(w[1],#w[3]),'Settings storage is not writable data')end
+    for i,w in ipairs(writes)do
+        if not api.write(w[1],w[3],true) then undo(api,writes,i);error('Could not create per-pack hover settings')end
+    end
+    s=assert(M.inspect(api,game,target),'New hover override unavailable')
+    assert(not s.create and s.bytes:sub(157,160)==original,'New hover override mismatch')
+    return s
+end
 function M.cancel(api,game,target,state)
     -- A mission transition can invalidate data after the input snapshot.
     -- Retry read-only preflight; errors after mutation still reach cleanup.
@@ -78,25 +103,7 @@ function M.cancel(api,game,target,state)
     local original=s.bytes:sub(157,160);local duration=ffi.new('float[1]');ffi.copy(duration,original,4)
     assert(duration[0]>1/1024 and duration[0]<86400 and s.bytes:byte(154)==1,'Unsupported hover duration mode')
     if not current(api,s) then return false end
-    local writes
-    if s.create then
-        -- Publish a normal engine-owned override in existing free storage.
-        -- No allocations or native function calls. Native pack destruction
-        -- removes/compacts these records through both maps.
-        writes={{s.address,s.previous,s.bytes},{s.reverse.address,s.reverse.bytes,word(s.index)..word(target.pack)},
-            {s.count_address,s.count_bytes,word(s.index+1)},
-            {s.forward.address,s.forward.bytes,word(target.pack)..word(s.index)}}
-        for _,w in ipairs(writes)do assert(api.writable_data(w[1],#w[3]),'Settings storage is not writable data')end
-        for i,w in ipairs(writes)do
-            if not api.write(w[1],w[3]) then
-                -- No frame/native callback occurs between these writes.
-                for j=i,1,-1 do assert(api.write(writes[j][1],writes[j][2]),'Settings rollback failed')end
-                error('Could not create per-pack hover settings')
-            end
-        end
-        s=assert(M.inspect(api,game,target),'New hover override unavailable')
-        assert(not s.create and s.bytes:sub(157,160)==original,'New hover override mismatch')
-    end
+    if s.create then s=create(api,game,target,s,original) end
     if not current(api,s) then return false end
     local lease={manager=target.manager,pack=target.pack,identity=target.identity,key=target.key,original=original}
     state.lease=lease -- keep cleanup information even if a write reports failure
@@ -107,6 +114,8 @@ function M.cancel(api,game,target,state)
     assert(api.read(s.address+156,4)==CUTOFF,'Hover duration write not retained')
     return true
 end
+-- true once the lease is settled (restored, or its pack proven gone); false
+-- and why while it waits (settings unreadable or changing), keeping the lease.
 function M.restore(api,game,state)
     local lease=state.lease;if not lease then return true end
     -- Retain the identity lease until we can resolve it or prove it is gone.
@@ -114,10 +123,10 @@ function M.restore(api,game,state)
     local ok,s=pcall(M.inspect,api,game,lease)
     if not ok then
         state.restore_waits=(state.restore_waits or 0)+1
-        state.last_restore_error=tostring(s);return false
+        state.last_restore_error=tostring(s);return false,state.last_restore_error
     end
     if not s or s.create then state.lease=nil;return true end
-    if not current(api,s) then return false end
+    if not current(api,s) then return false,'Hover settings changed' end
     -- Do not overwrite a later native/other-mod edit, or use a stale address.
     if s.bytes:sub(157,160)==CUTOFF then
         assert(api.write(s.address+156,lease.original),'Could not restore hover duration')
@@ -126,4 +135,11 @@ function M.restore(api,game,state)
     end
     state.lease=nil;return true
 end
+-- The settings writer runs on about two frames per flight: the cancellation
+-- and the restoration. Compiled, it took about 6 KB of the LuaJIT code cache
+-- that the game and every mod share (the whole mod 14,294 -> 8,241 bytes and
+-- 20 -> 14 traces, measured in the game's lua51.dll), and those frames were
+-- not faster for it in a test process. true selects this chunk, the second
+-- true every function in it: nothing else is affected and nothing is flushed.
+if jit and jit.off then jit.off(true,true) end
 return M

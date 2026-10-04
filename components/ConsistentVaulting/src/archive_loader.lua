@@ -1,4 +1,4 @@
-return function(create_api,patch,build)
+return function(create_api,patch,build,runtime)
     if rawget(_G,'ConsistentVaulting') then return end
     local state={revision=build.revision,active=false,prepared=0,metadata_fallbacks=0,observed_queries=0,
         updates=0,polls=0,fresh_queries=0,retry_calls=0,native_starts=0}
@@ -81,47 +81,90 @@ return function(create_api,patch,build)
     end)
     if not ok then report(tostring(adapter),false,true);return end
     api=adapter
-    local previous,previous_shutdown,stopped=update,shutdown,false
-    local function cleanup()
+    -- The update chain is runtime.guard's (bingus_runtime.lua): the previous
+    -- update runs outside pcall, so its errors reach the game unchanged; 8 of
+    -- this mod's own errors in a burst stop it; after an error in an update
+    -- below, the mod restores its changes, pauses and resumes once the updates
+    -- below have returned on 60 frames in a row (8 such errors in a burst stop
+    -- it); the first failure survives shutdown. stopped: the guard has stopped
+    -- this mod and its stop work ran. skipped: the last check after the game's
+    -- update did not run (idle).
+    local guard,stopped,skipped=nil,false,false
+    local function release()
         if patch.stop then return patch.stop(api,game,exe,state) end
         local restored=patch.restore(api,state.pending)
         if restored then state.pending=nil end
         return restored
     end
+    -- Cleanup never raises into the game's update or shutdown; an error in it
+    -- counts as a failed restore.
+    local function cleanup() local called,restored=pcall(release);return called and restored end
+    -- A fresh start, as after loading. A successful cleanup has already dropped
+    -- the held query writes and the slope lease; this drops what else carries
+    -- over between checks: the press window, the input edge (a fresh release is
+    -- needed again), the retry interval, the avatar handed over within a check
+    -- and the work in progress.
+    local function reset()
+        state.assist_intent=nil;state.slope_down=nil;state.last_retry_at=nil
+        state.avatar=nil;state.busy=nil;state.active=false
+        skipped=false
+    end
+    -- The patch raised: restore and start fresh, then raise the error again for
+    -- the guard to count. A restore that fails stops the mod at once.
+    local function failed(problem)
+        if not cleanup() then return guard.stop(tostring(problem)) end
+        reset()
+        error(problem,0)
+    end
     local function check(phase)
         if stopped then return end
         state.polls=state.polls+1;state.phase=phase
         local called,accepted,reason,active=pcall(patch.apply,api,game,exe,state)
-        if not called then
-            local restored=cleanup()
-            stopped=true;report(restored and tostring(accepted) or 'local_restore_failed',false,true);return
-        end
-        if not accepted then
-            stopped=true
-            if not cleanup() then reason='local_restore_failed' end
-        end
-        report(tostring(reason),active==true,not accepted)
+        if not called then return failed(accepted) end
+        -- A refusal stops the mod and is its first failure.
+        if not accepted then return guard.stop(tostring(reason)) end
+        report(tostring(reason),active==true,false)
     end
-    -- Poll both boundaries because other shared-loader/HUD wrappers may update
-    -- data. The native engine retains ownership of query scheduling/consumption.
-    local function after(called,...)
-        if not called then
-            local restored=cleanup()
-            stopped=true
-            report(restored and 'stopped_after_update_error' or 'local_restore_failed',false,true)
-            error((...),0)
-        end
-        check('after_update');return ...
-    end
-    update=function(...)
+    -- One check per frame, before the game's update. Work that starts right
+    -- after a skipped check gets that check now, still before the game's update,
+    -- so it advances exactly as with two checks per frame (an assist armed with a
+    -- climb already started caps its speed before the update, not one frame
+    -- later).
+    local function step()
         state.updates=state.updates+1
-        check('before_update');return after(pcall(previous,...))
+        check('before_update')
+        if skipped and state.busy~=false then skipped=false;check('before_update') end
     end
-    shutdown=function(...)
+    -- A second check after the game's update runs only while something is in
+    -- progress (state.busy from the patch: held query writes, a slope assist or
+    -- its press window, a vault check past its idle gates), because the update
+    -- and other shared-loader/HUD wrappers may change that data. Idle, the next
+    -- frame's check sees the same state before the next update. The native
+    -- engine retains ownership of query scheduling.
+    local function after()
+        skipped=state.busy==false
+        if not skipped then check('after_update') end
+    end
+    -- Once, when the guard stops this mod (a refusal, a failed restore after an
+    -- error, 8 errors in a burst, a failed pause) or at shutdown: restore and
+    -- report. At shutdown the first failure, if any, is kept in the status.
+    local function stop(reason)
         stopped=true
         local restored=cleanup()
-        report(restored and 'stopped' or 'local_restore_failed',false,true)
-        if previous_shutdown then return previous_shutdown(...) end
+        if reason~='shutdown' then return report(restored and reason or 'local_restore_failed',false,true) end
+        local failure=guard.status.first_failure
+        report((restored and 'stopped' or 'local_restore_failed')..(failure and ' after: '..failure or ''),false,true)
     end
+    -- An update below this mod raised: restore and start fresh. A restore that
+    -- fails raises, and the guard stops the mod.
+    local function pause()
+        if not cleanup() then error('local_restore_failed',0) end
+        reset()
+    end
+    local installed,why=pcall(function()
+        guard=runtime.guard({name='ConsistentVaulting',env=_G,step=step,after=after,stop=stop,pause=pause,
+            log=function(line) report(line,state.active,true) end}).install()
+    end)
+    if not installed then report(tostring(why),false,true);return end
     report('waiting_for_mission',false,true)
 end

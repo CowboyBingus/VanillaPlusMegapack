@@ -218,6 +218,25 @@ T.register({language = 'pseudo', name = 'layout test', force = true, mods = {}})
 assert(tr:refresh() and tr('panel.more', {count = 9}):find('9', 1, true) and tr('panel.label'):sub(1, 1) == '[')
 print('PASS: regional tags fall back to their base language; a forced pack wins, including English and pseudo')
 
+-- A broken registry (another copy, an add-on or a stray assignment) is repaired,
+-- malformed packs are skipped, and only force = true forces a language.
+T = fresh()
+rawset(_G, 'BingusTranslations', {override = 'not a tag !', packs = 'oops'})
+tr = T.new(english)
+assert(tr('panel.footer') == 'Possible encounters.', 'a registry without packs or serial still resolves English')
+local broken = T.registry()
+assert(type(broken.packs) == 'table' and broken.serial == 0 and broken.version == 1, 'missing fields filled in')
+broken.packs[#broken.packs + 1] = 42
+broken.packs[#broken.packs + 1] = {language = 'zh-Hans', mods = 'not a table'}
+broken.game_language = 'zh-Hans'
+local footer = '可能的遭遇。'
+T.register({language = 'zh-Hans', name = 'string force', force = 'false', mods = {
+    know_your_constellation = {['panel.footer'] = footer}}})
+assert(T.language() == 'zh-Hans', 'an invalid override is ignored; force = "false" does not force')
+assert(tr:refresh() and tr('panel.footer') == footer, 'malformed packs are skipped, valid ones used')
+assert(not pcall(T.register, {language = 'en us', mods = {}}), 'a pack without a language tag is refused')
+print('PASS: a broken registry is repaired, malformed packs are skipped, and only force = true forces')
+
 -- Upper case beyond ASCII (Mod Options Menu and Mod Bindings Menu upper-case names).
 assert(T.upper('abc xyz 09') == 'ABC XYZ 09')
 assert(T.upper('plong\195\169e \195\160 \195\191') == 'PLONG\195\137E \195\128 \197\184', 'Latin-1')

@@ -313,13 +313,18 @@ def pack_source(module, tag, name, force, mods):
         lines.append('        },')
     lines += ['    },',
               '}',
+              # Same as bingus_text.lua's M.registry() and M.register(): fill in what
+              # another copy or add-on left out; force only with force = true.
               "local registry = rawget(_G, 'BingusTranslations')",
               "if type(registry) ~= 'table' then",
-              '    registry = {version = 1, serial = 0, packs = {}}',
+              '    registry = {}',
               "    rawset(_G, 'BingusTranslations', registry)",
               'end',
+              "if type(rawget(registry, 'version')) ~= 'number' then rawset(registry, 'version', 1) end",
+              "if type(rawget(registry, 'serial')) ~= 'number' then rawset(registry, 'serial', 0) end",
+              "if type(rawget(registry, 'packs')) ~= 'table' then rawset(registry, 'packs', {}) end",
               'registry.packs[#registry.packs + 1] = pack',
-              'if pack.force then registry.override = pack.language end',
+              'if pack.force == true then registry.override = pack.language end',
               'registry.serial = registry.serial + 1',
               '']
     return '\n'.join(lines).encode('utf-8')

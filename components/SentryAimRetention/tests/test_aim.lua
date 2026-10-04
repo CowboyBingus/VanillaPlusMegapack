@@ -116,6 +116,24 @@ test('one failed rollback does not prevent the remaining controls from releasing
     assert(current.flags==0 and current.horizontal==number(150) and current.vertical==number(90))
     api.write=write;assert(M.stop(api,nil,nil,state))
 end)
+test('rollback writes skip the query only inside the aim range the release just checked',function()
+    for _,moved in ipairs({false,true})do
+        local api,native,new,fresh,put=fixture();local state={native=native};local s=new(1)
+        M.step(api,native,{s},state);s.target=0;s.raw=vec(3,4,5);s.computed=s.raw
+        put(s.raw_address,s.raw);put(s.computed_address,s.raw);api.partial=s.computed_address
+        assert(not M.step(api,native,{s},state))
+        local lease=state.records[1].lease
+        if moved then -- the release checks another aim range than the one written
+            local copy=clone(lease.snapshot);copy.raw_address=s.raw_address+0x400
+            put(copy.raw_address,string.rep('\0',24));lease.snapshot=copy
+        end
+        local checks={};local write=api.write
+        api.write=function(a,b,checked)checks[#checks+1]=checked==true;return write(a,b)end
+        assert(M.release(api,native,lease))
+        assert(#checks==2 and checks[1]==not moved and checks[2]==not moved)
+        assert(api.read(s.raw_address,12)==vec(3,4,5) and api.read(s.computed_address,12)==vec(3,4,5))
+    end
+end)
 test('compaction follows the same entity and preserves customized restore values',function()
     local api,native,new,fresh,put=fixture();local state={native=native};local s=new(1)
     M.step(api,native,{s},state);s.target=0;M.step(api,native,{s},state);s=fresh(s)

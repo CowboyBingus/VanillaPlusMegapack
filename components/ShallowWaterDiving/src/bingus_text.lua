@@ -317,24 +317,35 @@ function M.pseudo(text)
     return '[' .. concat(parts) .. ' ' .. string.rep('~', math.max(2, math.ceil(M.length(text) * 0.4))) .. ']'
 end
 
--- The shared table (see the top of this file), created on first use.
+-- The shared table (see the top of this file), created on first use. Another
+-- copy, a pack add-on or a stray assignment may have left it incomplete: the
+-- fields every reader needs are filled in instead of failing in every mod.
 function M.registry()
     local registry = rawget(_G, 'BingusTranslations')
     if type(registry) ~= 'table' then
-        registry = {version = 1, serial = 0, packs = {}}
+        registry = {}
         rawset(_G, 'BingusTranslations', registry)
     end
+    if type(rawget(registry, 'version')) ~= 'number' then rawset(registry, 'version', 1) end
+    if type(rawget(registry, 'serial')) ~= 'number' then rawset(registry, 'serial', 0) end
+    if type(rawget(registry, 'packs')) ~= 'table' then rawset(registry, 'packs', {}) end
     return registry
 end
 
+-- A language tag a pack may carry: 'de', 'pt-BR', 'zh-Hant', 'es-419', 'pseudo'.
+local function valid_tag(tag)
+    return type(tag) == 'string' and #tag <= 16 and tag:match('^%a%a%a?%-?[%w%-]*$') ~= nil
+end
+
 -- Adds a translation pack. Pack add-ons do the same inline, without this file
--- (translations.py writes that code); keep the two identical.
+-- (translations.py writes that code); keep the two identical. A pack forces its
+-- language on every mod only with force = true (any other value does not).
 function M.register(pack)
-    assert(type(pack) == 'table' and type(pack.language) == 'string' and type(pack.mods) == 'table',
-        'A translation pack needs a language and a mods table')
+    assert(type(pack) == 'table' and valid_tag(pack.language) and type(pack.mods) == 'table',
+        'A translation pack needs a language tag and a mods table')
     local registry = M.registry()
     registry.packs[#registry.packs + 1] = pack
-    if pack.force then registry.override = pack.language end
+    if pack.force == true then registry.override = pack.language end
     registry.serial = registry.serial + 1
 end
 
@@ -459,9 +470,10 @@ function M.game_language()
 end
 
 -- The language mods show: a forced pack's, else the game's, else English.
+-- Forcing is global: every mod on Bingus Text shows the forced language.
 function M.language()
     local override = M.registry().override
-    if type(override) == 'string' and override ~= '' then return override end
+    if valid_tag(override) then return override end
     return M.game_language() or 'en'
 end
 
@@ -533,7 +545,8 @@ function translator:resolve(language, registry)
             local bundled = self.bundled[tag]
             self:merge(texts, translated, bundled and bundled.strings, tag .. ' (bundled)')
             for _, pack in ipairs(registry.packs) do
-                if pack.language == tag and type(pack.mods) == 'table' then
+                -- A malformed entry (another copy's or add-on's) is skipped, never indexed blindly.
+                if type(pack) == 'table' and pack.language == tag and type(pack.mods) == 'table' then
                     self:merge(texts, translated, pack.mods[self.mod], tag .. ' (' .. tostring(pack.name) .. ')')
                 end
             end
@@ -575,7 +588,7 @@ end
 if jit and jit.off then
     for _, fn in ipairs({M.decode, M.encode, M.check, M.display, M.length, upper_value, M.upper, M.clip, mark,
                          wide, space, M.boundaries, pieces, M.wrap, M.format, M.placeholders, M.pseudo,
-                         M.registry, M.register, number, M.game_code, M.observe, M.steam_language,
+                         M.registry, valid_tag, M.register, number, M.game_code, M.observe, M.steam_language,
                          M.game_language, M.language, chain, M.new, translator.warn, translator.merge,
                          translator.resolve, translator.refresh, translator.text}) do
         jit.off(fn, true)

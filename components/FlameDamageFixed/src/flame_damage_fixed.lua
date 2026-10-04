@@ -1,5 +1,5 @@
 -- HD2-Addon: mods/cowboybingus/flame_damage_fixed
--- Flame Damage Fixed v1.1 for Helldivers 2 Steam build 25480438. Three fixes to the flame shared by the
+-- Flame Damage Fixed v1.2 for Helldivers 2 Steam build 25480438. Three fixes to the flame shared by the
 -- Lumberer's flamethrower arm and the Flame Sentry:
 --   1. Flame systems 0 and 3 spawn again. Their spawn-rate curves are keyed on normalized effect time
 --      (elapsed / effect lifetime) and step up at 0.3-0.9 % of it; the shared flame's lifetime is 1e10 s,
@@ -90,6 +90,21 @@ local function le32(v)
 end
 -- Byte strings for the writes are built once here, never per frame.
 for _, row in ipairs(Fix.PATCHES) do row.tb = le32(row.t) end
+
+-- Keeps rarely-run functions out of the JIT: jit.off on each listed function only, when the mod loads (before any of
+-- them has a trace). No other function is affected and no JIT setting changes. Straight-line code that runs on a few
+-- frames (a burst start, grouping, a release, the weapon scan every 0.5 s) would otherwise compile into the LuaJIT
+-- code cache the game and every mod share, mostly inlined into side traces of the per-frame step, and it runs as fast
+-- interpreted. The body scan's loop over every body record stays compiled: there the JIT pays. Measured in the game's
+-- lua51.dll with the real adapter (synthetic world of 37,000 bodies, 30 bursts, a rescan, a release; the step called
+-- from C, as the game calls update): machine code 80.9 KB with everything compiled -> 35.3 KB (median of 10 fresh
+-- processes; 20.9 KB with the scan loop interpreted too). Per frame, everything compiled -> this split (test process,
+-- median of 15 interleaved runs): body-scan frame 25.7 -> 25.8 us (91.0 with the scan loop interpreted), burst start
+-- 48.7 -> 48.9 us, release 219.5 -> 162.7 us, the 0.5 s weapon scan 11.9 -> 17.5 us. In game, unmeasured.
+local function interpreted(list)
+    if type(jit) ~= 'table' or type(jit.off) ~= 'function' then return end
+    for i = 1, #list do jit.off(list[i]) end
+end
 
 local function u32at(bytes, offset)
     local a, b, c, d = bytes:byte(offset + 1, offset + 4)
@@ -192,9 +207,15 @@ end
 
 -- ===== 3: self-hit fix (private Havok system groups) =====
 
--- A system group can take up to 2047; the game hands them out lowest first (at most 63 were in use in
--- busy missions), so each tracked weapon takes one from the top that the allocator still marks free.
+-- Each tracked weapon takes a group from the top of the 2048-group pool (2047 down to 2040) that the game's
+-- allocator still marks free. The game hands groups out lowest first, to ragdolls only (at most 144 were in use,
+-- highest 154, in busy missions); the engine treats every allocator-claimed group as a ragdoll group, so a mod
+-- must never claim one for other bodies (a claimed group 159 crashed the game, exe+0x16c768, 2026-10-04). The mod
+-- never writes the allocator: a group counts as this weapon's only while the allocator still marks it free, no
+-- other weapon of this mod holds it, and the weapon's latest body scan found no other body in it, checked at
+-- every use. README.md states the convention for other mods.
 local GROUP_UNIT = 2097152 -- 2^21: group 1 in a filter info
+local TOP_FILTER = PHYS.GROUP_LOW * GROUP_UNIT -- a filter info at or above this is in one of groups 2040-2047
 local BLOCK_BODIES = 409   -- bodies per read (65440 B)
 local SPAN_GAP = 64        -- kept bodies closer than this many records share one read
 local W_FLAGS, W_FILTER, W_ID, W_ACTOR, W_UNIT = 17, 27, 28, 36, 37 -- u32 words of a 160 B body record
@@ -263,6 +284,8 @@ end
 -- Starts a body scan for a family: every physics world's body array up to its index bound. Reads only.
 function Fix.scan_begin(api, exe, job)
     job.worlds, job.w, job.i, job.n, job.done, job.spans = 0, 1, 0, 0, false, 0
+    job.foreign = job.foreign or {}
+    for g = PHYS.GROUP_LOW, PHYS.GROUP_TOP do job.foreign[g] = false end
     for w = 0, 3 do
         local world = pointer(api, exe + PHYS.WORLDS + PHYS.WORLD_STRIDE * w)
         if world and u64(api, world) == exe + PHYS.WORLD_VTABLE then
@@ -293,11 +316,52 @@ local function build_spans(job)
     job.span_k[s + 1], job.spans = job.n + 1, s
 end
 
--- Advances a body scan by up to `blocks` block reads and keeps the family's bodies that the flame can hit
--- and whose subsystem and don't-collide are 0 (bits the game may use are never touched), in no group or in the
--- weapon's own group g (kept as marked). Returns true when the scan is complete, false while it continues, or
--- nil and a reason.
-function Fix.scan_step(api, job, set, blocks, g)
+local function not_own() return false end
+
+-- A live body of interest at record o (its filter info is a flame-hittable layer alone, or in groups 2040-2047).
+-- Keeps one of the family's bodies (job.set) the flame can hit whose subsystem and don't-collide are 0 (bits the
+-- game may use are never touched), in no group or in the weapon's own group job.g (kept as marked). Notes a group
+-- from 2040 up that any other body carries in job.foreign, unless job.own(group, unit) says it is another of this
+-- mod's weapons' own. Returns a reason when the family has too many bodies.
+local function scan_body(job, words, o, base, index, filter)
+    local unit = words[o + W_UNIT]
+    local mine = job.set[unit]
+    local group, low = math.floor(filter / GROUP_UNIT), filter % GROUP_UNIT
+    if mine and low < 128 and HITTABLE[low] and (group == 0 or group == job.g) then
+        local n = job.n + 1
+        if n > MAX_BODIES then return 'too many own bodies' end
+        job.n, job.base[n], job.index[n], job.layer[n] = n, base, index, low
+        job.actor[n], job.unit[n], job.marked[n] = words[o + W_ACTOR], unit, group ~= 0
+    elseif group >= PHYS.GROUP_LOW and not (mine and group == job.g) and not job.own(group, unit) then
+        job.foreign[group] = true
+    end
+    return nil
+end
+
+-- One block of body records. Every body the scan keeps or notes has a filter info in groups 2040-2047, or a
+-- flame-hittable layer alone (no group, subsystem 0, don't-collide 0) and a unit of the family. The filter word is
+-- read first, the unit only for a hittable layer, and the rest for those bodies only: one or two words per record.
+local function scan_block(job, words, base, first, count)
+    local set = job.set
+    for k = 0, count - 1 do
+        local o = 40 * k
+        local filter = words[o + W_FILTER]
+        if filter >= TOP_FILTER or HITTABLE[filter] and set[words[o + W_UNIT]] then
+            if words[o + W_FLAGS] % 4 ~= 0 and words[o + W_ID] % 16777216 == first + k then
+                local why = scan_body(job, words, o, base, first + k, filter)
+                if why then return why end
+            end
+        end
+    end
+    return nil
+end
+
+-- Advances a body scan by up to `blocks` block reads: keeps the family's own bodies (set: its unit handles; g: the
+-- weapon's group, if any) and notes which of groups 2040-2047 other bodies carry (own(group, unit): true for the
+-- bodies of this mod's other weapons). Returns true when the scan is complete, false while it continues, or nil and
+-- a reason.
+function Fix.scan_step(api, job, set, blocks, g, own)
+    job.set, job.g, job.own = set, g or 0, own or not_own
     while blocks > 0 and job.w <= job.worlds do
         local base, limit, first = job.bases[job.w], job.limits[job.w], job.i
         if first >= limit then
@@ -307,20 +371,8 @@ function Fix.scan_step(api, job, set, blocks, g)
             local words = api.load(base + PHYS.BODY * first, PHYS.BODY * count)
             if not words then return nil, 'body array unreadable' end
             blocks = blocks - 1
-            for k = 0, count - 1 do
-                local o = 40 * k
-                local unit = words[o + W_UNIT]
-                if set[unit] and words[o + W_FLAGS] % 4 ~= 0 and words[o + W_ID] % 16777216 == first + k then
-                    local filter = words[o + W_FILTER]
-                    local group, low = math.floor(filter / GROUP_UNIT), filter % GROUP_UNIT
-                    if low < 128 and HITTABLE[low] and (group == 0 or group == g) then
-                        local n = job.n + 1
-                        if n > MAX_BODIES then return nil, 'too many own bodies' end
-                        job.n, job.base[n], job.index[n], job.layer[n] = n, base, first + k, low
-                        job.actor[n], job.unit[n], job.marked[n] = words[o + W_ACTOR], unit, group ~= 0
-                    end
-                end
-            end
+            local why = scan_block(job, words, base, first, count)
+            if why then return nil, why end
             job.i = first + count
         end
     end
@@ -477,35 +529,70 @@ function Fix.find_instance(api, slot, id)
     return nil
 end
 
--- Sets one flame instance's particle systems' query filter info from layer 11 to `value` (layer 11 in the
--- weapon's group). The world's particle-system array is looked up once per instance. `region` carries the last
--- verified writable heap region. Returns the number of systems changed, or nil and a reason.
-function Fix.retarget_instance(api, exe, sim, data, region, value)
+-- The particle system a system handle names (world: bits 30-31, generation: 16-23, index: 0-15) while the world's
+-- particle-system array still holds that generation at that index, else nil. cache keeps the last world's array.
+local function system_of(api, exe, handle, cache)
+    local index, generation, w = handle % 65536, math.floor(handle / 65536) % 256, math.floor(handle / 1073741824)
+    if w ~= cache.world then
+        local wrapper = pointer(api, exe + PHYS.WORLDS + PHYS.WORLD_STRIDE * w)
+        local tbl = wrapper and pointer(api, wrapper + PHYS.PS_TABLE)
+        cache.world, cache.array = w, tbl and pointer(api, tbl + PHYS.PS_ARRAY)
+    end
+    local array = cache.array
+    if not array then return nil end
+    local ps, tag = pointer(api, array + 16 * index), api.u32(array + 16 * index + 8)
+    if ps and tag and tag % 65536 == index and math.floor(tag / 16777216) == generation then return ps end
+    return nil
+end
+
+-- Sets the query filter info of one flame instance's particle systems that hold `from` (default: layer 11) to
+-- `value` (layer 11 in the weapon's group, or back). The world's particle-system array is looked up once per
+-- instance. `region` carries the last verified writable heap region. Returns the number of systems changed, or nil
+-- and a reason.
+local system_cache = {}
+function Fix.retarget_instance(api, exe, sim, data, region, value, from)
     if pointer(api, sim + 32) ~= data then return 0 end -- another effect's instance
     local systems, list = api.u32(sim + 40), pointer(api, sim + 48)
     if not systems or not list or systems > MAX_SYSTEMS then return 0 end
-    local moved, array_world, array = 0, nil, nil
+    from = from or PHYS.FLAME_LAYER
+    system_cache.world, system_cache.array = nil, nil
+    local moved = 0
     for s = 0, systems - 1 do
         local handle = api.u32(list + 80 * s + 52)
-        if handle and handle ~= 0 then
-            local index, generation, w = handle % 65536, math.floor(handle / 65536) % 256, math.floor(handle / 1073741824)
-            if w ~= array_world then
-                local wrapper = pointer(api, exe + PHYS.WORLDS + PHYS.WORLD_STRIDE * w)
-                local tbl = wrapper and pointer(api, wrapper + PHYS.PS_TABLE)
-                array_world, array = w, tbl and pointer(api, tbl + PHYS.PS_ARRAY)
-            end
-            local ps = array and pointer(api, array + 16 * index)
-            local tag = array and api.u32(array + 16 * index + 8)
-            if ps and tag and tag % 65536 == index and math.floor(tag / 16777216) == generation
-                and api.u32(ps + PHYS.PS_FILTER) == PHYS.FLAME_LAYER then
-                if not writable(api, region, ps + PHYS.PS_FILTER) then return nil, 'particle system not writable private data' end
-                if not api.write_u32(ps + PHYS.PS_FILTER, value) then return nil, 'particle system write failed' end
-                moved = moved + 1
-            end
+        local ps = handle and handle ~= 0 and system_of(api, exe, handle, system_cache)
+        if ps and api.u32(ps + PHYS.PS_FILTER) == from then
+            if not writable(api, region, ps + PHYS.PS_FILTER) then return nil, 'particle system not writable private data' end
+            if not api.write_u32(ps + PHYS.PS_FILTER, value) then return nil, 'particle system write failed' end
+            moved = moved + 1
         end
     end
     return moved
 end
+
+-- Every live instance of the shared flame (the flame slot's records): systems that hold `from` get `value`.
+-- Returns the number of systems changed, or nil and a reason.
+function Fix.restore_flames(api, exe, slot, data, region, value, from)
+    local count, records = api.u32(slot), pointer(api, slot + 8)
+    if not count or not records or count > MAX_INSTANCES then return 0 end
+    local changed = 0
+    for i = 0, count - 1 do
+        local sim = pointer(api, records + PHYS.INSTANCE * i + 8)
+        if sim then
+            local moved, why = Fix.retarget_instance(api, exe, sim, data, region, value, from)
+            if not moved then return nil, why end
+            changed = changed + moved
+        end
+    end
+    return changed
+end
+
+-- Rarely run: effect lookup and fix (burst starts), filter check (once per session), the family walk and the start and
+-- end of a body scan (once per family), grouping, release and flame instances (burst starts and releases). The body
+-- scan's loop (Fix.scan_step, scan_block, scan_body) stays compiled.
+interpreted({chain, Fix.resolve_effect, Fix.check_effect, Fix.apply_effect, Fix.check_filter, Fix.family,
+             Fix.scan_begin, build_spans, writable, each_body, tally, Fix.verify, mark_one, Fix.mark, unmark_one,
+             Fix.unmark, Fix.group_free, Fix.flame_slot, Fix.find_instance, system_of, Fix.retarget_instance,
+             Fix.restore_flames})
 
 -- ===== per-frame driver =====
 
@@ -525,48 +612,132 @@ function Fix.new(api, game, exe, log)
         if not self.told[reason] then self.told[reason] = true; log(prefix .. tostring(reason)) end
     end
     local NO_GROUP = 'Self-hit fix skipped: no free Havok system group in ' .. PHYS.GROUP_LOW .. '-' .. PHYS.GROUP_TOP
+    local ON_BODIES, IN_ALLOCATOR = 'other bodies carry it', "the game's group allocator handed it out"
+    local SKIPPED, DROPPED = {}, {}
+    for g = PHYS.GROUP_LOW, PHYS.GROUP_TOP do
+        SKIPPED[g] = 'Self-hit group ' .. g .. ' not used: ' .. ON_BODIES
+        DROPPED[g] = 'Self-hit group ' .. g .. ' is no longer this mod\'s alone ('
+    end
 
+    local function new_job()
+        return {bases = {}, limits = {}, base = {}, index = {}, layer = {}, actor = {}, unit = {}, marked = {},
+                span_k = {}, span_base = {}, spans = 0, worlds = 0, w = 1, i = 0, n = 0, done = false, foreign = {}}
+    end
+    -- job: the last complete body scan (job_ok once there is one); scan_job: the scan in progress.
     local function new_weapon(address, handle, hi)
         return {address = address, handle = handle, name = WEAPON_NAMES[hi] or 'weapon', started = false,
-                firing = false, family = {set = {}}, stack = {},
-                job = {bases = {}, limits = {}, base = {}, index = {}, layer = {}, actor = {}, unit = {}, marked = {},
-                       span_k = {}, span_base = {}, spans = 0, worlds = 0, w = 1, i = 0, n = 0, done = false},
+                firing = false, family = {set = {}}, stack = {}, job = new_job(), scan_job = new_job(),
                 job_ok = false, next_try = 0, group = nil, marked = false, destroyed = false, instance = nil,
-                awaiting = false}
+                awaiting = false, flames = false}
     end
 
-    -- The weapon's bodies leave its group (it is gone, or its vehicle was destroyed).
+    -- The weapon's bodies leave its group (it is gone, or its vehicle was destroyed). Returns true, or nil and the
+    -- reason a body kept its group.
     local function release(weapon)
+        local ok, why = true, nil
         if weapon.marked and weapon.group and weapon.job_ok then
-            local cleared, why = Fix.unmark(api, weapon.job, weapon.group, self.region)
-            if not cleared then tell_once(why, 'Self-hit group not released: ') end
+            ok, why = Fix.unmark(api, weapon.job, weapon.group, self.region)
+            if not ok then tell_once(why, 'Self-hit group not released: ') end
         end
         weapon.marked = false
+        return ok, why
     end
 
-    -- Family and body scan for a weapon: the walk now, the scan over the next present frames. A scan while the
-    -- bodies are grouped keeps them (as grouped), so nothing is ever left behind.
+    -- Flame systems of live instances still in the weapon's group go back to plain layer 11.
+    local function restore_flames(weapon, slot)
+        if not (weapon.flames and weapon.group and slot and self.data) then return true end
+        local region = self.region
+        region[1], region[2] = nil, nil
+        local restored, why = Fix.restore_flames(api, exe, slot, self.data, region, PHYS.FLAME_LAYER,
+            PHYS.FLAME_LAYER + weapon.group * GROUP_UNIT)
+        if restored then weapon.flames = false end
+        return restored, why
+    end
+
+    -- A body of `unit` in group g is this mod's own when the weapon holding g has the unit in its family.
+    local function own_body(g, unit)
+        for _, other in pairs(self.weapons) do
+            if other.group == g and other.family.set[unit] then return true end
+        end
+        return false
+    end
+
+    -- Group g can be this weapon's: no other weapon of this mod holds it, the weapon's latest complete body scan found
+    -- no other body in it, and the game's allocator still marks it free (7 reads).
+    local function usable(weapon, g)
+        for _, other in pairs(self.weapons) do
+            if other ~= weapon and other.group == g then return false end
+        end
+        if weapon.job.foreign[g] then
+            tell(SKIPPED[g], SKIPPED[g])
+            return false
+        end
+        return Fix.group_free(api, exe, g)
+    end
+
+    -- Checked at every use of the weapon's group (each burst start, and every SCAN_SECONDS while grouped): the
+    -- latest body scan found no body outside the mod's own in it, and the allocator still marks it free (7 reads).
+    local function still_own(weapon)
+        local g = weapon.group
+        if weapon.job.foreign[g] then return false, ON_BODIES end
+        if not Fix.group_free(api, exe, g) then return false, IN_ALLOCATOR end
+        return true
+    end
+
+    -- The weapon's group is no longer this mod's alone: its bodies and flame systems leave it at once, and the next
+    -- grouping picks another free group, or none (the weapon keeps the game's own collision). A refused write turns
+    -- the self-hit fix off for the session, as for any refused group write. Returns true when everything left it.
+    local function drop_group(weapon, why)
+        local g = weapon.group
+        local released, reason = release(weapon)
+        local restored, failure = restore_flames(weapon, weapon.flames and self.data and Fix.flame_slot(api, game))
+        weapon.group = nil
+        if not (released and restored) then
+            self.self_hit_off = reason or failure
+            log('Self-hit fix disabled for this session: ' .. tostring(self.self_hit_off))
+            return false
+        end
+        if not self.told[DROPPED[g]] then
+            self.told[DROPPED[g]] = true
+            log(DROPPED[g] .. why .. '): the ' .. weapon.name .. "'s hit-boxes and flames left it.")
+        end
+        return true
+    end
+
+    -- Family and body scan for a weapon: the walk now, the scan over the next present frames, into the weapon's
+    -- scan job. Until that scan is complete the last complete job stays in use, so a grouped weapon can always be
+    -- released, also while its bodies are rescanned; a scan while grouped keeps the grouped bodies (as grouped).
+    -- A walk or scan that fails is tried again after RETRY_SECONDS.
     local function begin_family(weapon)
-        weapon.job_ok = false
-        local n, why = Fix.family(api, exe, weapon.handle, weapon.family, weapon.stack)
-        if not n then tell_once(why, 'Self-hit fix unavailable: ') return end
-        local ok, reason = Fix.scan_begin(api, exe, weapon.job)
-        if not ok then tell_once(reason, 'Self-hit fix unavailable: ') return end
+        local ok, why = Fix.family(api, exe, weapon.handle, weapon.family, weapon.stack)
+        if ok then ok, why = Fix.scan_begin(api, exe, weapon.scan_job) end
+        if not ok then
+            weapon.next_try = self.clock + RETRY_SECONDS
+            tell_once(why, 'Self-hit fix unavailable: ')
+            return
+        end
         self.scanning = weapon
     end
 
-    -- A grouped weapon's bodies, checked on the weapon scan (every SCAN_SECONDS, one read per span): a body the
-    -- game moved to another layer means the vehicle was destroyed (its wreck leaves the group); a rebuilt body
-    -- starts a new scan; a body back to group-free is grouped again at the next burst.
+    -- A body that is no longer the one a grouped weapon's scan kept (rebuilt, removed or recycled) starts a new scan.
+    local function rescan_if_stale(weapon, c)
+        if c.stale > 0 and self.scanning == nil and self.clock >= weapon.next_try then begin_family(weapon) end
+    end
+
+    -- A grouped weapon's bodies and group, checked on the weapon scan (every SCAN_SECONDS, one read per span and the
+    -- allocator): a body the game moved to another layer means the vehicle was destroyed (its wreck leaves the
+    -- group); a group no longer this mod's alone is left; a rebuilt body starts a new scan; a body back to
+    -- group-free is grouped again at the next burst.
     local function check_marks(weapon)
         local c = Fix.verify(api, weapon.job, weapon.group)
         if not c then return end
         if c.moved > 0 then
             release(weapon)
             weapon.destroyed = true
-        elseif c.stale > 0 and self.scanning == nil then
-            begin_family(weapon)
+            return
         end
+        local own, why = still_own(weapon)
+        if own then rescan_if_stale(weapon, c) else drop_group(weapon, why) end
     end
 
     -- Tracked spray weapons (Lumberer arms, Flame Sentries) by their instance's state word. Every
@@ -620,16 +791,36 @@ function Fix.new(api, game, exe, log)
         spare, self.last = previous, last
     end
 
-    -- A free group for this weapon: its own if the allocator still marks it free, else the highest free one
-    -- that no other tracked weapon holds.
+    -- A free group for this weapon: the highest usable one.
     local function pick_group(weapon)
-        if weapon.group and Fix.group_free(api, exe, weapon.group) then return weapon.group end
         for g = PHYS.GROUP_TOP, PHYS.GROUP_LOW, -1 do
-            local taken = false
-            for _, other in pairs(self.weapons) do taken = taken or (other ~= weapon and other.group == g) end
-            if not taken and Fix.group_free(api, exe, g) then return g end
+            if usable(weapon, g) then return g end
         end
         return nil
+    end
+
+    -- Puts the weapon's group-free bodies into its group (its own, checked just before, or a newly picked one).
+    -- Returns false when the self-hit fix cannot go on for this weapon now.
+    local function group_bodies(weapon)
+        local g = weapon.group or pick_group(weapon)
+        if not g then
+            tell(NO_GROUP, NO_GROUP)
+            return false
+        end
+        weapon.group = g
+        local marked, reason = Fix.mark(api, weapon.job, g, self.region)
+        if not marked then
+            self.self_hit_off = reason
+            log('Self-hit fix disabled for this session: ' .. tostring(reason))
+            return false
+        end
+        weapon.marked = marked > 0
+        if weapon.marked and not weapon.announced then
+            weapon.announced = true
+            log('Self-hit fix active for the ' .. weapon.name .. ' (' .. marked .. '/' .. weapon.job.n
+                .. ' own bodies in group ' .. g .. ').')
+        end
+        return true
     end
 
     -- Effect fix (once per burst start of any tracked weapon). The full lookup runs every burst start: the effect
@@ -659,7 +850,8 @@ function Fix.new(api, game, exe, log)
     end
 
     -- Self-hit fix for one weapon's new burst. Its own bodies stay grouped from the first burst until the
-    -- weapon is gone; a burst only confirms the group (one read per span) and groups bodies found group-free.
+    -- weapon is gone; a burst confirms the bodies (one read per span) and the group (the allocator), groups bodies
+    -- found group-free, and moves to another free group when the weapon's group is no longer this mod's alone.
     local function weapon_burst(weapon)
         weapon.instance, weapon.awaiting = nil, true
         if not (self.filter and not self.self_hit_off and weapon.job_ok and not weapon.destroyed) then return end
@@ -670,28 +862,13 @@ function Fix.new(api, game, exe, log)
             weapon.destroyed = true
             return
         end
-        if c.free > 0 then
-            local g = pick_group(weapon)
-            if not g then
-                tell(NO_GROUP, NO_GROUP)
-                return
-            end
-            if weapon.marked and g ~= weapon.group then release(weapon) end
-            weapon.group = g
-            local marked, reason = Fix.mark(api, weapon.job, g, self.region)
-            if not marked then
-                self.self_hit_off = reason
-                log('Self-hit fix disabled for this session: ' .. tostring(reason))
-                return
-            end
-            weapon.marked = marked > 0
-            if weapon.marked and not weapon.announced then
-                weapon.announced = true
-                log('Self-hit fix active for the ' .. weapon.name .. ' (' .. marked .. '/' .. weapon.job.n
-                    .. ' own bodies in group ' .. g .. ').')
-            end
+        local regroup = c.free > 0
+        if weapon.group then
+            local own, why = still_own(weapon)
+            if not own then regroup = drop_group(weapon, why) end
         end
-        if c.stale > 0 and self.scanning == nil then begin_family(weapon) end
+        if regroup and not group_bodies(weapon) then return end
+        rescan_if_stale(weapon, c)
     end
 
     -- Firing and briefly after: the weapon's burst instance (spray record +0x24) gets its group.
@@ -716,10 +893,42 @@ function Fix.new(api, game, exe, log)
                 self.self_hit_off = why
                 log('Self-hit fix disabled for this session: ' .. tostring(why))
                 release(weapon)
+            elseif moved > 0 then
+                weapon.flames = true
             end
         end
     end
 
+    -- Restores this mod's group writes and starts over (the update guard's pause and stop): every weapon's bodies
+    -- leave its group, flame systems of live instances still in a weapon's group go back to plain layer 11, and the
+    -- tracked weapons are forgotten, so the next step finds them again. The effect fix stays: it needs no upkeep, and
+    -- the game reloads the effect with every mission. Raises the first reason a write was refused, after trying all.
+    function self.reset()
+        local slot = self.data and Fix.flame_slot(api, game)
+        local failure
+        for address, weapon in pairs(self.weapons) do
+            local released, why = release(weapon)
+            local restored, reason = restore_flames(weapon, slot)
+            failure = failure or (not released and why) or (not restored and reason) or nil
+            self.weapons[address] = nil
+        end
+        for i = #self.tracked, 1, -1 do self.tracked[i] = nil end
+        for key in pairs(self.last) do self.last[key] = nil end
+        self.scanning, self.watch_until, self.slot, self.since_scan = nil, nil, nil, SCAN_SECONDS
+        if failure then error(failure, 0) end
+    end
+
+    -- A complete scan becomes the weapon's job. Bodies found still grouped (a scan while grouped) keep their group,
+    -- and the weapon stays grouped; a group the scan found on other bodies is left at once.
+    local function scan_done(weapon)
+        self.scanning, weapon.job_ok = nil, true
+        weapon.job, weapon.scan_job = weapon.scan_job, weapon.job
+        for k = 1, weapon.job.n do weapon.marked = weapon.marked or weapon.job.marked[k] end
+        if weapon.group and weapon.job.foreign[weapon.group] then drop_group(weapon, ON_BODIES) end
+    end
+
+    -- The per-frame step is one function on purpose: split into helpers (read_states, watch, scan_tick) it compiled
+    -- to 50.4 instead of 20.7 KB of machine code (game's lua51.dll, same measurement as `interpreted`).
     function self.step(dt)
         self.clock = self.clock + dt
         self.since_scan = self.since_scan + dt
@@ -756,28 +965,43 @@ function Fix.new(api, game, exe, log)
         -- One family's body scan at a time, a few block reads per frame.
         local weapon = self.scanning
         if weapon then
-            local done, why = Fix.scan_step(api, weapon.job, weapon.family.set, SCAN_BLOCKS, weapon.group)
+            local done, why = Fix.scan_step(api, weapon.scan_job, weapon.family.set, SCAN_BLOCKS, weapon.group, own_body)
             if done == nil then
-                self.scanning = nil
+                self.scanning, weapon.next_try = nil, self.clock + RETRY_SECONDS
                 tell_once(why, 'Self-hit fix unavailable: ')
             elseif done then
-                self.scanning, weapon.job_ok = nil, true
-                -- Bodies found still grouped (a scan while grouped) keep their group; the weapon stays grouped.
-                for k = 1, weapon.job.n do weapon.marked = weapon.marked or weapon.job.marked[k] end
+                scan_done(weapon)
             end
         else
             for i = 1, #tracked do
                 local candidate = self.weapons[tracked[i]]
                 if not candidate.job_ok and self.clock >= candidate.next_try then
-                    candidate.next_try = self.clock + RETRY_SECONDS
                     begin_family(candidate)
                     break
                 end
             end
         end
     end
+
+    -- Every function above runs on a few frames only, except step and find_burst_instance (every frame, and every
+    -- firing frame) and own_body (called from the compiled body-scan loop).
+    interpreted({begin_family, scan_done, release, restore_flames, drop_group, self.reset, pick_group, group_bodies,
+                 usable, still_own, rescan_if_stale, check_marks, self.scan, self.burst_start, weapon_burst})
     return self
 end
+
+
+-- ===== update chain =====
+-- Flame Damage Fixed installs the shared update guard from Bingus Shared Runtime (bingus_runtime.lua),
+-- which the build bundles. The guard enforces the same policy the mod used to carry by hand: the previous
+-- update runs outside pcall (P1); 8 errors stop the mod, counted per burst and separately for the mod's own
+-- errors and errors below, reset after 3600 clean frames (P3); an error below pauses the mod (which restores
+-- its group writes and starts over) and it resumes after 60 clean frames; the first failure survives shutdown
+-- (P2). ERRORS/RESUME/CLEAN below are the runtime's defaults, kept for the tests.
+Fix.ERRORS, Fix.RESUME_FRAMES, Fix.CLEAN_FRAMES = 8, 60, 3600
+
+local GAME_SHA256 = '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
+local EXE_SHA256 = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
 
 -- Bingus Shared Loader v18+ with API 1. The loader's own version field is not its release number (the v18
 -- release reports 17), so v18 is recognized by the `jit` state it added.
@@ -786,174 +1010,138 @@ function Fix.loader_ok(loader)
         and type(loader.jit) == 'table'
 end
 
-if rawget(_G, 'FLAME_DAMAGE_FIXED_TEST') then return Fix end
+-- The guard's pause and stop restore work: the mod takes its hit-boxes and flames out of their groups and
+-- starts over (fix.reset, which raises when a write cannot be restored, so the guard stops). At shutdown it
+-- restores nothing: the game is closing and its physics may already be gone.
+function Fix.restore_on(fix)
+    return function(reason)
+        if reason ~= 'shutdown' then fix.reset() end
+    end
+end
 
--- ===== In-game adapter =====
-local GAME_SHA256 = '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
-local EXE_SHA256 = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
-local ffi = require('ffi')
--- Same prototypes as the other Bingus mods; each is guarded so an identical earlier declaration is fine.
-for _, declaration in ipairs({
-    'void *GetModuleHandleA(const char *name);',
-    'uint32_t GetModuleFileNameW(void *module, uint16_t *path, uint32_t capacity);',
-    'void *GetCurrentProcess(void);',
-    'int ReadProcessMemory(void *process, const void *address, void *buffer, size_t size, size_t *read);',
-    'int WriteProcessMemory(void *process, void *address, const void *buffer, size_t size, size_t *written);',
-    'size_t VirtualQuery(const void *address, void *region, size_t size);',
-    'void *CreateFileW(const uint16_t *path, uint32_t access, uint32_t share, void *security, uint32_t disposition, uint32_t flags, void *template_file);',
-    'int ReadFile(void *file, void *buffer, uint32_t size, uint32_t *read, void *overlapped);',
-    'int CloseHandle(void *handle);',
-    'int32_t BCryptOpenAlgorithmProvider(void **algorithm, const uint16_t *name, const uint16_t *provider, uint32_t flags);',
-    'int32_t BCryptCloseAlgorithmProvider(void *algorithm, uint32_t flags);',
-    'int32_t BCryptCreateHash(void *algorithm, void **hash, void *object, uint32_t object_size, const void *secret, uint32_t secret_size, uint32_t flags);',
-    'int32_t BCryptHashData(void *hash, const void *data, uint32_t size, uint32_t flags);',
-    'int32_t BCryptFinishHash(void *hash, void *digest, uint32_t size, uint32_t flags);',
-    'int32_t BCryptDestroyHash(void *hash);',
-}) do pcall(ffi.cdef, declaration) end
--- Named once (function-pointer type strings would create a new C type on every load). No 64-bit value
--- is ever read back into Lua: interpreted code boxes each one as a cdata, so SIZE_T results and counts
--- are read as uint32 halves. VirtualQuery's SIZE_T result (0 or 48) is taken from its low half.
-if not pcall(ffi.typeof, 'FlameDamageFixedRegion') then
-    ffi.cdef([[
-typedef struct { uintptr_t base, allocation; uint32_t allocation_protect; uint32_t partition; size_t size; uint32_t state, protection, type; } FlameDamageFixedRegion;
-typedef int (*FlameDamageFixedReadMemory)(void *, uintptr_t, void *, size_t, uint32_t *);
-typedef int (*FlameDamageFixedWriteMemory)(void *, uintptr_t, const void *, size_t, uint32_t *);
-typedef uint32_t (*FlameDamageFixedQueryMemory)(uintptr_t, FlameDamageFixedRegion *, size_t);
+-- The in-game adapter: a reused-buffer reader and writer over the game's own memory. Windows functions are
+-- declared under private names, each with an __asm__ label naming the real
+-- export, and the only type names are the mod's own, so another mod's declarations of the real names (before or
+-- after this one) neither change what this mod calls nor are changed by it. Addresses go in as uintptr_t and no
+-- 64-bit value is read back into Lua (interpreted code boxes each one): SIZE_T counts and VirtualQuery's SIZE_T
+-- result are read as uint32 halves. Module files are hashed by bingus_memory.lua's shared session cache, so this
+-- adapter declares no file or hashing functions. Returns the api and a module-handle getter.
+function Fix.adapter()
+    local ffi = require('ffi')
+    if not pcall(ffi.typeof, 'hd2fdf_region') then
+        ffi.cdef([[
+typedef struct { uintptr_t base, allocation; uint32_t allocation_protect; uint32_t partition; size_t size; uint32_t state, protection, type; } hd2fdf_region;
+void *hd2fdf_GetModuleHandleA(const char *name) __asm__("GetModuleHandleA");
+void *hd2fdf_GetCurrentProcess(void) __asm__("GetCurrentProcess");
+int hd2fdf_ReadProcessMemory(void *process, uintptr_t address, void *buffer, size_t size, uint32_t *done) __asm__("ReadProcessMemory");
+int hd2fdf_WriteProcessMemory(void *process, uintptr_t address, const void *buffer, size_t size, uint32_t *done) __asm__("WriteProcessMemory");
+uint32_t hd2fdf_VirtualQuery(uintptr_t address, hd2fdf_region *region, size_t size) __asm__("VirtualQuery");
 ]])
-end
-local kernel, bcrypt = ffi.load('kernel32'), ffi.load('bcrypt')
-local process = kernel.GetCurrentProcess()
--- One-time casts: numeric addresses go straight in, results land in reused buffers.
-local read_memory = ffi.cast('FlameDamageFixedReadMemory', kernel.ReadProcessMemory)
-local write_memory = ffi.cast('FlameDamageFixedWriteMemory', kernel.WriteProcessMemory)
-local query_memory = ffi.cast('FlameDamageFixedQueryMemory', kernel.VirtualQuery)
-local word, count = ffi.new('uint32_t[1]'), ffi.new('uint32_t[2]') -- count: SIZE_T as two halves
-local out_word = ffi.new('uint32_t[1]')
-local BULK_SIZE, BLOCK_SIZE = 2048, 65536
-local bulk = ffi.new('uint8_t[?]', BULK_SIZE)
-local block = ffi.new('uint8_t[?]', BLOCK_SIZE)
-local block_words = ffi.cast('uint32_t *', block)
-local region = ffi.new('FlameDamageFixedRegion[1]')
-local REGION_SIZE = ffi.sizeof('FlameDamageFixedRegion')
--- The region as uint32 words (written only by VirtualQuery): base 0-1, size 6-7, state 8, protect 9, type 10.
-local region_words = ffi.cast('uint32_t *', region)
-
-local api = {}
-function api.u32(address)
-    if read_memory(process, address, word, 4, count) == 0 or count[0] ~= 4 or count[1] ~= 0 then return nil end
-    return word[0]
-end
--- Bulk read into a string (tests and cold paths only).
-function api.read(address, size)
-    if size < 1 or size > BULK_SIZE then return nil end
-    if read_memory(process, address, bulk, size, count) == 0 or count[0] ~= size or count[1] ~= 0 then return nil end
-    return ffi.string(bulk, size)
-end
--- Block read into a reused 64 KB buffer: returns its u32 view (0-based word index), valid until the next
--- load. Nothing is allocated: indexing a uint32_t pointer yields plain numbers.
-function api.load(address, size)
-    if size < 4 or size > BLOCK_SIZE then return nil end
-    if read_memory(process, address, block, size, count) == 0 or count[0] ~= size or count[1] ~= 0 then return nil end
-    return block_words
-end
-local function private_rw(address)
-    if query_memory(address, region, REGION_SIZE) == 0 then return nil end
-    local w = region_words
-    if w[8] ~= 0x1000 or w[10] ~= 0x20000 or w[9] ~= 4 then return nil end
-    return w[0] + w[1] * 4294967296, w[6] + w[7] * 4294967296
-end
--- Committed, private, read-write data only: never executable, image-mapped or read-only pages.
-function api.writable_data(address, size)
-    local cursor, remaining = address, size
-    while remaining > 0 do
-        local base, span = private_rw(cursor)
-        if not base then return false end
-        local available = base + span - cursor
-        if available <= 0 then return false end
-        local step = math.min(available, remaining)
-        cursor, remaining = cursor + step, remaining - step
     end
-    return true
-end
--- The committed private read-write region holding address: base, size (one VirtualQuery) or nil.
-function api.writable_region(address)
-    return private_rw(address)
-end
--- Caller must have passed api.writable_data or api.writable_region for the target in the same frame.
-function api.write_raw(address, bytes)
-    return write_memory(process, address, bytes, #bytes, count) ~= 0 and count[0] == #bytes and count[1] == 0
-end
--- One u32 from a reused buffer (same rule as write_raw).
-function api.write_u32(address, value)
-    out_word[0] = value
-    return write_memory(process, address, out_word, 4, count) ~= 0 and count[0] == 4 and count[1] == 0
-end
-if rawget(_G, 'FLAME_DAMAGE_FIXED_ADAPTER_TEST') then return api end
+    local kernel = ffi.load('kernel32')
+    local process = kernel.hd2fdf_GetCurrentProcess()
+    -- Bound once: numeric addresses go straight in, results land in reused buffers.
+    local read_memory, write_memory = kernel.hd2fdf_ReadProcessMemory, kernel.hd2fdf_WriteProcessMemory
+    local query_memory = kernel.hd2fdf_VirtualQuery
+    local word, count = ffi.new('uint32_t[1]'), ffi.new('uint32_t[2]') -- count: SIZE_T as two halves
+    local out_word = ffi.new('uint32_t[1]')
+    local BULK_SIZE, BLOCK_SIZE = 2048, 65536
+    local bulk = ffi.new('uint8_t[?]', BULK_SIZE)
+    local block = ffi.new('uint8_t[?]', BLOCK_SIZE)
+    local block_words = ffi.cast('uint32_t *', block)
+    local region = ffi.new('hd2fdf_region[1]')
+    local REGION_SIZE = ffi.sizeof('hd2fdf_region')
+    -- The region as uint32 words (written only by VirtualQuery): base 0-1, size 6-7, state 8, protect 9, type 10.
+    local region_words = ffi.cast('uint32_t *', region)
 
-local function module_hash(module)
-    local path = ffi.new('uint16_t[32768]')
-    local length = kernel.GetModuleFileNameW(module, path, 32768)
-    assert(length > 0 and length < 32768, 'Cannot resolve module file')
-    local file = kernel.CreateFileW(path, 0x80000000, 7, nil, 3, 0x08000000, nil)
-    assert(file ~= ffi.cast('void *', -1), 'Cannot read module file')
-    local algorithm, hash = ffi.new('void *[1]'), ffi.new('void *[1]')
-    local ok, result = pcall(function()
-        local name = ffi.new('uint16_t[7]', {83, 72, 65, 50, 53, 54, 0})
-        assert(bcrypt.BCryptOpenAlgorithmProvider(algorithm, name, nil, 0) == 0, 'SHA256 unavailable')
-        assert(bcrypt.BCryptCreateHash(algorithm[0], hash, nil, 0, nil, 0, 0) == 0, 'SHA256 creation failed')
-        local buffer, got = ffi.new('uint8_t[1048576]'), ffi.new('uint32_t[1]')
-        while true do
-            assert(kernel.ReadFile(file, buffer, 1048576, got, nil) ~= 0, 'Module file read failed')
-            if got[0] == 0 then break end
-            assert(bcrypt.BCryptHashData(hash[0], buffer, got[0], 0) == 0, 'SHA256 update failed')
+    local api = {}
+    function api.u32(address)
+        if read_memory(process, address, word, 4, count) == 0 or count[0] ~= 4 or count[1] ~= 0 then return nil end
+        return word[0]
+    end
+    -- Bulk read into a string (tests and cold paths only).
+    function api.read(address, size)
+        if size < 1 or size > BULK_SIZE then return nil end
+        if read_memory(process, address, bulk, size, count) == 0 or count[0] ~= size or count[1] ~= 0 then return nil end
+        return ffi.string(bulk, size)
+    end
+    -- Block read into a reused 64 KB buffer: returns its u32 view (0-based word index), valid until the next
+    -- load. Nothing is allocated: indexing a uint32_t pointer yields plain numbers.
+    function api.load(address, size)
+        if size < 4 or size > BLOCK_SIZE then return nil end
+        if read_memory(process, address, block, size, count) == 0 or count[0] ~= size or count[1] ~= 0 then return nil end
+        return block_words
+    end
+    local function private_rw(address)
+        if query_memory(address, region, REGION_SIZE) == 0 then return nil end
+        local w = region_words
+        if w[8] ~= 0x1000 or w[10] ~= 0x20000 or w[9] ~= 4 then return nil end
+        return w[0] + w[1] * 4294967296, w[6] + w[7] * 4294967296
+    end
+    -- Committed, private, read-write data only: never executable, image-mapped or read-only pages.
+    function api.writable_data(address, size)
+        local cursor, remaining = address, size
+        while remaining > 0 do
+            local base, span = private_rw(cursor)
+            if not base then return false end
+            local available = base + span - cursor
+            if available <= 0 then return false end
+            local step = math.min(available, remaining)
+            cursor, remaining = cursor + step, remaining - step
         end
-        local digest, hex = ffi.new('uint8_t[32]'), {}
-        assert(bcrypt.BCryptFinishHash(hash[0], digest, 32, 0) == 0, 'SHA256 finish failed')
-        for i = 0, 31 do hex[#hex + 1] = string.format('%02X', digest[i]) end
-        return table.concat(hex)
+        return true
+    end
+    -- The committed private read-write region holding address: base, size (one VirtualQuery) or nil.
+    function api.writable_region(address)
+        return private_rw(address)
+    end
+    -- Caller must have passed api.writable_data or api.writable_region for the target in the same frame.
+    function api.write_raw(address, bytes)
+        return write_memory(process, address, bytes, #bytes, count) ~= 0 and count[0] == #bytes and count[1] == 0
+    end
+    -- One u32 from a reused buffer (same rule as write_raw).
+    function api.write_u32(address, value)
+        out_word[0] = value
+        return write_memory(process, address, out_word, 4, count) ~= 0 and count[0] == 4 and count[1] == 0
+    end
+    return api, kernel.hd2fdf_GetModuleHandleA
+end
+
+-- Builds the fix and installs the shared runtime's update guard. runtime and memory come from the vendored
+-- bingus_runtime.lua and bingus_memory.lua, which the build bundles ahead of this file. The game build is
+-- checked through memory.verify_build, which hashes game.dll and the EXE at most once per session for every mod
+-- (the shared hash cache).
+function Fix.install(runtime, memory)
+    local ffi = require('ffi')
+    local loader = rawget(_G, 'CowboyBingusModLoader')
+    local log_file
+    if loader and type(loader.open_log) == 'function' then
+        pcall(function() log_file = loader.open_log('FlameDamageFixed.log') end)
+    end
+    local function note(line)
+        print('[FlameDamageFixed] ' .. line)
+        if log_file then pcall(function() log_file:write(line .. '\n'); log_file:flush() end) end
+    end
+    local ready, fix = pcall(function()
+        assert(Fix.loader_ok(loader), 'Bingus Shared Loader v18+ / API 1 required')
+        local api, get_module = Fix.adapter()
+        local game, exe = get_module('game.dll'), get_module(nil)
+        assert(game ~= nil and exe ~= nil, 'Game modules unavailable')
+        local ok, why = memory.verify_build({exe_sha256 = EXE_SHA256, game_sha256 = GAME_SHA256})
+        assert(ok, why == 'unsupported game build' and 'Unsupported game build (needs 25480438)' or why)
+        return Fix.new(api, tonumber(ffi.cast('uintptr_t', game)), tonumber(ffi.cast('uintptr_t', exe)), note)
     end)
-    if hash[0] ~= nil then bcrypt.BCryptDestroyHash(hash[0]) end
-    if algorithm[0] ~= nil then bcrypt.BCryptCloseAlgorithmProvider(algorithm[0], 0) end
-    kernel.CloseHandle(file)
-    if not ok then error(result) end
-    return result
-end
-
-local loader = rawget(_G, 'CowboyBingusModLoader')
-local log_file
-if loader and type(loader.open_log) == 'function' then
-    pcall(function() log_file = loader.open_log('FlameDamageFixed.log') end)
-end
-local function note(line)
-    print('[FlameDamageFixed] ' .. line)
-    if log_file then pcall(function() log_file:write(line .. '\n'); log_file:flush() end) end
-end
-
-local ready, fix = pcall(function()
-    assert(Fix.loader_ok(loader), 'Bingus Shared Loader v18+ / API 1 required')
-    local game, exe = kernel.GetModuleHandleA('game.dll'), kernel.GetModuleHandleA(nil)
-    assert(game ~= nil and exe ~= nil, 'Game modules unavailable')
-    assert(module_hash(game) == GAME_SHA256 and module_hash(exe) == EXE_SHA256, 'Unsupported game build (needs 25480438)')
-    return Fix.new(api, tonumber(ffi.cast('uintptr_t', game)), tonumber(ffi.cast('uintptr_t', exe)), note)
-end)
-if not ready then
-    note('Disabled: ' .. tostring(fix))
-    return
-end
-
-local previous_update = rawget(_G, 'update')
-local traceback, errors = debug.traceback, 0
-local step = fix.step
-update = function(dt)
-    if errors < 8 then
-        -- xpcall passes dt on (LuaJIT extension), so no closure is built per frame.
-        local ok, err = xpcall(step, traceback, dt)
-        if not ok then
-            errors = errors + 1
-            note('Update error ' .. errors .. ': ' .. tostring(err))
-        end
+    if not ready then
+        note('Disabled: ' .. tostring(fix))
+        return
     end
-    if type(previous_update) == 'function' then return previous_update(dt) end
+    runtime.guard({name = 'FlameDamageFixed', step = fix.step, stop = Fix.restore_on(fix),
+                   pause = Fix.restore_on(fix), log = note, env = _G}).install()
+    _G.FlameDamageFixedInstalled = true
+    note('Flame Damage Fixed v1.2 initialized (spawn fix, Cremator emitter distances, self-hit fix by Havok system group).')
 end
-_G.FlameDamageFixedInstalled = true
-note('Flame Damage Fixed v1.1 initialized (spawn fix, Cremator emitter distances, self-hit fix by Havok system group).')
+
+if rawget(_G, 'FLAME_DAMAGE_FIXED_TEST') then return Fix end
+-- The real adapter and the module lookup, for tests/test_fix_adapter.lua and tests/test_ffi_names.lua.
+if rawget(_G, 'FLAME_DAMAGE_FIXED_ADAPTER_TEST') then return Fix.adapter() end
+return Fix

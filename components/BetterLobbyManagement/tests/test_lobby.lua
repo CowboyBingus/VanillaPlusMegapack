@@ -592,6 +592,40 @@ do
 end
 print('PASS: refused joins, successors that stay, empty results, refused starts, lost sessions and overlaps fail cleanly')
 
+-- A fresh start (the addon's pause or its own error): the action cancelled,
+-- queued kicks and the arrival check dropped, the unload hold released.
+do
+    local world, lobby, status = setup()
+    lobby.kick_mode = 'game'
+    lobby.game_kicker = function() return 'busy' end
+    lobby.disband(0)
+    assert(lobby.busy() and lobby.ui_pending())
+    local counts = budget.wrap(world.api)
+    local frame, cancelled = budget.frame(counts, lobby.reset, 'paused')
+    assert(cancelled == true and not lobby.busy() and not lobby.ui_pending(), 'cancelled, queue dropped')
+    assert(next(frame) == nil, 'a reset without a hold reads nothing: ' .. budget.describe(frame))
+    assert(status.lobby == 'disband failed: cancelled: paused', status.lobby)
+    lobby.ui_step(DT)
+    assert(world.count('kick_peer') == 0 and world.count('pause_unloads') == 0, 'no kick afterwards')
+    -- The unload hold (test builds) and a pending arrival check.
+    local lines
+    world, lobby, status, lines = setup()
+    lobby.disband(0)
+    assert(lobby.holding() and world.unload_paused == 1)
+    lobby.arrival = {due = 15, squad = 3, name = 'Tango', lo = T.lo, hi = T.hi}
+    assert(lobby.reset('paused') and not lobby.holding() and world.unload_paused == 0 and lobby.arrival == nil)
+    assert(joined(lines):find('package unloads resumed: paused', 1, true), joined(lines))
+    assert(lobby.reset('again') == false, 'nothing left to cancel')
+    -- A kick queued for the render callback (test builds) is dropped too.
+    world, lobby = setup()
+    lobby.kick_mode = 'render'
+    lobby.disband(0)
+    lobby.reset('paused')
+    lobby.render_step(0)
+    assert(world.count('kick_peer') == 0 and not lobby.holding(), 'the queued render kick is dropped')
+end
+print('PASS: reset cancels the action, drops queued kicks and the arrival check and releases the unload hold')
+
 -- Off the ship: promote is refused; nothing is kicked.
 do
     for _, mode in ipairs({G.MODE_MISSION, 7}) do

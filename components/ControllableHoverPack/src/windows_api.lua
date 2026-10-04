@@ -1,136 +1,107 @@
-return function()
-    local ffi = require('ffi')
-    assert(ffi.abi('64bit'), 'Windows x64 is required')
-    ffi.cdef [[
-        void *GetModuleHandleA(const char *name);
-        uint32_t GetModuleFileNameW(void *module, uint16_t *path, uint32_t capacity);
-        void *GetCurrentProcess(void);
-        uint64_t GetTickCount64(void);
-        int ReadProcessMemory(void *process, const void *address, void *buffer, size_t size, size_t *read);
-        int WriteProcessMemory(void *process, void *address, const void *buffer, size_t size, size_t *written);
-        typedef struct {
-            void *base; void *allocation_base; uint32_t allocation_protection;
-            uint16_t partition; uint16_t reserved; size_t size;
-            uint32_t state; uint32_t protection; uint32_t type;
-        } HoverMemoryRegion;
-        size_t VirtualQuery(const void *address, void *region, size_t size);
-        void *CreateFileW(const uint16_t *path, uint32_t access, uint32_t share, void *security,
-                          uint32_t disposition, uint32_t flags, void *template_file);
-        int ReadFile(void *file, void *buffer, uint32_t size, uint32_t *read, void *overlapped);
-        int CloseHandle(void *handle);
-        int32_t BCryptOpenAlgorithmProvider(void **algorithm, const uint16_t *name,
-                                            const uint16_t *provider, uint32_t flags);
-        int32_t BCryptCloseAlgorithmProvider(void *algorithm, uint32_t flags);
-        int32_t BCryptCreateHash(void *algorithm, void **hash, void *object, uint32_t object_size,
-                                 const void *secret, uint32_t secret_size, uint32_t flags);
-        int32_t BCryptHashData(void *hash, const void *data, uint32_t size, uint32_t flags);
-        int32_t BCryptFinishHash(void *hash, void *digest, uint32_t size, uint32_t flags);
-        int32_t BCryptDestroyHash(void *hash);
-    ]]
-    local kernel, bcrypt = ffi.load('kernel32'), ffi.load('bcrypt')
-    local process = kernel.GetCurrentProcess()
-    local api = {}
-    function api.time() return tonumber(kernel.GetTickCount64()) / 1000 end
-    function api.module(name)
-        local handle = kernel.GetModuleHandleA(name)
-        if handle == nil then return nil end
-        return ffi.cast('uint8_t *', handle)
+-- Windows adapter on top of Bingus Shared Runtime v1. memory is the api of
+-- src/bingus_memory.lua extended by src/bingus_write.lua; the build passes it
+-- with the core, src/bingus_runtime.lua. The runtime declares the Windows
+-- functions under private, versioned names and provides the protection check,
+-- checked writes, module handles, module hashes (computed once per session for
+-- every mod that asks) and the clock (seconds; it allocates nothing). This file
+-- adds what this mod needs: reads at plain-number addresses that allocate
+-- nothing but a returned string, pointers as numbers, writes whose destination
+-- the caller just checked, its write-size limit and the focus check.
+return function(runtime, memory)
+    assert(type(memory) == 'table' and type(memory.write) == 'function',
+        'bingus_memory.lua and bingus_write.lua v1 are required')
+    local native = memory.windows
+    local ffi, windows = native.ffi, native.kernel32
+    -- Private names (__asm__ labels) and a named function-pointer type,
+    -- declared once per process: ffi.cdef keeps the first declaration of a
+    -- name for the whole game, and a function-pointer type written in a cast
+    -- string would add C types to the table every mod shares on every use.
+    if not pcall(ffi.typeof, 'hd2chp_read_memory') then
+        ffi.cdef [[
+            typedef int (*hd2chp_read_memory)(void *process, uint64_t address, uint64_t buffer, size_t size, uint32_t *done);
+            uint32_t hd2chp_GetCurrentProcessId(void) __asm__("GetCurrentProcessId");
+            int32_t hd2chp_GetForegroundWindow(void) __asm__("GetForegroundWindow");
+            uint32_t hd2chp_GetWindowThreadProcessId(intptr_t window, uint32_t *pid) __asm__("GetWindowThreadProcessId");
+        ]]
     end
+    local kernel, user = ffi.load('kernel32'), ffi.load('user32')
+    local process = windows.GetCurrentProcess()
+    local api = {distance = memory.distance, module = memory.module, module_hash = memory.module_hash,
+        time = memory.time}
 
-    -- ReadProcessMemory does not call back into Lua. Copy to a Lua string before
-    -- reusing this scratch space; no borrowed memory survives a read.
-    local buffer,count=ffi.new('uint8_t[32768]'),ffi.new('size_t[1]')
-    function api.read(address, size)
-        if type(size)~='number' or size<1 or size>32768 or size%1~=0 then return nil end
-        if kernel.ReadProcessMemory(process, address, buffer, size, count) == 0 or count[0] ~= size then
-            return nil
-        end
-        return ffi.string(buffer, size)
-    end
-
-    local pointer_word = ffi.new('uintptr_t[1]')
-    function api.pointer(bytes, offset)
-        offset = offset or 0
-        if not bytes or offset < 0 or offset + 8 > #bytes then return nil end
-        -- Reused word, copied straight from the string: no allocation per pointer.
-        local value = pointer_word
-        ffi.copy(value, ffi.cast('const uint8_t *', bytes) + offset, 8)
-        if value[0] < 0x10000 or value[0] >= 0x800000000000 then return nil end
-        return ffi.cast('uint8_t *', value[0])
-    end
-
-    function api.distance(first, second)
-        return tonumber(ffi.cast('intptr_t', first) - ffi.cast('intptr_t', second))
-    end
-
+    -- Every accepted Windows user address is below 2^47, so a Lua number holds
+    -- each byte address exactly.
     function api.address(pointer)
-        -- All accepted Windows user addresses are below 2^47, so a Lua number
-        -- represents each byte address exactly. Formatted pointer strings are
-        -- display output and must not determine read-cache identity.
-        local value=tonumber(ffi.cast('uintptr_t',pointer))
-        assert(value>=0x10000 and value<0x800000000000,'Address outside bounds')
+        local value = memory.address(pointer)
+        assert(value >= 0x10000 and value < 0x800000000000, 'Address outside bounds')
         return value
     end
 
-    local query_region=ffi.cast('size_t (*)(const void *,void *,size_t)',kernel.VirtualQuery)
-    function api.writable_data(address,size)
-        if size<1 or size>280 then return false end
-        local cursor=ffi.cast('uint8_t *',address)
-        local region=ffi.new('HoverMemoryRegion[1]')
-        while size>0 do
-            if query_region(cursor,region,ffi.sizeof(region[0]))~=ffi.sizeof(region[0]) then return false end
-            if region[0].state~=0x1000 or region[0].type~=0x20000 or region[0].protection~=4 then return false end
-            local available=tonumber(region[0].size)-api.distance(cursor,region[0].base)
-            if available<=0 then return false end
-            local n=math.min(available,size);cursor=cursor+n;size=size-n
-        end
-        return true
+    -- The runtime's ReadProcessMemory, cast once to a type whose address and
+    -- buffer are uint64_t and whose count is two 32-bit words: a read creates
+    -- no pointer or 64-bit cdata. ReadProcessMemory does not call back into Lua.
+    local read_memory = ffi.cast('hd2chp_read_memory', windows.ReadProcessMemory)
+    local count = ffi.new('uint32_t[2]')
+    local function read_to(address, size, destination)
+        return read_memory(process, address, destination, size, count) ~= 0 and count[0] == size and count[1] == 0
     end
-    function api.write(address,bytes)
-        if not api.writable_data(address,#bytes) then return false end
-        local written=ffi.new('size_t[1]')
-        return kernel.WriteProcessMemory(process,address,bytes,#bytes,written)~=0 and written[0]==#bytes
+    -- read(address, size): the bytes as a string (one reused scratch buffer),
+    -- so a read allocates only the returned string.
+    -- read(address, size, into, offset): the bytes copied into a caller buffer
+    -- {data, address, size} at offset, and true: nothing is allocated, which
+    -- is what the per-frame snapshot uses. nil when they cannot all be read.
+    -- A pointer cdata address is accepted and converted.
+    local MAX_READ = 32768
+    local scratch = ffi.new('uint8_t[?]', MAX_READ)
+    local scratch_address = tonumber(ffi.cast('uintptr_t', scratch))
+    function api.read(address, size, into, offset)
+        if type(size) ~= 'number' or size < 1 or size > MAX_READ or size % 1 ~= 0 then return nil end
+        if type(address) ~= 'number' then address = memory.address(address) end
+        if not into then
+            if not read_to(address, size, scratch_address) then return nil end
+            return ffi.string(scratch, size)
+        end
+        offset = offset or 0
+        if offset < 0 or offset + size > into.size then return nil end
+        return read_to(address, size, into.address + offset) or nil
     end
 
-    function api.module_hash(module)
-        local path = ffi.new('uint16_t[32768]')
-        local length = kernel.GetModuleFileNameW(module, path, 32768)
-        assert(length > 0 and length < 32768, 'Cannot resolve module file')
-        local file = kernel.CreateFileW(path, 0x80000000, 7, nil, 3, 0x08000000, nil)
-        assert(file ~= ffi.cast('void *', -1), 'Cannot read module file')
-        local algorithm, hash = ffi.new('void *[1]'), ffi.new('void *[1]')
-        local ok, result = pcall(function()
-            local name = ffi.new('uint16_t[7]', {83, 72, 65, 50, 53, 54, 0})
-            assert(bcrypt.BCryptOpenAlgorithmProvider(algorithm, name, nil, 0) == 0, 'SHA256 unavailable')
-            assert(bcrypt.BCryptCreateHash(algorithm[0], hash, nil, 0, nil, 0, 0) == 0, 'SHA256 creation failed')
-            local buffer, count = ffi.new('uint8_t[1048576]'), ffi.new('uint32_t[1]')
-            while true do
-                assert(kernel.ReadFile(file, buffer, 1048576, count, nil) ~= 0, 'Module file read failed')
-                if count[0] == 0 then break end
-                assert(bcrypt.BCryptHashData(hash[0], buffer, count[0], 0) == 0, 'SHA256 update failed')
-            end
-            local digest, hex = ffi.new('uint8_t[32]'), {}
-            assert(bcrypt.BCryptFinishHash(hash[0], digest, 32, 0) == 0, 'SHA256 finish failed')
-            for i = 0, 31 do hex[#hex + 1] = string.format('%02X', digest[i]) end
-            return table.concat(hex)
-        end)
-        if hash[0] ~= nil then bcrypt.BCryptDestroyHash(hash[0]) end
-        if algorithm[0] ~= nil then bcrypt.BCryptCloseAlgorithmProvider(algorithm[0], 0) end
-        kernel.CloseHandle(file)
-        if not ok then error(result) end
-        return result
+    -- The user-mode pointer stored at bytes[offset+1 .. offset+8], as a number.
+    function api.pointer(bytes, offset)
+        local value = memory.pointer(bytes, offset)
+        return value and memory.address(value)
     end
-    ffi.cdef [[
-        void *GetForegroundWindow(void);
-        uint32_t GetWindowThreadProcessId(void *window, uint32_t *pid);
-        uint32_t GetCurrentProcessId(void);
-    ]]
-    local user=ffi.load('user32')
+
+    -- The largest write is one 280-byte settings record: refuse anything else
+    -- before the protection query.
+    local MAX_WRITE = 280
+    function api.writable_data(address, size)
+        return size >= 1 and size <= MAX_WRITE and memory.writable_data(address, size)
+    end
+    -- checked: the caller verified this destination with writable_data moments
+    -- before, in the same call (the settings creation checks all four before
+    -- writing any), so the write makes no second query. Any other write is
+    -- checked by the runtime right before writing.
+    local done = ffi.new('size_t[1]')
+    local done32 = ffi.cast('uint32_t *', done)
+    function api.write(address, bytes, checked)
+        if #bytes < 1 or #bytes > MAX_WRITE then return false end
+        local destination = ffi.cast('void *', address)
+        if not checked then return memory.write(destination, bytes) end
+        return windows.WriteProcessMemory(process, destination, bytes, #bytes, done) ~= 0
+            and done32[0] == #bytes and done32[1] == 0
+    end
+
+    -- The process ID once per session and one reused output word. A window
+    -- handle is 32-bit significant on 64-bit Windows, which documents
+    -- truncating it and sign-extending it again: taken as int32_t and passed as
+    -- intptr_t, the check creates no pointer cdata.
+    local process_id, window_process = kernel.hd2chp_GetCurrentProcessId(), ffi.new('uint32_t[1]')
     function api.focused()
-        local window=user.GetForegroundWindow();if window==nil then return false end
-        local pid=ffi.new('uint32_t[1]')
-        user.GetWindowThreadProcessId(window,pid)
-        return pid[0]==kernel.GetCurrentProcessId()
+        local window = user.hd2chp_GetForegroundWindow()
+        if window == 0 then return false end
+        user.hd2chp_GetWindowThreadProcessId(window, window_process)
+        return window_process[0] == process_id
     end
     return api
 end

@@ -1,5 +1,5 @@
 local source=assert(arg[1])
-local M=dofile(source..'/corpse_data.lua')
+local M=assert(loadfile(source..'/corpse_data.lua'))(dofile(source..'/corpse_profiles.lua'))
 local function matrix(x,y,angle)
     local c,s=math.cos(math.rad(angle or 0)),math.sin(math.rad(angle or 0))
     return {c,s,0,0,-s,c,0,0,0,0,1,0,x or 0,y or 0,0,1}

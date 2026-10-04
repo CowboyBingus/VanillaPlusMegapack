@@ -35,9 +35,9 @@ function M.encode(items,build)
     return table.concat(lines,'\n')..'\n'
 end
 function M.options(text)
-    local result={enabled=true,prewarm=true,images=true,disk=false}
+    local result={enabled=true,prewarm=true,images=true,disk=false,verify_gate=false}
     for key,value in (text or ''):gmatch('([%w_]+)%s*=%s*([01])')do
-        if key=='enabled' or key=='prewarm' or key=='images'then result[key]=value=='1'end
+        if key=='enabled' or key=='prewarm' or key=='images' or key=='verify_gate'then result[key]=value=='1'end
     end
     return result
 end

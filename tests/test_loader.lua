@@ -155,6 +155,13 @@ for _, scenario in ipairs(scenarios) do
                 GetLastError = function() return 18 end,
                 FindClose = function() return 1 end,
             }
+            -- Loader v19 binds these under private bsl_ names (ffi.cdef keeps the
+            -- first prototype of a plain name for the whole game); v18 used the
+            -- plain names. Answer both, so this runs against either loader build.
+            for _, plain in ipairs({'GetModuleFileNameA', 'FindFirstFileA', 'FindNextFileA', 'GetLastError',
+                                    'FindClose'}) do
+                kernel['bsl_' .. plain] = kernel[plain]
+            end
             -- Mocked Win32 calls need no declarations. Repeating cdef thousands
             -- of times exhausts the process-wide LuaJIT CType table; production
             -- discovery declares these once, and the loader's native test covers it.
@@ -246,7 +253,7 @@ end
 local calls = {}
 local recorder = {opt = {start = function(...) calls[#calls + 1] = table.concat({...}, ' ') end}}
 local old = run_pack({version = 16, api = 1, modules = {}}, recorder)
-assert(old.jit_fallback == 'maxmcode=16384 maxtrace=8000' and #calls == 1 and calls[1] == old.jit_fallback)
+assert(old.jit_fallback == 'maxmcode=65536 maxtrace=8000' and #calls == 1 and calls[1] == old.jit_fallback)
 calls = {}
 assert(run_pack({version = 17, api = 1, modules = {}, jit = {managed = true, expanded = false}}, recorder).jit_fallback == nil)
 assert(#calls == 0, 'A managed cache stays with the loader, whatever its current limits')

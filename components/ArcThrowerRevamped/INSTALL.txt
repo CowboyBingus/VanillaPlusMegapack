@@ -1,4 +1,6 @@
-Current local compatibility candidate for Steam build 25480438 / EXE 1.8.46015.0. Offline checks passed; live gameplay verification is pending.
+Arc Thrower Revamped v1.7
+Release for Steam build 25480438 / EXE 1.8.46015.0. Offline checks passed; in live
+play the addon loads and finds the Arc Thrower's charge record.
 
 Arc Thrower Revamped - install, update, remove
 ==============================================
@@ -6,7 +8,7 @@ Arc Thrower Revamped - install, update, remove
 Install
 -------
 1. Close Helldivers 2.
-2. Import Arc-Thrower-Revamped-v1.6.zip and Bingus Shared Loader v17 or newer
+2. Import Arc-Thrower-Revamped-v1.7.zip and Bingus Shared Loader v18 or newer
    into Arsenal or HD2MM.
 3. Enable both. With Arsenal's default priority the loader belongs at the
    bottom of the load order; with first-mod priority, at the top.
@@ -31,3 +33,6 @@ Requirements
 ------------
 Steam build 25480438 / EXE 1.8.46015.0. Other builds are refused by the addon's
 own fingerprint check.
+
+Requires Bingus Shared Loader v18 or newer:
+https://github.com/CowboyBingus/BingusSharedLoader/releases/latest

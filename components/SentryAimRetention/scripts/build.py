@@ -12,7 +12,7 @@ from package import package_release
 
 MODULE='mods/cowboybingus/sentry_aim_retention'
 REVISION='data-v8.6'
-VERSION='1.0.13'
+VERSION='1.1.0'
 def run(args,**kwargs):
     p=subprocess.run(list(map(str,args)),capture_output=True,text=True,**kwargs)
     if p.returncode: raise RuntimeError(p.stdout+p.stderr)
@@ -33,13 +33,15 @@ def main():
     tests+=run([LUA,ROOT/'tests/test_loader.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_snapshot.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_windows_api.lua',ROOT/'src'],env=env)
+    tests+=run([LUA,ROOT/'tests/test_current_game.lua',ROOT/'src'],env=env)
     resources=build_module(ROOT,build,MODULE,'aim_data.lua',REVISION)
+    tests+=run([LUA,ROOT/'tests/test_module.lua',build/'mod.wrapper.lua'],env=env)
     (build/ARCHIVE).write_bytes(make_archive(resources))
     for suffix in ('.stream','.gpu_resources'): (build/(ARCHIVE+suffix)).write_bytes(b'')
     files={f'data/{ARCHIVE}{s}':f'build/{ARCHIVE}{s}' for s in ('','.stream','.gpu_resources')}
     report={'name':'Sentry Aim Retention','slug':'SentryAimRetention','revision':REVISION,'version':VERSION,
         'guid':'2c158cef-8455-461c-8113-6a207a60b692',
-        'description':'Retains sentry aim; pauses Gatling and machine-gun shots during broad sweeps, target loss and terrain-obstructed aim. Small adjustments can keep firing. Requires Bingus Shared Loader v6 or newer / API 1.',
+        'description':'Retains sentry aim; pauses Gatling and machine-gun shots during broad sweeps, target loss and terrain-obstructed aim. Small adjustments can keep firing. Requires Bingus Shared Loader v18 or newer.',
         'game_exe_sha256':EXE_SHA,'game_dll_sha256':GAME_DLL_SHA,
         'deployment_files':files,'files':{p:sha((ROOT/p).read_bytes()) for p in files.values()},
         'requires':[{'name':'Bingus Shared Loader','api':1,'revision':'loader-v6'}],

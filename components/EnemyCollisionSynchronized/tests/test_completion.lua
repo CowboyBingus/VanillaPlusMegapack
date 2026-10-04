@@ -1,6 +1,6 @@
 -- Only the owner-routed request policy is exercised; native calls are stubs.
 local source=assert(arg[1])
-local M=dofile(source..'/corpse_data.lua')
+local M=assert(loadfile(source..'/corpse_data.lua'))(dofile(source..'/corpse_profiles.lua'))
 local original=M.snapshot
 local function unit(resource)
     return {unit=99,id=77,resource=resource,settled=true,corpse=false,

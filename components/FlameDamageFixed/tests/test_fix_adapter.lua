@@ -3,10 +3,11 @@
 local root = assert(arg[1], 'project root required')
 local ffi = require('ffi')
 _G.FLAME_DAMAGE_FIXED_ADAPTER_TEST = true
-local api = dofile(root .. '/src/flame_damage_fixed.lua')
+local api, module = dofile(root .. '/src/flame_damage_fixed.lua')
 _G.FLAME_DAMAGE_FIXED_ADAPTER_TEST = nil
 assert(type(api) == 'table' and api.u32 and api.write_raw and api.writable_region and api.load and api.write_u32,
     'adapter returned')
+assert(module ~= nil, 'module lookup returned')  -- a bound cdata function (GetModuleHandleA)
 
 local buffer = ffi.new('uint32_t[16]', {0x11223344, 0xa5a5a5a5})
 local address = tonumber(ffi.cast('uintptr_t', buffer))
@@ -25,9 +26,11 @@ assert(api.load(16, 16) == nil, 'unmapped block reads fail cleanly')
 assert(api.write_u32(address + 12, 0xffe0000b) and buffer[3] == 0xffe0000b, 'u32 write keeps the full unsigned range')
 assert(api.u32(16) == nil, 'unmapped address reads fail cleanly')
 -- The loaded lua51.dll image is never writable private data.
-pcall(ffi.cdef, 'void *GetModuleHandleA(const char *name);')
-local module = tonumber(ffi.cast('uintptr_t', ffi.C.GetModuleHandleA('lua51.dll') or ffi.C.GetModuleHandleA(nil)))
-assert(not api.writable_data(module, 16) and api.writable_region(module) == nil, 'module image refused')
+local image = module('lua51.dll')
+if image == nil then image = module(nil) end
+image = tonumber(ffi.cast('uintptr_t', image))
+assert(not api.writable_data(image, 16) and api.writable_region(image) == nil, 'module image refused')
+assert(module('kernel32.dll') ~= nil and module('fdf-not-loaded.dll') == nil, 'module lookup resolves a real module only')
 assert(not api.writable_data(16, 16) and api.writable_region(16) == nil, 'unmapped memory refused')
 
 -- No garbage per read or region query, even interpreted: in game, cold paths (the weapon scan, burst
@@ -49,5 +52,5 @@ jit.on()
 assert(read_bytes < 1 and region_bytes < 1 and load_bytes < 1 and write_bytes < 1, string.format(
     'interpreted garbage: %.1f B per u32, %.1f B per region query, %.1f B per block read, %.1f B per u32 write',
     read_bytes, region_bytes, load_bytes, write_bytes))
-print('PASS: real adapter reads, bulk and block reads, raw and u32 writes, region query; image and unmapped pages '
-    .. 'refused; no garbage per read, block read, u32 write or region query when interpreted')
+print('PASS: real adapter reads, bulk and block reads, raw and u32 writes, region query, module lookup; image and unmapped pages refused; no garbage per read, block read, u32 write or '
+    .. 'region query when interpreted')

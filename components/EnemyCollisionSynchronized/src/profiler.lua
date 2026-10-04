@@ -80,11 +80,12 @@ function P.new(api,revision)
         if p.last_update and now>=p.last_update then record(p.intervals,(now-p.last_update)*1000)end
         p.last_update=now;return now
     end
+    -- A failed update is only noticed on the next call: counted, not timed.
     function p.update_finished(start,ok)
+        if not ok then p.update_errors=(p.update_errors or 0)+1 end
         if not start then return end
         local elapsed=(clock()-start)*1000
         record(p.chain,elapsed);record(p.chain_window,elapsed)
-        if not ok then p.update_errors=(p.update_errors or 0)+1 end
     end
     local function add_unit(rows,key,elapsed,reads)
         local row=rows[key]

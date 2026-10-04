@@ -90,11 +90,61 @@ do
     local a,b,c=f.env.shutdown()
     check(f.closed and a==7 and b==nil and c==9, 'shutdown cleans up and preserves return tuple')
 end
+-- Above ~64 FPS several updates share one GetTickCount64 value (it advances in
+-- steps of about 15.6 ms). Each update is still a frame of its own: a press and
+-- a drag step that fall inside one clock step are both handled.
+do
+    local f=fixture(module)
+    local frames=f.state.frames
+    f.x,f.y=1005,515;f.down=false;f.tick(0);f.down=true;f.tick(0)
+    check(f.state.clicks==1 and f.state.last_reason=='bar_press', 'a press within one clock step grabs the thumb')
+    f.x,f.y=-2000,595;f.tick(0)
+    check(math.abs(f.value-0.6)<1e-6, 'a drag step within one clock step moves the list')
+    check(f.state.frames==frames+3, 'every update within one clock step is a frame')
+end
 do
     local f=fixture(module)
     f.state.settings.diagnostics=1
     f.press();f.move(0,650);f.release()
     for _=1,100 do f.tick() end
     check(f.logs<=1, 'opt-in diagnostics are rate limited')
+end
+-- Update errors come in bursts: error_limit (8) errors with fewer than 3600
+-- error-free frames between any two stop the addon, while errors further apart
+-- never add up. A burst writes the log at its first error and when it stops,
+-- and the stop reason, naming the burst's first error, survives shutdown.
+do
+    local f=fixture(module)
+    local pressed,failing,count=f.platform.pressed,false,0
+    f.platform.pressed=function()
+        if failing then count=count+1;error('synthetic frame failure '..count,0) end
+        return pressed()
+    end
+    local function fail_once() failing=true;f.tick();failing=false end
+    for _=1,20 do
+        fail_once()
+        for _=1,3600 do f.tick() end
+    end
+    check(f.state.errors==20 and f.state.status=='running', 'errors 3600 frames apart must never stop the addon')
+    check(f.logs==20 and f.state.burst_errors==0, 'each one-error burst writes the log once and then ends')
+    local logs=f.logs
+    for index=1,8 do
+        fail_once()
+        if index<8 then for _=1,3599 do f.tick() end end
+    end
+    check(f.state.status=='stopped after 8 errors: synthetic frame failure 21', 'a burst stops with its first error: '
+        ..tostring(f.state.status))
+    check(f.logs==logs+2, 'a stopping burst writes the log at its first error and when it stops')
+    local errors,frames=f.state.errors,f.state.frames
+    failing=true;f.tick();f.tick();failing=false
+    check(f.state.errors==errors and f.state.frames==frames, 'a stopped addon runs no frame; the game update still runs')
+    local a,b,c=f.env.shutdown()
+    check(f.state.status=='stopped after 8 errors: synthetic frame failure 21' and a==7 and b==nil and c==9,
+        'shutdown keeps the stop reason and the return tuple')
+end
+do
+    local f=fixture(module)
+    f.env.shutdown()
+    check(f.state.status=='stopped', 'a shutdown without a failure reads stopped')
 end
 print('install: '..passed..' native-only regression checks passed')

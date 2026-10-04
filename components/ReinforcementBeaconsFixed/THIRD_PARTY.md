@@ -6,4 +6,4 @@ Helldivers 2 is required. Build verification reads hashes from the user's instal
 
 HDArsenal, HD2MM and HUD+ were used for compatibility checks with locally supplied fixtures. Their executables, unpacked application sources and game resources are not bundled here.
 
-Artwork was generated with GPT-6 Astra assistance using the existing mod artwork as style references. The images include a visible AI disclosure. No repository-wide license has been selected.
+Artwork was generated with GPT-6 Astra assistance using the existing mod artwork as style references. The images include a visible AI disclosure. This repository is licensed under the Zero-Clause BSD license (0BSD, see `LICENSE`): use, copy, modify and distribute it for any purpose, with no conditions. Upstream dependencies keep their own licenses.

@@ -3,17 +3,23 @@
 local source,fixtures=assert(arg[1]),assert(arg[2])
 local ffi=require('ffi')
 local scene=dofile(fixtures..'/perf_scene.lua')
-local M=dofile(source..'/corpse_data.lua')
+local M=assert(loadfile(source..'/corpse_data.lua'))(dofile(source..'/corpse_profiles.lua'))
 local production=dofile(source..'/windows_api.lua')()
 local ticks,reads=0,0
 local api={pointer=production.pointer,address=production.address,distance=production.distance}
-local function read(at,size)reads=reads+1;ticks=ticks+.0000001;return ffi.string(at,size)end
+local function read(at,size)reads=reads+1;ticks=ticks+.0000001;return ffi.string(type(at)=='number' and ffi.cast('uint8_t *',at) or at,size)end
 local _,g,e,initial,f=scene(M,api,300,3,3)
 api.clock=function()return api.time()+ticks end
 local saved={}
 for i,storage in ipairs(f.owners)do saved[i]=ffi.string(storage,ffi.sizeof(storage))end
 local function replay(profiled,source_override)
-    local M=source_override and dofile(source_override..'/corpse_data.lua') or M
+    -- A baseline from before the allowlist moved to corpse_profiles.lua loads as one file.
+    local function load_sources(dir)
+        local profiles=io.open(dir..'/corpse_profiles.lua')
+        if not profiles then return dofile(dir..'/corpse_data.lua') end
+        profiles:close();return assert(loadfile(dir..'/corpse_data.lua'))(dofile(dir..'/corpse_profiles.lua'))
+    end
+    local M=source_override and load_sources(source_override) or M
     -- Reuse identical addresses: separately allocated scenes can change guard
     -- batching distances and therefore their legitimate read counts.
     for i,storage in ipairs(f.owners)do ffi.copy(storage,saved[i],#saved[i])end

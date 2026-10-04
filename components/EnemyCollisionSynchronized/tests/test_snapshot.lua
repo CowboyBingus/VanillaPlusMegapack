@@ -1,6 +1,6 @@
 local ffi=require('ffi')
 local source=assert(arg[1])
-local M=dofile(source..'/corpse_data.lua')
+local M=assert(loadfile(source..'/corpse_data.lua'))(dofile(source..'/corpse_profiles.lua'))
 local function fixture(corpse,native_pointers,resource)
     resource=resource or '\059\238\251\018\066\231\248\220'
     local profile=M.profiles[resource];local count=profile.bodies;local extra=count+1
@@ -125,7 +125,7 @@ local lossy_env=setmetatable({tostring=function(value)
     if type(value)=='cdata' then return 'cdata<pointer>' end
     return tostring(value)
 end},{__index=_G})
-local lossy=setfenv(assert(loadfile(source..'/corpse_data.lua')),lossy_env)()
+local lossy=setfenv(assert(loadfile(source..'/corpse_data.lua')),lossy_env)(dofile(source..'/corpse_profiles.lua'))
 for _,corpse in ipairs({false,true}) do
     local api,g,e,f=fixture(corpse,true)
     for pass=1,80 do
@@ -134,10 +134,14 @@ for _,corpse in ipairs({false,true}) do
         assert(#lossy.plan(units[1])==1)
         assert(state.preflight_getter=='verified' and state.getter_checks==17)
     end
+    -- On the ship the preflight no longer runs (it cost 3 reads a poll there);
+    -- in a mission it runs before any unit, so a changed getter is still
+    -- rejected before the first death.
     f.u(f.mode+8,0)
     local state={};local units,status=lossy.snapshot(api,g,e,state)
-    assert(status=='waiting_for_mission' and #units==0 and state.preflight_getter=='verified'
-        and state.getter_checks==1,'Ship preflight exercises the actual getter path')
+    assert(status=='waiting_for_mission' and #units==0 and state.preflight_getter=='waiting_for_mission'
+        and state.getter_checks==nil,'No preflight on the ship')
+    f.u(f.mode+8,1)
     f.p(f.getter,f.exe+0xd11661)
     state={};local ok,reason=pcall(lossy.snapshot,api,g,e,state)
     assert(not ok and tostring(reason):find('Body getter changed',1,true))

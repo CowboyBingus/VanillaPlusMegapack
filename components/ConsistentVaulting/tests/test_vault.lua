@@ -88,23 +88,47 @@ api.read=function(address,size)
     if unreadable==address then return nil end
     return ffi.string(locate(address,size),size)
 end
+-- Into a caller buffer, like the runtime's read_into (byte by byte, so the
+-- fixture itself allocates nothing either).
+api.read_into=function(address,size,buffer)
+    if unreadable==address then return false end
+    local data=locate(address,size)
+    for i=0,size-1 do buffer[i]=data[i] end
+    return true
+end
 api.pointer=function(bytes,offset)
     if not bytes then return nil end
     local v=ffi.new('uint64_t[1]');ffi.copy(v,bytes:sub((offset or 0)+1),8)
     local n=tonumber(v[0]);if n<0x10000 or n>=0x800000000000 then return nil end
     return n
 end
-api.writable_data=function(address,size)
-    return size==8 and address>=controller+0x4c and address<=controller+0x4c+9*44
-        and (address-controller-0x4c)%44==0
+-- Protection is modeled per region, as one VirtualQuery answers for a whole
+-- region: any span inside the local controller is writable. Each stored write
+-- must still land on a local query unit/actor pair.
+local function controller_span(address,size)
+    return size>0 and address>=controller and address+size<=controller+0x2b0
 end
-api.write=function(address,bytes)
-    assert(api.writable_data(address,#bytes),'Write escaped local query metadata')
+api.writable_data=controller_span
+local function store(address,bytes)
+    assert(#bytes==8 and address>=controller+0x4c and address<=controller+0x4c+9*44
+        and (address-controller-0x4c)%44==0,'Write escaped local query metadata')
     writes=writes+1
     if writes==changed_before_write then u(control,0x2ac,999);return false end
     if writes==partial_write then ffi.copy(locate(address,8),bytes,2);return false end
     if writes==fail_write then return false end
     ffi.copy(locate(address,8),bytes,8);return true
+end
+-- Like the Windows adapter: one protection query per write or per batch.
+api.write=function(address,bytes)
+    if not api.writable_data(address,#bytes) then return false end
+    return store(address,bytes)
+end
+api.write_batch=function(base,size,changes)
+    if not api.writable_data(base,size) then return false,0 end
+    for i,change in ipairs(changes) do
+        if change[1]<0 or change[1]+#change[2]>size or not store(base+change[1],change[2]) then return false,i-1 end
+    end
+    return true,#changes
 end
 local function read32(address)
     local v=ffi.new('uint32_t[1]');ffi.copy(v,api.read(address,4),4);return tonumber(v[0])
@@ -186,6 +210,11 @@ assert(not ok and reason=='query_write_failed' and read32(controller+0x4c)==444 
 reset({{actor=2},{}});actor_flags[2]=0x100000;partial_write=1;state={}
 ok,reason=patch.apply(api,game,exe,state)
 assert(not ok and reason=='query_write_failed' and read32(controller+0x4c)==444);done()
+-- A write that lands in part can leave a byte mix of the original and the new
+-- bytes: it is undone before the rollback.
+reset({{actor=2},{}});actor_flags[2]=0x100000;u(control,0x30+28,0x12345678);partial_write=1;state={}
+ok,reason=patch.apply(api,game,exe,state)
+assert(not ok and reason=='query_write_failed' and read32(controller+0x4c)==0x12345678 and writes==2);done()
 reset({{actor=2},{}});actor_flags[2]=0x100000;state={}
 local original_exit=native.exit
 native.exit=function(...)local result=original_exit(...);avatars[input_offset]=0;return result end
@@ -200,6 +229,22 @@ reset({{actor=2}});actor_flags[2]=0x100000;avatars[input_offset]=3
 run({});assert(read32(controller+0x50)==0xffffffff);done()
 reset({{actor=2},{}});actor_flags[2]=0x100000;entities[24]=0
 run({});assert(writes==0);entities[24]=151;done()
+-- A held vault keeps its prepared write while each check would prepare the
+-- same one (no restore, no new write). A changed plan restores and prepares the
+-- new one in the same check; a pair the game replaced is never restored.
+reset({{actor=2},{}});actor_flags[2]=0x100000;state={};run(state)
+local prepared_writes=writes
+for _=1,3 do
+    assert(run(state)=='local_manual_alternative_prepared' and writes==prepared_writes and state.pending)
+    assert(read32(controller+0x4c)==0 and read32(controller+0x4c+44)==444)
+end
+actor_flags[2]=0
+assert(run(state)=='native_vault_checks_retained' and read32(controller+0x4c)==444 and not state.pending);done()
+reset({{actor=2},{}});actor_flags[2]=0x100000;state={};run(state);actor_speed[1]=2
+assert(run(state)=='local_manual_metadata_fallback_prepared' and writes==3)
+assert(read32(controller+0x4c)==444 and read32(controller+0x50)==0xffffffff and state.metadata_fallbacks==1);done()
+reset({{actor=2},{}});actor_flags[2]=0x100000;state={};run(state);u(control,0x30+28,555)
+assert(run(state)=='local_manual_alternative_prepared' and writes==2 and read32(controller+0x4c)==0);done()
 
 -- Reproduce the observed lifecycle: Lua sees consumed stage 3 and count zero,
 -- although this avatar's descriptors/result counts remain in the scheduler.
@@ -222,15 +267,14 @@ native.retry=function(address)
     u(control,4,3)
     if not retry_reject then u(avatars,flags_offset+12,0x200) end
 end
-api.writable_data=function(address,size)
-    return address==controller+4 and size==4
+-- The late retry may also write the phase and whole 44-byte hits.
+store=function(address,bytes)
+    local size=#bytes
+    assert(address==controller+4 and size==4
         or size==44 and address>=controller+0x30 and address<=controller+0x30+9*44
             and (address-controller-0x30)%44==0
         or size==8 and address>=controller+0x4c and address<=controller+0x4c+9*44
-            and (address-controller-0x4c)%44==0
-end
-api.write=function(address,bytes)
-    assert(api.writable_data(address,#bytes),'Late retry escaped local controller')
+            and (address-controller-0x4c)%44==0,'Late retry escaped local controller')
     writes=writes+1
     if writes==partial_write then ffi.copy(locate(address,#bytes),bytes,math.min(2,#bytes));return false end
     if writes==fail_write then return false end
@@ -600,6 +644,8 @@ native.refresh_query=function(record,world)
     return ffi.string(out,44),1
 end
 candidate('ledge');assert(raised_calls==10)
+-- The raised pass keeps its results local: nothing lands in the shared globals.
+assert(rawget(_G,'_')==nil,'the ledge candidate search wrote the global _')
 late({{normal=.314}});top_height=2.5;candidate('ledge')
 late({{normal=.314}});top_height=.1
 assert(candidate(nil).raised_trace.passes.raised[1].result=='below_ledge_minimum')
@@ -688,11 +734,96 @@ late({{normal=.5}});actor_speed[1]=0/0
 local valid_call=pcall(patch.assist_candidate,api,game,exe,{},candidate_owner)
 assert(not valid_call and writes==0,'Invalid native result must still reach loader cleanup');done()
 
--- Real Windows adapter only writes existing private PAGE_READWRITE data.
-local real=assert(loadfile(source..'/windows_api.lua'))()()
+-- The identity chain from the slope check of the same poll stands in for the
+-- vault's own reads: the same guards in the same order (addresses, bytes and
+-- epoch) and the same plan as a snapshot that reads the chain itself.
+do
+    reset({{actor=2},{}});actor_flags[2]=0x100000
+    local full=assert(patch.snapshot(api,game,exe,nil,nil,nil))
+    local in_epoch,chain={},{}
+    for _,g in ipairs(full.epoch) do in_epoch[g]=true end
+    for i=1,17 do local g=full.guards[i];chain[i]={address=g.address,bytes=g.bytes,epoch=in_epoch[g]} end
+    local avatar={identity=chain,key={owner=owner,manager=manager,id=222},entity=owner+0xf32f18+24,
+        entity_bytes=ffi.string(entities+24,24),ai=1}
+    local reused=assert(patch.snapshot(api,game,exe,nil,nil,nil,avatar))
+    assert(#reused.guards==#full.guards and #reused.epoch==#full.epoch and reused.entity==full.entity)
+    for i,g in ipairs(full.guards) do
+        assert(reused.guards[i].address==g.address and reused.guards[i].bytes==g.bytes)
+    end
+    for i,g in ipairs(full.epoch) do assert(reused.epoch[i].address==g.address and reused.epoch[i].bytes==g.bytes) end
+    local planned,reused_plan=patch.plan(full),patch.plan(reused)
+    assert(#planned>0 and #planned==#reused_plan)
+    for i,w in ipairs(planned) do
+        assert(reused_plan[i].address==w.address and reused_plan[i].before==w.before and reused_plan[i].after==w.after)
+    end
+    done()
+end
+-- Per-check call budget of patch.apply without slope assistance (the full
+-- check is budgeted in test_slope.lua; the loader runs one check per frame, two
+-- while something is in progress).
+-- Fixture writes query protection first, as the Windows adapter's write and
+-- write_batch do.
+do
+    local budget=dofile(arg[0]:gsub('[%w_]+%.lua$','')..'frame_budget.lua')
+    local counts=budget.wrap(api)
+    local function check(label,s,limits,expected)
+        local frame,ok,reason=budget.frame(counts,patch.apply,api,game,exe,s)
+        assert(ok and reason==expected,label..': '..tostring(reason))
+        budget.check(frame,limits,label)
+    end
+    -- read_into: the same ReadProcessMemory as read (about 1-2 us in game),
+    -- into a reused buffer. Every snapshot's mission gate reads the mode pointer
+    -- and record that way and decodes them in place (one api.pointer less), so
+    -- a check outside a mission allocates nothing; the read count is unchanged.
+    reset({});u(mission,8,0)
+    check('outside a mission',{},{read_into=2},'waiting_for_mission');u(mission,8,1)
+    reset({});u(control,4,0)
+    check('idle, no vault query',{},{read=17,read_into=2,pointer=7},'waiting_for_vault_query')
+    reset({{actor=2},{}});avatars[input_offset]=0
+    check('native query, input released',{},{read=20,read_into=2,pointer=7},'waiting_for_manual_vault')
+    reset({{actor=2},{}});actor_flags[2]=0x100000;local s={}
+    -- A commit or restore is one write_batch: one protection query for the
+    -- local controller. Its writes reach it as offsets (api.distance, one per
+    -- write: arithmetic, no system call).
+    check('vault alternative prepared',s,{read=176,read_into=2,pointer=24,distance=11,native=1,writable_data=1,
+        write_batch=1},
+        'local_manual_alternative_prepared')
+    -- A held vault keeps its prepared write while the check would prepare the
+    -- same one: no restore, no write and no protection query, and no second
+    -- read of the guards the snapshot has just read.
+    check('vault held, write kept',s,{read=92,read_into=2,pointer=24,distance=10,native=1},
+        'local_manual_alternative_prepared')
+    avatars[input_offset]=0
+    check('vault released, restored',s,{read=46,read_into=2,pointer=7,distance=1,writable_data=1,write_batch=1},
+        'waiting_for_manual_vault')
+    assert(not s.pending)
+    late({{actor=2},{}});actor_flags[2]=0x100000
+    -- One batch before the native retry and one restoring after it.
+    check('late native retry',{},{read=234,read_into=2,pointer=27,distance=13,native=1,time=1,writable_data=2,
+        write_batch=2},
+        'native_local_vault_started')
+    -- Slope/ledge candidate validation: at most once per 0.1 s during a press.
+    late({{normal=.5}})
+    local frame,kind=budget.frame(counts,patch.assist_candidate,api,game,exe,{},candidate_owner)
+    assert(kind=='slope');budget.check(frame,{read=125,read_into=2,pointer=26,distance=11,native=1,time=1},'candidate')
+end
+print('PASS: per-check call budget: no protection queries while idle or waiting for a manual vault')
+
+-- Real Windows adapter (memory from bingus_memory.lua and bingus_write.lua, as the build hands it
+-- over) only writes existing private PAGE_READWRITE data.
+local runtime=assert(loadfile(source..'/bingus_runtime.lua'))()
+local memory=assert(loadfile(source..'/bingus_write.lua'))().extend(assert(loadfile(source..'/bingus_memory.lua'))().new(runtime))
+local real=assert(loadfile(source..'/windows_api.lua'))()(runtime,memory)
+assert(real==memory and type(real.time())=='number','the adapter takes the runtime clock')
 local allocation=ffi.new('uint8_t[16]')
 assert(real.writable_data(allocation,16) and real.write(allocation,'abcdefgh'))
 assert(real.read(allocation,8)=='abcdefgh')
 assert(not real.writable_data(real.module(nil),8) and not real.write(real.module(nil),'abcdefgh'))
+local batched,landed=real.write_batch(allocation,16,{{0,'12'},{14,'34'}})
+assert(batched and landed==2 and real.read(allocation,16)=='12cdefgh\0\0\0\0\0\0' .. '34')
+batched,landed=real.write_batch(allocation,16,{{0,'ab'},{15,'xy'}})
+assert(not batched and landed==1 and real.read(allocation,2)=='ab','A change past the batch must stop it')
+batched,landed=real.write_batch(real.module(nil),8,{{0,'abcdefgh'}})
+assert(not batched and landed==0)
 done()
 print('PASS: '..passed..' local query, native-check model, identity, worker, transition, rollback and Windows permission scenarios')

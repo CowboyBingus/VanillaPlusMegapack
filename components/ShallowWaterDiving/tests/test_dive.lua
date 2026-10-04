@@ -1,5 +1,21 @@
 local source=assert(arg[1])
 local ffi=require('ffi')
+-- Before anything in this process declares them: another mod that loaded
+-- first declared every Windows name this mod's code binds (the runtime's, the
+-- translation module's and the tick count the adapter used to read) with a
+-- wrong prototype (tests/hostile_vm.lua, H.clash). ffi.cdef keeps the first
+-- prototype of a name for the whole game, so everything below, the Windows
+-- adapter block included, runs against those clashing declarations.
+local H=dofile(arg[0]:gsub('[%w_]+%.lua$','')..'hostile_vm.lua')
+local CLASHED={'GetModuleHandleA','GetModuleFileNameW','GetCurrentProcess','ReadProcessMemory','WriteProcessMemory',
+    'VirtualQuery','QueryPerformanceCounter','QueryPerformanceFrequency','CreateFileW','ReadFile','CloseHandle',
+    'BCryptOpenAlgorithmProvider','BCryptCloseAlgorithmProvider','BCryptCreateHash','BCryptHashData',
+    'BCryptFinishHash','BCryptDestroyHash','GetTickCount64','GetProcAddress'}
+do
+    local count=0
+    for name,status in pairs(H.clash(CLASHED)) do assert(status=='clashed',name..': '..status);count=count+1 end
+    assert(count==#CLASHED)
+end
 local patch=assert(loadfile(source..'/dive_data.lua'))()
 local regions={}
 local function region(address,size)
@@ -433,6 +449,108 @@ do
     assert(patch.restore(api,state.pending))
 end
 print('PASS: no garbage outside a mission, while waiting, idle (full check and gate) or while a dive is held')
+-- The whole per-frame path: the loader (archive_loader.lua) on the runtime's
+-- update guard, over this patch and the fixture. A frame is one update: a
+-- check before the game's update and, while a local avatar exists or a lease
+-- or retry is in progress, one after it. The calls per frame are the checks'
+-- own (the guard and the loader add none), and a frame allocates nothing.
+-- Both Mod Options Menu paths: loader v18 (the bounded retry, which watches
+-- all session here because no menu is installed) and a loader with the
+-- after_startup capability (one registration before the first update).
+for _,kind in ipairs({'retry','after_startup'}) do
+    local budget=dofile(arg[0]:gsub('[%w_]+%.lua$','')..'frame_budget.lua')
+    local env=setmetatable({print=function() end},{__index=_G});env._G=env
+    local queued={}
+    env.CowboyBingusModLoader={api=1,version=6,open_log=function() end}
+    if kind=='after_startup' then
+        env.CowboyBingusModLoader={api=1,version=17,open_log=function() end,capabilities=setmetatable({},{__index={after_startup=true}}),
+            after_startup=function(fn) queued[#queued+1]=fn;return true end}
+    end
+    env.update=function() end
+    env.shutdown=function() end
+    local frame_api={read=api.read,write=api.write,writable_data=api.writable_data,
+        module=function(name) return name and game or 1 end,
+        module_hash=function(module) return module==game and 'game' or 'exe' end}
+    local counts=budget.wrap(frame_api)
+    local Text=assert(loadfile(source..'/bingus_text.lua'))()
+    local locales={en=assert(loadfile(source..'/../locales/en.lua'))(),bundled={}}
+    local runtime=assert(loadfile(source..'/bingus_runtime.lua'))()
+    setfenv(assert(loadfile(source..'/archive_loader.lua')),env)()(function() return frame_api end,patch,
+        {revision='frame',game_sha256='game',exe_sha256='exe'},Text,locales,runtime)
+    for _,fn in ipairs(queued) do fn() end
+    local loaded=env.ShallowWaterDive
+    assert(loaded.depth_option==(kind=='after_startup' and 'not installed' or nil),kind)
+    local function frame(label,limits,expected)
+        label=label..' ('..kind..')'
+        local calls=budget.frame(counts,env.update,1/60)
+        assert(loaded.status==expected,label..': '..tostring(loaded.status))
+        budget.check(calls,limits,label)
+        return calls
+    end
+    reset();u(mission,8,0)
+    frame('outside a mission, first update',{read=2},'waiting_for_mission')
+    frame('outside a mission',{read=2},'waiting_for_mission')
+    -- 62 checks in 31 idle frames: 2 full checks (14 reads) and 60 gates (1 read).
+    u(mission,8,1);u(avatars,local_ctl+0xf8c,0)
+    local full=0
+    for i=1,31 do
+        local calls=frame('idle in a mission '..i,{read=15},'dive_ended')
+        assert(calls.read==2 or calls.read==15,'idle frame '..i..': '..budget.describe(calls))
+        if calls.read==15 then full=full+1 end
+    end
+    assert(full==2,'idle frames with a full check: '..full)
+    -- A dive start and the held check after the update. The 31 idle frames
+    -- used up the gate, so the dive frame starts with a full check (98 reads:
+    -- the session's first dive verifies the game.dll constants; one page
+    -- check), then 31 for the held check.
+    u(avatars,local_ctl+0xf8c,0x20)
+    frame('first dive start',{read=129,writable_data=1,write=2},'airborne_reference')
+    frame('dive held',{read=62},'airborne_reference')
+    u(avatars,local_ctl+0xf8c,0)
+    frame('dive end',{read=50,write=1},'dive_ended')
+    frame('idle after a dive',{read=2},'dive_ended')
+    -- Garbage per frame with the JIT off (the interpreter is the worst case).
+    local function garbage(label,setup)
+        jit.off();jit.flush()
+        setup();env.update(1/60)
+        collectgarbage('collect');collectgarbage('stop')
+        local start=collectgarbage('count')
+        for _=1,100 do env.update(1/60) end
+        local bytes=(collectgarbage('count')-start)*1024
+        collectgarbage('restart');jit.on()
+        assert(bytes==0,label..' ('..kind..'): '..bytes..' bytes in 100 frames')
+    end
+    garbage('guarded update outside a mission',function() u(mission,8,0) end)
+    garbage('guarded update idle in a mission',function() u(mission,8,1);u(avatars,local_ctl+0xf8c,0) end)
+    garbage('guarded update with a dive held',function() f(water,16,0.011);u(avatars,local_ctl+0xf8c,0x20) end)
+    assert(loaded.status=='airborne_reference' and loaded.pending)
+    -- Compiled (JIT on), once the traces have settled: recording a trace
+    -- allocates, and the idle checks' traces settle within about 2000 frames
+    -- here. One loop serves the warm-up and the windows, so the windows record
+    -- nothing new. Every window of 100 frames then allocates nothing.
+    local function frames(n) for _=1,n do env.update(1/60) end end
+    local function compiled_garbage(label,setup)
+        jit.on();jit.flush()
+        setup();frames(3000)
+        for window=1,3 do
+            collectgarbage('collect');collectgarbage('stop')
+            local start=collectgarbage('count')
+            frames(100)
+            local bytes=(collectgarbage('count')-start)*1024
+            collectgarbage('restart')
+            assert(bytes==0,label..' ('..kind..', compiled): '..bytes..' bytes in 100 frames, window '..window)
+        end
+    end
+    u(avatars,local_ctl+0xf8c,0);env.update(1/60)
+    compiled_garbage('guarded update outside a mission',function() u(mission,8,0) end)
+    compiled_garbage('guarded update idle in a mission',function() u(mission,8,1);u(avatars,local_ctl+0xf8c,0) end)
+    compiled_garbage('guarded update with a dive held',function() f(water,16,0.011);u(avatars,local_ctl+0xf8c,0x20) end)
+    assert(loaded.status=='airborne_reference' and loaded.pending)
+    u(avatars,local_ctl+0xf8c,0);env.update(1/60)
+    assert(loaded.status=='dive_ended' and not loaded.pending and env.BingusRuntime.statuses.ShallowWaterDiving.errors==0)
+    env.shutdown();assert(loaded.status=='stopped')
+end
+print('PASS: guarded update (loader on the runtime guard), with the menu retry and with after_startup: per frame only the checks\' calls (2 reads outside a mission, 2 or 15 idle, 62 with a dive held) and no garbage outside a mission, idle or with a dive held, interpreted or compiled')
 -- Machine code in the LuaJIT cache the game and every mod share: idle and
 -- held-dive checks (with this fixture) compile about 13 KB while the full
 -- snapshot stays interpreted, about 50 KB if it is compiled.
@@ -452,11 +570,27 @@ do
     assert(bytes<32*1024,string.format('%.1f KB of machine code for idle and held checks',bytes/1024))
 end
 print('PASS: idle and held-dive checks compile under 32 KB of machine code')
--- The Windows adapter reads into a caller buffer without allocating, refuses
--- ranges outside that buffer and unreadable memory, and takes the same number
--- addresses for string reads and checked writes.
+-- The next free ID in the C type table every mod in the VM shares. A probe
+-- struct itself takes two type IDs.
+local function next_type() return tonumber(ffi.typeof('struct { int probe; }')) end
+-- The Windows adapter, on Bingus Shared Runtime v1 passed in as the build does
+-- (the core, and bingus_memory.lua's api extended by bingus_write.lua): reads
+-- into a caller buffer without allocating, refuses ranges outside that buffer
+-- and unreadable memory, and takes the same number addresses for string reads
+-- and writes. It binds no Windows function under its plain name, so the
+-- clashing declarations made at the top of this file (H.clash) change nothing.
 do
-    local win=assert(loadfile(source..'/windows_api.lua'))()()
+    local runtime=assert(loadfile(source..'/bingus_runtime.lua'))()
+    local function memory_api()
+        return assert(loadfile(source..'/bingus_write.lua'))().extend(assert(loadfile(source..'/bingus_memory.lua'))().new(runtime))
+    end
+    local make=assert(loadfile(source..'/windows_api.lua'))()
+    -- The adapter refuses a memory api without the write side (its own checked
+    -- writes cast the runtime's WriteProcessMemory) and a missing runtime.
+    assert(not pcall(make,runtime,assert(loadfile(source..'/bingus_memory.lua'))().new(runtime)),'memory api without writes')
+    assert(not pcall(make,nil,memory_api()) and not pcall(make,runtime),'runtime and memory api required')
+    local memory_used=memory_api()
+    local win=make(runtime,memory_used)
     local memory=ffi.new('uint8_t[64]');for i=0,63 do memory[i]=i end
     local at=tonumber(ffi.cast('uintptr_t',memory))
     local data=ffi.new('uint8_t[32]')
@@ -466,26 +600,59 @@ do
     assert(win.read(0x10,4,into,0)==nil and win.read(0x10,4)==nil)
     assert(win.read(at+4,4)=='\4\5\6\7')
     assert(win.write(at+60,'\9\8\7\6') and memory[60]==9 and memory[63]==6)
-    -- The page check reports the span it approved and counts its queries; a
-    -- write the caller vouches for (checked) makes none.
-    local ok,low,high=win.writable_data(at+8,12)
-    assert(ok and low<=at+8 and at+20<=high and low%4096==0,'page check span')
+    -- The page check approves the whole pages around the range and counts its
+    -- queries; a write the caller vouches for (checked) makes none, any other
+    -- write is checked by the runtime, and image memory is refused.
     local before=win.queries
+    local ok,low,high=win.writable_data(at+8,12)
+    assert(ok and low%4096==0 and high%4096==0 and low<=at+8 and at+20<=high and high-low<=8192,'page check span')
+    assert(win.queries==before+1 and not win.writable_data(at,0) and win.queries==before+1)
+    before=win.queries
     assert(win.write(at+56,'\1\2\3\4',true) and memory[56]==1 and win.queries==before)
     assert(win.write(at+56,'\5\6\7\8') and memory[56]==5 and win.queries==before+1)
+    local image=tonumber(ffi.cast('uintptr_t',win.module(nil)))
+    assert(not win.writable_data(image,8) and not win.write(image,'\0') and win.queries==before+3,'image memory')
+    -- Module hashes come from the runtime: read once per session for every mod.
+    local shared=runtime.shared()
+    local hash=win.module_hash(win.module(nil))
+    local reads=shared.hash_reads
+    assert(#hash==64 and win.module_hash(win.module(nil))==hash and shared.hash_reads==reads,'session hash cache')
+    -- The log throttle's clock is the runtime's own (no wrapper, nothing per call
+    -- but QueryPerformanceCounter), in seconds like the GetTickCount64 / 1000 it
+    -- replaces: both agree over at least 60 ms (the tick count moves in steps of
+    -- about 16 ms).
+    assert(win.time==memory_used.time and type(win.time())=='number' and win.time()>0)
+    ffi.cdef('uint64_t swd_test_GetTickCount64(void) __asm__("GetTickCount64");')
+    local tick=ffi.load('kernel32').swd_test_GetTickCount64
+    local t0,k0=win.time(),tonumber(tick())
+    while tonumber(tick())-k0<60 do end
+    local seconds,ticks=win.time()-t0,(tonumber(tick())-k0)/1000
+    assert(math.abs(seconds-ticks)<0.035,'time() in seconds: '..seconds..' s against '..ticks..' s of tick count')
+    -- Buffer reads allocate nothing and a string read only its string: reading
+    -- the same bytes again finds that string already interned. A page check
+    -- allocates nothing either (the runtime takes number addresses without a
+    -- pointer cast), so a dive start's check adds no garbage, and neither does
+    -- the clock (the tick count it replaces boxed 16 B per call).
     jit.off();collectgarbage('collect');collectgarbage('stop')
     local start=collectgarbage('count')
     for _=1,100 do assert(win.read(at,32,into,0)) end
+    for _=1,100 do assert(win.read(at+4,4)=='\4\5\6\7') end
+    for _=1,100 do assert(win.writable_data(at+8,12)) end
+    for _=1,100 do assert(win.time()>0) end
     local bytes=(collectgarbage('count')-start)*1024
     collectgarbage('restart');jit.on()
-    assert(bytes==0,'Windows adapter: '..bytes..' bytes in 100 buffer reads')
+    assert(bytes==0,'Windows adapter: '..bytes..' bytes in 100 buffer reads, 100 string reads, 100 page checks and 100 clock reads')
+    -- Its declarations and the runtime's are made once per process: creating
+    -- the adapter again adds no C types to the table every mod shares.
+    local first=next_type()
+    for _=1,5 do assert(loadfile(source..'/windows_api.lua'))()(runtime,memory_api()) end
+    local added=next_type()-first-2
+    assert(added==0,'5 adapter creations added '..added..' C types')
 end
-print('PASS: Windows adapter reads into caller buffers without garbage, rejects bad ranges and unreadable memory')
+print('PASS: Windows adapter on Bingus Shared Runtime v1 (core, memory and write files): works after another mod declared 19 Windows names (every one the runtime and the translation module bind, and the tick count) with wrong prototypes (H.clash), buffer reads without garbage and string reads allocating only their string, bad ranges and unreadable memory rejected, whole-page checks counted and allocation-free, image memory refused, module hashes once per session, the runtime\'s clock in seconds without garbage')
 -- Loading the module again adds no C types to the table every mod in the VM
--- shares (the Megapack's loader test loads it thousands of times). A probe
--- struct itself takes two type IDs.
+-- shares (the Megapack's loader test loads it thousands of times).
 do
-    local function next_type() return tonumber(ffi.typeof('struct { int probe; }')) end
     local before=next_type()
     for _=1,20 do assert(loadfile(source..'/dive_data.lua'))() end
     local added=next_type()-before-2

@@ -1,7 +1,9 @@
-- Know Your Constellation v4.0: lists every enemy a mission can spawn, named as on the Helldivers wiki, with spawn-rate meters for large enemies.
-- Better Lobby Management v1.1: adds CANCEL SOS, which stops the host's SOS Beacon in a mission.
-- Mod Options Menu v1.1, Mod Bindings Menu v2.1, Ship Station Hotkeys v1.8 and Shallow Water Diving v3.9: texts follow the game's Text Language when a translation is installed.
-- Adds the translation kit: this repository's `components` folder covers all six mods with text (see TRANSLATING.md).
-- Discontinues the Rows package, since Know Your Constellation v4 has a single layout; Rows users should switch to this pack.
-- Measured in live play with all 17 options: the updated mods cost the same as their previous versions (Know Your Constellation about 0.05 ms per frame while its forecast is shown).
-- The other eleven mods are unchanged from v35.
+- Every option is updated to its 2026-10-04 release; each mod's own notes list its changes.
+- All 17 mods now pause after an error in the game or another mod instead of stopping, and resume once updates run cleanly again.
+- Several mods no longer locate their game data again every frame: Sentry Aim Retention, Controllable Hover Pack, Consistent Vaulting and Arc Thrower Revamped make far fewer memory reads.
+- Fixed: Know Your Constellation lists Hive Lords on Hive Worlds again, and other planet campaign modifiers apply again.
+- Fixed: Clickable Scrollbars skipped updates at high frame rates, so drags were less smooth and short clicks could be missed.
+- New: Simplified Chinese for Know Your Constellation and Better Lobby Management, by joyrhyme.
+- New: Mod Options Menu fits more than 8 mods on its MODS tab.
+- Requires Bingus Shared Loader v18 or newer; v19 is current and recommended.
+- Measured in live play with every option: the 17 mods together cost 0.25 ms per frame in missions (0.59 before this release) and 0.17 on the ship.

@@ -11,7 +11,8 @@ from module import build_module
 from package import package_release
 
 MODULE='mods/cowboybingus/consistent_vaulting'
-REVISION='data-v8.8'
+REVISION='data-v8.9'
+VERSION='v8.9'
 FORBIDDEN=('VirtualAlloc','VirtualProtect','FlushInstructionCache','CreateRemoteThread',
            'RtlAddFunctionTable','RtlDeleteFunctionTable','LoadLibrary')
 def run(args,**kwargs):
@@ -36,9 +37,9 @@ def main():
     (build/ARCHIVE).write_bytes(make_archive(resources))
     for suffix in ('.stream','.gpu_resources'): (build/(ARCHIVE+suffix)).write_bytes(b'')
     files={f'data/{ARCHIVE}{suffix}':f'build/{ARCHIVE}{suffix}' for suffix in ('','.stream','.gpu_resources')}
-    report={'name':'Consistent Vaulting','slug':'ConsistentVaulting','revision':REVISION,
+    report={'name':'Consistent Vaulting','slug':'ConsistentVaulting','revision':REVISION,'version':VERSION,
         'guid':'d4710210-3515-4f69-b6c5-b1d3c653e784',
-        'description':'Makes manual vaulting more forgiving with fresh obstacle checks, higher ledge detection and controlled steep-surface support for your Helldiver. Requires Bingus Shared Loader v4 or newer / API 1 or newer.',
+        'description':'Makes manual vaulting more forgiving with fresh obstacle checks, higher ledge detection and controlled steep-surface support for your Helldiver. Requires Bingus Shared Loader v18 or newer.',
         'game_exe_sha256':EXE_SHA,'game_dll_sha256':GAME_DLL_SHA,'deployment_files':files,
         'files':{p:sha((ROOT/p).read_bytes()) for p in files.values()},
         'requires':[{'name':'Bingus Shared Loader','api':1,'revision':'loader-v4'}],
@@ -75,5 +76,5 @@ def main():
     report['release']={'path':Path(os.path.relpath(release,ROOT)).as_posix(),'sha256':sha(release.read_bytes())}
     (build/'build-report.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
     (build/'offline-tests.txt').write_text(tests,encoding='utf-8')
-    print(tests.strip());print('Built '+str(release)+'; in-game validation pending.')
+    print(tests.strip());print('Built '+str(release)+'.')
 if __name__=='__main__': main()

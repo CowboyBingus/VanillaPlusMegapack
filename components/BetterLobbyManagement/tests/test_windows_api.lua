@@ -1,14 +1,16 @@
 -- The Windows and native-call layer in the game's own LuaJIT (run through
 -- run_game_lua.py): loads, guarded reads, page checks, checked writes, C
 -- strings, the aligned scratch block, 64-bit peer ids through the native
--- pointer types, module hashing and zero garbage; then the whole update hook
--- and the region check on real memory, with garbage, compiled code and time
--- measured.
+-- pointer types, module hashing (through the shared runtime's session cache)
+-- and zero garbage; then the whole update hook (the runtime's guard) and the
+-- region check on real memory, with garbage, compiled code and time measured.
 -- Usage: test_windows_api.lua <src directory> [SHA-256 of the loaded lua51.dll]
 local source = assert(arg[1], 'source directory required')
 local lua51_sha256 = arg[2]
 local ffi = require('ffi')
 local create_api = dofile(source .. '/windows_api.lua')
+local Runtime = dofile(source .. '/bingus_runtime.lua')
+local Memory = dofile(source .. '/bingus_memory.lua')
 local G = dofile(source .. '/game.lua')
 local L = dofile(source .. '/lobby.lua')
 local R = dofile(source .. '/region.lua')
@@ -16,12 +18,24 @@ local M = dofile(source .. '/menu.lua')
 local C = dofile(source .. '/chat.lua')
 local S = dofile(source .. '/scanner.lua')
 local B = dofile(source .. '/sos.lua')
-local api = create_api()
-assert(create_api() ~= api, 'each call builds its own api') -- repeated setup must not fail
+local api = create_api(Memory.new(Runtime))
+assert(create_api(Memory.new(Runtime)) ~= api, 'each call builds its own api') -- repeated setup must not fail
+assert(not pcall(create_api), 'the memory api of the shared runtime is required')
 local function address(pointer) return tonumber(ffi.cast('uintptr_t', pointer)) end
+-- Memory this test owns in a committed region of its own, as the game's heap
+-- objects have: an FFI allocation can straddle two of the allocator's regions
+-- (it merges adjacent ones), and the page check then (rightly) refuses it, so
+-- a test using ffi.new memory for page checks fails by memory layout alone.
+ffi.cdef('void *blm_test_VirtualAlloc(void *address, size_t size, uint32_t type, uint32_t protect) '
+    .. '__asm__("VirtualAlloc");')
+local function committed(size)
+    local base = ffi.load('kernel32').blm_test_VirtualAlloc(nil, size, 0x3000, 4)
+    assert(base ~= nil, 'test memory')
+    return base
+end
 
 -- Loads and guarded reads on memory this test owns.
-local block = ffi.new('uint32_t[16]')
+local block = ffi.cast('uint32_t *', committed(4096))
 local a = address(block)
 block[0], block[1], block[2] = 0xbe929838, 0x1be, 20
 assert(api.load8(a) == 0x38 and api.load32(a) == 0xbe929838 and api.load32(a + 8) == 20)
@@ -42,7 +56,10 @@ assert(api.read_bytes(a, 17) == nil, 'longer than the reused buffer')
 -- Page checks: private read/write memory yes; module images, free memory and
 -- ranges past the region end no.
 local queries = api.queries
-local code = address(ffi.cast('void *', ffi.load('kernel32').GetCurrentProcess))
+-- An export's address through the test's own FFI name (windows_api.lua declares
+-- only its private names): code memory, and the cross-check for api.export.
+ffi.cdef('void *blm_test_GetCurrentProcess(void) __asm__("GetCurrentProcess");')
+local code = address(ffi.cast('void *', ffi.load('kernel32').blm_test_GetCurrentProcess))
 assert(api.writable_data(a, 64) == true)
 assert(api.writable_data(code, 4) == false, 'module image is not writable data')
 assert(api.writable_data(16, 4) == false, 'free memory is not writable data')
@@ -150,11 +167,18 @@ assert(api.module('game.dll') == nil, 'the game is not loaded in a test process'
 assert(api.export(api.module('kernel32.dll'), 'GetCurrentProcess') == code)
 assert(api.export(api.module('kernel32.dll'), 'NoSuchExport') == nil)
 local lua51 = assert(api.module('lua51.dll'), 'run inside the game lua51.dll')
+local shared = Runtime.shared()
+local reads = shared.hash_reads
 local digest = api.module_sha256(lua51)
 assert(#digest == 64 and digest:match('^[0-9A-F]+$'))
 if lua51_sha256 then assert(digest == lua51_sha256:upper(), 'module hash mismatch') end
+-- The session cache every mod on the runtime shares (audit P2-11): the file is
+-- read once, whichever api or mod asks again.
+assert(shared.hash_reads == reads + 1, 'the module file read once')
+assert(api.module_sha256(lua51) == digest and create_api(Memory.new(Runtime)).module_sha256(lua51) == digest)
+assert(shared.hash_reads == reads + 1, 'the same module is never hashed again this session')
 print('PASS: loads, guarded reads, page checks (private data only), checked writes, C strings, aligned scratch, '
-    .. '64-bit peer ids through the native pointer types, module lookup, exports and SHA-256')
+    .. '64-bit peer ids through the native pointer types, module lookup, exports and SHA-256 (read once per session)')
 
 -- Garbage: the per-frame primitives allocate nothing. The loop runs once to
 -- compile first: the JIT's own trace objects live in the same heap.
@@ -266,7 +290,7 @@ end
 local installer = setfenv(assert(loadfile(source .. '/addon.lua')), installed)()
 local Text = dofile(source .. '/bingus_text.lua')
 installer(function() return addon_api end, G, L, R, M, C, S, B, Text, {en = dofile(source .. '/../locales/en.lua'),
-    bundled = {}}, {version = 'test', game_sha256 = 'G', exe_sha256 = 'E'})
+    bundled = {}}, {version = 'test', game_sha256 = 'G', exe_sha256 = 'E', runtime = Runtime})
 local mod = installed.BetterLobbyManagement
 assert(mod.status == 'ready', mod.status)
 local update = installed.update
@@ -348,12 +372,9 @@ print('PASS: the update hook on real memory: no session, alone, as a client, hos
 -- The region check on real memory: a config object laid out like the game's,
 -- the server's 16 pairs, own continent NA; the flags are written once, then
 -- every check is loads only and allocates nothing. The object gets a
--- committed region of its own, as the game's heap object has: an FFI
--- allocation can straddle two regions, and the mod's page check then
--- (rightly) refuses the write.
-pcall(ffi.cdef, 'void *VirtualAlloc(void *address, size_t size, uint32_t type, uint32_t protect);')
-local config = address(ffi.load('kernel32').VirtualAlloc(nil, 0x1b000, 0x3000, 4))
-assert(config ~= 0, 'test config region')
+-- committed region of its own (committed above), as the game's heap object
+-- has.
+local config = address(committed(0x1b000))
 ffi.cast('uint64_t *', game + R.CONFIG_PTR)[0] = config
 local function words_at(at) return ffi.cast('uint32_t *', at) end
 for _, offset in ipairs({R.TABLE, R.SYNCED_TABLE}) do

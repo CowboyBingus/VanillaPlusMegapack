@@ -5,6 +5,8 @@ local budget = dofile(root .. '/tests/frame_budget.lua')
 _G.FLAME_DAMAGE_FIXED_TEST = true
 local Fix = dofile(root .. '/src/flame_damage_fixed.lua')
 _G.FLAME_DAMAGE_FIXED_TEST = nil
+-- The mod installs the shared runtime's update guard; the guard tests build it the same way the mod does.
+local runtime = dofile(root .. '/src/bingus_runtime.lua')
 local PRINT_BUDGETS = os.getenv('FDF_PRINT_BUDGETS') ~= nil
 
 local function le32(v) return string.char(v % 256, math.floor(v / 256) % 256, math.floor(v / 65536) % 256, math.floor(v / 16777216) % 256) end
@@ -645,14 +647,16 @@ do
     m.poke(PM_LISTS + 24 * 5, le32(0)) -- the burst's flame instance died
     step(fix, 5)
     bodies_are(m, ARM_FAMILY_BODIES, 2047, 'still grouped between bursts')
-    -- The weapon scan confirms the group (one read per span).
+    -- The weapon scan confirms the group: one read per span, and the allocator (7 reads; was 22 reads: the group is
+    -- checked at every use, since nothing reserves it).
     f = next_scan_frame(fix, counts)
-    pin(f, {u32 = 22, load = 1}, 'scan frame with the group check')
-    -- Second burst: the group is confirmed with one read; only the new instance is written.
+    pin(f, {u32 = 29, load = 1}, 'scan frame with the group check')
+    -- Second burst: the bodies are confirmed with one read and the group in the allocator (7 reads; was 99 reads in
+    -- all: the group is checked at every use); only the new instance is written.
     local before = #lines
     m.poke(PM_LISTS + 24 * 5, le32(2)); m.poke(ARM_INSTANCE_ID, le32(ID2)); m.poke(ARM_STATE, le32(2))
     f = budget.frame(counts, fix.step, dt)
-    pin(f, {u32 = 99, load = 1, writable_region = 1, write_u32 = 5}, 'second burst start')
+    pin(f, {u32 = 106, load = 1, writable_region = 1, write_u32 = 5}, 'second burst start')
     bodies_are(m, ARM_FAMILY_BODIES, 2047, 'second burst')
     for index = 7, 11 do assert(layer_of(m, index) == FLAME_G, 'second instance system ' .. index .. ' grouped') end
     assert(layer_of(m, 12) == 0x4a and #lines == before, 'other filter untouched, nothing logged')
@@ -717,6 +721,146 @@ do
     assert(filter_of(m, 9) == 48, 'the new layer is kept')
     m.poke(ARM_STATE, le32(2)); m.poke(ARM_INSTANCE_ID, le32(ID1)); step(fix)
     for _, index in ipairs(ARM_FAMILY_BODIES) do assert(group_of(m, index) == 0, 'not grouped again: ' .. index) end
+end
+
+-- A rescan never loses track of the grouped bodies: until it is complete the last complete scan stays in use, so a
+-- weapon released mid-rescan (it left, below 40 FPS when the 0.5 s weapon scan lands inside the rescan, or after a
+-- rescan started by a burst) leaves no body in its group. v1.1 cleared the kept bodies when a rescan began and
+-- left all 21 grouped.
+do
+    local m = world(); physics(m, {limit = 4000}) -- 10 blocks: a body scan takes 3 frames
+    local fix = Fix.new(m.api, GAME, EXE, function() end)
+    step(fix, 20)
+    m.poke(ARM_STATE, le32(2)); m.poke(ARM_INSTANCE_ID, le32(ID1)); step(fix)
+    m.poke(ARM_STATE, le32(0)); step(fix, 2)
+    bodies_are(m, ARM_FAMILY_BODIES, 2047, 'grouped before the rescan')
+    local arm = fix.weapons[ARM_STATE]
+    m.api.write_u32(BODIES + 160 * 7 + 144, 0xc0000777) -- body 7 rebuilt: the next weapon scan starts a rescan
+    for _ = 1, 40 do
+        fix.step(dt)
+        if fix.scanning == arm then break end
+    end
+    assert(fix.scanning == arm and arm.job_ok and arm.job.n == OWN_ARM, 'mid-rescan, the last complete scan stays in use')
+    m.poke(SPRAY_MGR + 0x38, le32(0)) -- the weapon leaves before the rescan is done
+    fix.scan()
+    assert(fix.scanning == nil and next(fix.weapons) == nil, 'weapon dropped, rescan abandoned')
+    bodies_are(m, {}, 2047, 'released mid-rescan')
+end
+
+-- ---- a private group stays this mod's alone (nothing reserves it) -------------------------------------------
+-- Clears group g's free bit in the allocator, as if the game had handed it out.
+local function allocate(m, g)
+    local address = BITMAP + 8 + 4 * math.floor(g / 32)
+    local word = m.word(address)
+    local bitv = 2 ^ (g % 32)
+    if math.floor(word / bitv) % 2 == 1 then m.api.write_u32(address, word - bitv) end
+end
+local function arm_grouped(options)
+    local m = world(); physics(m, options)
+    local lines = {}
+    local fix = Fix.new(m.api, GAME, EXE, function(line) lines[#lines + 1] = line end)
+    step(fix, 6)
+    m.poke(ARM_STATE, le32(2)); m.poke(ARM_INSTANCE_ID, le32(ID1)); step(fix)
+    return m, fix, lines
+end
+do
+    -- The allocator hands out the weapon's group between bursts: the next weapon scan sees it (the group is checked
+    -- at every use), the bodies and the live flame systems leave it at once, and the next burst moves to 2046.
+    local m, fix, lines = arm_grouped()
+    local arm = fix.weapons[ARM_STATE]
+    m.poke(ARM_STATE, le32(3)); step(fix, 2)
+    assert(arm.group == 2047 and group_of(m, 0) == 2047 and layer_of(m, 1) == FLAME_G, 'grouped in 2047')
+    allocate(m, 2047)
+    local counts = budget.wrap(m.api)
+    local f = next_scan_frame(fix, counts)
+    -- Once: the span read and the allocator (as every 0.5 s), then the 21 bodies (a release) and the flame slot with
+    -- its live instance's 5 systems.
+    pin(f, {u32 = 96, load = 2, writable_region = 2, write_u32 = OWN_ARM + 5}, 'weapon scan: group handed out')
+    bodies_are(m, {}, 2047, 'left the handed-out group')
+    for index = 1, 5 do assert(layer_of(m, index) == 11, 'flame system ' .. index .. ' back to layer 11') end
+    assert(arm.group == nil and not arm.marked, 'the weapon holds no group')
+    assert(table.concat(lines, ' | '):find("group 2047 is no longer this mod's alone %(the game's group allocator handed it out%)"),
+        table.concat(lines, ' | '))
+    m.poke(ARM_STATE, le32(1)); m.poke(ARM_INSTANCE_ID, le32(ID2)); m.poke(PM_LISTS + 24 * 5, le32(2)); step(fix)
+    bodies_are(m, ARM_FAMILY_BODIES, 2046, 'next burst: group 2046')
+    for index = 7, 11 do assert(layer_of(m, index) == 11 + 2046 * 2097152, 'burst instance in 2046') end
+    assert(arm.group == 2046, 'the weapon holds 2046')
+end
+do
+    -- Handed out while the weapon rests, found at the burst start itself: it moves to 2046 within that frame, and the
+    -- burst's flame systems join 2046.
+    local m, fix = arm_grouped({instances = 2})
+    m.poke(ARM_STATE, le32(0)); step(fix, 2)
+    allocate(m, 2047)
+    local counts = budget.wrap(m.api)
+    m.poke(ARM_STATE, le32(1)); m.poke(ARM_INSTANCE_ID, le32(ID2))
+    local f = budget.frame(counts, fix.step, dt)
+    -- Once: the burst start (106 reads), the 2047 check that fails, the release (21 writes), the flame slot and both
+    -- live instances, 2046's check, the regrouping (21 writes) and the new instance's 5 systems.
+    pin(f, {u32 = 236, load = 3, writable_region = 4, write_u32 = 2 * OWN_ARM + 10}, 'burst start: group handed out')
+    bodies_are(m, ARM_FAMILY_BODIES, 2046, 'moved to 2046 at the burst start')
+    for index = 1, 5 do assert(layer_of(m, index) == 11, 'the old instance left 2047') end
+    for index = 7, 11 do assert(layer_of(m, index) == 11 + 2046 * 2097152, 'the new instance is in 2046') end
+end
+do
+    -- Another mod's body (here a Charger hit-box) already carries 2047 when the arm's bodies are scanned: the first
+    -- burst skips 2047 (logged once) and the other body is never touched.
+    local m = world(); physics(m)
+    m.api.write_u32(BODIES + 160 * 27 + 108, 20 + 2047 * 2097152)
+    local lines = {}
+    local fix = Fix.new(m.api, GAME, EXE, function(line) lines[#lines + 1] = line end)
+    step(fix, 6)
+    assert(fix.weapons[ARM_STATE].job.foreign[2047] and not fix.weapons[ARM_STATE].job.foreign[2046], 'census')
+    m.poke(ARM_STATE, le32(2)); m.poke(ARM_INSTANCE_ID, le32(ID1)); step(fix)
+    for _, index in ipairs(ARM_FAMILY_BODIES) do assert(group_of(m, index) == 2046, 'arm body ' .. index .. ' in 2046') end
+    assert(group_of(m, 27) == 2047 and layer_of(m, 1) == 11 + 2046 * 2097152, 'other body untouched, flame in 2046')
+    assert(table.concat(lines, ' | '):find('group 2047 not used: other bodies carry it'), table.concat(lines, ' | '))
+    m.poke(ARM_STATE, le32(0)); m.poke(SPRAY_MGR + 0x38, le32(0))
+    next_scan_frame(fix, budget.wrap(m.api))
+    assert(group_of(m, 27) == 2047 and group_of(m, 0) == 0, 'release leaves the other body alone')
+end
+do
+    -- This mod's other weapon's bodies are not "other bodies": the Flame Sentry grouped in 2047 before the arm's scan.
+    local m = world(); physics(m)
+    local fix = Fix.new(m.api, GAME, EXE, function() end)
+    step(fix, 2) -- the Sentry is scanned; the arm's family is looked up next
+    m.poke(SENTRY_STATE, le32(2)); m.poke(SENTRY_INSTANCE_ID, le32(ID1)); step(fix)
+    for _, index in ipairs(SENTRY_BODIES) do assert(group_of(m, index) == 2047, 'sentry body ' .. index .. ' in 2047') end
+    step(fix, 4)
+    local arm = fix.weapons[ARM_STATE]
+    assert(arm.job_ok and not arm.job.foreign[2047], 'the Sentry\'s bodies are this mod\'s own')
+    m.poke(ARM_STATE, le32(2)); m.poke(ARM_INSTANCE_ID, le32(ID2)); m.poke(PM_LISTS + 24 * 5, le32(2)); step(fix)
+    for _, index in ipairs(ARM_FAMILY_BODIES) do assert(group_of(m, index) == 2046, 'arm body ' .. index .. ' in 2046') end
+    for _, index in ipairs(SENTRY_BODIES) do assert(group_of(m, index) == 2047, 'sentry body ' .. index .. ' kept') end
+end
+do
+    -- Other bodies start carrying the weapon's group after it was grouped: the next rescan (here after a rebuilt
+    -- hit-box) finds them and the weapon leaves the group at once; the next burst moves to 2046.
+    local m, fix, lines = arm_grouped()
+    local arm = fix.weapons[ARM_STATE]
+    m.poke(ARM_STATE, le32(0)); step(fix, 2)
+    m.api.write_u32(BODIES + 160 * 28 + 108, 20 + 2047 * 2097152) -- another mod's body joins 2047
+    m.api.write_u32(BODIES + 160 * 7 + 144, 0xc0000777)          -- a rebuilt hit-box: rescan
+    step(fix, 40)
+    assert(arm.group == nil and not arm.marked and group_of(m, 28) == 2047, 'left 2047, the other body untouched')
+    for _, index in ipairs(ARM_FAMILY_BODIES) do assert(group_of(m, index) == 0, 'body ' .. index .. ' left 2047') end
+    assert(table.concat(lines, ' | '):find("group 2047 is no longer this mod's alone %(other bodies carry it%)"),
+        table.concat(lines, ' | '))
+    m.poke(ARM_STATE, le32(2)); m.poke(ARM_INSTANCE_ID, le32(ID2)); m.poke(PM_LISTS + 24 * 5, le32(2)); step(fix)
+    for _, index in ipairs(ARM_FAMILY_BODIES) do assert(group_of(m, index) == 2046, 'regrouped in 2046: ' .. index) end
+    assert(group_of(m, 28) == 2047, 'the other body keeps its group')
+end
+do
+    -- No usable group left: the weapon keeps the game's own collision (logged once); nothing is written.
+    local m, fix, lines = arm_grouped()
+    m.poke(ARM_STATE, le32(0)); step(fix, 2)
+    for g = 2040, 2047 do allocate(m, g) end
+    step(fix, 40)
+    bodies_are(m, {}, 2047, 'left 2047')
+    m.poke(ARM_STATE, le32(2)); m.poke(ARM_INSTANCE_ID, le32(ID2)); m.poke(PM_LISTS + 24 * 5, le32(2)); step(fix)
+    bodies_are(m, {}, 2047, 'no group')
+    for index = 7, 11 do assert(layer_of(m, index) == 11, 'the flame keeps layer 11 without a group') end
+    assert(table.concat(lines, ' | '):find('no free Havok system group'), table.concat(lines, ' | '))
 end
 
 -- Refusals: no free group, or an unknown filter, fall back to vanilla collision; the effect still fixes.
@@ -790,6 +934,217 @@ do
         present, burst, firing, after, release, idle))
 end
 
+-- ---- update chain: P1 (errors below pass through), pause with restore, P3 bursts, P2 shutdown ----------------
+local H = dofile(root .. '/tests/hostile_vm.lua')
+-- A grouped Lumberer (bodies in 2047, the burst's flame systems in 2047) under a guard in env, with the game's
+-- update below it behind a neighbour that raises when `raising` is set and a step that raises when `failing` is.
+local function guarded(options)
+    options = options or {}
+    local m = world(); physics(m, {instances = 2})
+    local lines = {}
+    local function log(line) lines[#lines + 1] = line end
+    local fix = Fix.new(m.api, GAME, EXE, log)
+    local env, ctl = {}, {raising = false, failing = false, game = 0, shutdowns = 0}
+    env.update = function(dt, extra) ctl.game = ctl.game + 1; return 'game', dt, extra end
+    env.shutdown = function(...) ctl.shutdowns = ctl.shutdowns + 1; return 'shut', ... end
+    ctl.below = H.chain(env, 'throw_below', {raise_on = function() return ctl.raising end})
+    local function step_or_fail(dt) if ctl.failing then error('step failed on purpose') end return fix.step(dt) end
+    -- The same guard the mod installs, in the test's env (so its BingusRuntime is isolated per scenario).
+    local guard = runtime.guard({name = 'FlameDamageFixed', env = env, step = step_or_fail,
+        stop = Fix.restore_on(fix), pause = Fix.restore_on(fix), log = log}).install()
+    for _ = 1, 6 do env.update(dt) end
+    m.poke(ARM_STATE, le32(1)); m.poke(ARM_INSTANCE_ID, le32(ID1)); env.update(dt)
+    m.poke(ARM_STATE, le32(3)); env.update(dt)
+    bodies_are(m, ARM_FAMILY_BODIES, 2047, 'grouped under the guard')
+    for index = 1, 5 do assert(layer_of(m, index) == FLAME_G, 'flame system ' .. index .. ' grouped') end
+    return m, fix, env, ctl, guard, lines
+end
+local function count_lines(lines, pattern)
+    local n = 0
+    for _, line in ipairs(lines) do if line:find(pattern) then n = n + 1 end end
+    return n
+end
+do
+    -- P1: arguments and returns pass through; an error below reaches the caller unchanged (the same table).
+    local m, fix, env, ctl, guard, lines = guarded()
+    local a, b, c = env.update(dt, 'extra')
+    assert(a == 'game' and b == dt and c == 'extra', 'arguments and returns pass through')
+    ctl.raising = true
+    local ok, err = pcall(env.update, dt)
+    assert(not ok and err == ctl.below.last_error, 'the error below passes through unchanged: ' .. tostring(err))
+    ctl.raising = false
+    -- Pause: the next frame restores the group writes (bodies and live flame systems), forgets the weapons and skips
+    -- the step; one log line.
+    local counts = budget.wrap(m.api)
+    local clock = fix.clock
+    local f = budget.frame(counts, env.update, dt)
+    -- Once per pause: the bodies' span read and 21 writes (as a release), then the flame slot and both live
+    -- instances (one read per system) and the 5 systems still in the group.
+    pin(f, {u32 = 116, load = 1, writable_region = 2, write_u32 = OWN_ARM + 5}, 'pause frame: group writes restored')
+    bodies_are(m, {}, 2047, 'released by the pause')
+    for index = 1, 12 do assert(layer_of(m, index) == ((index == 6 or index == 12) and 0x4a or 11), 'flame system ' .. index .. ' restored') end
+    assert(next(fix.weapons) == nil and #fix.tracked == 0 and fix.clock == clock, 'started over; the step is skipped')
+    assert(count_lines(lines, 'paused:') == 1 and guard.status.pauses == 1, table.concat(lines, ' | '))
+    -- More errors below while paused: no new pause or line; each one restarts the 60-frame wait.
+    for _ = 1, 3 do
+        ctl.raising = true; pcall(env.update, dt); ctl.raising = false
+        for _ = 1, 30 do env.update(dt) end
+    end
+    assert(fix.clock == clock and count_lines(lines, 'paused:') == 1, 'still paused')
+    for _ = 1, Fix.RESUME_FRAMES - 30 do env.update(dt) end
+    assert(fix.clock == clock, 'the updates below returned on 60 frames in a row: the step stays skipped until then')
+    env.update(dt)
+    assert(fix.clock > clock and count_lines(lines, 'resumed after') == 1, 'resumed on the next frame')
+    for _ = 1, 10 do env.update(dt) end
+    m.poke(ARM_STATE, le32(1)); m.poke(ARM_INSTANCE_ID, le32(ID2)); env.update(dt)
+    bodies_are(m, ARM_FAMILY_BODIES, 2047, 'grouped again after the resume')
+    assert(guard.running() and guard.status.lower_errors == 4, 'running, 4 errors below counted')
+    -- P2: a clean shutdown forwards every argument and return; the guard's status ends 'stopped'.
+    local r1, r2, r3 = env.shutdown('x', 'y')
+    assert(r1 == 'shut' and r2 == 'x' and r3 == 'y' and ctl.shutdowns == 1, 'shutdown passes through')
+    assert(guard.status.state == 'stopped', guard.status.state)
+end
+do
+    -- P3 below: 8 failed updates below within the clean window stop the mod; the restore runs once.
+    local m, fix, env, ctl, guard, lines = guarded()
+    for _ = 1, Fix.ERRORS do
+        ctl.raising = true; pcall(env.update, dt); ctl.raising = false
+        env.update(dt)
+    end
+    assert(not guard.running() and count_lines(lines, 'stopped after 8 failed updates below') == 1,
+        table.concat(lines, ' | '))
+    bodies_are(m, {}, 2047, 'released by the stop')
+    local game = ctl.game
+    for _ = 1, 5 do env.update(dt) end
+    assert(ctl.game == game + 5, 'the game update keeps running below a stopped mod')
+    ctl.raising = true
+    assert(not pcall(env.update, dt), 'errors below still pass through')
+    ctl.raising = false
+    env.shutdown()
+    assert(guard.status.state == 'stopped after: stopped after 8 failed updates below this mod', guard.status.state)
+end
+do
+    -- P3 below, spread out: a count starts again after 3600 clean frames, so rare errors never stop the mod.
+    local _, _, env, ctl, guard = guarded()
+    for _ = 1, 3 do
+        for _ = 1, Fix.ERRORS - 1 do
+            ctl.raising = true; pcall(env.update, dt); ctl.raising = false
+            for _ = 1, Fix.RESUME_FRAMES do env.update(dt) end
+        end
+        for _ = 1, Fix.CLEAN_FRAMES do env.update(dt) end
+    end
+    assert(guard.running() and guard.status.lower_errors == 0 and guard.status.pauses == 21, '21 rare errors below')
+end
+do
+    -- P3 own: one line per burst; a burst ends after 3600 clean frames; 8 in a burst stop the mod.
+    local m, _, env, ctl, guard, lines = guarded()
+    ctl.failing = true
+    for _ = 1, Fix.ERRORS - 1 do env.update(dt) end
+    ctl.failing = false
+    assert(guard.running() and count_lines(lines, ' error: ') == 1, 'one line for a burst of 7')
+    for _ = 1, Fix.CLEAN_FRAMES do env.update(dt) end
+    assert(guard.status.errors == 0, 'the burst ended')
+    ctl.failing = true
+    for _ = 1, Fix.ERRORS - 1 do env.update(dt) end
+    assert(guard.running() and count_lines(lines, ' error: ') == 2, 'a new burst gets its line')
+    env.update(dt)
+    assert(not guard.running() and count_lines(lines, 'stopped after 8 errors: .*step failed on purpose') == 1,
+        table.concat(lines, ' | '))
+    bodies_are(m, {}, 2047, 'released by the stop')
+    -- P2: the first failure survives shutdown, also when an error below arrives later.
+    ctl.failing, ctl.raising = false, true
+    pcall(env.update, dt)
+    env.shutdown()
+    assert(guard.status.state:find('^stopped after: stopped after 8 errors: '), guard.status.state)
+end
+do
+    -- P2: an update below that raised on the last frame before shutdown is the first failure.
+    local _, _, env, ctl, guard, lines = guarded()
+    ctl.raising = true; pcall(env.update, dt)
+    env.shutdown()
+    assert(guard.status.state == 'stopped after: the previous update failed', guard.status.state)
+end
+do
+    -- A restore that cannot write stops the mod instead of pausing it.
+    local m, _, env, ctl, guard, lines = guarded()
+    m.writable = false
+    ctl.raising = true; pcall(env.update, dt); ctl.raising = false
+    env.update(dt)
+    assert(not guard.running() and count_lines(lines, 'pause failed: body memory not writable') == 1,
+        table.concat(lines, ' | '))
+end
+do
+    -- Hostile neighbours: one re-hooking above every frame and one calling the chain below twice.
+    local m, fix, env = guarded()
+    H.chain(env, 'double_call')
+    H.chain(env, 'rehook')
+    for _ = 1, 120 do env.update(dt) end
+    m.poke(ARM_STATE, le32(1)); m.poke(ARM_INSTANCE_ID, le32(ID2)); env.update(dt)
+    bodies_are(m, ARM_FAMILY_BODIES, 2047, 'neighbours above and below')
+    assert(fix.weapons[ARM_STATE] and fix.weapons[ARM_STATE].marked, 'still working')
+end
+do
+    -- The guard allocates nothing per frame, even interpreted.
+    local _, _, env = guarded()
+    for _ = 1, 300 do env.update(dt) end
+    jit.off(); jit.flush()
+    collectgarbage('collect'); collectgarbage('stop')
+    local before = collectgarbage('count')
+    for _ = 1, 120 do env.update(dt) end
+    local bytes = (collectgarbage('count') - before) * 1024
+    collectgarbage('restart'); jit.on()
+    assert(bytes == 0, 'guarded frames allocate ' .. bytes .. ' B')
+end
+
+-- Machine code in the LuaJIT cache the game and every mod share. The straight-line rarely-run paths (burst starts,
+-- grouping, releases, the 0.5 s check, the start and end of a body scan) stay interpreted (jit.off on those functions
+-- only): no trace may start in them. The body scan's loop stays compiled; this world's block view is a Lua table with
+-- a metamethod, so that loop adds little here (with the real adapter: src/flame_damage_fixed.lua, `interpreted`).
+-- Over 30 bursts on this world the mod's own traces measured 12.8-16.7 KB in the game's lua51.dll and 6.8-15.4 KB in
+-- the workspace LuaJIT (30 runs each); the limit is 18 KB, about 10% over the highest. With the straight-line paths
+-- compiled too it is 32-45 KB. The step is called from C, as the game calls update, so its traces end where it
+-- returns.
+do
+    local util = require('jit.util')
+    local m = world(); physics(m, {limit = 4000, instances = 2})
+    local fix = Fix.new(m.api, GAME, EXE, function() end)
+    local rare = {}
+    for _, fn in ipairs({Fix.family, Fix.scan_begin, Fix.verify, Fix.mark, Fix.unmark, Fix.group_free,
+                         Fix.resolve_effect, Fix.check_effect, Fix.apply_effect, Fix.check_filter, Fix.flame_slot,
+                         Fix.find_instance, Fix.retarget_instance, Fix.restore_flames, fix.scan, fix.burst_start,
+                         fix.reset}) do
+        rare[fn] = true
+    end
+    local mine, bytes, rare_starts = {}, 0, 0
+    jit.flush() -- lint-ok: R5 test only: a fresh code cache for the measurement
+    jit.attach(function(what, tr, func) -- lint-ok: R5 test only: counts this test's traces
+        if what == 'start' then
+            mine[tr] = (util.funcinfo(func).source or ''):find('flame_damage_fixed.lua', 1, true) ~= nil
+            if rare[func] then rare_starts = rare_starts + 1 end
+        elseif what == 'stop' and mine[tr] then
+            local code = util.tracemc(tr)
+            bytes = bytes + (code and #code or 0)
+        end
+    end, 'trace')
+    local function tick() fix.step(dt) end
+    local ONE = '\0'
+    local function frames(n) for _ = 1, n do ONE:gsub('.', tick) end end
+    frames(120)
+    for b = 1, 30 do
+        for index = 1, 12 do m.api.write_u32(ps_address(index) + 5764, (index == 6 or index == 12) and 0x4a or 11) end
+        m.poke(ARM_INSTANCE_ID, le32(b % 2 == 1 and ID1 or ID2)); m.poke(ARM_STATE, le32(1)); frames(1)
+        m.poke(ARM_STATE, le32(2)); frames(120)
+        m.poke(ARM_STATE, le32(0))
+        if b == 15 then m.api.write_u32(BODIES + 160 * 7 + 144, 0xc0000777) end -- a rescan
+        frames(120)
+    end
+    m.poke(SPRAY_MGR + 0x38, le32(0)); frames(200)
+    jit.attach(function() end, 'trace') -- lint-ok: R5 test only: detaches the counter
+    if PRINT_BUDGETS then print(string.format('machine code for 30 bursts: %d bytes', bytes)) end
+    assert(rare_starts == 0, rare_starts .. ' traces started in rarely-run functions')
+    assert(bytes < 18 * 1024, string.format('%.1f KB of machine code for 30 bursts', bytes / 1024))
+end
+
 -- A second deployed copy returns before doing anything: no update hook, no FFI declarations.
 do
     local update_before = rawget(_G, 'update')
@@ -816,5 +1171,11 @@ print('PASS: patch table layout, effect lookup/check/apply with refusals and wri
     .. 'recycled and regrouped bodies untouched; write guard), instances by id and flame grouping (array read once), '
     .. 'driver budgets (scan, family, body scan, present, first/second burst with one read per span, firing, group '
     .. 'check on the weapon scan, release when weapons leave, idle), groups kept between bursts, distinct groups per '
-    .. 'weapon, rebuilt hit-box rescan, re-grouping, destroyed vehicle released, refusals, mission reload, no '
-    .. 'garbage (interpreted), re-entry guard, loader detection (v18 reports version 17)')
+    .. 'weapon, rebuilt hit-box rescan, release mid-rescan, re-grouping, destroyed vehicle released, group handed out '
+    .. 'by the allocator (between bursts and at a burst start), group carried by other bodies (skipped when picking, '
+    .. 'left after a rescan; the other bodies untouched; bodies of its other weapons are its own), no usable group, refusals, mission '
+    .. 'reload, no garbage (interpreted), straight-line rarely-run paths interpreted (no trace starts in them; under 18 KB '
+    .. 'of machine code for 30 bursts), update chain (errors below pass through; pause restores bodies and flames '
+    .. 'and resumes after 60 clean frames; 8 errors in a burst stop and restore; bursts end after 3600 clean frames; '
+    .. 'first failure at shutdown; restore refused stops; hostile neighbours; no garbage), re-entry guard, loader '
+    .. 'detection (v18 reports version 17)')

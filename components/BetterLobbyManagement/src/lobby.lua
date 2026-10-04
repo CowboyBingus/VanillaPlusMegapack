@@ -569,6 +569,17 @@ function L.new(api, game, G, natives, status, note)
         return true
     end
 
+    -- A fresh start (the addon's pause after an error below it, or its own
+    -- error): the running action is cancelled, the unload hold released, and
+    -- queued kicks and the arrival check are dropped. True when an action was
+    -- running.
+    function self.reset(reason)
+        local cancelled = self.cancel(reason)
+        self.release_hold(reason)
+        ui, pending, self.arrival = {}, {}, nil
+        return cancelled
+    end
+
     return self
 end
 

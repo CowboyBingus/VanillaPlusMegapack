@@ -10,6 +10,25 @@
 local text = assert(..., 'bingus_text required')
 local M = {}
 
+-- Expected transient states, while the game builds or switches screens, are
+-- raised as constant tables {pending = reason, status = 'hidden: ' .. reason}:
+-- a waiting frame builds no string, and the installer hides and retries on the
+-- next frame without counting the frame toward stopping the mod (as v4.0 did
+-- for every raised frame). Everything else raises a string and counts.
+local function pending(reason) return {pending = reason, status = 'hidden: ' .. reason} end
+M.PENDING = {
+    worlds = pending('UI worlds unavailable'),
+    gui = pending('Could not create forecast panel'),
+    material = pending('Font material unavailable'),
+    metrics = pending('Font metrics unavailable'),
+    caret = pending('Font caret unavailable'),
+    rect = pending('Retained rectangle unavailable'),
+    text = pending('Retained text unavailable'),
+    native = pending('Native panel unavailable'),
+    viewport = pending('Forecast exceeds viewport'),
+}
+local PENDING = M.PENDING
+
 -- UI units at scale 1; the native frame is 533 wide.
 M.BOTTOM = 56             -- keep the Esc / Back prompt row visible
 -- Native frame geometry: a 3-unit gold outline, a 4-unit dark gap, then the
@@ -201,12 +220,13 @@ function M.place(anchor, width, height, plan_below, plan_side)
         local h = plan_below.height + chrome(s)
         return {side=false, x=anchor.x, y=anchor.y + M.BORDER * s - h, w=anchor.w, h=h}, plan_below
     end
-    local plan = assert(plan_side, 'Forecast exceeds viewport')
+    local plan = plan_side
+    if not plan then error(PENDING.viewport) end
     local h = plan.height + chrome(s)
     local x = anchor.x + anchor.w + 12 * s
     if x + anchor.w > width - 12 * s then x = anchor.x - anchor.w - 12 * s end
     local y = math.min(height - 12 * s, anchor.y + anchor.h) - h
-    assert(x >= 0 and y >= 0, 'Forecast exceeds viewport')
+    if x < 0 or y < 0 then error(PENDING.viewport) end
     return {side=true, x=x, y=y, w=anchor.w, h=h}, plan
 end
 
@@ -225,25 +245,38 @@ function M.new(engine)
     local App, World, Gui = engine.Application, engine.World, engine.Gui
     local function colour(a, r, g, b) return engine.Color(a, r, g, b) end
     local function vector(x, y, z) return engine.Vector3(x, y, z or 0) end
-    local function worlds() return assert(App.worlds(), 'UI worlds unavailable') end
+    local function worlds()
+        local list = App.worlds()
+        if not list then error(PENDING.worlds) end
+        return list
+    end
     local function contains(list, value)
         for _, v in ipairs(list) do if v == value then return true end end
         return false
     end
-    local function destroy()
-        if self.gui and contains(worlds(), self.world) then World.destroy_gui(self.world, self.gui) end
+    local function wipe(t)
+        for key in pairs(t) do t[key] = nil end
+    end
+    -- Drops the GUI, destroying it only while its world is still listed
+    -- (`list`: this frame's world list, when the caller already has it). The
+    -- tables are emptied in place, so the hidden frames, which clear every
+    -- frame, allocate nothing.
+    local function destroy(list)
+        if self.gui and contains(list or worlds(), self.world) then World.destroy_gui(self.world, self.gui) end
         self.gui, self.world, self.font, self.scroll = nil, nil, nil, nil
-        self.rect_ids, self.text_ids = {}, {}
+        wipe(self.rect_ids) wipe(self.text_ids)
         self.signature = nil
     end
-    function self:clear()
-        destroy()
+    local function clear(list)
+        destroy(list)
         self.model, self.geometry = nil, nil
-        self.cache, self.order = {}, {}
+        wipe(self.cache) wipe(self.order)
     end
+    function self:clear() clear() end
     -- Mirror native normal-font setup on one of our GUI materials.
     local function ink(gui, anchor)
-        local material = assert(Gui.material(gui, engine.IdString64.from_hex(anchor.material)), 'Font material unavailable')
+        local material = Gui.material(gui, engine.IdString64.from_hex(anchor.material))
+        if not material then error(PENDING.material) end
         local function slot(hash) return engine.IdString64.from_hex(hash .. '00000000') end
         for _, hash in ipairs({'8035c266', '5e8455fe', '309e7783', '82b803a8'}) do
             engine.Material.set_scalar(material, slot(hash), 0)
@@ -252,17 +285,21 @@ function M.new(engine)
         engine.Material.set_vector4(material, slot('7701209e'), colour(0, 0, 0, 0))
         engine.Material.set_texture(material, slot('88bac99b'), engine.IdString64.from_hex(anchor.atlas))
     end
+    -- Every frame the panel is up, the world list is checked again: a world
+    -- that was replaced or removed moves or hides the panel on that frame.
     local function prepare(anchor)
         -- The first non-main world is the only UI world drawn on the war table.
         local main, target = App.main_world(), nil
-        for _, world in ipairs(worlds()) do
+        local list = worlds()
+        for _, world in ipairs(list) do
             if world ~= main then target = world break end
         end
-        if not target then self:clear() return nil end
-        if self.world and self.world ~= target then self:clear() end
+        if not target then clear(list) return nil end
+        if self.world and self.world ~= target then clear(list) end
         if not self.gui or self.font ~= anchor.font or self.material ~= anchor.material or self.atlas ~= anchor.atlas then
-            destroy()
-            self.gui = assert(World.create_screen_gui(target, 'scale', 1, 1), 'Could not create forecast panel')
+            destroy(list)
+            self.gui = World.create_screen_gui(target, 'scale', 1, 1)
+            if not self.gui then error(PENDING.gui) end
             self.world = target
             ink(self.gui, anchor)
             self.font, self.material, self.atlas = anchor.font, anchor.material, anchor.atlas
@@ -275,7 +312,7 @@ function M.new(engine)
             local key = size .. '|' .. value
             if not measured[key] then
                 local lo, hi, caret = Gui.text_extents(self.gui, value, font, size)
-                assert(lo and hi and caret, 'Font metrics unavailable')
+                if not (lo and hi and caret) then error(PENDING.metrics) end
                 measured[key] = math.max(engine.Vector2.x(hi), engine.Vector2.x(caret)) - math.min(0, engine.Vector2.x(lo))
             end
             return measured[key]
@@ -287,7 +324,7 @@ function M.new(engine)
         local edges = {0}
         for k = 2, #bounds do
             local _, _, caret = Gui.text_extents(self.gui, value:sub(1, bounds[k] - 1), font, size)
-            assert(caret, 'Font caret unavailable')
+            if not caret then error(PENDING.caret) end
             edges[k] = math.max(edges[k - 1], engine.Vector2.x(caret))
         end
         return edges
@@ -327,7 +364,11 @@ function M.new(engine)
             local pos, size = vector(x, y, z), engine.Vector2(w, h)
             local id = self.rect_ids[rect_index]
             if id then Gui.update_rect(gui, id, pos, size, fill)
-            else self.rect_ids[rect_index] = assert(Gui.rect(gui, pos, size, fill), 'Retained rectangle unavailable') end
+            else
+                local created = Gui.rect(gui, pos, size, fill)
+                if not created then error(PENDING.rect) end
+                self.rect_ids[rect_index] = created
+            end
         end
         local function label(value, size, x, y, fill)
             text_index = text_index + 1
@@ -335,8 +376,8 @@ function M.new(engine)
             local id = self.text_ids[text_index]
             if id then Gui.update_text(gui, id, text.display(value), font_id, size, material_id, pos, fill)
             else
-                id = assert(Gui.text(gui, text.display(value), font_id, size, material_id, pos, fill),
-                    'Retained text unavailable')
+                id = Gui.text(gui, text.display(value), font_id, size, material_id, pos, fill)
+                if not id then error(PENDING.text) end
                 self.text_ids[text_index] = id
             end
             return id
@@ -408,7 +449,7 @@ function M.new(engine)
             return true
         end
         local s = anchor.scale
-        assert(width >= 640 and height >= 480 and s > 0, 'Native panel unavailable')
+        if not (width >= 640 and height >= 480 and s > 0) then error(PENDING.native) end
         local font_id = engine.IdString64.from_hex(anchor.font)
         local material_id = engine.IdString64.from_hex(anchor.material)
         local content_w = anchor.w - 2 * M.PAD * s
@@ -422,12 +463,16 @@ function M.new(engine)
         return true
     end
     -- Pending reports keep the panel and captions (in the language they were
-    -- drawn in) without any enemy text.
+    -- drawn in) without any enemy text. The pending model is made once, from
+    -- the report drawn before it; while it is drawn, later pending frames
+    -- pass it again, so they allocate nothing.
     function self:suspend(anchor)
         local model = self.model
         if not self.gui or not model then return false end
-        return self:show({key=model.key, screen=model.screen, label=model.label, footer=model.footer,
-            signature='pending'}, 0, anchor)
+        if model.signature ~= 'pending' then
+            model = {key=model.key, screen=model.screen, label=model.label, footer=model.footer, signature='pending'}
+        end
+        return self:show(model, 0, anchor)
     end
     return self
 end

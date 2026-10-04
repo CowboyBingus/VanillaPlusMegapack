@@ -2,15 +2,22 @@
 local source = arg[1] or ((arg[0]:match('^(.*[/\\])') or '') .. '../src/mod_options_menu.lua')
 local root = source:match('^(.*)[/\\]src[/\\][^/\\]+$') or '.'
 local directory = assert(os.getenv('TEMP') or os.getenv('TMP'))
-os.remove(directory .. '/ModOptionsMenu.values')
+-- A save leaves the values file and its backup; a backup alone would be loaded.
+for _, suffix in ipairs({'', '.bak', '.tmp'}) do os.remove(directory .. '/ModOptionsMenu.values' .. suffix) end
 _G.CowboyBingusModLoader = {log_directory = directory}
-_G.ModOptionsMenu, _G.update, _G.BingusTranslations = nil, nil, nil
+_G.ModOptionsMenu, _G.update, _G.BingusTranslations, _G.BingusRuntime = nil, function() end, nil, nil
 -- The build puts the text module and the locales ahead of the main file as
--- the local mom_text; here it is a global.
+-- the local mom_text, and the other source files as the functions in the local
+-- mom_files; here both are globals, and mom_files loads src/<name>.lua.
 local Text = dofile(root .. '/src/bingus_text.lua')
 local ENGLISH = dofile(root .. '/locales/en.lua')
 Text.registry().steam_language = 'en'
 _G.mom_text = {module = Text, locales = {en = ENGLISH, bundled = {}}}
+_G.mom_files = setmetatable({}, {__index = function(files, name)
+    local chunk = assert(loadfile(root .. '/src/' .. name .. '.lua'))
+    rawset(files, name, chunk)
+    return chunk
+end})
 dofile(source)
 local ffi = require('ffi')
 local bit = require('bit')
@@ -34,12 +41,25 @@ local function set_upvalue(fn, wanted, value)
     end
     error('missing upvalue ' .. wanted)
 end
+-- The category a mod registered under the given (upper-case) name.
+local function category(st, name)
+    for _, mod in ipairs(st.mods) do
+        if mod.name == name then return mod end
+    end
+    return nil
+end
 -- ReadProcessMemory calls per frame and KB allocated over `frames` updates
 -- after one settling update, whose long frame also writes any pending value
 -- save. The interpreter runs them, so compiled-trace allocation sinking cannot
 -- hide garbage; existing traces are flushed first because they embed
--- read_memory as a constant.
-local function measure(frames)
+-- read_memory as a constant. The full collection may shrink the Lua stack,
+-- which the next frame grows back once, so that frame is not counted.
+-- compiled: the JIT compiles 300 frames first, then runs five windows of
+-- `frames`; a late side trace is GC memory too, so the median window counts.
+-- instance: another instance's {update, step, state} (default: the first).
+local function measure(frames, compiled, instance)
+    local update, step, state = update, step, state
+    if instance then update, step, state = instance.update, instance.step, instance.state end
     local fill = upvalue(upvalue(step, 'escape_menu'), 'fill')
     local real, reads = upvalue(fill, 'read_memory'), 0
     jit.off()
@@ -47,16 +67,24 @@ local function measure(frames)
     set_upvalue(fill, 'read_memory', function(...) reads = reads + 1; return real(...) end)
     update(2)
     assert(not state.dirty, 'value save still pending')
+    if compiled then
+        jit.on()
+        for _ = 1, 300 do update(0.016) end
+    end
+    local windows, results, before = compiled and 5 or 1, {0, 0, 0, 0, 0}, 0
     collectgarbage('collect')
     collectgarbage('stop')
-    reads = 0
-    local before = collectgarbage('count')
-    for _ = 1, frames do update(0.016) end
-    local garbage = collectgarbage('count') - before
+    for frame = 0, frames * windows do
+        if frame == 1 then reads = 0 end
+        if frame % frames == 1 then before = collectgarbage('count') end
+        update(0.016)
+        if frame > 0 and frame % frames == 0 then results[frame / frames] = collectgarbage('count') - before end
+    end
     collectgarbage('restart')
     jit.on()
     set_upvalue(fill, 'read_memory', real)
-    return reads / frames, garbage
+    table.sort(results, function(a, b) return a < b end)
+    return reads / (frames * windows), compiled and results[3] or results[5]
 end
 
 local function address(pointer) return tonumber(ffi.cast('uint64_t', pointer)) end
@@ -326,7 +354,7 @@ end
 
 -- Registration contract.
 local changes = {}
-assert(menu.api == 1 and menu.version == 2 and menu.ready()) -- version 2: texts may be functions
+assert(menu.api == 1 and menu.version == 3 and menu.ready()) -- version 2: texts may be functions; 3: max_mods enforced
 assert(not menu.register_option('bad', {type = 'toggle'}))
 assert(not menu.register_option('bad', {type = 'dial', label = 'Dial'}))
 assert(not menu.register_option('bad', {type = 'choice', label = 'One', choices = {'A'}}))
@@ -486,12 +514,65 @@ set_dialog(3); step(0.016); set_dialog(0)
 assert(get8(UNAPPLIED) == 0 and get32(row(0) + 29068) == 0 and #changes == 3 and #calls.sound == 1)
 
 -- Code changes update the visible row without callbacks, replacing any
--- unapplied edit of that option.
+-- unapplied edit of that option. set() itself writes no row: the next step
+-- writes it once it has checked the escape menu, the view and the page.
+local row_writes, set_choice_native, set_slider_native = 0, native.set_choice, native.set_slider
+native.set_choice = function(...) row_writes = row_writes + 1; return set_choice_native(...) end
+native.set_slider = function(...) row_writes = row_writes + 1; return set_slider_native(...) end
 putf(row(4) + 31408, 9); step(0.016); assert(get8(UNAPPLIED) == 1)
-assert(menu.set('alpha.count', 7.4))
-assert(menu.get('alpha.count') == 7 and getf(row(4) + 31408) == 7 and #changes == 3)
+row_writes = 0
+assert(menu.set('alpha.count', 7.4) and menu.set('zulu.1', true)) -- Zulu is not on this page
+assert(menu.get('alpha.count') == 7 and row_writes == 0 and getf(row(4) + 31408) == 9 and #changes == 3)
 step(0.016)
-assert(#changes == 3 and get8(UNAPPLIED) == 0)
+assert(row_writes == 1 and getf(row(4) + 31408) == 7 and #changes == 3 and get8(UNAPPLIED) == 0)
+step(0.016)
+assert(row_writes == 1 and state.queued_any == false and next(state.queued) == nil)
+native.set_choice, native.set_slider = set_choice_native, set_slider_native
+
+-- A row value the option cannot take is refused: a slider at NaN or an
+-- infinity, or a selector index past its choices, makes no edit, and the row
+-- is set back to the value it showed (its pending edit, if any). Hot, so the
+-- JIT compiles the poll too.
+do
+    local slider_writes = 0
+    native.set_slider = function(...) slider_writes = slider_writes + 1; return set_slider_native(...) end
+    for round = 1, 100 do
+        for _, bad in ipairs({0 / 0, math.huge, -math.huge}) do
+            slider_writes = 0
+            putf(row(3) + 31408, bad); step(0.016)
+            assert(slider_writes == 1 and getf(row(3) + 31408) == 0.75, 'slider set back: ' .. tostring(bad) .. ' ' .. round)
+            assert(get8(UNAPPLIED) == 0 and state.pending_count == 0 and menu.get('alpha.volume') == 0.75)
+        end
+        put32(row(1) + 29068, 3); step(0.016)
+        assert(get32(row(1) + 29068) == 2 and shown(row(1) + 16832) == 'AUTO' and get8(UNAPPLIED) == 0)
+    end
+    putf(row(4) + 31408, 9); step(0.016)
+    putf(row(4) + 31408, 0 / 0); step(0.016)
+    assert(getf(row(4) + 31408) == 9 and state.pending['alpha.count'] == 9 and get8(UNAPPLIED) == 1)
+    putf(row(4) + 31408, 7); step(0.016)
+    assert(get8(UNAPPLIED) == 0 and #changes == 3)
+    -- A slider the game keeps at NaN is set back once, not on every frame: the
+    -- MODS frame budget holds (two reads, no allocation).
+    native.set_slider = function(slider, value)
+        slider_writes = slider_writes + 1
+        putf(address(slider) - 29176 + 31408, 0 / 0)
+    end
+    slider_writes = 0
+    putf(row(3) + 31408, 0 / 0)
+    local visual = native.options_visual
+    native.options_visual = function() end
+    local reads, garbage = measure(200)
+    assert(slider_writes == 1 and reads == 2, 'a row stuck at NaN: ' .. slider_writes .. ' writes, ' .. reads .. ' reads')
+    assert(garbage < 0.5, string.format('a row stuck at NaN allocated %.2f KB', garbage))
+    reads, garbage = measure(200, true)
+    native.options_visual = visual
+    assert(slider_writes == 1 and reads == 2 and garbage < 0.5,
+           string.format('compiled, a row stuck at NaN: %d writes, %.2f reads, %.2f KB', slider_writes, reads, garbage))
+    assert(get8(UNAPPLIED) == 0 and state.pending_count == 0 and menu.get('alpha.volume') == 0.75)
+    native.set_slider = set_slider_native
+    putf(row(3) + 31408, 0.75); step(0.016)
+    assert(get8(UNAPPLIED) == 0 and state.pending_count == 0 and #changes == 3)
+end
 
 -- Hovering Fire Mode shows its two-line description; Level has none, so the
 -- box hides, and an unchanged selection costs nothing.
@@ -563,15 +644,25 @@ do
     native.options_visual = visual
     assert(reads == 2, 'MODS frame reads: ' .. reads)
     assert(garbage < 0.5, string.format('MODS frames allocated %.2f KB', garbage))
-    assert(passes == 201 and #calls.box == description_calls)
+    assert(passes == 202 and #calls.box == description_calls)
+    -- Compiled, the same.
+    native.options_visual = function() passes = passes + 1 end
+    reads, garbage = measure(200, true)
+    native.options_visual = visual
+    assert(reads == 2 and garbage < 0.5, string.format('compiled MODS frames: %.2f reads, %.2f KB', reads, garbage))
     -- With an edit pending, the dialog and apply-action checks are direct
-    -- loads too: still two reads and no allocation.
+    -- loads too: still two reads and no allocation, interpreted or compiled.
     putf(row(1) + 31408, 4)
     native.options_visual = function() passes = passes + 1 end
     reads, garbage = measure(200)
     native.options_visual = visual
     assert(reads == 2, 'MODS frame reads with an edit pending: ' .. reads)
     assert(garbage < 0.5, string.format('MODS frames with an edit pending allocated %.2f KB', garbage))
+    native.options_visual = function() passes = passes + 1 end
+    reads, garbage = measure(200, true)
+    native.options_visual = visual
+    assert(reads == 2 and garbage < 0.5,
+           string.format('compiled MODS frames with an edit pending: %.2f reads, %.2f KB', reads, garbage))
     assert(get8(UNAPPLIED) == 1 and menu.get('beta.speed') == 1)
     putf(row(1) + 31408, 1); step(0.016); assert(get8(UNAPPLIED) == 0)
 end
@@ -620,8 +711,16 @@ assert(get32(row(5) + 29068) == 1) -- the applied Extra 1
 put32(row(6) + 29068, 1); step(0.016)
 assert(get8(UNAPPLIED) == 1 and state.pending_count == 1)
 set_stack({})
+-- Another mod's set() after the menu closed and before this step (its screen
+-- may be freed already) writes no row, and neither does the step that drops
+-- the view (audit: set() against a stale view).
+native.set_choice = function(...) row_writes = row_writes + 1; return set_choice_native(...) end
+native.set_slider = function(...) row_writes = row_writes + 1; return set_slider_native(...) end
+row_writes = 0
+assert(menu.set('alpha.extra3', true) and menu.set('alpha.count', 2) and row_writes == 0)
 step(0.016)
-assert(not state.view and #calls.visual == visual_calls + 2)
+assert(not state.view and #calls.visual == visual_calls + 2 and row_writes == 0)
+native.set_choice, native.set_slider = set_choice_native, set_slider_native
 assert(state.pending_count == 0 and menu.get('alpha.extra2') == false)
 
 -- Per-frame budget with the escape menu closed (most of every session): one
@@ -635,7 +734,7 @@ do
 end
 
 -- A second instance reads the saved values.
-_G.ModOptionsMenu, _G.update = nil, nil
+_G.ModOptionsMenu, _G.update, _G.BingusRuntime = nil, function() end, nil
 dofile(source)
 assert(ModOptionsMenu.register_option('alpha.hints', {type = 'toggle', label = 'Show Hints', mod = 'Alpha Mod', default = true}))
 assert(ModOptionsMenu.register_option('alpha.volume', {type = 'slider', label = 'Volume', mod = 'Alpha Mod',
@@ -648,7 +747,7 @@ assert(ModOptionsMenu.register_option(late_option,
     {type = 'toggle', label = 'Expanded Cache', mod = 'Example Loader', default = true,
      description = "Registered after every addon has loaded, under a category of its own."}))
 assert(ModOptionsMenu.get(late_option) == true and ModOptionsMenu.on_change(late_option, function() end))
-assert(upvalue(ModOptionsMenu.register_option, 'state').mods['EXAMPLE LOADER'])
+assert(category(upvalue(ModOptionsMenu.register_option, 'state'), 'EXAMPLE LOADER'))
 -- Shallow Water Diving v3.8 registers this exact slider: two decimals (0.05
 -- steps from 0.20), shown as a float slider, defaulting to its old fixed limit.
 local depth_option = 'shallow_water_diving.max_water_depth'
@@ -668,11 +767,176 @@ end
 print('MODS tab, pages, layout pass, descriptions, apply and unapplied-changes discard, value persistence '
       .. 'and restoration, idle, open and MODS frame budgets and a late registration OK')
 
+-- More than 8 mods: the category buttons show 7 mods at a time and the 8th
+-- button the page control, whose panel is one native selector row naming the
+-- pages. Turning that row relabels the buttons and nothing else: no category
+-- selection, no row rebuild, no edit. Up to 112 mods (16 pages).
+do
+    local lines = {}
+    _G.CowboyBingusModLoader = {log_directory = directory, open_log = function()
+        return {write = function(_, text) lines[#lines + 1] = text end, flush = function() end}
+    end}
+    _G.ModOptionsMenu, _G.update, _G.BingusTranslations, _G.BingusRuntime = nil, function() end, nil, nil
+    Text.registry().steam_language = 'en'
+    dofile(source)
+    local menu6, update6 = ModOptionsMenu, update
+    local st, step6 = upvalue(menu6.register_option, 'state'), upvalue(update6, 'step')
+    st.initialized, st.base, st.native = true, base, native
+    assert(menu6.max_mods == 112)
+    -- 20 mods, registered out of order; shown alphabetically: PAGE MOD 001..020.
+    local function name(index) return string.format('Page Mod %03d', index) end
+    for _, index in ipairs({20, 1, 19, 2, 18, 3, 17, 4, 16, 5, 15, 6, 14, 7, 13, 8, 12, 9, 11, 10}) do
+        assert(menu6.register_option('page' .. index .. '.toggle', {type = 'toggle', label = 'Toggle ' .. index,
+                                                                    mod = name(index)}))
+    end
+    assert(menu6.register_option('page17.level', {type = 'slider', label = 'Level', mod = name(17), min = 0, max = 4}))
+    local function button(index) return content + 816 + 14920 * index end
+    local function labels(first, count)
+        for index = 0, count - 1 do
+            assert(visible(button(index)) and shown(button(index) + 1928) == name(first + index):upper(),
+                   'button ' .. index .. ' shows ' .. tostring(shown(button(index) + 1928)))
+        end
+    end
+    -- The escape menu opens on OPTIONS (its init clears the unapplied flag and
+    -- the dialog); the player picks MODS.
+    set_stack({1})
+    put8(UNAPPLIED, 0); set_dialog(0)
+    put32(bar + 57448, 3); put32(bar + 57452, 2); put32(screen + 8, 2)
+    for index = 1, 3 do put32(bar + 57320 + 4 * (index - 1), TAB_LABELS[index]) end
+    for index = 0, 8 do
+        set_visible(button(index), true)
+        put32(button(index) + 1928 + 272, CATEGORY_LABELS[index + 1]); put8(button(index) + 1928 + 616, 0)
+    end
+    put32(content + 1318488, 7); native_build(7)
+    step6(0.016)
+    put32(bar + 57452, 3); put32(screen + 8, 3); put8(content + 1319445, 1)
+    step6(0.016)
+    assert(st.view and st.view.page.index == 0 and shown(row(0) + 3992) == 'Toggle 1')
+    labels(1, 7)
+    assert(visible(button(7)) and shown(button(7) + 1928) == 'PAGE 1 OF 3' and not visible(button(8)))
+    -- The page control's panel: one selector row, its value the shown page.
+    put32(content + 1318492, 0)
+    native.select_category(ffi.cast('void *', content), 7)
+    step6(0.016)
+    assert(st.view.page.index == 7 and get32(panel(7) + 2832) == 1 and #children(panel(7) + 544) == 1)
+    assert(get32(row(0) + 31428) == 139 and shown(row(0) + 3992) == 'Mods Page' and get32(row(0) + 29072) == 3)
+    assert(get32(row(0) + 29068) == 0 and shown(row(0) + 16832) == '1 / 3')
+    assert(get8(box + 2672) == 0 and shown(title) == 'Mods Page' and shown(body):find('7 mods at a time', 1, true))
+    -- Turning the row to page 2 relabels the buttons: no category selection,
+    -- no row rebuild, no edit, nothing saved.
+    local selects, releases, choices = #calls.select, released, 0
+    local set_choice = native.set_choice
+    native.set_choice = function(...) choices = choices + 1; return set_choice(...) end
+    put32(row(0) + 29068, 1); put32(row(0) + 16832 + 272, TEMPLATE)
+    step6(0.016)
+    labels(8, 7)
+    assert(shown(button(7) + 1928) == 'PAGE 2 OF 3' and shown(row(0) + 16832) == '2 / 3')
+    assert(#calls.select == selects and released == releases and choices == 0 and get32(content + 1318488) == 7)
+    assert(get8(UNAPPLIED) == 0 and st.pending_count == 0 and not st.dirty and st.mods_page == 1)
+    assert(lines[#lines]:find('Showing mods page 2 of 3.', 1, true))
+    -- The last page shows 6 mods and hides the 7th button.
+    put32(row(0) + 29068, 2); put32(row(0) + 16832 + 272, TEMPLATE)
+    step6(0.016)
+    labels(15, 6)
+    assert(not visible(button(6)) and visible(button(7)) and shown(button(7) + 1928) == 'PAGE 3 OF 3')
+    -- The hidden button holds no mod: were it selected, MOM goes to the first
+    -- button, as for any button without a mod.
+    put32(content + 1318492, 7)
+    native.select_category(ffi.cast('void *', content), 6)
+    step6(0.016)
+    assert(st.view.page.index == 0 and get32(content + 1318488) == 0 and shown(row(0) + 3992) == 'Toggle 15')
+    put32(content + 1318492, 0)
+    native.select_category(ffi.cast('void *', content), 7)
+    step6(0.016)
+    assert(st.view.page.index == 7 and get32(row(0) + 29068) == 2 and shown(row(0) + 16832) == '3 / 3')
+    -- A mod of that page: its own options, edited and applied as on any page.
+    put32(content + 1318492, 7)
+    native.select_category(ffi.cast('void *', content), 2)
+    step6(0.016)
+    assert(st.view.page.index == 2 and shown(row(0) + 3992) == 'Toggle 17' and shown(row(1) + 3992) == 'Level')
+    putf(row(1) + 31408, 3); step6(0.016)
+    assert(get8(UNAPPLIED) == 1 and menu6.get('page17.level') == 0)
+    press(APPLY); step6(0.016); release_keys()
+    assert(get8(UNAPPLIED) == 0 and menu6.get('page17.level') == 3)
+    -- An edit stays pending across page turns; discarding it on the page
+    -- control's panel keeps the page row's page.
+    putf(row(1) + 31408, 1); step6(0.016)
+    put32(content + 1318492, 2)
+    native.select_category(ffi.cast('void *', content), 7)
+    step6(0.016)
+    assert(get32(row(0) + 29068) == 2 and shown(row(0) + 16832) == '3 / 3' and get8(UNAPPLIED) == 1)
+    put32(row(0) + 29068, 0); put32(row(0) + 16832 + 272, TEMPLATE)
+    step6(0.016)
+    labels(1, 7)
+    assert(get8(UNAPPLIED) == 1 and st.pending['page17.level'] == 1)
+    set_dialog(2); step6(0.016); game_answers(SELECT); step6(0.016); set_dialog(0)
+    assert(get8(UNAPPLIED) == 0 and st.pending_count == 0 and menu6.get('page17.level') == 3)
+    assert(get32(row(0) + 29068) == 0 and shown(row(0) + 16832) == '1 / 3')
+    labels(1, 7)
+    -- A page index past the pages (the game or another mod) is refused: the
+    -- row goes back to the shown page, the buttons stay.
+    put32(row(0) + 29068, 5); step6(0.016)
+    assert(get32(row(0) + 29068) == 0 and st.mods_page == 0)
+    labels(1, 7)
+    -- Per frame on the page control's panel: the MODS frame budget, two reads
+    -- and no allocation, interpreted and compiled.
+    do
+        local visual, instance = native.options_visual, {update = update6, step = step6, state = st}
+        native.options_visual = function() end
+        for _, compiled in ipairs({false, true}) do
+            local reads, garbage = measure(200, compiled, instance)
+            assert(reads == 2 and garbage < 0.5, string.format('page control frames (%s): %.2f reads, %.2f KB',
+                                                               compiled and 'compiled' or 'interpreted', reads, garbage))
+        end
+        native.options_visual = visual
+    end
+    -- Leaving the tab and coming back shows the page last shown, from its
+    -- first mod; the page control's row lists the pages again.
+    put32(row(0) + 29068, 1); put32(row(0) + 16832 + 272, TEMPLATE); step6(0.016)
+    put32(bar + 57452, 2); step6(0.016)
+    assert(not st.view and get32(button(7) + 1928 + 272) == CATEGORY_LABELS[8] and visible(button(8)))
+    put32(bar + 57452, 3); put32(screen + 8, 3); put8(content + 1319445, 1); step6(0.016)
+    assert(st.view.page.index == 0 and shown(row(0) + 3992) == 'Toggle 8')
+    labels(8, 7)
+    assert(shown(button(7) + 1928) == 'PAGE 2 OF 3')
+    -- Registrations while open: a 21st mod still fits 3 pages; a 22nd makes a
+    -- 4th, and the page control lists it. The page shown stays.
+    assert(menu6.register_option('page21.toggle', {type = 'toggle', label = 'Toggle 21', mod = name(21)}))
+    step6(0.016)
+    assert(shown(button(7) + 1928) == 'PAGE 2 OF 3')
+    assert(menu6.register_option('page22.toggle', {type = 'toggle', label = 'Toggle 22', mod = name(22)}))
+    step6(0.016)
+    labels(8, 7)
+    assert(shown(button(7) + 1928) == 'PAGE 2 OF 4')
+    put32(content + 1318492, 0)
+    native.select_category(ffi.cast('void *', content), 7)
+    step6(0.016)
+    assert(get32(row(0) + 29072) == 4 and get32(row(0) + 29068) == 1 and shown(row(0) + 16832) == '2 / 4')
+    -- Up to 112 mods: 16 pages, the last one full; a 113th mod is refused.
+    for index = 23, 112 do
+        assert(menu6.register_option('page' .. index .. '.toggle', {type = 'toggle', label = 'Toggle ' .. index,
+                                                                    mod = name(index)}))
+    end
+    local ok, reason = menu6.register_option('page113.toggle', {type = 'toggle', label = 'Late', mod = name(113)})
+    assert(ok == false and reason == 'all 112 mod categories are in use')
+    step6(0.016)
+    assert(get32(row(0) + 29072) == 16 and shown(button(7) + 1928) == 'PAGE 2 OF 16')
+    put32(row(0) + 29068, 15); put32(row(0) + 16832 + 272, TEMPLATE); step6(0.016)
+    labels(106, 7)
+    assert(shown(button(7) + 1928) == 'PAGE 16 OF 16' and shown(row(0) + 16832) == '16 / 16')
+    set_stack({}); step6(0.016)
+    assert(not st.view)
+    _G.CowboyBingusModLoader = {log_directory = directory}
+end
+print('More than 8 mods: pages of 7 mods and a page control on the 8th button; turning it relabels only the '
+      .. 'buttons, edits and discards work across pages, a page past the pages is refused, the page is kept for '
+      .. 'the session, registrations while open extend the pages, 112 mods at most, and the MODS frame budget holds OK')
+
 -- Translations (API version 2). Limits count characters; mod names and
 -- choices are upper-cased beyond a-z; texts given as functions and MOM's own
 -- texts follow the language each time the escape menu opens, never per frame.
 do
-    _G.ModOptionsMenu, _G.update, _G.BingusTranslations = nil, nil, nil
+    _G.ModOptionsMenu, _G.update, _G.BingusTranslations, _G.BingusRuntime = nil, function() end, nil, nil
     Text.registry().steam_language = 'en'
     dofile(source)
     local menu3 = ModOptionsMenu
@@ -689,7 +953,7 @@ do
     assert(not menu3.register_option('zh.bad', {type = 'toggle', label = 'bad \255 bytes'}), 'invalid UTF-8')
     -- A Russian mod name, upper-cased as Cyrillic.
     assert(menu3.register_option('ru.depth', {type = 'toggle', label = 'x', mod = '\208\191\208\187\208\176\208\178'}))
-    assert(st.mods['\208\159\208\155\208\144\208\146'], 'mod names are upper-cased in every script')
+    assert(category(st, '\208\159\208\155\208\144\208\146'), 'mod names are upper-cased in every script')
     -- Texts as functions (as Better Lobby Management passes them).
     local language = 'en'
     local words = {en = {label = 'Depth', mod = 'Diving', choice = 'Deep', description = 'How deep.'},
@@ -702,7 +966,7 @@ do
     assert(menu3.register_option('fn.depth', spec()))
     local option = st.options['fn.depth']
     assert(option.label == 'Depth' and option.choices[1] == 'DEEP' and option.choices[2] == 'ON')
-    assert(option.description == 'How deep.' and st.mods['DIVING'].title == 'DIVING')
+    assert(option.description == 'How deep.' and category(st, 'DIVING').title == 'DIVING')
     assert(menu3.register_option('fn.depth', spec()), 'new closures register the same option')
     -- The game's language changes (and a pack translates MOM's own texts):
     -- nothing happens until the escape menu opens again.
@@ -720,7 +984,7 @@ do
     step3(0.016)
     assert(option.label == words.zh.label and option.choices[1] == words.zh.choice and option.choices[2] == 'ON')
     assert(option.description == words.zh.description and st.revision > revision, 'the view is rebuilt')
-    assert(st.mods['DIVING'] and st.mods['DIVING'].title == words.zh.mod, 'same category, new name')
+    assert(category(st, 'DIVING') and category(st, 'DIVING').title == words.zh.mod, 'same category, new name')
     assert(st.mods_title == cjk(2, 600) and st.empty_text == cjk(6, 700))
     assert(shown(bar + 8296 + 3400 * 3) == cjk(2, 600), 'the MODS tab shows the translated title')
     -- A text function that fails keeps the text shown before.
@@ -732,3 +996,307 @@ do
 end
 print('Translations: character limits, upper case in every script, function texts and MOM\'s own texts '
       .. 'refreshed when the escape menu opens, failing texts kept OK')
+
+-- The update chain, held by Bingus Shared Runtime's guard (src/bingus_runtime.lua),
+-- on fresh instances chained after a previous update; the status is
+-- BingusRuntime.statuses.ModOptionsMenu. MOM's own errors: 8 in one burst (none
+-- 3600 error-free frames after the one before) stop the step for the session
+-- (no protected call, log line, read or allocation per frame after), an open
+-- MODS view goes back to the game as on leaving the tab, and the API keeps
+-- working; each burst logs its first error once. An update below that raises:
+-- its error reaches the caller unchanged, MOM pauses on the next frame (the
+-- view goes back to the game the same way, MOM starts afresh) and resumes once
+-- the updates below have returned on 60 frames in a row; 8 in one burst stop
+-- it. At shutdown a due save is written and the menu is left alone. Every
+-- argument and every return value pass through to the previous update.
+do
+    local lines, tracebacks, recording, passed = {}, 0, true, {}
+    local log = {write = function(_, text) lines[#lines + 1] = text end, flush = function() end}
+    local real_traceback = debug.traceback
+    debug.traceback = function(...) tracebacks = tracebacks + 1; return real_traceback(...) end
+    -- below: what the previous update raises on its next call, if anything.
+    local below = nil
+    local function previous(...)
+        if recording then passed[#passed + 1] = {n = select('#', ...), ...} end
+        if below then
+            local problem = below
+            below = nil
+            error(problem, 0)
+        end
+        return 1, nil, 3
+    end
+    local function pack(...) return {n = select('#', ...), ...} end
+    local function count(text, from)
+        local found = 0
+        for index = from, #lines do
+            if lines[index]:find(text, 1, true) then found = found + 1 end
+        end
+        return found
+    end
+    _G.CowboyBingusModLoader = {log_directory = directory, open_log = function() return log end}
+    local function fresh()
+        _G.ModOptionsMenu, _G.BingusTranslations, _G.BingusRuntime = nil, nil, nil
+        Text.registry().steam_language = 'en'
+        _G.update, _G.shutdown = previous, nil
+        dofile(source)
+        local st = upvalue(ModOptionsMenu.register_option, 'state')
+        st.initialized, st.base, st.native = true, base, native
+        return ModOptionsMenu, st, update, BingusRuntime.statuses.ModOptionsMenu
+    end
+    -- A frame through the guard: the previous update gets every argument and
+    -- the caller every value it returns.
+    local function frame(wrapper)
+        local results = pack(wrapper(0.016, 'marker', nil))
+        local got = passed[#passed]
+        assert(got.n == 3 and got[1] == 0.016 and got[2] == 'marker', 'arguments pass through')
+        assert(results.n == 3 and results[1] == 1 and results[2] == nil and results[3] == 3, 'results pass through')
+    end
+    -- A frame whose update below raises: the same error object reaches the
+    -- caller, neither caught nor raised again as MOM's.
+    local function failing_frame(wrapper)
+        local problem = {below = true}
+        below = problem
+        local ok, raised = pcall(wrapper, 0.016, 'marker', nil)
+        assert(not ok and raised == problem, 'an error below reaches the caller unchanged')
+    end
+    -- The escape menu opens on MOUSE & KEYBOARD; the player picks MODS and edits a row.
+    local function open_and_edit(wrapper, st)
+        set_stack({1}); put8(UNAPPLIED, 0); set_dialog(0)
+        put32(bar + 57452, 2); put32(screen + 8, 2)
+        put32(content + 1318488, 7); native_build(7)
+        frame(wrapper)
+        put32(bar + 57452, 3); put32(screen + 8, 3); put8(content + 1319445, 1)
+        frame(wrapper)
+        assert(st.view and st.view.page and get32(row(0) + 31428) == 139)
+        put32(row(0) + 29068, 1); frame(wrapper)
+        assert(st.pending_count == 1 and get8(UNAPPLIED) == 1)
+    end
+    -- The view went back to the game as on leaving the tab: native categories,
+    -- the panel MOUSE & KEYBOARD showed, the description box and the
+    -- unapplied-changes flag released, the edit dropped.
+    local function handed_back(st)
+        assert(not st.view and st.pending_count == 0)
+        assert(get8(UNAPPLIED) == 0 and get8(box + 2672) == 1 and get32(DESCRIBED) == 156 and get32(SHOWN) == 156)
+        for index = 0, 8 do
+            local button = content + 816 + 14920 * index
+            assert(visible(button) and get32(button + 1928 + 272) == CATEGORY_LABELS[index + 1])
+            assert(get8(button + 1928 + 616) == 0)
+        end
+        assert(get32(content + 1318488) == 7 and get32(panel(7) + 2832) == 11 and get32(row(0) + 31428) == 700)
+    end
+    -- Guarded reads and KB allocated over `frames` frames, interpreted (as in measure).
+    local function quiet(wrapper, real_step, frames)
+        local fill = upvalue(upvalue(real_step, 'escape_menu'), 'fill')
+        local real_read, reads = upvalue(fill, 'read_memory'), 0
+        set_upvalue(fill, 'read_memory', function(...) reads = reads + 1; return real_read(...) end)
+        recording = false
+        jit.off()
+        jit.flush()
+        collectgarbage('collect')
+        collectgarbage('stop')
+        local before
+        for index = 0, frames do
+            if index == 1 then reads, before = 0, collectgarbage('count') end
+            wrapper(0.016, 'marker')
+        end
+        local garbage = collectgarbage('count') - before
+        collectgarbage('restart')
+        jit.on()
+        recording = true
+        set_upvalue(fill, 'read_memory', real_read)
+        return reads, garbage
+    end
+
+    -- MOM's own errors. A step that always raises runs 8 times: one line for
+    -- the burst's first error, one when it stops, naming that error.
+    local menu4, st4, update4, status4 = fresh()
+    local real_step = upvalue(update4, 'step')
+    assert(status4.name == 'ModOptionsMenu' and status4.state == 'running' and status4.installed)
+    assert(menu4.register_option('stop.toggle', {type = 'toggle', label = 'Stop Toggle', mod = 'Stopper'}))
+    open_and_edit(update4, st4)
+    assert(#passed == 3)
+    local step_calls, from, stop_lines = 0, #lines + 1, nil
+    set_upvalue(update4, 'step', function()
+        step_calls = step_calls + 1
+        error('step failure ' .. step_calls .. '.')
+    end)
+    tracebacks = 0
+    for index = 1, 20 do
+        frame(update4)
+        if index == 8 then stop_lines = #lines end
+    end
+    assert(step_calls == 8 and status4.errors == 8 and tracebacks == 0, 'the step stops after its 8th error')
+    assert(#lines == stop_lines and #passed == 23, 'stopped frames log nothing and still pass on')
+    assert(count('Options update error: ', from) == 1 and count('stopped after 8 errors', from) == 1)
+    assert(lines[from]:find('Options update error: ', 1, true) and lines[from]:find('step failure 1.', 1, true),
+           "the burst's first error is logged")
+    local stop_line = lines[stop_lines - 1]
+    assert(stop_line:find('Options update stopped: stopped after 8 errors: ', 1, true)
+           and stop_line:find('step failure 1.', 1, true), 'the stop line names the first error')
+    assert(status4.state:find('^stopped: stopped after 8 errors: ') and status4.state:find('step failure 1.', 1, true))
+    assert(status4.first_failure == status4.state:sub(10) and status4.first_error:find('step failure 1.', 1, true))
+    assert(lines[stop_lines]:find('Closed MODS tab.', 1, true) and count('Closed MODS tab.', from) == 1)
+    handed_back(st4)
+    -- The API keeps working; nothing touches the menu's rows any more.
+    assert(menu4.register_option('stop.later', {type = 'slider', label = 'Later', mod = 'Stopper', min = 0, max = 4}))
+    assert(menu4.on_change('stop.later', function() end) and menu4.get('stop.later') == 0 and menu4.ready())
+    assert(menu4.set('stop.toggle', true) and menu4.get('stop.toggle') == true and get32(row(0) + 31428) == 700)
+    -- A stopped frame only passes on: no read, no log line, no allocation.
+    stop_lines = #lines
+    local reads, garbage = quiet(update4, real_step, 200)
+    assert(reads == 0, 'stopped frames read: ' .. reads)
+    assert(garbage < 0.5, string.format('stopped frames allocated %.2f KB', garbage))
+    assert(step_calls == 8 and tracebacks == 0 and #lines == stop_lines)
+
+    -- Stopping while another screen covers the escape menu: MOM does not
+    -- touch the menu then, as in its step, so the view is only dropped (with
+    -- its edit); a later set() from code writes no row.
+    local menu8, st8, update8, status8 = fresh()
+    assert(menu8.register_option('stop.toggle', {type = 'toggle', label = 'Stop Toggle', mod = 'Stopper'}))
+    open_and_edit(update8, st8)
+    set_stack({1, 5})
+    frame(update8)
+    assert(st8.view, 'a covered menu keeps its view')
+    set_upvalue(update8, 'step', function() error('covered failure.') end)
+    from = #lines + 1
+    for _ = 1, 8 do frame(update8) end
+    assert(status8.errors == 8 and count('stopped after 8 errors', from) == 1 and count('Closed MODS tab.', from) == 0)
+    assert(not st8.view and st8.pending_count == 0 and get8(UNAPPLIED) == 1 and get32(row(0) + 31428) == 139)
+    local set_choice, choices = native.set_choice, 0
+    native.set_choice = function(...) choices = choices + 1; return set_choice(...) end
+    assert(menu8.set('stop.toggle', false) and menu8.get('stop.toggle') == false)
+    native.set_choice = set_choice
+    assert(choices == 0, 'set() wrote a row of a dropped view')
+    set_stack({})
+
+    -- Errors count in bursts. A step that fails 7 times, then runs 3600
+    -- frames without an error, starts counting again: three such bursts never
+    -- stop it, and each logs only its first error.
+    set_stack({})
+    local menu5, st5, update5, status5 = fresh()
+    local real_step5 = upvalue(update5, 'step')
+    local failing, calls5 = {}, 0
+    set_upvalue(update5, 'step', function(dt)
+        calls5 = calls5 + 1
+        if failing[calls5] then error('scripted failure at call ' .. calls5 .. '.') end
+        return real_step5(dt)
+    end)
+    local function fail_calls(first, count5)
+        for call = first, first + count5 - 1 do failing[call] = true end
+    end
+    fail_calls(1, 7)
+    fail_calls(3608, 7)
+    fail_calls(7215, 7)
+    from = #lines + 1
+    for _ = 1, 7231 do frame(update5) end
+    assert(calls5 == 7231 and status5.errors == 7 and status5.state == 'running', 'bursts 3600 frames apart never add up')
+    assert(count('Options update error: ', from) == 3 and count('stopped', from) == 0, 'one line per burst')
+    assert(lines[from]:find('at call 1.', 1, true) and lines[from + 1]:find('at call 3608.', 1, true)
+           and lines[from + 2]:find('at call 7215.', 1, true))
+    -- 3599 error-free frames keep the burst open: its 8th error stops the step.
+    fail_calls(7231 + 3589 + 1, 1)
+    for _ = 1, 3590 + 5 do frame(update5) end
+    assert(calls5 == 7231 + 3590 and status5.errors == 8, 'the 8th error of a burst stops the step')
+    assert(count('Options update error: ', from) == 3 and count('stopped after 8 errors', from) == 1)
+    assert(lines[#lines]:find('stopped after 8 errors', 1, true)
+           and lines[#lines]:find('at call 7215.', 1, true), "the stop line names the burst's first error")
+    assert(status5.first_error:find('at call 1.', 1, true), "the session's first error is kept")
+    assert(menu5.register_option('stop.after', {type = 'toggle', label = 'After', mod = 'Stopper'}))
+
+    -- An update below raises with the MODS view open and an edit pending. Its
+    -- error reaches the caller; on the next frame MOM pauses: the view goes
+    -- back to the game as on leaving the tab, and the step does not run (no
+    -- read, no allocation) until the updates below have returned on 60 frames
+    -- in a row. Then MOM starts afresh: the MODS tab is still the current
+    -- tab, so its view is built again.
+    local menu6, st6, update6, status6 = fresh()
+    local real_step6 = upvalue(update6, 'step')
+    assert(menu6.register_option('pause.toggle', {type = 'toggle', label = 'Pause Toggle', mod = 'Pauser'}))
+    open_and_edit(update6, st6)
+    from = #lines + 1
+    failing_frame(update6)
+    assert(st6.view and status6.state == 'running' and #lines == from - 1, 'seen on the next frame')
+    frame(update6)
+    assert(status6.state == 'paused: the previous update failed' and status6.pauses == 1 and status6.lower_errors == 1)
+    assert(status6.errors == 0 and not status6.first_error, 'an error below is not counted as MOM\'s')
+    assert(lines[from]:find('Options update paused: the previous update failed', 1, true)
+           and lines[from + 1]:find('Closed MODS tab.', 1, true))
+    handed_back(st6)
+    assert(not st6.menu_seen, 'a fresh start')
+    reads, garbage = quiet(update6, real_step6, 58)
+    assert(reads == 0, 'paused frames read: ' .. reads)
+    assert(garbage < 0.5, string.format('paused frames allocated %.2f KB', garbage))
+    assert(not st6.view and status6.state:find('^paused'), 'still paused after 59 clean frames')
+    frame(update6)
+    assert(status6.state == 'running' and st6.view and st6.view.page.index == 0, 'resumed after 60 clean frames')
+    assert(count('Options update resumed after 60 clean frames', from) == 1 and count('Opened MODS tab', from) == 1)
+    assert(get32(row(0) + 31428) == 139 and get32(row(0) + 29068) == 0 and get8(UNAPPLIED) == 0, 'the edit was dropped')
+    -- Another error below during a pause extends it: 60 clean frames count
+    -- from the last one.
+    failing_frame(update6); frame(update6)
+    assert(status6.pauses == 2 and not st6.view)
+    for _ = 1, 30 do frame(update6) end
+    failing_frame(update6)
+    for _ = 1, 60 do frame(update6) end
+    assert(not st6.view and status6.pauses == 2 and status6.lower_errors == 3, 'one pause, three errors below')
+    frame(update6)
+    assert(st6.view and status6.state == 'running')
+    -- 8 errors below in one burst stop MOM for the session.
+    from = #lines + 1
+    for _ = 1, 5 do failing_frame(update6); frame(update6) end
+    assert(status6.lower_errors == 8 and status6.state == 'stopped: stopped after 8 failed updates below this mod')
+    assert(count('Options update stopped: stopped after 8 failed updates below this mod', from) == 1)
+    assert(not st6.view and menu6.set('pause.toggle', true) and menu6.get('pause.toggle') == true)
+    for _ = 1, 100 do frame(update6) end
+    assert(not st6.view and status6.state:find('^stopped: '), 'stopped for the session')
+
+    -- A hand-back that raises during a pause stops MOM instead.
+    local menu9, st9, update9, status9 = fresh()
+    assert(menu9.register_option('pause.toggle', {type = 'toggle', label = 'Pause Toggle', mod = 'Pauser'}))
+    open_and_edit(update9, st9)
+    local select_category = native.select_category
+    native.select_category = function() error('hand-back failure', 0) end
+    failing_frame(update9)
+    frame(update9)
+    native.select_category = select_category
+    assert(status9.state == 'stopped: pause failed: hand-back failure' and not st9.view)
+    assert(lines[#lines - 1]:find('Options update stopped: pause failed: hand-back failure', 1, true)
+           or lines[#lines]:find('Options update stopped: pause failed: hand-back failure', 1, true))
+    set_stack({})
+
+    -- Shutdown: a save still due is written, the menu is left alone (no native
+    -- call), and the status keeps the session's first failure, including an
+    -- update below that raised in the last frame.
+    for _, last_frame_failed in ipairs({false, true}) do
+        for _, suffix in ipairs({'', '.bak', '.tmp'}) do os.remove(directory .. '/ModOptionsMenu.values' .. suffix) end
+        local menu7, st7, update7, status7 = fresh()
+        assert(menu7.register_option('quit.toggle', {type = 'toggle', label = 'Quit Toggle', mod = 'Quitter'}))
+        open_and_edit(update7, st7)
+        assert(menu7.set('quit.toggle', true) and st7.dirty, 'a save is due')
+        if last_frame_failed then failing_frame(update7) end
+        local natives = 0
+        local saved_native = {}
+        for name, fn in pairs(native) do
+            saved_native[name] = fn
+            native[name] = function(...) natives = natives + 1; return fn(...) end
+        end
+        shutdown()
+        for name, fn in pairs(saved_native) do native[name] = fn end
+        assert(natives == 0 and not st7.view and not st7.dirty, 'shutdown leaves the menu alone and saves')
+        local file = assert(io.open(directory .. '/ModOptionsMenu.values', 'rb'))
+        local text = file:read('*a')
+        file:close()
+        assert(text:find('quit.toggle\ttrue', 1, true), 'the due value is saved at shutdown')
+        assert(status7.state == (last_frame_failed and 'stopped after: the previous update failed' or 'stopped'))
+        set_stack({}); put8(UNAPPLIED, 0)
+    end
+
+    debug.traceback = real_traceback
+    _G.CowboyBingusModLoader = {log_directory = directory}
+    _G.update, _G.shutdown = function() end, nil
+end
+print('Update chain (Bingus Shared Runtime guard): 8 own errors in one burst stop the step without a log line, read or '
+      .. 'allocation per frame after, bursts 3600 error-free frames apart never add up, an error below reaches the '
+      .. 'caller unchanged and pauses MOM for 60 clean frames (view handed back, no read or allocation), 8 below in '
+      .. 'a burst or a failing hand-back stop it, shutdown saves without touching the menu, the API keeps working, '
+      .. 'and every argument and return value pass through OK')

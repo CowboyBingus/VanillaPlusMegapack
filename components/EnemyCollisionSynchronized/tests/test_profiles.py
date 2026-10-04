@@ -5,7 +5,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'scripts'))
-from generate_profiles import END, generate
+from generate_profiles import TARGET, generate
 
 catalog = json.loads((ROOT/'profiles/catalog.json').read_text())
 assert catalog['schema'] == 1 and catalog['steam_build'] == 25480438
@@ -30,6 +30,7 @@ for p in profiles:
     assert {'fixed', 'ragdoll_fixed'} & set(p['ragdoll_profiles'])
     assert len(p['assets']) == 3 and all(len(h) == 64 for h in p['assets'].values())
 assert sum(p['finish_disabled'] for p in profiles) == 2
-source = (ROOT/'src/corpse_data.lua').read_text()
-assert source.split(END, 1)[0] + END == generate(catalog), 'Run scripts/generate_profiles.py'
-print('PASS: 21 reviewed profiles, 680 auxiliary mappings, body/disabled bounds and exact embedded catalog')
+assert TARGET.read_text(encoding='utf-8') == generate(catalog), 'Run scripts/generate_profiles.py'
+# The allowlist is data in its own generated file; the logic takes it as an argument.
+assert 'generate_profiles' not in (ROOT/'src/corpse_data.lua').read_text(encoding='utf-8')
+print('PASS: 21 reviewed profiles, 680 auxiliary mappings, body/disabled bounds and exact generated catalog')

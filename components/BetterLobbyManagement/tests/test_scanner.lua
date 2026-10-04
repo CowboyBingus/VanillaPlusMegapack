@@ -308,30 +308,113 @@ local function suite()
     assert(fresh.stop('x') and world.u32[CONFIG + FIELD] == 20)
 end
 
--- Garbage: 100,000 idle checks allocate nothing.
-local function garbage()
-    local scanner = start()
-    scanner.check()
-    for _ = 1, 1000 do scanner.check() end
+-- The addon's pause after an error below it: the game's value goes back (one
+-- page check), nothing is checked while paused, and after resume() the next
+-- check confirms the object again and applies the setting, with the counts
+-- kept. A stop stays a stop.
+local function pause_suite()
+    local scanner, s = start()
+    frame(scanner, FIRST, 'before the pause')
+    local calls, restored = budget.frame(counts, scanner.pause, 'paused')
+    budget.check(calls, {read32 = 1, writable_data = 1, write32 = 1}, 'pause')
+    assert(restored and world.u32[CONFIG + FIELD] == 20 and s.status == 'paused', s.status)
+    assert(frame(scanner, {}, 'paused') == false, 'nothing is checked while paused')
+    assert(scanner.resume() and s.status == 'waiting_for_config' and not scanner.resume())
+    frame(scanner, FIRST, 'resumed')
+    assert(world.u32[CONFIG + FIELD] == 5 and s.status == 'active' and s.writes == 2 and s.refreshes == 0,
+        'the restored value is not counted as a game rewrite')
+    frame(scanner, IDLE, 'idle after the resume')
+    -- The game wrote the field during the pause: a rewrite, and its value is followed.
+    assert(scanner.pause('paused'))
+    world.u32[CONFIG + FIELD] = 12
+    assert(scanner.resume())
+    frame(scanner, FIRST, 'resumed after a game write')
+    assert(s.game_value == 12 and s.refreshes == 1 and world.u32[CONFIG + FIELD] == 5 and s.writes == 3)
+    -- A restore the page check refuses leaves the mod's value; resuming finds nothing to write.
+    world.objects[1].writable = false
+    assert(scanner.pause('paused') == false and world.u32[CONFIG + FIELD] == 5)
+    world.objects[1].writable = true
+    assert(scanner.resume())
+    frame(scanner, {load64 = 1, read32 = 1, load32 = 1}, 'resumed after a refused restore')
+    assert(s.game_value == 12 and s.status == 'active' and s.writes == 3 and world.u32[CONFIG + FIELD] == 5)
+    -- A stop stays a stop.
+    assert(scanner.stop('stopped_after_error') and world.u32[CONFIG + FIELD] == 12)
+    assert(scanner.pause('paused') and not scanner.resume() and scanner.check() == false)
+    assert(s.status == 'stopped_after_error', s.status)
+    -- Paused before any config object: nothing to restore, then the first sight as usual.
+    scanner, s = start()
+    world.u64[CONFIG_PTR] = 0
+    frame(scanner, {load64 = 1}, 'no config yet')
+    calls = budget.frame(counts, scanner.pause, 'paused')
+    assert(next(calls) == nil and scanner.resume())
+    world.u64[CONFIG_PTR] = CONFIG
+    frame(scanner, FIRST, 'first sight after the resume')
+    assert(s.status == 'active' and world.u32[CONFIG + FIELD] == 5)
+end
+
+-- Garbage: idle checks allocate nothing. Every trace the JIT compiles is an
+-- object of 1-2 KB in the same heap, and in the game's lua51.dll a compile
+-- could land inside a single measured window (2 KB in some processes, which
+-- failed the build). So one loop serves the warm-up and every window (its
+-- traces carry over), and each round's verdict is the median of WINDOWS
+-- windows, which one-off JIT work cannot move, plus their total, which
+-- catches a table that grows only now and then. The second round starts with
+-- jit.flush() (what a full code cache or another mod does), so its first
+-- window always holds the recompilation and the verdict must hold anyway.
+local WINDOWS, WINDOW = 5, 100000
+local MEDIAN_KB, TOTAL_KB = 1, 16 -- about 0.01 and 0.03 bytes per check
+
+local function window(scanner)
     collectgarbage('collect'); collectgarbage('stop')
     local before = collectgarbage('count')
-    for _ = 1, 100000 do scanner.check() end
+    for _ = 1, WINDOW do scanner.check() end
     local used = collectgarbage('count') - before
     collectgarbage('restart')
     return used
 end
 
+local function shown(sizes)
+    local parts = {}
+    for i, kb in ipairs(sizes) do parts[i] = string.format('%.3f', kb) end
+    return table.concat(parts, ' ')
+end
+
+-- One round: WINDOWS windows, judged by their median and total. Returns a summary.
+local function round(scanner, label)
+    local sizes, sorted, total = {}, {}, 0
+    for i = 1, WINDOWS do
+        sizes[i] = window(scanner)
+        sorted[i], total = sizes[i], total + sizes[i]
+    end
+    table.sort(sorted)
+    local median = sorted[(WINDOWS + 1) / 2]
+    assert(median < MEDIAN_KB and total < TOTAL_KB, string.format('%s: idle checks allocated %s KB per %d checks',
+        label, shown(sizes), WINDOW))
+    return string.format('%s: median %.3f KB, windows %s KB', label, median, shown(sizes))
+end
+
+local function garbage()
+    local scanner = start()
+    window(scanner) -- warm-up: the loop's traces compile here
+    local warm = round(scanner, 'warm')
+    jit.flush()
+    return warm, round(scanner, 'after a JIT flush')
+end
+
 local chosen = arg[2]
 Scanner = load_scanner(chosen or (source .. '/scanner.lua'))
 if chosen then
-    -- Mutation run: report whether the suite notices.
-    local ok = pcall(suite)
+    -- Mutation run: report whether the suite or the garbage check notices.
+    local ok = pcall(function() suite(); pause_suite(); garbage() end)
     print(ok and 'SURVIVED' or 'CAUGHT')
     return
 end
 suite()
 print('PASS: boot, first sight, idle, game rewrites, raced countdowns, server value changes, settings, '
     .. 'bad values, object changes, unreadable memory, refused writes and stop/restore, with exact call budgets')
-local used = garbage()
-assert(used < 1, 'idle checks allocated ' .. used .. ' KB')
-print(string.format('PASS: 100,000 idle checks allocated %.3f KB', used))
+pause_suite()
+print('PASS: a pause puts the game\'s value back with one page check and checks nothing; resume applies the setting '
+    .. 'again on the next check (a game write meanwhile is followed, a refused restore needs no write); a stop stays')
+local warm, flushed = garbage()
+print(string.format('PASS: idle checks allocate nothing (%d windows of %d checks; %s; %s)', WINDOWS, WINDOW, warm,
+    flushed))

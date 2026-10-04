@@ -58,22 +58,51 @@ local now,position,writes,override_calls,fail,partial,unreadable,release_on_writ
 local native={mover_position=function(unit,name)assert(unit==444 and name==123);return {unpack(position)} end}
 local api={time=function()return now end,distance=function(a,b)return a-b end,native=function()return native end}
 function api.read(a,n)if a==unreadable then return nil end;return ffi.string(locate(a,n),n) end
+-- Into a caller buffer, like the runtime's read_into: byte by byte from the
+-- region and its offset, so the fixture itself allocates nothing either.
+function api.read_into(a,n,buffer)
+    if a==unreadable then return false end
+    for _,r in ipairs(regions) do
+        if a>=r.a and a+n<=r.a+r.n then
+            local o=a-r.a
+            for i=0,n-1 do buffer[i]=r.b[o+i] end
+            return true
+        end
+    end
+    error(string.format('Unbounded fixture access %x + %x',a,n))
+end
 function api.pointer(b,o)
     if not b then return nil end
     local v=ffi.new('uint64_t[1]');ffi.copy(v,b:sub((o or 0)+1),8)
     local n=tonumber(v[0]);if n>=0x10000 then return n end
 end
+-- Protection is modeled per region, as one VirtualQuery answers for a whole
+-- region: any span inside one fixture allocation is writable. Each stored
+-- write must still land on one of the local cells.
 function api.writable_data(a,n)
-    if n~=4 then return false end
-    for _,address in pairs(cells) do if a==address then return true end end
+    for _,r in ipairs(regions) do if n>0 and a>=r.a and a+n<=r.a+r.n then return true end end
     return false
 end
-function api.write(a,b)
-    assert(api.writable_data(a,#b),'Write escaped four local fields');writes=writes+1
+local function store(a,b)
+    local cell=false
+    for _,address in pairs(cells) do if a==address then cell=true end end
+    assert(cell and #b==4,'Write escaped four local fields');writes=writes+1
     if release_on_write==writes then avatars[input]=0 end
     if fail==writes then return false end
     if partial==writes then ffi.copy(locate(a,4),b,2);return false end
     ffi.copy(locate(a,4),b,4);return true
+end
+-- Like the Windows adapter: one protection query per write or per batch.
+function api.write(a,b)
+    if not api.writable_data(a,#b) then return false end
+    return store(a,b)
+end
+function api.write_batch(base,size,changes)
+    if not api.writable_data(base,size) then return false,0 end
+    for i,change in ipairs(changes) do
+        if change[1]<0 or change[1]+#change[2]>size or not store(base+change[1],change[2]) then return false,i-1 end
+    end
+    return true,#changes
 end
 function native.ensure_override(manager,entity)
     assert(manager==am and entity==owner+0xf32f18+24)
@@ -110,6 +139,95 @@ local function baseline()
     assert(math.abs(number(cells.slope)-math.cos(50*math.pi/180))<.000001)
     assert(math.abs(number(cells.height)-1.95)<.000001)
 end
+-- Idle checks allocate nothing: outside a mission, idle in a mission and with
+-- a retained query and the input released, frames through the loader (its
+-- guard and every check) create no garbage, with the fixture's number
+-- addresses and with pointer addresses like the Windows adapter's. First
+-- interpreted, before anything here has compiled; then compiled, counted in a
+-- window in which the JIT compiled nothing (compiling allocates). Fresh module
+-- copies, so the scenarios below start as before.
+do
+    -- The fixture behind pointer addresses: each pointer converts to its number
+    -- once, as the mod hands over one pointer per address.
+    local function pointer_api()
+        local numbers=setmetatable({},{__mode='k'})
+        local function number(a)
+            if type(a)=='number' then return a end
+            local n=numbers[a]
+            if not n then n=tonumber(ffi.cast('uintptr_t',a));numbers[a]=n end
+            return n
+        end
+        local wrapped={}
+        for name,fn in pairs(api) do wrapped[name]=fn end
+        function wrapped.read_into(a,n,buffer) return api.read_into(number(a),n,buffer) end
+        function wrapped.read(a,n) return api.read(number(a),n) end
+        function wrapped.distance(a,b) return number(a)-number(b) end
+        function wrapped.pointer(b,o) local n=api.pointer(b,o);return n and ffi.cast('uint8_t *',n) end
+        return wrapped,ffi.cast('uint8_t *',g),ffi.cast('uint8_t *',e)
+    end
+    local function install(pointers)
+        local adapter,game,exe=api,g,e
+        if pointers then adapter,game,exe=pointer_api() end
+        local runtime=assert(loadfile(source..'/bingus_runtime.lua'))()
+        local vault=assert(loadfile(source..'/vault_data.lua'))()
+        local slope=assert(loadfile(source..'/slope_assist.lua'))()
+        vault.assistance=slope;slope.candidate=vault.assist_candidate
+        local env=setmetatable({print=function()end,CowboyBingusModLoader={api=1,version=6}},{__index=_G});env._G=env
+        env.update=function(...)return ... end
+        local loader_api=setmetatable({module=function(name)return name and game or exe end,
+            module_hash=function(module)return module==game and 'G' or 'E' end},{__index=adapter})
+        setfenv(assert(loadfile(source..'/archive_loader.lua'))(),env)(function()return loader_api end,vault,
+            {revision='fixture',game_sha256='G',exe_sha256='E'},runtime)
+        return env
+    end
+    local function garbage(env,frames)
+        collectgarbage('collect');collectgarbage('stop')
+        local before=collectgarbage('count')
+        for _=1,frames do env.update(1/60) end
+        local grown=(collectgarbage('count')-before)*1024
+        collectgarbage('restart')
+        return grown
+    end
+    local scenarios={
+        {'outside a mission',function()u(mission,8,0) end,'waiting_for_mission'},
+        {'idle in a mission',function()u(mission,8,1) end,'waiting_for_vault_query'},
+        {'retained query, input released',function()u(avatars,0x53e1b8+0x1238+4,3) end,'waiting_for_manual_vault'},
+    }
+    local events=0
+    local function traced() events=events+1 end
+    -- bytes per frame over a window of 600 frames; compiled, the first window
+    -- without trace events after a warm-up.
+    local function per_frame(env,compiled)
+        if not compiled then return garbage(env,600)/600 end
+        for _=1,5 do garbage(env,600) end
+        for _=1,20 do
+            events=0
+            local bytes=garbage(env,600)
+            if events==0 then return bytes/600 end
+        end
+        error('the JIT kept compiling idle frames')
+    end
+    reset();avatars[input]=0
+    local envs={install(false),install(true)}
+    jit.off()
+    for pass=1,2 do
+        local compiled=pass==2
+        if compiled then jit.on();jit.attach(traced,'trace') end
+        for _,scenario in ipairs(scenarios) do
+            scenario[2]()
+            for i,env in ipairs(envs) do
+                for _=1,10 do env.update(1/60) end
+                assert(env.ConsistentVaulting.status==scenario[3],scenario[1]..': '..env.ConsistentVaulting.status)
+                local bytes=per_frame(env,compiled)
+                assert(bytes==0,string.format('%s (%s addresses, %s): %.1f bytes per frame',scenario[1],
+                    i==1 and 'number' or 'pointer',compiled and 'compiled' or 'interpreted',bytes))
+            end
+        end
+        u(mission,8,1);u(avatars,0x53e1b8+0x1238+4,0)
+    end
+    jit.attach(traced)
+end
+print('PASS: idle checks allocate nothing: outside a mission, idle in a mission, retained query with the input released; number and pointer addresses, interpreted and compiled')
 for mode=1,7 do
     reset();u(mission,0x40,mode);local state={};arm(state);assert(A.stop(api,g,e,state));baseline();done()
 end
@@ -204,6 +322,15 @@ assert(writes==0 and not state.slope_lease);done()
 reset();state={};candidate_kind='ledge';move[12]=1;step(state);avatars[input]=1;step(state)
 assert(writes==0 and not state.slope_lease);done()
 
+-- The kept identity of released-input checks: a registry slot that no longer
+-- points at the avatar, or an entity record that changed, resolves the whole
+-- chain again in the same check; a press after kept checks still arms.
+reset();state={};step(state);step(state);assert(state.slope_status=='waiting_for_manual_climb')
+p(avatars,0x118,owner+0xf32f18);step(state);assert(state.slope_status=='waiting_for_slope_data')
+p(avatars,0x118,owner+0xf32f18+24);step(state);step(state);assert(state.slope_status=='waiting_for_manual_climb')
+u(entities,32,999);step(state);assert(state.slope_status=='waiting_for_avatar')
+u(entities,32,222);step(state);step(state);assert(state.slope_status=='waiting_for_manual_climb')
+avatars[input]=1;step(state);assert(state.slope_lease);assert(A.stop(api,g,e,state));baseline();done()
 -- Relocation of the same entity's override must restore its new row.
 reset();state={};arm(state);local old_enter,old_exit=cells.enter,cells.exit
 ffi.copy(avatars+0x547d24+2*852,settings,852);u(overrides,222%16*8+4,2)
@@ -219,17 +346,102 @@ patch.snapshot=function()
 end
 assert(patch.apply(api,g,e,state));avatars[input]=1;assert(patch.apply(api,g,e,state))
 assert(state.slope_lease and patch.stop(api,g,e,state));baseline();done()
--- With no lease and the input released, a step reads only up to the input
--- state; pressing the input reads and validates everything and still arms.
+-- Through the loader's guard: an error in the game's update restores an armed
+-- assist and pauses the mod; after 60 clean frames it resumes from a fresh
+-- start, so the input still held from before does not arm again until it is
+-- released and pressed.
+reset();do
+    local runtime=assert(loadfile(source..'/bingus_runtime.lua'))()
+    local vault=assert(loadfile(source..'/vault_data.lua'))();vault.assistance=A
+    local env=setmetatable({print=function()end,CowboyBingusModLoader={api=1,version=6}},{__index=_G});env._G=env
+    local fail=false
+    env.update=function()if fail then error('update fixture failure') end end
+    local loader_api=setmetatable({module=function(name)return name and g or e end,
+        module_hash=function(module)return module==g and 'G' or 'E' end},{__index=api})
+    setfenv(assert(loadfile(source..'/archive_loader.lua'))(),env)(function()return loader_api end,vault,
+        {revision='fixture',game_sha256='G',exe_sha256='E'},runtime)
+    local s=env.ConsistentVaulting
+    env.update();avatars[input]=1;env.update()
+    assert(s.slope_lease and number(cells.enter)==65 and s.slope_arms==1,'assist armed through the loader')
+    fail=true;assert(not pcall(env.update));assert(s.slope_lease,'nothing is handled while the error passes')
+    assert(not pcall(env.update));baseline()
+    assert(not s.slope_lease and s.slope_down==nil and s.assist_intent==nil and s.busy==nil)
+    fail=false;local polls=s.polls
+    for _=1,60 do env.update() end
+    assert(s.polls==polls and not s.slope_lease,'paused')
+    env.update();assert(s.polls>polls and not s.slope_lease and s.slope_arms==1,'a held input needs a fresh press')
+    avatars[input]=0;env.update();avatars[input]=1;now=now+1;env.update()
+    assert(s.slope_lease and s.slope_arms==2,'a fresh press arms again')
+    env.shutdown();baseline();assert(not s.slope_lease)
+end;done()
+-- Per-check call budget of the full patch.apply (slope assistance, then the
+-- real vault snapshot, which waits at stage 0 in this fixture). The loader runs
+-- one check per frame, two while something is in progress (test_loader.lua).
+-- The candidate validator is stubbed here; its cost is
+-- budgeted in test_vault.lua. With no lease and the input released a check
+-- reads only up to the input state; a press reads and validates everything.
+-- read_into: the same ReadProcessMemory as read (about 1-2 us in game), into a
+-- reused buffer. The identity chain and the input (light reads), the mission
+-- gate and the vault phase word are read that way and decode in place, without
+-- api.pointer, so an idle check allocates nothing (pinned below the scenarios).
+-- While the input stays released a check verifies the kept identity instead
+-- of resolving the chain again, and outside a mission the vault check takes
+-- the slope check's answer instead of reading the mode again.
 do
-    local raw_read,reads=api.read,0
-    api.read=function(a,n) reads=reads+1;return raw_read(a,n) end
-    reset();local idle_state={};avatars[input]=0;step(idle_state);local idle=reads
-    reads=0;avatars[input]=1;step(idle_state);local pressed=reads
-    assert(idle_state.slope_lease,'Released-input snapshots must not prevent arming')
-    assert(idle*2<pressed,string.format('idle step read %d times, pressed step %d',idle,pressed))
-    assert(A.stop(api,g,e,idle_state));baseline()
-    api.read=raw_read
+    local budget=dofile(arg[0]:gsub('[%w_]+%.lua$','')..'frame_budget.lua')
+    local counts=budget.wrap(api)
+    local vault=assert(loadfile(source..'/vault_data.lua'))();vault.assistance=A
+    local function check(label,s,limits,expected)
+        local frame,ok,reason=budget.frame(counts,vault.apply,api,g,e,s)
+        assert(ok and reason==expected,label..': '..tostring(reason))
+        budget.check(frame,limits,label)
+    end
+    reset();u(mission,8,0);local s={}
+    check('outside a mission',s,{read_into=2},'waiting_for_mission');u(mission,8,1)
+    reset();s={};avatars[input]=0;vault.apply(api,g,e,s)
+    -- The slope check verifies its kept identity (the input, the mission, the
+    -- unit reference, the entity record and the registry slot: 6 reads); the
+    -- vault check reads only the phase word of that avatar. Nothing takes the
+    -- time while nothing is held.
+    check('idle in a mission',s,{read_into=7},'waiting_for_vault_query')
+    -- A retained query (stage 3) with the input released: the same one read.
+    u(avatars,0x53e1b8+0x1238+4,3)
+    check('retained query, input released',s,{read_into=7},'waiting_for_manual_vault')
+    u(avatars,0x53e1b8+0x1238+4,0)
+    reset();s={};avatars[input]=1;vault.apply(api,g,e,s)
+    -- The override's three cells come from its settings read (3 reads fewer).
+    check('input held, no new press',s,{read=26,read_into=19,pointer=10,distance=1,native=1,time=1},
+        'waiting_for_vault_query')
+    -- A retained query with the input held: the vault snapshot runs, taking the
+    -- local avatar's chain (and its guards) from the slope snapshot of this
+    -- check instead of reading it again. This fixture has no query scheduler,
+    -- so it stops there.
+    u(avatars,0x53e1b8+0x1238+4,3)
+    local frame,ok,reason=budget.frame(counts,vault.apply,api,g,e,s)
+    assert(ok and reason:find('Game pointer unavailable',1,true),'input held, retained query: '..tostring(reason))
+    budget.check(frame,{read=33,read_into=19,pointer=11,distance=1,native=1,time=1},'input held, retained query')
+    u(avatars,0x53e1b8+0x1238+4,0)
+    reset();s={};avatars[input]=0;vault.apply(api,g,e,s);avatars[input]=1
+    -- Arm and release verify the guards once around their writes and query
+    -- protection once per region: one write_batch for both angles in the
+    -- settings record, one write each for the slope cosine and the cap. The
+    -- press check reads the input at the kept index first, then resolves the
+    -- whole chain (one read_into more than resolving it directly).
+    check('slope lease armed',s,{read=143,read_into=20,pointer=10,distance=3,native=1,time=1,writable_data=2,write=1,
+        write_batch=1},
+        'waiting_for_vault_query')
+    assert(s.slope_lease,'Released-input snapshots must not prevent arming')
+    check('slope lease held',s,{read=26,read_into=18,pointer=10,distance=4,native=1,time=1},'waiting_for_vault_query')
+    u(avatars,flags+12,0x200);now=.5
+    check('climb starts, speed cap',s,{read=63,read_into=18,pointer=10,distance=4,native=1,time=1,writable_data=1,
+        write=1},
+        'waiting_for_vault_query')
+    check('climb held',s,{read=26,read_into=18,pointer=10,distance=4,native=1,time=1},'waiting_for_vault_query')
+    u(avatars,flags,0x4002)
+    check('lease released',s,{read=86,read_into=28,pointer=20,distance=8,native=1,time=1,writable_data=3,write=2,
+        write_batch=1},
+        'waiting_for_vault_query')
+    assert(not s.slope_lease);baseline()
 end
-print('PASS: released-input steps skip the mover/settings reads; a press reads everything and arms')
+print('PASS: per-check call budget: 7 reads and no protection queries idle; released-input checks skip the mover/settings reads; leases write only on arm, cap and release')
 print('PASS: '..passed..' slope ownership, native-override model, limits, lease lifecycle, cleanup and integration scenarios')

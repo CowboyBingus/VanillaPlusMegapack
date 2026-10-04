@@ -1,9 +1,75 @@
 local source=assert(arg[1])
 local ffi=require('ffi')
+local H=dofile(arg[0]:gsub('[%w_]+%.lua$','')..'hostile_vm.lua')
+-- Another mod loaded first and declared every Windows name the adapter and the
+-- runtime bind, with other prototypes. ffi.cdef keeps the first one, so the
+-- adapter and the runtime must use private names. None of these declarations
+-- is ever called.
+do
+    local names={'GetTickCount64','GetModuleHandleA','GetModuleFileNameW','GetCurrentProcess','ReadProcessMemory',
+        'WriteProcessMemory','VirtualQuery','QueryPerformanceCounter','QueryPerformanceFrequency','CreateFileW',
+        'ReadFile','CloseHandle','BCryptOpenAlgorithmProvider','BCryptCloseAlgorithmProvider','BCryptCreateHash',
+        'BCryptHashData','BCryptFinishHash','BCryptDestroyHash'}
+    local status=H.clash(names)
+    for _,name in ipairs(names) do assert(status[name]=='clashed',name..': '..tostring(status[name])) end
+end
+-- As in the build: the runtime's core runs once, and the adapter gets the read
+-- side extended by the write side.
+local runtime=assert(loadfile(source..'/bingus_runtime.lua'))()
+local function new_memory()
+    return assert(loadfile(source..'/bingus_write.lua'))().extend(assert(loadfile(source..'/bingus_memory.lua'))().new(runtime))
+end
 local create=assert(loadfile(source..'/windows_api.lua'))()
-local api=create()
--- Repeated initialization shares declarations in the loader's Lua VM.
-local again=create()
+local api_memory=new_memory()
+local api=create(runtime,api_memory)
+-- Repeated initialization, with second copies of the runtime files, shares
+-- declarations in the loader's Lua VM.
+local again_memory=new_memory()
+local again=create(runtime,again_memory)
+assert(not pcall(create,runtime,assert(loadfile(source..'/bingus_memory.lua'))().new(runtime)),
+    'the adapter needs the write side')
+-- The clock is the runtime's time(): seconds as a Lua number, never going
+-- back, and no allocation per call, interpreted or compiled (the adapter's own
+-- 64-bit tick count allocated 16 bytes per interpreted call).
+do
+    assert(api.time==api_memory.time and again.time==again_memory.time,'the clock is the runtime time()')
+    ffi.cdef [[ uint64_t sar_test_GetTickCount64(void) __asm__("GetTickCount64"); ]]
+    local system=ffi.load('kernel32')
+    local function ticks()return tonumber(system.sar_test_GetTickCount64())end
+    local t0,s0=ticks(),api.time()
+    repeat until ticks()-t0>=250
+    local t1,s1,s2=ticks(),api.time(),again.time()
+    assert(type(s0)=='number' and s1>=s0 and s2>=s1,'time() never goes back')
+    assert(math.abs((s1-s0)-(t1-t0)/1000)<0.05,'time() counts seconds: '..(s1-s0)..' s over '..(t1-t0)..' ms')
+    local flush,sink=H.jit_churn(),0
+    local function loop(n)for _=1,n do sink=sink+api.time()end end
+    -- Bytes per call: the median of three windows after a warm-up.
+    local function per_call(compiled)
+        flush()
+        if not compiled then jit.off() end -- lint-ok: R5 test only: measures the interpreted case
+        loop(1000);loop(1000)
+        local windows={}
+        for i=1,3 do windows[i]=H.heap_peak(loop,10000)*1024/10000 end
+        jit.on() -- lint-ok: R5 test only: restores the JIT
+        table.sort(windows);return windows[2]
+    end
+    local compiled,interpreted=per_call(true),per_call(false)
+    assert(compiled==0 and interpreted==0,'time() allocated '..compiled..' B compiled, '..interpreted..' B interpreted per call')
+    print('PASS: the clock is the runtime time(): seconds, never going back, 0 B per call compiled and interpreted')
+end
+-- A module's SHA-256 is read once per session for every mod.
+do
+    local exe=api.module(nil);local reads=rawget(_G,'BingusRuntime') and BingusRuntime.hash_reads or 0
+    local hash=api.module_hash(exe)
+    assert(#hash==64 and hash:find('^[0-9A-F]+$'),'uppercase SHA-256')
+    assert(again.module_hash(exe)==hash and BingusRuntime.hash_reads==reads+1,'hash read once per session')
+    -- The loader's build check is the runtime's verify_build, which takes the
+    -- same session hashes. This process has no game.dll: it refuses before
+    -- reading any module file.
+    assert(api.verify_build==api_memory.verify_build and again.verify_build==again_memory.verify_build)
+    local ok,why=api.verify_build({exe_sha256=hash,game_sha256=hash})
+    assert(ok==false and why=='game modules unavailable' and BingusRuntime.hash_reads==reads+1,tostring(why))
+end
 ffi.cdef [[
     void *VirtualAlloc(void *address, size_t size, uint32_t allocation, uint32_t protection);
     int VirtualFree(void *address, size_t size, uint32_t operation);
@@ -13,10 +79,15 @@ local kernel=ffi.load('kernel32')
 local allocation=kernel.VirtualAlloc(nil,8192,0x3000,4)
 assert(allocation~=nil)
 local data=ffi.cast('uint8_t *',allocation)
-for _,a in ipairs({api,again}) do
+for _,pair in ipairs({{api,api_memory},{again,again_memory}}) do
+    local a,m=pair[1],pair[2]
     assert(a.writable_data(data,8192))
-    assert(a.write(data+4095,'\x12\x34'))
+    -- An unchecked write queries its range once (one region here) right before writing.
+    local queries=m.queries
+    assert(a.write(data+4095,'\x12\x34') and m.queries==queries+1)
     assert(a.read(data+4095,2)=='\x12\x34')
+    -- checked: writable_data verified this range above; the write skips its own query.
+    assert(a.write(data+4100,'\x56',true) and a.read(data+4100,1)=='\x56' and m.queries==queries+1)
     assert(not a.write(a.module(nil),'\0'))
 end
 
@@ -119,15 +190,20 @@ for _,protection in ipairs({2,0x20,0x40}) do
 end
 assert(kernel.VirtualFree(data,0,0x8000)~=0)
 assert(not api.writable_data(data,1) and not api.write(data,'\0'))
-print('PASS: Windows adapter repeated initialization, writable data and guarded memory rejection')
+print('PASS: Windows adapter repeated initialization, writable data and guarded memory rejection after another mod declared every Windows name it binds')
 
 -- Exercise the engine-layout reader against synthetic data. No game code is
 -- invoked: pose resolution uses only guarded reads through the adapter.
 do
-    local actual_read=api.read;local memory={};local unit=0x400001
+    local actual_read,actual_read_into=api.read,api.read_into;local memory={};local unit=0x400001
     local function scalar(kind,v)return ffi.string(ffi.new(kind..'[1]',v),ffi.sizeof(kind))end
     local function ptr(address,v)memory[address]=scalar('uint64_t',v)end
     local function uint(address,v)memory[address]=scalar('uint32_t',v)end
+    -- Words and the job table are read into reused buffers through read_into.
+    api.read_into=function(address,size,buffer)
+        local b=api.read(address,size);if not b then return false end
+        ffi.copy(buffer,b,size);return true
+    end
     ptr(0x200000+0x1a100f0,0x300000);uint(0x300098,2)
     ptr(0x3000a0,0x400000);memory[0x400001]='\1'
     ptr(0x300088,0x500000);ptr(0x500008,0x600000)
@@ -143,7 +219,16 @@ do
     assert(not pcall(binding.pose,unit,2))
     memory[0x400001]='\2';assert(not pcall(binding.pose,unit,1));memory[0x400001]='\1'
     uint(0x600008,unit+1);assert(not pcall(binding.pose,unit,1));uint(0x600008,unit)
-    memory[0x800000]='wrong';assert(not pcall(binding.pose,unit,1))
+    -- The pose code is checked when a unit's path is located: a binding that
+    -- already holds the path keeps it, a new path is refused.
+    memory[0x800000]='wrong';assert(binding.pose(unit,1)==memory[0x900040])
+    local fresh=api.bind(ffi.cast('uint8_t *',0x100000),ffi.cast('uint8_t *',0x200000))
+    assert(not pcall(fresh.pose,unit,1));memory[0x800000]='\x48\x8d\x41\x60\xc3'
+    -- A cached path is followed again when the unit's slot names another object.
+    ptr(0x500008,0x610000);uint(0x610008,unit);uint(0x610070,2);ptr(0x610000,0x700000)
+    ptr(0x610088,0x910000);memory[0x910040]=string.rep('n',64)
+    assert(binding.pose(unit,1)==memory[0x910040]);ptr(0x500008,0x600000)
+    assert(binding.pose(unit,1)==memory[0x900040])
     ptr(0x100000+0x347d7e0,0xa00000);ptr(0x100000+0x346bfa0,0xb00000)
     uint(0xa00000,1)
     assert(binding.terrain_path(unit,string.rep('\0',12),string.rep('\0',12))==nil)
@@ -155,8 +240,25 @@ do
         assert(binding.terrain_path(unit,string.rep('\0',12),string.rep('\0',12))==nil)
         jobs[3*i+2]=1
     end
-    api.read=actual_read
+    api.read,api.read_into=actual_read,actual_read_into
     print('PASS: muzzle pose identity and bounds; pending queries and each of 24 busy workers prevent native casts')
+end
+
+-- Declarations are made once per game and api.bind casts to named
+-- function-pointer types: creating the adapter again or binding again adds no
+-- C types to the table every mod in the VM shares and LuaJIT never frees.
+-- (Function-pointer type strings added 35 per bind.)
+do
+    -- The next free ID: a probe struct takes two type IDs.
+    local function next_type() return tonumber(ffi.typeof('struct { int probe; }')) end -- lint-ok: R2 the probe adds its two types on purpose
+    local game,exe=ffi.cast('uint8_t *',0x100000),ffi.cast('uint8_t *',0x200000)
+    api.bind(game,exe)
+    local first=next_type()
+    for _=1,5 do assert(loadfile(source..'/windows_api.lua'))()(runtime,new_memory()).bind(game,exe) end
+    for _=1,5 do api.bind(game,exe) end
+    local added=next_type()-first-2
+    assert(added==0,'5 adapter creations and 10 binds added '..added..' C types')
+    print('PASS: repeated adapter creations and binds add no C types')
 end
 
 -- A plane at z=0 models terrain independently of the gate implementation.

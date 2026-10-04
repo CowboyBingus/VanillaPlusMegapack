@@ -50,13 +50,14 @@ local env = setmetatable({stingray={Gui={},World={}},print=function() end,os={},
 env._G = env
 env.update = function(dt,marker) previous_calls=previous_calls+1 return 1,nil,marker end
 local function api()
-    return {module=function() return 1 end,module_hash=function() return 'same' end}
+    return {module=function() return 1 end}
 end
-setfenv(install,env)(api,{new=function() return source_object end},{},roster,roster_data,
-    model,{new=function() return surface end},
-    {revision='test',game_sha256='same',exe_sha256='same'},
-    {new=function() return {sample=function() return ready and {client=client,active=active} or nil end} end},
-    text,{en=english,bundled={}})
+setfenv(install,env)({create_api=api,mission={new=function() return source_object end},resolve={},roster=roster,
+    roster_data=roster_data,model=model,panel={new=function() return surface end},
+    presentation={new=function() return {sample=function() return ready and {client=client,active=active} or nil end} end},
+    text=text,locales={en=english,bundled={}},runtime=assert(loadfile(source..'/bingus_runtime.lua'))(),
+    runtime_memory={new=function() return {verify_build=function() return true end} end},
+    build={revision='test',game_sha256='same',exe_sha256='same'}})
 local a,b,c = env.update(0.1,'marker')
 assert(a==1 and b==nil and c=='marker' and draws==0)
 screen='map'

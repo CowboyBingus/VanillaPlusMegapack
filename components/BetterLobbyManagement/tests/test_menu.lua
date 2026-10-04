@@ -141,6 +141,30 @@ end
 print('PASS: the dialog is filled once while hidden when our button has the focus; only a confirmed answer runs '
     .. 'the action; our text leaves the dialog before a native one')
 
+-- The addon's fresh start (a pause after an error below it): a dialog opened
+-- before it and answered while the mod did not run runs nothing; the focus
+-- sets the dialog up again and the next confirm runs the action.
+do
+    local world, menu, frame, ran = setup()
+    world.open_menu()
+    frame()
+    world.focus(4 + 3) -- promote
+    frame()
+    world.select(); frame() -- the game opened the dialog from our button
+    local counts = budget.wrap(world.api)
+    assert(next(budget.frame(counts, menu.reset)) == nil, 'reset reads nothing')
+    world.answer(true) -- confirmed during the pause
+    frame()
+    assert(#ran == 0, 'an answer given while the mod was paused runs nothing')
+    local setups = world.count('dialog_setup')
+    world.hide_dialog(); frame()
+    assert(world.count('dialog_setup') == setups + 1, 'the dialog is set up again for the focused button')
+    world.select(); frame()
+    world.answer(true); frame()
+    assert(#ran == 1 and ran[1] == 'promote', 'the next confirm runs the action')
+end
+print('PASS: after reset an answer given meanwhile runs nothing; the next confirm runs the action')
+
 -- Real-game timing: the dialog hides in the frame it is answered and fades out
 -- (state 3); a click can land on another of our buttons meanwhile, or in the
 -- same frame as the focus change. The dialog always shows the clicked button's

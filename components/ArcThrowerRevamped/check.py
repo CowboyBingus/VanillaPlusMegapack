@@ -38,7 +38,7 @@ def check_luajit(lua, path):
 
 def check_bindings(lua, path):
     test = Path(__file__).parent / "tests" / "test_bindings.lua"
-    for scenario in ("clean", "predeclared", "game-present"):
+    for scenario in ("clean", "predeclared", "game-present", "sdk-declared"):
         result = subprocess.run([str(lua), str(test), str(path), scenario],
                                 capture_output=True, text=True)
         if result.returncode != 0:
@@ -49,7 +49,7 @@ def check_bindings(lua, path):
 
 def check_work_budget(lua, path):
     test = Path(__file__).parent / "tests" / "test_work_budget.lua"
-    for scenario in ("normal", "slow", "stale"):
+    for scenario in ("normal", "slow", "stale", "budget"):
         result = subprocess.run([str(lua), str(test), str(path), scenario],
                                 capture_output=True, text=True)
         if result.returncode:
@@ -63,7 +63,10 @@ def check_recovery(lua, path):
                  "identity-gap", "holder-gap", "charge-binding-gap", "large-trigger-table",
                  "sparse-trigger-table", "dense-trigger-table",
                  "input-expired", "release-during-gap", "identity-change-during-gap",
-                 "holder-change-during-gap", "diagnostic-recovery")
+                 "holder-change-during-gap", "diagnostic-recovery", "entry-refused",
+                 "record-protection-refused", "record-not-private", "record-restore-failed",
+                 "update-error-pause", "update-errors-stop", "own-errors", "shutdown-restore",
+                 "entry-query-failed")
     for mode in ("normal", "slow"):
         for scenario in scenarios:
             result = subprocess.run([str(lua), str(test), str(path), mode, scenario],
@@ -88,11 +91,25 @@ def archive_entry(archive):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", default=str(Path(__file__).parent / "src"
-                                                / "arc_thrower_auto.lua"))
+    parser.add_argument("--source", help="an assembled entry (default: scripts/entry.py's, from src/)")
     parser.add_argument("--archive")
     arguments = parser.parse_args()
-    source = Path(arguments.source)
+    if arguments.source:
+        source = Path(arguments.source)
+    else:
+        sys.path.insert(0, str(Path(__file__).parent / "scripts"))
+        from entry import entry_text
+        handle, assembled = tempfile.mkstemp(suffix=".lua")
+        os.close(handle)
+        Path(assembled).write_bytes(entry_text())
+        try:
+            return check(Path(assembled), arguments)
+        finally:
+            os.unlink(assembled)
+    return check(source, arguments)
+
+
+def check(source, arguments):
     text = source.read_text(encoding="utf-8")
     if text.startswith("\ufeff") or "\0" in text:
         raise SystemExit("Entry must be plain UTF-8 Lua without a BOM")

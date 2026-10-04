@@ -1,35 +1,17 @@
 -- Windows and native-call layer for Better Lobby Management. Addresses are plain Lua
 -- numbers (user-mode addresses stay below 2^53); 64-bit peer ids never are
 -- (see u64). Nothing here allocates per call except the u64 helpers, which run
--- only on action frames.
-return function()
+-- only on action frames. memory: the read side of Bingus Shared Runtime
+-- (src/bingus_memory.lua, new(runtime)), used for module hashes only: each
+-- module file is hashed once per session for every mod on the runtime.
+return function(memory)
+    if type(memory) ~= 'table' or type(memory.module_hash) ~= 'function' then
+        error('the memory api of the shared runtime is required', 0)
+    end
     local ffi = require('ffi')
     assert(ffi.abi('64bit'), 'Windows x64 is required')
-    -- LuaJIT keeps the first declaration of a C function in the VM every mod
-    -- shares, so these may lose to another mod's equivalent declaration. The
-    -- calls that matter go through the named pointer types below, which fix
-    -- their argument types whichever declaration won. Named types are declared
-    -- once: a type written out in a string adds a C type on every evaluation.
-    ffi.cdef [[
-        void *GetModuleHandleA(const char *name);
-        void *GetProcAddress(void *module, const char *name);
-        uint32_t GetModuleFileNameW(void *module, uint16_t *path, uint32_t capacity);
-        void *GetCurrentProcess(void);
-        int ReadProcessMemory(void *process, const void *address, void *buffer, size_t size, size_t *read);
-        size_t VirtualQuery(const void *address, void *region, size_t size);
-        void *CreateFileW(const uint16_t *path, uint32_t access, uint32_t share, void *security,
-                          uint32_t disposition, uint32_t flags, void *template_file);
-        int ReadFile(void *file, void *buffer, uint32_t size, uint32_t *read, void *overlapped);
-        int CloseHandle(void *handle);
-        int32_t BCryptOpenAlgorithmProvider(void **algorithm, const uint16_t *name,
-                                            const uint16_t *provider, uint32_t flags);
-        int32_t BCryptCloseAlgorithmProvider(void *algorithm, uint32_t flags);
-        int32_t BCryptCreateHash(void *algorithm, void **hash, void *object, uint32_t object_size,
-                                 const void *secret, uint32_t secret_size, uint32_t flags);
-        int32_t BCryptHashData(void *hash, const void *data, uint32_t size, uint32_t flags);
-        int32_t BCryptFinishHash(void *hash, void *digest, uint32_t size, uint32_t flags);
-        int32_t BCryptDestroyHash(void *hash);
-    ]]
+    -- Named types are declared once: a type written out in a string adds a C
+    -- type on every evaluation.
     if not pcall(ffi.typeof, 'LmMemoryRegion') then
         ffi.cdef [[
             typedef struct {
@@ -37,8 +19,6 @@ return function()
                 uint16_t partition; uint16_t reserved; uint64_t size;
                 uint32_t state; uint32_t protection; uint32_t type;
             } LmMemoryRegion;
-            typedef size_t (*LmQuery)(uint64_t address, LmMemoryRegion *region, size_t size);
-            typedef int (*LmRead)(void *process, uint64_t address, uint64_t buffer, size_t size, uint32_t *count);
             typedef void (*LmKickPeer)(uint64_t host_sync, uint64_t peer);
             typedef uint8_t (*LmStartJoin)(uint64_t join, uint64_t info, int32_t type, uint64_t unused, int32_t reason);
             typedef void (*LmFilterString)(uint64_t field, int32_t key, uint64_t value, uint32_t op);
@@ -73,10 +53,25 @@ return function()
             typedef void (*LmLobbySetInt)(uint64_t lobby, uint32_t key, int32_t value);
         ]]
     end
-    local kernel, bcrypt = ffi.load('kernel32'), ffi.load('bcrypt')
-    local query_region = ffi.cast('LmQuery', kernel.VirtualQuery)
-    local read_memory = ffi.cast('LmRead', kernel.ReadProcessMemory)
-    local process = kernel.GetCurrentProcess()
+    -- Every Windows function has a private name, an __asm__ label naming the
+    -- real export: LuaJIT keeps the first prototype declared for a name in the
+    -- state the game and every mod share, so a mod that declared the real names
+    -- first, with other prototypes, would change how this mod calls them, and
+    -- a mod declaring them later would get this mod's. Declaring a private name
+    -- again (a second api) changes nothing. The memory query and read take
+    -- addresses and the buffer as numbers, so a call creates no pointer.
+    ffi.cdef [[
+        void *blm_GetModuleHandleA(const char *name) __asm__("GetModuleHandleA");
+        void *blm_GetProcAddress(void *module, const char *name) __asm__("GetProcAddress");
+        void *blm_GetCurrentProcess(void) __asm__("GetCurrentProcess");
+        int blm_ReadProcessMemory(void *process, uint64_t address, uint64_t buffer, size_t size, uint32_t *count)
+            __asm__("ReadProcessMemory");
+        size_t blm_VirtualQuery(uint64_t address, LmMemoryRegion *region, size_t size) __asm__("VirtualQuery");
+    ]]
+    local kernel = ffi.load('kernel32')
+    local query_region = kernel.blm_VirtualQuery
+    local read_memory = kernel.blm_ReadProcessMemory
+    local process = kernel.blm_GetCurrentProcess()
     local api = {}
 
     -- Direct loads through typed pointers based at address 0: an address
@@ -169,14 +164,14 @@ return function()
     end
 
     function api.module(name)
-        local handle = kernel.GetModuleHandleA(name)
+        local handle = kernel.blm_GetModuleHandleA(name)
         if handle == nil then return nil end
         return tonumber(ffi.cast('uintptr_t', handle))
     end
 
     -- An exported function's address (startup only).
     function api.export(module, name)
-        local address = kernel.GetProcAddress(ffi.cast('void *', module), name)
+        local address = kernel.blm_GetProcAddress(ffi.cast('void *', module), name)
         if address == nil then return nil end
         return tonumber(ffi.cast('uintptr_t', address))
     end
@@ -238,33 +233,11 @@ return function()
         return string.format('%X%08X', hi, lo)
     end
 
+    -- The SHA-256 (uppercase hex) of a loaded module's file, from the shared
+    -- session cache: read and hashed at most once per session for every mod on
+    -- the runtime (startup only).
     function api.module_sha256(module)
-        local path = ffi.new('uint16_t[32768]')
-        local length = kernel.GetModuleFileNameW(ffi.cast('void *', module), path, 32768)
-        assert(length > 0 and length < 32768, 'Cannot resolve module file')
-        local file = kernel.CreateFileW(path, 0x80000000, 7, nil, 3, 0x08000000, nil)
-        assert(file ~= nil and file ~= ffi.cast('void *', -1), 'Cannot read module file')
-        local algorithm, hash = ffi.new('void *[1]'), ffi.new('void *[1]')
-        local ok, result = pcall(function()
-            local name = ffi.new('uint16_t[7]', {83, 72, 65, 50, 53, 54, 0})
-            assert(bcrypt.BCryptOpenAlgorithmProvider(algorithm, name, nil, 0) == 0, 'SHA256 unavailable')
-            assert(bcrypt.BCryptCreateHash(algorithm[0], hash, nil, 0, nil, 0, 0) == 0, 'SHA256 creation failed')
-            local buffer, received = ffi.new('uint8_t[1048576]'), ffi.new('uint32_t[1]')
-            while true do
-                assert(kernel.ReadFile(file, buffer, 1048576, received, nil) ~= 0, 'Module file read failed')
-                if received[0] == 0 then break end
-                assert(bcrypt.BCryptHashData(hash[0], buffer, received[0], 0) == 0, 'SHA256 update failed')
-            end
-            local digest, hex = ffi.new('uint8_t[32]'), {}
-            assert(bcrypt.BCryptFinishHash(hash[0], digest, 32, 0) == 0, 'SHA256 finish failed')
-            for i = 0, 31 do hex[#hex + 1] = string.format('%02X', digest[i]) end
-            return table.concat(hex)
-        end)
-        if hash[0] ~= nil then bcrypt.BCryptDestroyHash(hash[0]) end
-        if algorithm[0] ~= nil then bcrypt.BCryptCloseAlgorithmProvider(algorithm[0], 0) end
-        kernel.CloseHandle(file)
-        if not ok then error(result, 0) end
-        return result
+        return memory.module_hash(ffi.cast('void *', module))
     end
     return api
 end

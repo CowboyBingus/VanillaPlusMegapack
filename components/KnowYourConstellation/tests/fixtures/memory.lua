@@ -54,7 +54,8 @@ function M.mission(kind)
         put(campaign+304*p+286952,string.rep('\0',132))
     end
     put(game+0x347cef0,qword(session))
-    put(session+92102,string.char(0))
+    put(session+92102,string.char(0xa4)) -- unrelated data at the old offset, as in play
+    put(session+92134,string.char(0))
     put(root+4205,string.char(0))
     put(root+4217,string.char(0))
     put(game+0x347cd98,qword(defs))

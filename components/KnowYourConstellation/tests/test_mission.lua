@@ -14,8 +14,7 @@ function api.pointer(bytes,offset)
     if value<65536 or value>=0x800000000000 then return nil end
     return value
 end
-function api.read(address,size)
-    reads=reads+1
+local function lookup(address,size)
     for i=#overrides,1,-1 do
         local block=overrides[i]
         if address>=block.address and address+size<=block.address+#block.bytes then
@@ -30,6 +29,16 @@ function api.read(address,size)
         end
     end
     error(string.format('Unspecified synthetic read 0x%x + %d',address,size))
+end
+-- Like the game's reader: a string, or the bytes copied into a caller buffer.
+local function deliver(bytes,size,into,offset)
+    if not into then return bytes end
+    ffi.copy(into.data+(offset or 0),bytes,size)
+    return true
+end
+function api.read(address,size,into,offset)
+    reads=reads+1
+    return deliver(lookup(address,size),size,into,offset)
 end
 local reader=mission.new(api,fixture.game,resolve)
 assert(reader:screen()==fixture.screen)
@@ -206,13 +215,13 @@ assert(bile,'The hovered planet modifier was not applied')
 overrides={}
 local original_read=api.read
 local descriptor_reads=0
-function api.read(address,size)
+function api.read(address,size,into,offset)
     local bytes=original_read(address,size)
     if address==remote_sample.address and size==200 then
         descriptor_reads=descriptor_reads+1
-        if descriptor_reads==2 then return word(u32(bytes,0)+1)..bytes:sub(5) end
+        if descriptor_reads==2 then bytes=word(u32(bytes,0)+1)..bytes:sub(5) end
     end
-    return bytes
+    return deliver(bytes,size,into,offset)
 end
 assert(other_reader:sample('map')==nil,'A mission changed during sampling must return pending, not fail the renderer')
 api.read=original_read
@@ -262,7 +271,31 @@ assert(weighted.zone and weighted.zone[war_strider]==5 and weighted.zone[tank]==
     'Category-72 weights must apply once per modifier ID on the hovered planet only')
 assert(weighted.war and weighted.war[tank]==0.25 and not weighted.war[war_strider],
     'War effects must follow their scope: global applies, another planet does not')
+-- A sample's lists and weight tables are its own: passed again, it is refilled
+-- in place; a sample into another table leaves them alone.
+local kept_zone,kept_war,kept_tags=weighted.zone,weighted.war,weighted.tags
+local tag_list=table.concat(kept_tags,',')
+assert(other_reader:sample('map',weighted)==weighted and weighted.zone==kept_zone and weighted.war==kept_war
+    and weighted.tags==kept_tags and table.concat(kept_tags,',')==tag_list and kept_zone[war_strider]==5
+    and kept_zone[tank]==0.5 and kept_war[tank]==0.25,'A sample passed again is refilled in place')
 overrides={}
 local plain=other_reader:sample('map')
 assert(plain.zone==nil and plain.war==nil,'No multipliers without applicable rows')
-print('PASS: category-72 spawn weights on the hovered planet, deduplicated IDs, scoped type-15 war effects')
+assert(plain.tags~=kept_tags and kept_zone[war_strider]==5 and kept_war[tank]==0.25
+    and table.concat(kept_tags,',')==tag_list,'A sample into another table leaves the earlier one alone')
+assert(other_reader:sample('map',weighted)==weighted and weighted.zone==nil and weighted.war==nil
+    and next(kept_zone)==nil and next(kept_war)==nil and weighted.tags==kept_tags,
+    'Refilled without applicable rows, the kept weight tables are emptied and not named')
+print('PASS: category-72 spawn weights on the hovered planet, deduplicated IDs, scoped type-15 war effects; '
+    ..'samples refilled in place')
+
+-- No UI state yet (while the game starts) is no forecast screen, not an error:
+-- the same single read, and errors count toward stopping the mod.
+overrides={}
+local starting=mission.new(api,other.game,resolve)
+put(other.game+0x347ce28,qword(0))
+reads=0
+assert(starting:screen()==nil and reads==1,'An absent UI state must read as no forecast screen')
+put(other.game+0x347ce28,qword(0x8000))
+assert(starting:screen()==nil,'A UI state pointer outside user memory must read as no forecast screen')
+print('PASS: no forecast screen before the UI state exists')

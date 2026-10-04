@@ -1,3 +1,29 @@
+# v37
+
+- Every option is updated to its 2026-10-04 standalone release and ships that release's resource byte for byte.
+- All 17 mods: an error in the game's update or another mod's passes through unchanged and pauses the mod instead of stopping it; 8 errors in one burst stop it.
+- All 17 mods use Bingus Shared Runtime v1 for their update guard, memory access and once-per-session game module hashes, so another mod's Windows declarations can no longer break them.
+- Arc Thrower Revamped v1.7: while Fire is held the addon re-checks the slot it found instead of locating it again, about half the memory reads.
+- Armory Preview Cache v23: short Armory visits keep the thumbnails they showed, and unchanged frames skip the thumbnail work.
+- Better Lobby Management v1.2: Simplified Chinese translation by joyrhyme, and a pause keeps a CANCEL SOS you made.
+- Better Stratagem Bounce v15.4: works alongside mods that change other stratagem navigation flags, and its startup check makes one memory protection check instead of 104.
+- Clickable Scrollbars v2.15: fixes skipped updates at high frame rates, which made drags less smooth and could miss short clicks.
+- Consistent Vaulting v8.9: an idle check reads 7 values instead of 37-39, and a held vault makes far fewer memory reads.
+- Controllable Hover Pack v1.8: a worn hover pack is re-checked where it was found, 16 memory reads instead of 41 (82 in flight).
+- Enemy Collision Synchronized v2.12.0: fewer memory reads and less Lua memory per poll, and nothing allocated while nothing needs inspecting.
+- Flame Damage Fixed v1.2: each weapon's private collision group is checked at every burst and moves to a free group if another user appears.
+- Hellpod Steering Unlocked v7.5: puts the game's avoidance setting back when it pauses or stops, and leaves another mod's value alone.
+- Know Your Constellation v4.1: Hive Worlds list Hive Lords again and other planet campaign modifiers apply again; Simplified Chinese translation by joyrhyme.
+- Mod Bindings Menu v2.2: keys set on the MODS tab are never deleted, and binding pages read their state without allocating.
+- Mod Options Menu v1.2: more than 8 mods fit the MODS tab, and values are saved through a backup.
+- Reinforcement Beacons Fixed v4.6: 2 memory reads per frame instead of 4 on the ship and 9-10 instead of 14 in a mission.
+- Sentry Aim Retention v1.1.0: keeps each sentry's memory layout instead of locating it every check, 26-29 reads per check instead of 68-90.
+- Shallow Water Diving v3.10: the depth slider no longer goes missing when Mod Options Menu is not ready yet.
+- Ship Station Hotkeys v1.9: reads its six shortcuts with one Mod Bindings Menu call and checks the ship a few times a second instead of every frame.
+- With a loader older than v18, the pack now raises the LuaJIT machine-code limit to 64 MB instead of 16 MB, the same start as loader v19.
+- The component tests run each mod's current suites and no longer need a person at the desktop.
+- Measured in live play with every option: the 17 mods together cost 0.25 ms per frame in missions (0.59 before this release) and 0.17 on the ship.
+
 # v36
 
 - Know Your Constellation v4.0: lists every enemy a mission can spawn, named as on the Helldivers wiki, with spawn-rate meters for large enemies.

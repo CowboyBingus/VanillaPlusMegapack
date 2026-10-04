@@ -14,14 +14,10 @@ from package import package_release
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build'
 MODULE = 'mods/cowboybingus/vanilla_plus_megapack'
-VERSION = '36'
+VERSION = '37'
 REVISION = f'megapack-v{VERSION}'
 GUID = '876060ae-0640-4ac5-95b6-ec7c9a0567d3'
 INPUT_ARCHIVE = ARCHIVE.replace('patch_0', 'patch_1')  # Mod Bindings Menu's input actions, beside its addon
-# Standalone addons whose scripts/entry.py assembles src/ and locales/ into one plaintext entry that carries the
-# discovery declaration; the option ships those exact bytes. A component with a 'version' passes it on.
-ASSEMBLED = ('BetterLobbyManagement', 'ModOptionsMenu', 'ModBindingsMenu', 'GalacticMenuHotkey')
-
 OPTION_DESCRIPTIONS = {
     'ArcThrowerRevamped': 'Hold the fire button to keep the Arc Thrower firing.',
     'ArmoryPreviewCache': 'Caches equipment thumbnails and preloads assets in Armory and mission briefing.',
@@ -56,9 +52,9 @@ def load_script(root, relative, name):
     return module
 
 
-def run(args):
+def run(args, cwd=None):
     env = dict(os.environ, LUA_PATH=str(LUA.parent / '?.lua') + ';;')
-    result = subprocess.run(list(map(str, args)), capture_output=True, text=True, env=env)
+    result = subprocess.run(list(map(str, args)), capture_output=True, text=True, env=env, cwd=cwd)
     if result.returncode:
         raise RuntimeError(result.stdout + result.stderr)
     return result.stdout
@@ -108,117 +104,90 @@ def discoverable_resource(name, resource, directory):
     return entry
 
 
+# Standalone addons whose scripts/entry.py assembles src/ (and locales/) into one plaintext entry that carries the
+# discovery declaration; the option ships those exact bytes. A component with a 'version' passes it on.
+ASSEMBLED = ('BetterLobbyManagement', 'ModOptionsMenu', 'ModBindingsMenu', 'GalacticMenuHotkey', 'ClickableScrollbars',
+             'ArcThrowerRevamped')
+# Gameplay modules whose scripts/module.py compiles the embedded runtime, adapter, data and loader into the
+# standalone bytecode: build_module(root, build, module, patch, revision), with this build's archive module.
+MODULES = ('BetterStratagemBounce', 'HellpodSteeringUnlocked', 'ReinforcementBeaconsFixed', 'ConsistentVaulting',
+           'ShallowWaterDiving', 'SentryAimRetention', 'EnemyCollisionSynchronized')
+# Gameplay modules whose scripts/module.py returns the wrapper source: wrapper(root, game_sha, exe_sha).
+WRAPPERS = ('ArmoryPreviewCache', 'KnowYourConstellation')
+
+
+def write_entry(component, body, build):
+    """The option's resource: the plaintext entry, which also serves as its discovery entry."""
+    payload = struct.pack('<II', len(body), 2) + body
+    directory = build / component['slug']
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / 'mod.lua.main').write_bytes(payload)
+    (directory / 'entry.lua').write_bytes(body)  # the plain entry, for suites that load it
+    return payload
+
+
+def flame_entry(root):
+    """Flame Damage Fixed's scripts/build.py assemble(): its standalone entry, which already begins with the
+    declaration that the loader's entry_source would add, so the bytes are the same."""
+    if 'build_addon' not in sys.modules:
+        import types
+        sys.modules['build_addon'] = types.ModuleType('build_addon')
+        sys.modules['build_addon'].entry_source = None
+    module = load_script(root, 'scripts/build.py', 'flame_build')
+    body = module.assemble()
+    if not body.startswith(('-- HD2-Addon: ' + module.LUA_NAME + '\n').encode()):
+        raise ValueError('Flame Damage Fixed entry lacks its declaration')
+    return body
+
+
+def hover_source(root, component):
+    """Controllable Hover Pack's scripts/build.py wrapper (that script also runs its tests and packages)."""
+    source = ''
+    for variable, filename in [('runtime', 'bingus_runtime.lua'), ('runtime_memory', 'bingus_memory.lua'),
+                               ('runtime_write', 'bingus_write.lua'), ('create_api', 'windows_api.lua'),
+                               ('policy', 'cancel.lua'), ('settings', 'settings.lua'), ('patch', 'hover_data.lua'),
+                               ('install', 'archive_loader.lua')]:
+        source += f'local {variable}=(function()\n{(root / "src" / filename).read_text()}\nend)()\n'
+    source += 'patch.policy=policy;patch.settings=settings\n'
+    source += ("install(function()return create_api(runtime,runtime_write.extend(runtime_memory.new(runtime)))end,"
+               f"patch,{{revision='{component['revision']}',game_sha256='{GAME_DLL_SHA}',exe_sha256='{EXE_SHA}'}},"
+               "runtime)\n")
+    return source
+
+
+def component_resource(component, build):
+    root = ROOT / 'components' / component['slug']
+    slug = component['slug']
+    if slug in ASSEMBLED:
+        module = load_script(root, 'scripts/entry.py', slug + '_entry')
+        body = (module.entry_text(root, component['version']) if component.get('version')
+                else module.entry_text(root))
+        return write_entry(component, body, build)
+    if slug == 'FlameDamageFixed':
+        return write_entry(component, flame_entry(root), build)
+    if slug in MODULES:
+        module = load_script(root, 'scripts/module.py', slug + '_module')
+        (payload,) = module.build_module(root, build / slug, component['module'], component['patch'],
+                                         component['revision']).values()
+        return payload
+    if slug in WRAPPERS:
+        module = load_script(root, 'scripts/module.py', slug + '_module')
+        return compile_resource(module.wrapper(root, GAME_DLL_SHA, EXE_SHA), build / slug)
+    if slug == 'ControllableHoverPack':
+        return compile_resource(hover_source(root, component), build / slug)
+    raise ValueError('No standalone build recipe for ' + slug)
+
+
 def build_component(component, build=BUILD):
+    """The option's resource, assembled exactly as the component's standalone build does; it must equal the
+    pinned standalone resource byte for byte."""
     root = ROOT / 'components' / component['slug']
     for relative, expected in component['source_sha256'].items():
         if sha((root / relative).read_bytes()) != expected:
             raise ValueError('Pinned source changed: ' + component['slug'] + '/' + relative)
-    if component['slug'] in ASSEMBLED:
-        # The standalone build assembles its plaintext entry from src/ and locales/ with scripts/entry.py; the
-        # option ships those exact bytes, which carry the discovery declaration, so they are also its entry.
-        module = load_script(root, 'scripts/entry.py', component['slug'] + '_entry')
-        body = (module.entry_text(root, component['version']) if component.get('version')
-                else module.entry_text(root))
-        payload = struct.pack('<II', len(body), 2) + body
-        if sha(payload) != component['resource_sha256']:
-            raise ValueError('Addon resource differs from the verified standalone release: ' + component['slug'])
-        directory = build / component['slug']
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / 'mod.lua.main').write_bytes(payload)
-        (directory / 'entry.lua').write_bytes(body)  # the plain entry, for suites that load it
-        return payload
-    if component['slug'] == 'ShallowWaterDiving':
-        # Its scripts/module.py compiles the text module and locales with the gameplay files (with this
-        # build's archive module: the same LuaJIT and fingerprints), exactly as the standalone release.
-        module = load_script(root, 'scripts/module.py', 'shallow_water_module')
-        (payload,) = module.build_module(root, build / component['slug'], component['module'], component['patch'],
-                                         component['revision']).values()
-        if sha(payload) != component['resource_sha256']:
-            raise ValueError('Shallow Water Diving resource differs from the verified standalone release')
-        return payload
-    if component.get('source'):
-        # A standalone addon that declares itself on its first line: the option
-        # ships the standalone resource byte for byte, with no wrapper and no
-        # recompilation, and the same bytes are its discovery entry.
-        body = (root / component['source']).read_bytes()
-        payload = struct.pack('<II', len(body), 2) + body
-        if sha(payload) != component['resource_sha256']:
-            raise ValueError('Addon resource differs from the verified standalone release: ' + component['slug'])
-        directory = build / component['slug']
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / 'mod.lua.main').write_bytes(payload)
-        return payload
-    if component['slug'] == 'ArmoryPreviewCache':
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('armory_module', root / 'scripts/module.py')
-        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-        payload = compile_resource(module.wrapper(root, GAME_DLL_SHA, EXE_SHA), build / component['slug'])
-        if sha(payload) != component['resource_sha256']:
-            raise ValueError('Armory resource differs from tested standalone release')
-        return payload
-    if component['slug'] == 'ClickableScrollbars':
-        # This addon is already a plaintext discovery entry whose body installs
-        # itself, so the pack ships the standalone source verbatim: the option
-        # deploys the exact bytes the standalone release does, with no wrapper
-        # and no recompilation.
-        body = (root / 'src/clickable_scrollbars.lua').read_bytes()
-        payload = struct.pack('<II', len(body), 2) + body
-        if sha(payload) != component['resource_sha256']:
-            raise ValueError('Scrollbar resource differs from the verified standalone release')
-        directory = build / component['slug']
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / 'mod.lua.main').write_bytes(payload)
-        return payload
-    if component['slug'] == 'ArcThrowerRevamped':
-        # Same shape as the scrollbar option: the standalone addon is a
-        # plaintext discovery entry, so the pack ships those exact bytes.
-        body = (root / 'src/arc_thrower_auto.lua').read_bytes()
-        payload = struct.pack('<II', len(body), 2) + body
-        if sha(payload) != component['resource_sha256']:
-            raise ValueError('Arc thrower resource differs from the verified standalone release')
-        directory = build / component['slug']
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / 'mod.lua.main').write_bytes(payload)
-        # The addon declares itself on its first line, so the same bytes are
-        # also its discovery entry.
-        (directory / 'entry.lua.main').write_bytes(payload)
-        return payload
-    if component['slug'] == 'KnowYourConstellation':
-        module = load_script(root, 'scripts/module.py', 'constellation_module')
-        payload = compile_resource(module.wrapper(root, GAME_DLL_SHA, EXE_SHA), build / component['slug'])
-        if sha(payload) != component['resource_sha256']:
-            raise ValueError('Constellation runtime differs from the tested standalone release')
-        return payload
-    if component['slug'] == 'ControllableHoverPack':
-        source = ''
-        for variable, filename in [('create_api','windows_api.lua'),('policy','cancel.lua'),('settings','settings.lua'),('patch','hover_data.lua'),('install','archive_loader.lua')]:
-            source += f'local {variable}=(function()\n{(root / "src" / filename).read_text()}\nend)()\n'
-        source += 'patch.policy=policy;patch.settings=settings\n'
-        source += f"install(create_api,patch,{{revision='{component['revision']}',game_sha256='{GAME_DLL_SHA}',exe_sha256='{EXE_SHA}'}})\n"
-        payload = compile_resource(source, build / component['slug'])
-        if sha(payload) != component['resource_sha256']:
-            raise ValueError('Hover resource differs from verified standalone release')
-        return payload
-    parts = [('create_api', 'windows_api.lua'), ('patch', component['patch'])]
-    vaulting = component['slug'] == 'ConsistentVaulting'
-    if vaulting:
-        parts.append(('assistance', 'slope_assist.lua'))
-    collision = component['slug'] == 'EnemyCollisionSynchronized'
-    if collision:
-        parts.append(('profiler', 'profiler.lua'))
-    parts.append(('install_loader', 'archive_loader.lua'))
-    source = ''
-    for variable, filename in parts:
-        source += f'local {variable} = (function()\n{(root / "src" / filename).read_text(encoding="utf-8")}\nend)()\n'
-    if vaulting:
-        source += 'patch.assistance = assistance\nassistance.candidate = patch.assist_candidate\n'
-    if collision:
-        source += 'patch.profiler = profiler\n'
-    source += f"install_loader(create_api, patch, {{revision = '{component['revision']}', "
-    source += f"exe_sha256 = '{EXE_SHA}', game_sha256 = '{GAME_DLL_SHA}'" + '})\n'
-    payload = compile_resource(source, build / component['slug'])
+    payload = component_resource(component, build)
     if sha(payload) != component['resource_sha256']:
-        raise ValueError('Gameplay bytecode differs from pinned release: ' + component['slug'])
+        raise ValueError('Resource differs from the standalone build: ' + component['slug'] + ' ' + sha(payload))
     return payload
 
 
@@ -249,8 +218,8 @@ def input_actions_archive(component):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--skip-desktop-capture', action='store_true',
-                        help='Skip interactive capture and record it as unverified')
+    parser.add_argument('--desktop-capture', action='store_true',
+                        help='Also run the interactive desktop capture (otherwise recorded as unverified)')
     args = parser.parse_args()
     build = BUILD
     components = load_components()
@@ -272,7 +241,7 @@ def main():
     resources = {resource_hash(c['module']): entry(c)
                  for c in [*components, {'module': MODULE, 'slug': ''}]}
     component_tests = [sys.executable, ROOT / 'tests/test_components.py', build]
-    if args.skip_desktop_capture: component_tests.append('--skip-desktop-capture')
+    if args.desktop_capture: component_tests.append('--desktop-capture')
     loader_build = Path(os.environ.get('HD2_SHARED_LOADER_BUILD', ROOT.parent / 'BingusSharedLoader/build'))
     duplicate_args = [value for c in components for value in (c['module'], c['slug'])]
     # The option-subset suites replay every selection; they only read build outputs, so they run at once.
@@ -309,7 +278,7 @@ def main():
         'deployment_files': files, 'options': options,
         'files': {p: sha((ROOT / p).read_bytes()) for p in files.values()},
         'runtime_verified': False, 'boot_replaced': False, 'loader_bundled': False,
-        'desktop_capture_verified': not args.skip_desktop_capture,
+        'desktop_capture_verified': args.desktop_capture,
         'components': [{k: c[k] for k in ('name', 'slug', 'revision', 'module', 'resource_sha256')} for c in components],
         'resource_sha256': {f'{key:016x}': sha(value) for key, value in sorted(resources.items())},
     }

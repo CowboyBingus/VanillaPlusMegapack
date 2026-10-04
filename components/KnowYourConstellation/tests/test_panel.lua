@@ -348,11 +348,12 @@ worlds={main,overlay}
 width,height=2560,1440
 local screen,key,ready,complete,hovered='map','hosted',true,true,true
 local native=anchor()
+local sample_tags={15,22}
 local reader={}
 function reader:screen() return screen end
 function reader:descriptor() return {key=key,screen=screen,controller_matches=true},hovered end
 function reader:sample()
-    return {key=key,screen=screen,faction=3,tags={15,22},difficulty=8,complete=complete,controller_matches=true}
+    return {key=key,screen=screen,faction=3,tags=sample_tags,difficulty=8,complete=complete,controller_matches=true}
 end
 local expected=report(3,{15,22},8)
 local function complete_forecast()
@@ -363,14 +364,16 @@ local function complete_forecast()
 end
 local env=setmetatable({stingray=engine,print=function() end,os={}}, {__index=_G})
 env._G=env
+env.update=function() end
 local install=assert(loadfile(source..'/install.lua'))()
 surface:clear()
-setfenv(install,env)(function()
-    return {module=function() return 1 end,module_hash=function() return 'supported' end}
-end,{new=function() return reader end},{},roster,data,model,{new=function() return surface end},
-    {revision='panel-test',game_sha256='supported',exe_sha256='supported'},
-    {new=function() return {sample=function() native.screen=screen return ready and native or nil end} end},
-    T,{en=english,bundled={}})
+setfenv(install,env)({create_api=function() return {module=function() return 1 end} end,
+    mission={new=function() return reader end},resolve={},roster=roster,roster_data=data,model=model,
+    panel={new=function() return surface end},
+    presentation={new=function() return {sample=function() native.screen=screen return ready and native or nil end} end},
+    text=T,locales={en=english,bundled={}},runtime=assert(loadfile(source..'/bingus_runtime.lua'))(),
+    runtime_memory={new=function() return {verify_build=function() return true end} end},
+    build={revision='panel-test',game_sha256='supported',exe_sha256='supported'}})
 env.update(.01)
 assert(surface.gui and not surface.geometry.place.side and complete_forecast())
 local saved_gui=surface.gui
@@ -403,9 +406,75 @@ assert(not surface.gui,'A dismissed forecast cannot reappear from a refresh')
 hovered=true
 env.update(.01)
 assert(surface.gui and complete_forecast())
+
+-- The panel's own waits, each held for 10,000 frames: engine resources that
+-- are not there yet and a window or native panel the box cannot fit yet.
+-- Hidden with the reason, never counted toward a stop, back once it clears.
+-- `fresh` waits need a new GUI or new plans, as after a screen change.
+local state=env.EnemyIntelligence
+local long_headline=model.headline({19,20,21,22,15},tr)
+local function swap(owner,name,value)
+    local saved=owner[name]
+    owner[name]=value
+    return function() owner[name]=saved end
+end
+local waits={
+    {'UI worlds unavailable',true,function() return swap(engine.Application,'worlds',function() return nil end) end},
+    {'Could not create forecast panel',true,function()
+        return swap(engine.World,'create_screen_gui',function() return nil end) end},
+    {'Font material unavailable',true,function() return swap(engine.Gui,'material',function() return nil end) end},
+    {'Font metrics unavailable',true,function() return swap(engine.Gui,'text_extents',function() return nil end) end},
+    {'Font caret unavailable',false,function()
+        -- A headline that scrolls needs a caret per character; prefixes get none.
+        local measure=engine.Gui.text_extents
+        local restore=swap(engine.Gui,'text_extents',function(g,value,font,size)
+            local lo,hi,caret=measure(g,value,font,size)
+            if #value<#long_headline and long_headline:sub(1,#value)==value then caret=nil end
+            return lo,hi,caret
+        end)
+        sample_tags,key={19,20,21,22,15},'long-headline'
+        return function() restore() sample_tags,key={15,22},'joinable' end
+    end},
+    {'Retained rectangle unavailable',true,function() return swap(engine.Gui,'rect',function() return nil end) end},
+    {'Retained text unavailable',true,function() return swap(engine.Gui,'text',function() return nil end) end},
+    {'Native panel unavailable',false,function()
+        return swap(engine.Gui,'resolution',function() return 320,200 end) end},
+    {'Forecast exceeds viewport',false,function()
+        local y,h=native.y,native.h
+        native.y,native.h=20,30
+        return function() native.y,native.h=y,h end
+    end},
+}
+-- Waiting frames re-plan the box every frame, so the font fake's measurements
+-- are remembered for the holds (the test's own speed; results unchanged).
+local unmemoized=swap(engine.Gui,'text_extents',(function(measure)
+    local memo={}
+    return function(g,value,font,size)
+        local key=size..'|'..value
+        local hit=memo[key]
+        if not hit then hit={measure(g,value,font,size)} memo[key]=hit end
+        return hit[1],hit[2],hit[3]
+    end
+end)(engine.Gui.text_extents))
+for _,wait in ipairs(waits) do
+    local reason,fresh,cause=wait[1],wait[2],wait[3]
+    if fresh then surface:clear() end
+    local clear=cause()
+    local pending=state.pending
+    for _=1,10000 do env.update(.01) end
+    assert(state.status=='hidden: '..reason,reason..': status '..state.status)
+    assert(state.pending==pending+10000 and state.guard.errors==0 and state.failures==0
+        and not state.guard.first_failure,reason..': a waiting frame never counts toward a stop')
+    clear()
+    for _=1,3 do env.update(.11) end
+    assert(surface.gui and complete_forecast(),reason..': the forecast is back once it clears')
+end
+unmemoized()
 env.shutdown()
 assert(not surface.gui and env.EnemyIntelligence.failures==0)
 print('PASS: installer, roster and renderer through pending, pod entry, briefing, loadout and client unhover')
+print('PASS: the panel\'s '..#waits..' waits (engine resources, window size) each held for 10000 frames: '
+    ..'hidden with their reason, never counted, back once cleared')
 
 -- Scroll timing: hold at the start, move at the set speed (scaled with the
 -- UI), hold at the end, then restart from the beginning.

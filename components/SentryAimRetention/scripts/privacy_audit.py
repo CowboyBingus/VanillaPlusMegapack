@@ -16,15 +16,18 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_FILES = (
     'publication-files.json',
     '.gitattributes', '.gitignore', 'CONTRIBUTING.md', 'INSTALL.txt', 'README.md',
-    'THIRD_PARTY.md', 'dependencies.json', 'CHANGELOG.md',
+    'LICENSE', 'THIRD_PARTY.md', 'dependencies.json', 'CHANGELOG.md',
     'assets/ARTWORK.md', 'assets/banner.png', 'assets/thumbnail.png',
-    'docs/PRIVACY.md', 'docs/TECHNICAL.md',
+    'docs/MIGRATION_VALIDATION.md', 'docs/PRIVACY.md', 'docs/RELEASE_NOTES.md', 'docs/TECHNICAL.md',
     'scripts/archive.py', 'scripts/build.py', 'scripts/module.py',
     'scripts/package.py', 'scripts/privacy_audit.py', 'scripts/source_release.py',
-    'src/archive_loader.lua', 'src/aim_data.lua', 'src/windows_api.lua',
+    'src/archive_loader.lua', 'src/aim_data.lua', 'src/bingus_runtime.lua', 'src/bingus_memory.lua',
+    'src/bingus_write.lua', 'src/windows_api.lua',
     'tests/gatling_target_loss.lua', 'tests/test_aim.lua', 'tests/test_loader.lua',
     'tests/test_package.py', 'tests/test_snapshot.lua', 'tests/test_windows_api.lua',
-    'tests/test_firing.lua', 'tests/firing_sweeps.lua',
+    'tests/test_firing.lua', 'tests/firing_sweeps.lua', 'tests/frame_budget.lua', 'tests/test_module.lua',
+    'tests/hostile_vm.lua', 'tests/test_current_game.lua', 'tests/captured_game.lua',
+    'tests/current_game_25327279.lua',
 )
 PATTERNS = {
     'research_session': r'(?i)\bPID\s*[:=]?\s*\d{2,}\b',

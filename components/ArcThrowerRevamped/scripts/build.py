@@ -2,7 +2,7 @@
 
 Usage:
     python -B scripts/build.py --loader <path to BingusSharedLoader checkout>
-                               [--output releases/Arc-Thrower-Revamped-v1.6.zip]
+                               [--output releases/Arc-Thrower-Revamped-v1.7.zip]
 """
 import argparse
 import json
@@ -13,7 +13,7 @@ import zipfile
 
 NAME = "mods/cowboybingus/arc_thrower_auto"
 GUID = "00f25f55-962e-42e7-96ed-cc1f17fac9c3"
-DISPLAY_NAME = "Arc Thrower Revamped - v1.6"
+DISPLAY_NAME = "Arc Thrower Revamped - v1.7"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -22,24 +22,31 @@ def main():
     parser.add_argument("--loader", required=True,
                         help="path to a BingusSharedLoader checkout")
     parser.add_argument("--output", default=str(ROOT / "releases"
-                                                / "Arc-Thrower-Revamped-v1.6.zip"))
+                                                / "Arc-Thrower-Revamped-v1.7.zip"))
     arguments = parser.parse_args()
     builder = Path(arguments.loader) / "scripts" / "build_addon.py"
     if not builder.exists():
         raise SystemExit("No builder at {}".format(builder))
     subprocess.check_call([sys.executable, "-B", str(ROOT / "check.py")])
+    # The entry: src/bingus_runtime.lua and src/arc_thrower_auto.lua, assembled.
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from entry import entry_text
+    entry = Path(arguments.output).with_suffix(".entry.lua")
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_bytes(entry_text())
     command = [sys.executable, "-B", str(builder),
                "--name", NAME,
-               "--entry", str(ROOT / "src" / "arc_thrower_auto.lua"),
+               "--entry", str(entry),
                "--guid", GUID,
                "--display-name", DISPLAY_NAME,
                "--output", arguments.output]
     print(" ".join(command))
     subprocess.check_call(command)
+    entry.unlink()
     with zipfile.ZipFile(arguments.output) as archive:
         files = {name: archive.read(name) for name in archive.namelist()}
     manager = json.loads(files['manifest.json'])
-    manager['Description'] = 'Hold fire to keep the Arc Thrower firing. Requires Bingus Shared Loader v16 or newer / API 1.'
+    manager['Description'] = 'Hold fire to keep the Arc Thrower firing. Requires Bingus Shared Loader v18 / API 1.'
     manager['Options'][0]['Description'] = manager['Description']
     files['manifest.json'] = (json.dumps(manager, indent=2) + '\n').encode()
     files['INSTALL.txt'] = (ROOT / 'INSTALL.txt').read_bytes()

@@ -1,78 +1,57 @@
 return function()
     local ffi = require('ffi')
     assert(ffi.abi('64bit'), 'Windows x64 is required')
+    -- Every Windows function has a private name, an __asm__ label naming the
+    -- real export. ffi.cdef keeps the first prototype declared for a name in the
+    -- whole game and ignores later ones without an error, so a mod that declared
+    -- a real name first would decide how this mod calls it, and this mod's
+    -- declarations would decide it for every mod loaded later.
+    -- Memory is addressed by plain numbers: the memory read takes its address
+    -- and destination as uint64_t (the same register as a pointer on x64) and
+    -- reports its SIZE_T count as two 32-bit words, so a read creates no
+    -- pointer or 64-bit cdata. Module files are hashed by the shared runtime
+    -- (bingus_memory.lua), once per session for every mod.
     ffi.cdef [[
-        void *GetModuleHandleA(const char *name);
-        uint32_t GetModuleFileNameW(void *module, uint16_t *path, uint32_t capacity);
-        void *GetCurrentProcess(void);
-        int ReadProcessMemory(void *process, const void *address, void *buffer, size_t size, size_t *read);
-        void *CreateFileW(const uint16_t *path, uint32_t access, uint32_t share, void *security,
-                          uint32_t disposition, uint32_t flags, void *template_file);
-        int ReadFile(void *file, void *buffer, uint32_t size, uint32_t *read, void *overlapped);
-        int CloseHandle(void *handle);
-        int32_t BCryptOpenAlgorithmProvider(void **algorithm, const uint16_t *name,
-                                            const uint16_t *provider, uint32_t flags);
-        int32_t BCryptCloseAlgorithmProvider(void *algorithm, uint32_t flags);
-        int32_t BCryptCreateHash(void *algorithm, void **hash, void *object, uint32_t object_size,
-                                 const void *secret, uint32_t secret_size, uint32_t flags);
-        int32_t BCryptHashData(void *hash, const void *data, uint32_t size, uint32_t flags);
-        int32_t BCryptFinishHash(void *hash, void *digest, uint32_t size, uint32_t flags);
-        int32_t BCryptDestroyHash(void *hash);
+        void *hd2kyc_GetModuleHandleA(const char *name) __asm__("GetModuleHandleA");
+        void *hd2kyc_GetCurrentProcess(void) __asm__("GetCurrentProcess");
+        int hd2kyc_ReadProcessMemory(void *process, uint64_t address, uint64_t buffer, size_t size,
+                                     uint32_t *done) __asm__("ReadProcessMemory");
     ]]
-    local kernel, bcrypt = ffi.load('kernel32'), ffi.load('bcrypt')
-    local process = kernel.GetCurrentProcess()
+    local kernel = ffi.load('kernel32')
+    local read_memory = kernel.hd2kyc_ReadProcessMemory
+    local process = kernel.hd2kyc_GetCurrentProcess()
+    local done = ffi.new('uint32_t[2]')
     local api = {}
 
+    -- The module's base address as a number, or nil.
     function api.module(name)
-        local handle = kernel.GetModuleHandleA(name)
+        local handle = kernel.hd2kyc_GetModuleHandleA(name)
         if handle == nil then return nil end
-        return ffi.cast('uint8_t *', handle)
+        return tonumber(ffi.cast('uintptr_t', handle))
     end
 
-    function api.read(address, size)
-        local buffer, count = ffi.new('uint8_t[?]', size), ffi.new('size_t[1]')
-        if kernel.ReadProcessMemory(process, address, buffer, size, count) == 0 or count[0] ~= size then
-            return nil
+    local function copy(address, size, destination)
+        return read_memory(process, address, destination, size, done) ~= 0 and done[0] == size and done[1] == 0
+    end
+    -- Reads size bytes at a number address; nil when they cannot all be read.
+    -- read(address, size, into, offset) copies them into a buffer the caller
+    -- keeps, into = {data = uint8_t array, address = its address as a number,
+    -- size = its length}, at offset and returns true: nothing is allocated.
+    -- read(address, size) returns them as a string from one scratch buffer.
+    local scratch, scratch_address, scratch_size = nil, nil, 0
+    function api.read(address, size, into, offset)
+        if into then
+            offset = offset or 0
+            if size <= 0 or offset < 0 or offset + size > into.size then return nil end
+            return copy(address, size, into.address + offset) or nil
         end
-        return ffi.string(buffer, size)
-    end
-
-    function api.pointer(bytes, offset)
-        offset = offset or 0
-        if not bytes or offset < 0 or offset + 8 > #bytes then return nil end
-        local value = ffi.new('uintptr_t[1]')
-        ffi.copy(value, bytes:sub(offset + 1, offset + 8), 8)
-        if value[0] < 0x10000 or value[0] >= 0x800000000000 then return nil end
-        return ffi.cast('uint8_t *', value[0])
-    end
-
-    function api.module_hash(module)
-        local path = ffi.new('uint16_t[32768]')
-        local length = kernel.GetModuleFileNameW(module, path, 32768)
-        assert(length > 0 and length < 32768, 'Cannot resolve module file')
-        local file = kernel.CreateFileW(path, 0x80000000, 7, nil, 3, 0x08000000, nil)
-        assert(file ~= ffi.cast('void *', -1), 'Cannot read module file')
-        local algorithm, hash = ffi.new('void *[1]'), ffi.new('void *[1]')
-        local ok, result = pcall(function()
-            local name = ffi.new('uint16_t[7]', {83, 72, 65, 50, 53, 54, 0})
-            assert(bcrypt.BCryptOpenAlgorithmProvider(algorithm, name, nil, 0) == 0, 'SHA256 unavailable')
-            assert(bcrypt.BCryptCreateHash(algorithm[0], hash, nil, 0, nil, 0, 0) == 0, 'SHA256 creation failed')
-            local buffer, count = ffi.new('uint8_t[1048576]'), ffi.new('uint32_t[1]')
-            while true do
-                assert(kernel.ReadFile(file, buffer, 1048576, count, nil) ~= 0, 'Module file read failed')
-                if count[0] == 0 then break end
-                assert(bcrypt.BCryptHashData(hash[0], buffer, count[0], 0) == 0, 'SHA256 update failed')
-            end
-            local digest, hex = ffi.new('uint8_t[32]'), {}
-            assert(bcrypt.BCryptFinishHash(hash[0], digest, 32, 0) == 0, 'SHA256 finish failed')
-            for i = 0, 31 do hex[#hex + 1] = string.format('%02X', digest[i]) end
-            return table.concat(hex)
-        end)
-        if hash[0] ~= nil then bcrypt.BCryptDestroyHash(hash[0]) end
-        if algorithm[0] ~= nil then bcrypt.BCryptCloseAlgorithmProvider(algorithm[0], 0) end
-        kernel.CloseHandle(file)
-        if not ok then error(result) end
-        return result
+        if size > scratch_size then
+            scratch_size = math.max(size, 256)
+            scratch = ffi.new('uint8_t[?]', scratch_size)
+            scratch_address = tonumber(ffi.cast('uintptr_t', scratch))
+        end
+        if not copy(address, size, scratch_address) then return nil end
+        return ffi.string(scratch, size)
     end
     return api
 end

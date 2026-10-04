@@ -1,4 +1,11 @@
-"""Build the native input action resource and discoverable menu addon."""
+"""Test and build the native input action resource and discoverable menu addon.
+
+Needs a Bingus Shared Loader checkout beside this repository (or its path in BINGUS_SHARED_LOADER), the unmodified
+content/input.config of Steam build 25480438 (HD2_INPUT_CONFIG), a LuaJIT (HD2_LUAJIT; default: the workspace build in
+tools/src/LuaJIT/src of a folder above this repository, else `luajit` on PATH) and the installed game's bin/lua51.dll
+(HD2_LUA51_DLL). build() runs every test in both before it packages anything, and stops at the first one that fails.
+Importing this file runs nothing else: the Vanilla Plus Megapack build takes its input.config functions from it.
+"""
 
 from __future__ import annotations
 
@@ -6,12 +13,15 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
+import subprocess
 import sys
 import uuid
 import zipfile
 
 
+sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
 LOADER = Path(os.environ.get("BINGUS_SHARED_LOADER", ROOT / "BingusSharedLoader"))
 sys.path.insert(0, str(LOADER / "scripts"))
@@ -24,7 +34,7 @@ import translations  # noqa: E402
 
 HERE = Path(__file__).resolve().parents[1]
 BASE_CONFIG = Path(os.environ.get("HD2_INPUT_CONFIG", str(HERE / "research" / "input.config")))
-VERSION = "2.1"
+VERSION = "2.2"
 CONFIG_SHA256 = "E509D85AC3603721E5AFE5686C7041798587A108AA86E2DA961A2EA451881A1B"
 CONFIG_NAME = resource_hash("content/input")
 CONFIG_TYPE = resource_hash("config")
@@ -137,6 +147,57 @@ def typed_archive(name_hash: int, type_hash: int, payload: bytes) -> bytes:
     return body + b"\0" * (-len(body) % 16)
 
 
+WORKSPACE_LUAJIT = Path("tools/src/LuaJIT/src/luajit.exe")
+
+
+def luajit() -> Path:
+    """HD2_LUAJIT, else the workspace build in a folder above this repository, else luajit on PATH."""
+    if os.environ.get("HD2_LUAJIT"):
+        return Path(os.environ["HD2_LUAJIT"])
+    for folder in HERE.parents:
+        if (folder / WORKSPACE_LUAJIT).is_file():
+            return folder / WORKSPACE_LUAJIT
+    found = shutil.which("luajit")
+    if not found:
+        raise SystemExit("No LuaJIT for the tests: set HD2_LUAJIT.")
+    return Path(found)
+
+
+def suites() -> list[tuple[str, list]]:
+    """Each test file with its arguments, each run in a fresh Lua state (the FFI name orders need one each)."""
+    source = HERE / "src" / "mod_bindings_menu.lua"
+    return [("test_api.lua", [source]), ("test_assignments.lua", []), ("test_sweep.lua", []),
+            ("test_mods_tab.lua", [source]), ("test_poll.lua", [source]), ("test_ffi_names.lua", []),
+            ("test_ffi_names_hostile_first.lua", []), ("test_ffi_names_mbm_first.lua", []),
+            ("test_bingus_text.lua", [HERE / "src"])]
+
+
+def run(label: str, command: list) -> list[str]:
+    """Runs one test; its output lines, or SystemExit with the output when it fails."""
+    result = subprocess.run([str(part) for part in command], capture_output=True, cwd=HERE,
+                            text=True, encoding="utf-8", errors="replace")
+    output = (result.stdout + result.stderr).strip()
+    if result.returncode:
+        raise SystemExit(f"{label} failed (exit code {result.returncode}):\n{output}")
+    return [f"{label}: {line}" for line in output.splitlines()]
+
+
+def run_tests() -> list[str]:
+    """Every test in the LuaJIT and in the game's lua51.dll (tests/game_lua.py). A test file the list above
+    leaves out stops the build, so none is skipped unnoticed."""
+    listed = {name for name, _ in suites()}
+    present = {path.name for path in (HERE / "tests").glob("test_*.lua")}
+    if listed != present:
+        raise SystemExit(f"tests/ and the build's test list differ: {sorted(listed ^ present)}")
+    lua, game = luajit(), HERE / "tests" / "game_lua.py"
+    lines = []
+    for name, arguments in suites():
+        test = HERE / "tests" / name
+        lines += run(f"LuaJIT tests/{name}", [lua, test, *arguments])
+        lines += run(f"lua51.dll tests/{name}", [sys.executable, "-B", game, test, *arguments])
+    return lines
+
+
 def build(output: Path) -> Path:
     base = BASE_CONFIG.read_bytes()
     digest = hashlib.sha256(base).hexdigest().upper()
@@ -148,12 +209,14 @@ def build(output: Path) -> Path:
         problems = translations.check(HERE / "locales", path.stem, out=lambda line: None)
         if problems.errors:
             raise SystemExit(chr(10).join(problems.errors))
+    for line in run_tests():
+        print(line)
     source = entry_source(LUA_NAME, entry_text(HERE))
     lua = struct.pack("<II", len(source), 2) + source
     manifest = {
         "Version": 1, "Guid": str(uuid.UUID(GUID)), "Name": "Mod Bindings Menu v" + VERSION,
         "IconPath": "thumbnail.png",
-        "Description": "Adds a native MODS tab to the keyboard and controller binding pages: up to 36 mod bindings grouped by mod, with every activation type and controller buttons. Requires Bingus Shared Loader v17+.",
+        "Description": "Adds a native MODS tab to the keyboard and controller binding pages: up to 36 mod bindings grouped by mod, with every activation type and controller buttons. Requires Bingus Shared Loader v18+.",
         "Options": [{"Name": "Mod Bindings Menu", "Description": "Native MODS tab for mod bindings", "Image": "thumbnail.png", "Include": ["Addon"]}],
     }
     files = {

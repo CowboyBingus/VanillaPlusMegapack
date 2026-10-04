@@ -4,6 +4,19 @@ package.path = (arg and arg[1] or '.') .. '/?.lua;' .. package.path
 
 rawset(_G, '__CLICKABLE_SCROLLBARS_TEST', true)
 local module = assert(loadfile((arg and arg[2]) or 'ClickableScrollbars/src/clickable_scrollbars.lua'))()
+-- The legacy pixel detector is not shipped in the entry: load it from src/ beside the module.
+local function load_detector(target, environment)
+    local file = assert(io.open(((arg and arg[1]) or '.') .. '/src/detector.lua', 'rb'))
+    local chunk = assert(loadstring(file:read('*a'), '@detector.lua'))
+    file:close()
+    if environment then setfenv(chunk, environment) end
+    chunk(target, {clamp = function(value, low, high)
+        if value < low then return low end
+        if value > high then return high end
+        return value
+    end})
+end
+load_detector(module)
 
 local passed, failed = 0, 0
 local function check(name, condition, detail)

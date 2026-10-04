@@ -14,15 +14,16 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_FILES = (
-    '.gitattributes', '.gitignore', 'CONTRIBUTING.md', 'INSTALL.txt', 'README.md',
-    'THIRD_PARTY.md', 'TRANSLATING.md', 'dependencies.json',
+    '.gitattributes', '.gitignore', 'CHANGELOG.md', 'CONTRIBUTING.md', 'INSTALL.txt', 'README.md',
+    'LICENSE', 'THIRD_PARTY.md', 'TRANSLATING.md', 'dependencies.json',
     'assets/ARTWORK.md', 'assets/banner.png', 'assets/thumbnail.png',
-    'docs/PRIVACY.md', 'docs/RELEASE_NOTES.md', 'docs/TECHNICAL.md', 'locales/en.lua',
+    'docs/MIGRATION_VALIDATION.md', 'docs/PRIVACY.md', 'docs/RELEASE_NOTES.md', 'docs/TECHNICAL.md', 'locales/en.lua', 'publication-files.json',
     'scripts/archive.py', 'scripts/build.py', 'scripts/luatable.py', 'scripts/module.py',
     'scripts/package.py', 'scripts/privacy_audit.py', 'scripts/translations.py',
-    'src/archive_loader.lua', 'src/bingus_text.lua', 'src/dive_data.lua', 'src/windows_api.lua',
-    'tests/frame_budget.lua', 'tests/test_bingus_text.lua', 'tests/test_dive.lua', 'tests/test_loader.lua',
-    'tests/test_package.py',
+    'src/archive_loader.lua', 'src/bingus_memory.lua', 'src/bingus_runtime.lua', 'src/bingus_text.lua',
+    'src/bingus_write.lua', 'src/dive_data.lua', 'src/windows_api.lua',
+    'tests/frame_budget.lua', 'tests/hostile_vm.lua', 'tests/test_bingus_text.lua', 'tests/test_dive.lua',
+    'tests/test_loader.lua', 'tests/test_package.py',
 )
 PATTERNS = {
     'personal_home_path': r'(?i)(?:[a-z]:[\\/]Users[\\/][^\s\\/]+|/(?:home|Users)/[a-z0-9_.-]+)',

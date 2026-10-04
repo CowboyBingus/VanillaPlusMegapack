@@ -12,8 +12,8 @@ import translations
 from package import package_release
 
 MODULE='mods/cowboybingus/shallow_water_dive'
-REVISION='data-v3.9'
-VERSION='v3.9'
+REVISION='data-v3.10'
+VERSION='v3.10'
 FORBIDDEN=('VirtualAlloc','VirtualProtect','FlushInstructionCache','CreateRemoteThread',
            'RtlAddFunctionTable','RtlDeleteFunctionTable','LoadLibrary')
 def run(args,**kwargs):
@@ -43,10 +43,10 @@ def main():
     files={f'data/{ARCHIVE}{suffix}':f'build/{ARCHIVE}{suffix}' for suffix in ('','.stream','.gpu_resources')}
     report={'name':'Shallow Water Diving','slug':'ShallowWaterDiving','revision':REVISION,'version':VERSION,
         'guid':'d93cfc97-0e42-47d6-936a-30e96a7fa539',
-        'description':'Preserves the launch of a shallow-water dive until landing or deep-water entry; the depth limit is adjustable in Mod Options Menu. Requires Bingus Shared Loader v18.',
+        'description':'Preserves the launch of a shallow-water dive until landing or deep-water entry; the depth limit is adjustable in Mod Options Menu. Requires Bingus Shared Loader v18 or newer.',
         'game_exe_sha256':EXE_SHA,'game_dll_sha256':GAME_DLL_SHA,'deployment_files':files,
         'files':{p:sha((ROOT/p).read_bytes()) for p in files.values()},
-        'requires':[{'name':'Bingus Shared Loader','api':1,'revision':'loader-v5'}],
+        'requires':[{'name':'Bingus Shared Loader','api':1,'revision':'loader-v14'}],
         'module':MODULE,'runtime_verified':False,'status':'release',
         'executable_memory_changed':False,'custom_dlls':0,'boot_replaced':False,
         'write':{'target':'local avatar Drownable runtime only','max_records':1,

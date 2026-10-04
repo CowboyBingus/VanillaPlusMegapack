@@ -1,5 +1,5 @@
 local source=assert(arg[1])
-local M=dofile(source..'/corpse_data.lua')
+local M=assert(loadfile(source..'/corpse_data.lua'))(dofile(source..'/corpse_profiles.lua'))
 -- Synthetic geometry and handles only; no game capture is distributed.
 local function matrix(x)
     return {1,0,0,0,0,1,0,0,0,0,1,0,x or 0,0,0,1}

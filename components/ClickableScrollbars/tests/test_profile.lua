@@ -6,6 +6,19 @@ package.path = (arg and arg[1] or '.') .. '/?.lua;' .. package.path
 rawset(_G, '__CLICKABLE_SCROLLBARS_TEST', true)
 local SOURCE = (arg and arg[2]) or 'ClickableScrollbars/src/clickable_scrollbars.lua'
 local module = assert(loadfile(SOURCE))()
+-- The legacy pixel detector is not shipped in the entry: load it from src/ beside the module.
+local function load_detector(target, environment)
+    local file = assert(io.open(((arg and arg[1]) or '.') .. '/src/detector.lua', 'rb'))
+    local chunk = assert(loadstring(file:read('*a'), '@detector.lua'))
+    file:close()
+    if environment then setfenv(chunk, environment) end
+    chunk(target, {clamp = function(value, low, high)
+        if value < low then return low end
+        if value > high then return high end
+        return value
+    end})
+end
+load_detector(module)
 
 local passed, failed = 0, 0
 local function check(name, condition, detail)
@@ -418,6 +431,7 @@ sandbox.__CLICKABLE_SCROLLBARS_TEST = true
 local chunk = assert(loadstring(assert(io.open(SOURCE, 'rb')):read('*a'), '@' .. SOURCE))
 setfenv(chunk, sandbox)
 local sandboxed = chunk()
+load_detector(sandboxed, sandbox)
 assert(type(sandboxed) == 'table' and sandboxed.analyse, 'sandboxed module did not load')
 
 -- Exercise the paths that a press takes, inside the sandbox, with a fake

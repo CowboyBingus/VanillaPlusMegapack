@@ -1,3 +1,26 @@
+# v1.7
+
+- Windows functions and the memory-region record are declared under private names, so another mod that declared them first with other prototypes can no longer leave the addon idle for the session.
+- Memory reads go into reused buffers and fields are decoded in place, cutting Lua garbage per frame from about 1.7 KB to 33 B when idle in a mission and from 2.6 KB to 8 B while firing (measured offline).
+- While Fire is up, an update reads only the local Fire input (1 read instead of 16), and every 15th update checks the local avatar and the charge record in full. Outside a mission the updates between those checks make no Windows call.
+- A press that starts just after the Fire input becomes readable again (joining a mission, a respawn) is picked up at the next full check, within the press's first charge.
+- While Fire is held between full checks, an update verifies the avatar, Fire input and weapon-holder row found last instead of looking them up again: 12 memory reads per update while the Arc Thrower fires (26 before), 4 while another weapon fires (16 before).
+- The charging flag is written only when the game has not already set it, and its memory page is checked to be private read-write game data before the first write of each hold.
+- The weapon data record's page is checked, made writable for that one write and set back to read-only right after; a refused or failed protection change writes nothing and is logged.
+- An error from the game's update or a mod below this one still reaches the game unchanged; the addon then ends the hold, puts the Arc Thrower's record back and pauses until 60 clean updates in a row.
+- Eight errors in one burst stop the addon for the session with the record put back, and the count starts again after 3600 error-free updates. Before, its own errors were logged once and retried forever.
+- A refused write stops the addon and puts the record back; the log names the refused page's state, protection and type.
+- At shutdown the addon puts the record's auto-fire flag back; the log line reads `stopped`, or `stopped after: <first failure>` when something failed.
+- Only the idle path and the memory-read helpers are compiled by LuaJIT, so the addon takes about 5 KB of the code cache shared by the game and every mod (v1.6.1: about 10 KB).
+- Pause, stop and error handling now comes from Bingus Shared Runtime's update guard with the same behaviour; its log lines use the family's wording, for example `ArcThrowerRevamped paused: the previous update failed`.
+- Licensed under the Zero-Clause BSD license (0BSD).
+
+# v1.6.1
+
+- Documentation-only release: the addon is identical to v1.6 (same packaged script).
+- Rewrites the install notes packaged with the addon and the README status: one current status line instead of the compatibility-candidate notes left from the game-build update. In live play the addon loads and finds the Arc Thrower's charge record.
+- Lists one loader requirement, Bingus Shared Loader v18.
+
 # v1.6
 
 - Refresh game-build guards for Steam build 25480438.

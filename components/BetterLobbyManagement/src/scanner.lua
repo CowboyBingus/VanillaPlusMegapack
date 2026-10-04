@@ -157,14 +157,38 @@ function M.new(api, game, s)
         return true
     end
 
+    -- Puts the game's value back while the field still holds this module's.
+    -- Returns false only when that write failed.
+    local function put_back()
+        if config == 0 or config ~= owner or settled == nil or s.game_value == nil
+            or settled == s.game_value then return true end
+        if api.read32(field) ~= settled then return true end
+        if not api.write32(field, s.game_value) then return false end
+        settled = s.game_value -- the field holds the game's value now: not a rewrite
+        return true
+    end
+
     -- Stops checking and puts the game's value back when the field still
     -- holds this module's value. Returns false only when that write failed.
     function self.stop(reason)
         stopped, s.status, s.revision = true, reason or s.status, s.revision + 1
-        if config == 0 or config ~= owner or settled == nil or s.game_value == nil
-            or settled == s.game_value then return true end
-        if api.read32(field) ~= settled then return true end
-        return api.write32(field, s.game_value)
+        return put_back()
+    end
+
+    -- The addon's pause after an error below it: the game's value goes back
+    -- as on stop, and after resume() the next check confirms the object again
+    -- and applies the setting (the counts stay). A stop stays a stop.
+    local paused = false
+    function self.pause(reason)
+        if stopped then return true end
+        paused = true
+        return self.stop(reason)
+    end
+    function self.resume()
+        if not paused then return false end
+        paused, stopped, config, dirty = false, false, 0, true
+        set_status('waiting_for_config')
+        return true
     end
 
     return self

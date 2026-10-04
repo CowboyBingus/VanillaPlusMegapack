@@ -2,8 +2,226 @@
 -- scanner, Mod Options Menu settings and the update hook. C: squad chat
 -- (src/chat.lua). S: the scanner's recharge (src/scanner.lua). B: CANCEL SOS
 -- (src/sos.lua). T: texts and translations (src/bingus_text.lua) with the
--- locales ({en, bundled}). build: {version, game_sha256, exe_sha256, diag}.
--- D: the diagnostic recorder (src/diag.lua), in diagnostic test builds only.
+-- locales ({en, bundled}). build: {version, game_sha256, exe_sha256, diag,
+-- runtime}; runtime is src/bingus_runtime.lua, the core of Bingus Shared
+-- Runtime, whose guard is the update hook (install_hooks below). D: the
+-- diagnostic recorder (src/diag.lua), in diagnostic test builds only.
+
+-- Mod Options Menu entries (optional). Texts are keys in locales/en.lua; 'On'
+-- and 'Off' are the game's own words, which the menu translates. Test builds
+-- add the Kick Test and Promote Notice choices, in English.
+local KICK_TESTS = {{'game', 'Game Kick'}, {'render', 'Kick From Render'}, {'message', 'Message First'},
+                    {'hold', 'Hold Unloads'}, {'plain', 'Plain Kick (v0.3)'}}
+local NOTICES = {{'leader', 'Squad Leader Line'}, {'chat', 'Chat Line'}}
+local function option_list(S, diag)
+    local options = {
+        {id = 'better_lobby_management.region', key = 'region', texts = {type = 'choice',
+            label = 'option.region.label', choices = {'option.region.default', 'option.region.continent'},
+            default = 1, description = 'option.region.description'}},
+        {id = 'better_lobby_management.messages', key = 'messages', texts = {type = 'choice',
+            label = 'option.messages.label', native_choices = {'On', 'Off'}, default = 1,
+            description = 'option.messages.description'}},
+        {id = 'better_lobby_management.scanner_seconds', key = 'scanner', texts = {type = 'slider',
+            label = 'option.scanner.label', min = S and S.MIN_SECONDS or 5, max = S and S.MAX_SECONDS or 20,
+            step = 1, default = S and S.DEFAULT_SECONDS or 5, description = 'option.scanner.description'}},
+    }
+    if not diag then return options end
+    local choices = {}
+    for i, test in ipairs(KICK_TESTS) do choices[i] = test[2] end
+    options[#options + 1] = {id = 'better_lobby_management.kick_test', key = 'kick_test', spec = {type = 'choice',
+        label = 'Kick Test', mod = 'Better Lobby Management', choices = choices, default = 1,
+        description = 'Test build only. Game Kick makes the game run its own player-menu KICK. Kick From Render '
+            .. 'and Message First are test 2\'s kicks, Hold Unloads test 1\'s. Plain Kick is v0.3\'s kick and may '
+            .. 'crash the host.'}}
+    options[#options + 1] = {id = 'better_lobby_management.promote_notice', key = 'promote_notice', spec = {
+        type = 'choice', label = 'Promote Notice', mod = 'Better Lobby Management', default = 1,
+        choices = {NOTICES[1][2], NOTICES[2][2]},
+        description = 'Test build only. Squad Leader Line sends the game\'s own "<name> is the new squad leader" '
+            .. 'notice before PROMOTE kicks the new host (the release\'s message); Chat Line sends a chat message '
+            .. 'from you.'}}
+    return options
+end
+
+-- Mod Options Menu v1.1 and later (version 2) take texts as functions and
+-- call them whenever they build the MODS page, so the texts follow the
+-- game's language. v1.0 takes strings with byte limits: a translation that
+-- does not fit stays English there. tr: the mod's translator.
+local function option_text(tr, options_menu, key, bytes)
+    if (tonumber(options_menu.version) or 1) >= 2 then return function() return tr(key) end end
+    local text = tr(key)
+    return #text <= bytes and text or tr.english[key]
+end
+local function spec_of(tr, option, options_menu)
+    if option.spec then
+        -- Test-build options: English texts under the same (translated) mod name.
+        local spec = {}
+        for field, value in pairs(option.spec) do spec[field] = value end
+        spec.mod = option_text(tr, options_menu, 'option.mod', 40)
+        return spec
+    end
+    local texts = option.texts
+    local spec = {type = texts.type, default = texts.default, min = texts.min, max = texts.max, step = texts.step,
+        mod = option_text(tr, options_menu, 'option.mod', 40), label = option_text(tr, options_menu, texts.label, 64),
+        description = option_text(tr, options_menu, texts.description, 400), choices = texts.native_choices}
+    if texts.choices then
+        spec.choices = {}
+        for i, key in ipairs(texts.choices) do spec.choices[i] = option_text(tr, options_menu, key, 48) end
+    end
+    return spec
+end
+
+-- Mod Options Menu registration (optional). attempt(now) registers every
+-- option. In the loader's after_startup event (loader v19 and later) every mod
+-- of this startup has started, so the menu has installed its table whatever
+-- the load order: that attempt is the only one (attempt(now, 0)). Without the
+-- event (loader v18) the first update makes it, and while the installed menu
+-- has refused or raised (some option is unregistered), a check runs 1, 3, 7
+-- ... 255 s after it (RETRIES checks) and registers what is missing when the
+-- menu table was replaced, its revision moved, or the last attempt was
+-- refused or raised. Each option is registered, read and given its change
+-- callback once per menu table. The menu installs its table once per session,
+-- while the addons load, so none at the first update means none is coming:
+-- nothing is retried. Registered, no menu, or out of checks: nothing runs per
+-- frame. spec(option, menu) builds a registration, apply(key, value) applies
+-- a value, note(line) logs, status.options says how it went.
+local RETRIES = 8
+local function option_registrar(options, spec, apply, note, status)
+    local self = {}
+    local menu, revision, failed, registered = nil, nil, false, {}
+    local checks, due, retries = 0, 0, RETRIES
+    status.options = 'pending'
+
+    local function installed()
+        local found = rawget(_G, 'ModOptionsMenu')
+        if type(found) == 'table' and found.api == 1 then return found end
+        return nil
+    end
+
+    -- Registers what this menu does not have yet; returns the outcome. An
+    -- option counts once its value is applied and its callback set (the menu
+    -- accepts the same registration again).
+    local function register(found)
+        for _, option in ipairs(options) do
+            if not registered[option.id] then
+                local ok, why = found.register_option(option.id, spec(option, found))
+                if not ok then return 'not registered: ' .. tostring(why) end
+                apply(option.key, found.get(option.id))
+                found.on_change(option.id, function(value) apply(option.key, value) end)
+                registered[option.id] = true
+            end
+        end
+        return 'registered'
+    end
+
+    -- limit: the checks allowed from now on (default: as before, RETRIES).
+    function self.attempt(now, limit)
+        retries = limit or retries
+        local found, outcome = installed(), 'not installed (defaults in use)'
+        if found ~= menu then menu, registered = found, {} end
+        revision, failed = found and found.revision, false
+        if found then
+            local called, result = pcall(register, found)
+            outcome = called and result or 'failed: ' .. tostring(result)
+            failed = outcome ~= 'registered'
+        end
+        if outcome ~= status.options then note('Mod Options Menu: ' .. outcome) end
+        status.options, due = outcome, now + 2 ^ checks
+        return outcome
+    end
+
+    function self.pending() return menu ~= nil and status.options ~= 'registered' and checks < retries end
+
+    -- Once per frame while pending; false once nothing more will happen.
+    function self.tick(now)
+        if now < due then return true end
+        checks = checks + 1
+        local found = installed()
+        if found ~= menu or (found and (found.revision ~= revision or failed)) then self.attempt(now) end
+        due = now + 2 ^ checks
+        if self.pending() then return true end
+        if status.options ~= 'registered' and menu then
+            note('Mod Options Menu: ' .. status.options .. '; no more retries this session')
+        end
+        return false
+    end
+    return self
+end
+
+-- Runs fn in the loader's after_startup event: once every mod of this startup
+-- has started and before the first update, or at once when startup has
+-- finished. Only when the loader says it has the event
+-- (capabilities.after_startup, loader v19 and later), never by its version.
+-- True when the loader took fn; false (logged when refused) otherwise.
+local function at_startup(loader, fn, note)
+    local capabilities = type(loader) == 'table' and loader.capabilities
+    if type(capabilities) ~= 'table' or capabilities.after_startup ~= true
+        or type(loader.after_startup) ~= 'function' then
+        return false
+    end
+    local called, accepted, why = pcall(loader.after_startup, fn)
+    if called and accepted == true then return true end
+    note('Mod Options Menu: after_startup refused (' .. tostring(called and why or accepted)
+        .. '); registering on the first update')
+    return false
+end
+
+-- Diagnostic builds: the Kick From Render test runs its kicks in the render
+-- callback, after the game's own update in the same frame, while running()
+-- says the mod runs and is not paused; failed(problem) takes an error there.
+local function render_hook(kicks, running, failed)
+    local previous_render = rawget(_G, 'render')
+    return function(...)
+        if running() then
+            local ok, problem = pcall(kicks)
+            if not ok then failed(problem) end
+        end
+        if type(previous_render) == 'function' then return previous_render(...) end
+    end
+end
+
+-- The update hook: Bingus Shared Runtime's guard (build.runtime.guard), the
+-- policy every CowboyBingus mod shares. The update below this mod (the
+-- game's, or a mod loaded earlier) runs outside pcall with every argument and
+-- return value, so its errors reach the game unchanged; one that raised pauses
+-- this mod on the next frame (hooks.pause), and the mod resumes once the
+-- updates below have returned on 60 frames in a row. 8 errors in a burst stop
+-- it (hooks.stop, once), its own errors and the errors below counted apart,
+-- each count starting again after 3600 frames without one. The first failure
+-- survives shutdown, and hooks.stop also does the shutdown work (reason
+-- 'shutdown') while the mod has not stopped. The guard's lines (the first
+-- error of a burst, a pause, a resume, a stop) go to hooks.note. Diagnostic
+-- builds also hook render: an error there is handled at once by
+-- hooks.render_failed and raised at the end of the next step, after
+-- hooks.render_counted, so the guard counts it as one of the mod's own errors.
+-- Returns the guard, or nil and why it could not install.
+local function install_hooks(build, hooks)
+    local step, render_error = hooks.step, nil
+    if build.diag then
+        step = function(dt)
+            hooks.step(dt)
+            local problem = render_error
+            if problem then
+                render_error = nil
+                hooks.render_counted()
+                error(problem, 0)
+            end
+        end
+    end
+    local installed, guard = pcall(function()
+        return build.runtime.guard({name = 'BetterLobbyManagement', step = step, pause = hooks.pause,
+            stop = hooks.stop, log = hooks.note, env = _G}).install()
+    end)
+    if not installed then return nil, guard end
+    if build.diag then
+        render = render_hook(hooks.render_kicks, function() return guard.status.state == 'running' end,
+            function(problem)
+                hooks.render_failed()
+                render_error = problem
+            end)
+    end
+    return guard
+end
+
 return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
     if rawget(_G, 'BetterLobbyManagement') then return end
     local state = {version = build.version, status = 'starting', menu = 'pending', options = 'pending',
@@ -149,41 +367,13 @@ return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
     end
     set_messages(true)
 
-    -- Settings (Mod Options Menu, optional). Texts are keys in locales/en.lua;
-    -- 'On' and 'Off' are the game's own words, which the menu translates.
-    local OPTIONS = {
-        {id = 'better_lobby_management.region', key = 'region', texts = {type = 'choice',
-            label = 'option.region.label', choices = {'option.region.default', 'option.region.continent'},
-            default = 1, description = 'option.region.description'}},
-        {id = 'better_lobby_management.messages', key = 'messages', texts = {type = 'choice',
-            label = 'option.messages.label', native_choices = {'On', 'Off'}, default = 1,
-            description = 'option.messages.description'}},
-        {id = 'better_lobby_management.scanner_seconds', key = 'scanner', texts = {type = 'slider',
-            label = 'option.scanner.label', min = S and S.MIN_SECONDS or 5, max = S and S.MAX_SECONDS or 20,
-            step = 1, default = S and S.DEFAULT_SECONDS or 5, description = 'option.scanner.description'}},
-    }
-    local KICK_TESTS = {{'game', 'Game Kick'}, {'render', 'Kick From Render'}, {'message', 'Message First'},
-                        {'hold', 'Hold Unloads'}, {'plain', 'Plain Kick (v0.3)'}}
-    local NOTICES = {{'leader', 'Squad Leader Line'}, {'chat', 'Chat Line'}}
-    if build.diag then
-        local choices = {}
-        for i, test in ipairs(KICK_TESTS) do choices[i] = test[2] end
-        lobby.kick_mode = KICK_TESTS[1][1]
-        OPTIONS[#OPTIONS + 1] = {id = 'better_lobby_management.kick_test', key = 'kick_test', spec = {type = 'choice',
-            label = 'Kick Test', mod = 'Better Lobby Management', choices = choices, default = 1,
-            description = 'Test build only. Game Kick makes the game run its own player-menu KICK. Kick From Render '
-                .. 'and Message First are test 2\'s kicks, Hold Unloads test 1\'s. Plain Kick is v0.3\'s kick and may '
-                .. 'crash the host.'}}
-        lobby.notice_mode = NOTICES[1][1]
-        OPTIONS[#OPTIONS + 1] = {id = 'better_lobby_management.promote_notice', key = 'promote_notice', spec = {
-            type = 'choice', label = 'Promote Notice', mod = 'Better Lobby Management', default = 1,
-            choices = {NOTICES[1][2], NOTICES[2][2]},
-            description = 'Test build only. Squad Leader Line sends the game\'s own "<name> is the new squad leader" '
-                .. 'notice before PROMOTE kicks the new host (the release\'s message); Chat Line sends a chat message '
-                .. 'from you.'}}
-    end
+    -- Settings (Mod Options Menu, optional): option_list and spec_of above.
+    local OPTIONS = option_list(S, build.diag)
+    if build.diag then lobby.kick_mode, lobby.notice_mode = KICK_TESTS[1][1], NOTICES[1][1] end
+    local applied = {} -- key -> the value last applied, applied again after a pause
     local function apply_setting(key, value)
         if type(value) ~= 'number' then return end
+        applied[key] = value
         if key == 'kick_test' then
             local test = KICK_TESTS[value] or KICK_TESTS[1]
             lobby.kick_mode = test[1]
@@ -204,44 +394,8 @@ return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
             end
         end
     end
-    -- Mod Options Menu v1.1 and later (version 2) take texts as functions and
-    -- call them whenever they build the MODS page, so the texts follow the
-    -- game's language. v1.0 takes strings with byte limits: a translation
-    -- that does not fit stays English there.
-    local function option_text(options_menu, key, bytes)
-        if (tonumber(options_menu.version) or 1) >= 2 then return function() return tr(key) end end
-        local text = tr(key)
-        return #text <= bytes and text or tr.english[key]
-    end
-    local function spec_of(option, options_menu)
-        if option.spec then
-            -- Test-build options: English texts under the same (translated) mod name.
-            local spec = {}
-            for field, value in pairs(option.spec) do spec[field] = value end
-            spec.mod = option_text(options_menu, 'option.mod', 40)
-            return spec
-        end
-        local texts = option.texts
-        local spec = {type = texts.type, default = texts.default, min = texts.min, max = texts.max, step = texts.step,
-            mod = option_text(options_menu, 'option.mod', 40), label = option_text(options_menu, texts.label, 64),
-            description = option_text(options_menu, texts.description, 400), choices = texts.native_choices}
-        if texts.choices then
-            spec.choices = {}
-            for i, key in ipairs(texts.choices) do spec.choices[i] = option_text(options_menu, key, 48) end
-        end
-        return spec
-    end
-    local function register_options()
-        local options_menu = rawget(_G, 'ModOptionsMenu')
-        if type(options_menu) ~= 'table' or options_menu.api ~= 1 then return 'not installed (defaults in use)' end
-        for _, option in ipairs(OPTIONS) do
-            local ok, why = options_menu.register_option(option.id, spec_of(option, options_menu))
-            if not ok then return 'not registered: ' .. tostring(why) end
-            apply_setting(option.key, options_menu.get(option.id))
-            options_menu.on_change(option.id, function(value) apply_setting(option.key, value) end)
-        end
-        return 'registered'
-    end
+    local options = option_registrar(OPTIONS, function(option, menu) return spec_of(tr, option, menu) end,
+        apply_setting, note, state)
 
     -- Idle gate: the context pointer and the peer count answer "could an action
     -- run?". Hosting a squad, the escape menu is looked at; alone, CANCEL SOS
@@ -332,16 +486,6 @@ return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
         if action == 'cancel_sos' then return sos.cancel(clock) end
     end
 
-    -- Lua entry points (console or other addons). target: {lo, hi} or nil.
-    function state.disband() return lobby.disband(clock) end
-    function state.promote(target) return lobby.promote(target, clock) end
-    function state.cancel() return lobby.cancel('requested') end
-    function state.cancel_sos()
-        if not sos then return false, state.sos end
-        return sos.cancel(clock)
-    end
-
-    local step
     local menu_seen = false
     local function run(dt)
         clock = clock + (dt or 0)
@@ -388,65 +532,135 @@ return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
         if lobby.ui_pending() then lobby.ui_step(clock) end
         region.step()
     end
-    step = function(dt)
-        -- Translations register when their addon loads, before this first
-        -- update; the language decides the Mod Options Menu texts below.
+    -- The step the guard runs before the update below, every frame while the
+    -- mod runs: current is first, run, with_options (while a Mod Options Menu
+    -- check can come) or restart (the first frame after a pause). The guard
+    -- counts the mod's own errors (guarded.errors, per burst: back to 0 after
+    -- 3600 frames without one) and logs the first of a burst; recovered is the
+    -- count this mod has caught up with. A higher count means the last step
+    -- raised, so whatever runs next (the next step, the pause, the stop or the
+    -- shutdown) first cancels the running action with its queued kicks
+    -- (recover), with the clock of the frame that failed, and counts the error
+    -- in state.errors for the session. Per frame: one call, one load and one
+    -- comparison; no store.
+    local current, guarded, recovered = nil, nil, 0
+    local function recover()
+        state.errors = state.errors + 1
+        local ok, why = pcall(lobby.reset, 'error')
+        if not ok then note('Recovery failed: ' .. tostring(why)) end
+    end
+    local function catch_up()
+        local errors = guarded.errors
+        if errors > recovered then recover() end
+        recovered = errors
+    end
+    local function step(dt)
+        if guarded.errors ~= recovered then catch_up() end
+        current(dt)
+    end
+    -- While a Mod Options Menu registration is pending: its retry check after
+    -- the frame's work (one comparison while none is due).
+    local function with_options(dt)
+        run(dt)
+        if not options.tick(clock) then current = run end
+    end
+    local function next_step() return options.pending() and with_options or run end
+    -- The first update: the game's Text Language (5 guarded reads, again when
+    -- the loader's after_startup event read it, in case it was not readable
+    -- yet) and, unless that event registered them, the Mod Options Menu
+    -- options. Translations register when their addon loads, before it; the
+    -- language decides the Mod Options Menu texts.
+    local function first(dt)
         observe_language()
-        local called, result = pcall(register_options)
-        state.options = called and result or 'failed: ' .. tostring(result)
-        note('Mod Options Menu: ' .. state.options)
-        step = run
+        if state.options == 'pending' then options.attempt(clock) end
+        current = next_step()
+        return run(dt)
+    end
+    current = first
+    -- The first update after a pause: the settings applied again (the region
+    -- flags, the scanner's value), as at a fresh start.
+    local function restart(dt)
+        state.status = 'ready'
+        if scanner then scanner.resume() end
+        for key, value in pairs(applied) do apply_setting(key, value) end
+        current = next_step()
         return run(dt)
     end
 
-    -- An error stops the mod for the session: any action is cancelled, the
-    -- region flags are put back and the game's own update keeps running.
-    local previous_update, previous_shutdown = rawget(_G, 'update'), rawget(_G, 'shutdown')
-    local traceback = debug.traceback
-    local stopped = false
-    local function stop(err)
-        stopped = true
-        state.errors = state.errors + 1
-        state.status = 'stopped after error'
-        pcall(lobby.cancel, 'error')
-        pcall(lobby.release_hold, 'error')
+    -- Pause (an error below this mod): any action is cancelled with its queued
+    -- kicks, the region flags and the scanner's field go back, and the dialog
+    -- in progress and the chosen successor are forgotten. A kept SOS cancel is
+    -- the player's choice and stays: nothing keeps it up while paused, and on
+    -- the first frame after the pause keep() checks the session, the mission
+    -- and the beacons again from fresh reads before it acts.
+    local function pause()
+        catch_up()
+        state.status = 'paused: the previous update failed'
+        lobby.reset('paused')
+        if region.mode() == 2 then region.set_mode(1) end
+        if scanner then scanner.pause('paused') end
+        if menu then menu.reset() end
+        chosen, shown.mode, menu_seen = nil, -1, false
+        current = restart
+    end
+    -- Stop (8 errors in a burst, or a pause that failed): the same for the rest
+    -- of the session; the game's own update keeps running.
+    local function stop_after(reason)
+        state.status = 'stopped: ' .. reason
+        pcall(lobby.reset, 'error')
         local restored = pcall(region.restore)
         if scanner then pcall(scanner.stop, 'stopped_after_error') end
         if sos and sos.cancelled() then note('CANCEL SOS: no longer kept off; a player leaving lists the SOS again') end
-        note('Error: ' .. tostring(err))
         note('Better Lobby Management stopped for this session' .. (restored and '; region flags restored' or ''))
     end
-    update = function(dt)
-        if not stopped then
-            local ok, err = xpcall(step, traceback, dt)
-            if not ok then stop(err) end
-        end
-        if type(previous_update) == 'function' then return previous_update(dt) end
-    end
-    -- Diagnostic builds: the Kick From Render test runs its kicks here, after
-    -- the game's own update in the same frame.
-    if build.diag then
-        local previous_render = rawget(_G, 'render')
-        local function render_kicks() lobby.render_step(clock) end
-        render = function(...)
-            if not stopped then
-                local ok, err = xpcall(render_kicks, traceback)
-                if not ok then stop(err) end
-            end
-            if type(previous_render) == 'function' then return previous_render(...) end
-        end
-    end
-    shutdown = function(...)
+    -- Shutdown while the mod has not stopped. The status keeps the first
+    -- failure, an update below that raised in the last frame included.
+    local function finish()
+        local failure = guarded.first_failure
+        state.status = failure and 'stopped after: ' .. failure or 'stopped'
         pcall(lobby.release_hold, 'shutdown')
         local restored = region.mode() == 2 and region.restore() or 0
-        note(string.format('Shutdown: %d actions; region flags restored %d; page checks %d; errors %d%s%s',
-            state.actions or 0, restored, api.queries, state.errors, scanner and '; ' .. scanner_summary() or '',
+        note(string.format('Shutdown (%s): %d actions; region flags restored %d; page checks %d; errors %d, errors below '
+            .. '%d, pauses %d%s%s', state.status, state.actions or 0, restored, api.queries, state.errors,
+            guarded.lower_errors, guarded.pauses, scanner and '; ' .. scanner_summary() or '',
             sos and string.format('; SOS cancels %d, re-arms caught %d (%d already posted)', state.sos_cancels,
                 state.sos_rearms, state.sos_leaks) or ''))
-        if type(previous_shutdown) == 'function' then return previous_shutdown(...) end
+    end
+    -- The guard runs this once: when it stops the mod, or at shutdown (reason
+    -- 'shutdown'). A failure is logged, never raised.
+    local function stop(reason)
+        catch_up()
+        local shutting = reason == 'shutdown'
+        local ok, why = pcall(shutting and finish or stop_after, reason)
+        if not ok then note((shutting and 'Shutdown work failed: ' or 'Stopping failed: ') .. tostring(why)) end
+    end
+    local guard, why = install_hooks(build, {step = step, pause = pause, stop = stop, note = note,
+        render_failed = recover, render_counted = function() recovered = recovered + 1 end,
+        render_kicks = function() lobby.render_step(clock) end})
+    if not guard then
+        state.status = 'unsupported: ' .. tostring(why)
+        note('Better Lobby Management ' .. build.version .. ' inactive: ' .. tostring(why))
+        return
+    end
+    guarded = guard.status
+    state.guard = guarded
+
+    -- Lua entry points (console or other addons). target: {lo, hi} or nil.
+    function state.disband() return lobby.disband(clock) end
+    function state.promote(target) return lobby.promote(target, clock) end
+    function state.cancel() return lobby.cancel('requested') end
+    function state.cancel_sos()
+        if not sos then return false, state.sos end
+        return sos.cancel(clock)
     end
     note('Better Lobby Management ' .. build.version .. ' ready: game code and natives verified; menu '
         .. state.menu .. (region_ok and '' or '; Lobby Region disabled: ' .. region_why)
         .. '; squad messages ' .. state.chat .. '; scanner ' .. (scanner and 'ready' or 'disabled: ' .. scanner_why)
         .. '; CANCEL SOS ' .. state.sos .. (state.diag and '; diagnostics ' .. state.diag or ''))
+    -- Loader v19 and later: the Mod Options Menu options are registered once,
+    -- in its after_startup event (first then skips them); nothing is retried.
+    at_startup(loader, function()
+        observe_language()
+        options.attempt(clock, 0)
+    end, note)
 end

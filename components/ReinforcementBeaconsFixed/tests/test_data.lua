@@ -90,7 +90,7 @@ for _,case in ipairs({'success','changed','mode_changed','readonly','partial','r
     local remote=case:find('remote',1,true)~=nil
     local t={};local before=snapshot(1);beacon(before,50,remote and 2 or 0,10,20,not remote);patch.plan(before,t)
     local now=snapshot(2);beacon(now,50,remote and 2 or 1,10,20,not remote);now.address=0x10010c
-    local reads,writes=0,{}
+    local reads,writes,queries=0,{},0
     local mem=now.original
     local api={}
     patch.snapshot=function()
@@ -102,9 +102,13 @@ for _,case in ipairs({'success','changed','mode_changed','readonly','partial','r
         if reads==2 and case=='remote_owner_changed' then s.beacons[1].owned=true end
         return s
     end
-    api.writable_data=function(address,n) assert(address==now.address and n==8);return case~='readonly' end
+    api.writable_data=function(address,n)
+        assert(address==now.address and n==8);queries=queries+1;return case~='readonly'
+    end
+    -- Like the real adapter, write checks protection itself right before writing.
     api.write=function(address,bytes)
         assert(address==now.address and #bytes==8)
+        if not api.writable_data(address,#bytes) then return false end
         writes[#writes+1]=bytes
         mem=(case=='partial' and #writes==1) and bytes:sub(1,4)..mem:sub(5) or bytes
         return not(case=='partial' and #writes==1)
@@ -114,13 +118,47 @@ for _,case in ipairs({'success','changed','mode_changed','readonly','partial','r
         assert(address==0x1002e0 and n==4);return string.char(2,0,0,0)
     end
     local ok=pcall(patch.apply,api,0,0,t)
-    if case=='success' or case=='remote' then assert(ok and #writes==1 and t.corrections==1)
-    elseif case=='changed' or case=='mode_changed' or case=='remote_changed' or case=='remote_owner_changed' then assert(ok and #writes==0,case)
-    elseif case=='readonly' then assert(not ok and #writes==0)
-    else assert(not ok and #writes==2 and mem==now.original) end
+    -- One protection query per write; a refused write adds one to report why.
+    if case=='success' or case=='remote' then assert(ok and #writes==1 and t.corrections==1 and queries==1)
+    elseif case=='changed' or case=='mode_changed' or case=='remote_changed' or case=='remote_owner_changed' then assert(ok and #writes==0 and queries==0,case)
+    elseif case=='readonly' then assert(not ok and #writes==0 and queries==2)
+    else assert(not ok and #writes==2 and mem==now.original and queries==3) end
 end
 patch.snapshot=original_snapshot
+-- restore puts back only this mod's own pending write: the same player manager,
+-- the spawn still pending and its XY still holding the written bytes. Every
+-- association is forgotten either way (a fresh start).
+do
+    local pm,mem,spawn,written,refuse=0x100000,nil,nil,{},false
+    local api={}
+    api.read=function(address,n)
+        if address==0x3326468 then assert(n==8);return 'pm' end
+        if address==pm+0x2e0 then assert(n==4);return spawn end
+        assert(address==pm+0x10c and n==8);return mem
+    end
+    api.pointer=function(bytes) return bytes=='pm' and pm or nil end
+    api.write=function(address,bytes)
+        assert(address==pm+0x10c and #bytes==8)
+        if refuse then return false end
+        written[#written+1]=bytes;mem=bytes;return true
+    end
+    for _,case in ipairs({'restored','moved','spawned','overwritten','nothing','refused'}) do
+        local state={previous={},anchor={},pending={bytes='centered',address=pm+0x10c,original='original'}}
+        if case=='nothing' then state.pending=nil end
+        if case=='moved' then state.pending.address=pm+0x110c end
+        mem,spawn,written,refuse='centered',string.char(case=='spawned' and 3 or 2,0,0,0),{},case=='refused'
+        if case=='overwritten' then mem='another!' end
+        local ok,outcome=patch.restore(api,0,state)
+        assert(not state.pending and not state.previous and not state.anchor,case..': a fresh start')
+        if case=='restored' then assert(ok and outcome=='correction_restored' and #written==1 and mem=='original')
+        elseif case=='nothing' then assert(ok and outcome=='nothing_to_restore' and #written==0)
+        elseif case=='refused' then assert(not ok and outcome=='correction_restore_failed' and #written==0)
+        else assert(ok and outcome=='correction_left_unchanged' and #written==0,case) end
+    end
+end
 -- Archive startup enforces the external loader and preserves all update returns.
+-- The build hands the loader the vendored runtime as the fourth argument.
+local runtime=assert(loadfile(source..'/bingus_runtime.lua'))()
 local function test_loader(loader,accepted)
     local install=assert(loadfile(source..'/archive_loader.lua'))()
     local checks=0
@@ -130,8 +168,9 @@ local function test_loader(loader,accepted)
     setfenv(install,env)
     local previous=env.update
     local api={module=function(n)return n or 'exe'end,module_hash=function(n)return n end}
-    install(function()return api end,{apply=function()checks=checks+1;return true,'waiting',false end},
-        {revision='test',game_sha256='game.dll',exe_sha256='exe'})
+    install(function()return api end,{apply=function()checks=checks+1;return true,'waiting',false end,
+        restore=function()return true,'nothing_to_restore' end},
+        {revision='test',game_sha256='game.dll',exe_sha256='exe'},runtime)
     -- Idle (no reinforcement in progress): one check per frame.
     local a,b,c=env.update(4)
     assert(a==4 and b==nil and c==3 and checks==(accepted and 1 or 0))
@@ -157,4 +196,4 @@ for _,loader in ipairs({{api=1},{api=1,version=7},{api=2,version=7},{api=99,vers
     test_loader(loader,true)
 end
 for _,loader in ipairs({false,{}, {api=0,version=100},{api='1',version=100}}) do test_loader(loader,false) end
-print('PASS: beacon correction, three synthetic solo scenarios, guarded eight-byte writes, rollback, exclusions and minimum/newer loader API returns')
+print('PASS: beacon correction, three synthetic solo scenarios, guarded eight-byte writes, rollback, restore of its own pending write only, exclusions and minimum/newer loader API returns')

@@ -11,43 +11,42 @@ local bit = require('bit')
 -- provide it as a global). functions: one text function per key, so repeated
 -- registrations pass the same function.
 local translation = {T = ssh_text.module, functions = {}}
+-- Bingus Shared Runtime's vendored src/bingus_runtime.lua and
+-- src/bingus_memory.lua, which the build places ahead of this file as the
+-- functions in the local ssh_runtime (tests provide it as a global): the update
+-- guard (the family's update-chain policy) and the module hashes every mod
+-- shares, read once per session.
+local runtime = ssh_runtime.core()
+local memory = ssh_runtime.memory().new(runtime)
+local guard -- The update guard, installed at the end of this file.
 
+-- Every Windows function goes by a private name, an __asm__ label naming the
+-- real export, and every type name is this mod's own. ffi.cdef keeps the first
+-- prototype declared for a name and the first layout declared for a type name
+-- in the whole game, and ignores a later one without an error: another mod's
+-- declarations of the real names can no longer change how this mod calls them,
+-- and this mod's leave those names to the mods that declare them.
 ffi.cdef [[
 typedef unsigned short GMH_u16;
 typedef unsigned int GMH_u32;
 typedef unsigned long long GMH_u64;
 typedef unsigned char GMH_u8;
-void *GetModuleHandleA(const char *name);
-GMH_u32 GetModuleFileNameW(void *module, GMH_u16 *path, GMH_u32 capacity);
-void *GetCurrentProcess(void);
-GMH_u32 GetCurrentProcessId(void);
-int ReadProcessMemory(void *process, const void *address, void *buffer,
-                      size_t size, size_t *received);
-void *CreateFileW(const GMH_u16 *path, GMH_u32 access, GMH_u32 share,
-                  void *security, GMH_u32 disposition, GMH_u32 flags, void *template_file);
-int ReadFile(void *file, void *buffer, GMH_u32 size, GMH_u32 *received, void *overlapped);
-int CloseHandle(void *handle);
-short GetAsyncKeyState(int key);
-void *GetForegroundWindow(void);
-GMH_u32 GetWindowThreadProcessId(void *window, GMH_u32 *process);
-int BCryptOpenAlgorithmProvider(void **algorithm, const GMH_u16 *name,
-                                const GMH_u16 *provider, GMH_u32 flags);
-int BCryptCloseAlgorithmProvider(void *algorithm, GMH_u32 flags);
-int BCryptCreateHash(void *algorithm, void **hash, void *object, GMH_u32 object_size,
-                     const void *secret, GMH_u32 secret_size, GMH_u32 flags);
-int BCryptHashData(void *hash, const void *data, GMH_u32 size, GMH_u32 flags);
-int BCryptFinishHash(void *hash, void *digest, GMH_u32 size, GMH_u32 flags);
-int BCryptDestroyHash(void *hash);
+void *GMH_GetCurrentProcess(void) __asm__("GetCurrentProcess");
+GMH_u32 GMH_GetCurrentProcessId(void) __asm__("GetCurrentProcessId");
+int GMH_ReadProcessMemory(void *process, const void *address, void *buffer,
+                          size_t size, size_t *received) __asm__("ReadProcessMemory");
+short GMH_GetAsyncKeyState(int key) __asm__("GetAsyncKeyState");
+int32_t GMH_GetForegroundWindow(void) __asm__("GetForegroundWindow");
+GMH_u32 GMH_GetWindowThreadProcessId(int64_t window, GMH_u32 *process) __asm__("GetWindowThreadProcessId");
 ]]
 
-local kernel32, user32, bcrypt =
-    ffi.load('kernel32'), ffi.load('user32'), ffi.load('bcrypt')
-local process = kernel32.GetCurrentProcess()
-local process_id = tonumber(kernel32.GetCurrentProcessId())
+local kernel32, user32 = ffi.load('kernel32'), ffi.load('user32')
+local process = kernel32.GMH_GetCurrentProcess()
+local process_id = tonumber(kernel32.GMH_GetCurrentProcessId())
 -- label: the game's own localization ID (translated by the game), or text:
 -- a key in locales/en.lua.
 local MAP_SHORTCUT = {name = 'Galactic Map', id = 'cowboybingus.galactic_menu',
-                      label = 0xb46c8096, slot = 1, key = 0x09, presenter = 15}
+                      label = 0xb46c8096, slot = 1, key = 0x09, presenter = 15} -- Hologram
 local MENU_SHORTCUTS = {
     {name = 'Armory', id = 'cowboybingus.armory', label = 0x19e97f02,
      slot = 3, key = 0x70, presenter = 5}, -- F1
@@ -60,6 +59,16 @@ local MENU_SHORTCUTS = {
     {name = 'Hellpod Deployment', id = 'cowboybingus.hellpod',
      label = 0xe89a91ef, slot = 7, key = 0x77, hellpod = true}, -- F8
 }
+-- Every shortcut in the order they are polled and acted on: the map first.
+local SHORTCUTS = {MAP_SHORTCUT, unpack(MENU_SHORTCUTS)}
+-- Context checks: the galaxy table lookup makes engine calls for every world
+-- and the focus check two Windows calls, all unmeasured in game, so they do
+-- not run on every frame. The context is read again every CONTEXT_FRAMES
+-- frames and on every frame that acts (a newly pressed shortcut, or a Hellpod
+-- wait or seat in progress), so nothing acts on an older answer. While the
+-- game is not focused aboard the ship, its focus is checked on every frame, so
+-- a shortcut pressed right after switching back acts on that frame as before.
+local CONTEXT_FRAMES = 15
 local SHIP_TABLE_HASH = '3b9bcf29e38da0a6'
 local GAME_SHA256 = '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
 local EXE_SHA256 = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
@@ -101,7 +110,7 @@ local INTRO_WAITING, INTRO_DONE = 1, 0
 local SEAT_FALLBACK_SECONDS = 3
 local PRESENTER_OFFSET = 17032
 local ARCADE_MAX_DISTANCE_SQUARED = 9 -- Three world units from cabinet root.
-local IDLE_MENU_PRESENTER, HOLOGRAM_PRESENTER = 0, 15
+local IDLE_MENU_PRESENTER = 0
 -- Hellpod manager pod mode 2 means a mission is selected. Pod state 3 is
 -- open for entry; 4 is occupied. States 0-2 precede the opening animation.
 local POD_MISSION_READY, POD_OPEN, POD_OCCUPIED = 2, 3, 4
@@ -117,12 +126,23 @@ local BRIEFING_PREFIX =
     '\x48\x89\x4c\x24\x08\x57\x48\x83\xec\x40\x4c\x8b\x0d'
 
 local state = {
-    world = nil, world_status = nil, hotkey_down = false, menu_keys_down = {},
+    -- keys_down: each shortcut's state on the last frame, by id; now: this
+    -- frame's, in SHORTCUTS order.
+    world = nil, world_status = nil, keys_down = {}, now = {},
+    -- context_frames: frames until the context is read again; focused: the
+    -- game window was in the foreground then; other_window: a foreground
+    -- window already found to belong to another process.
+    context_frames = 0, focused = false, other_window = nil,
     initialized = false,
     open_presenter = nil, start_arcade = nil, enter_seat = nil, open_briefing = nil,
     unit_position = nil, game_base = nil, hellpod_wait = nil, hellpod_seat = nil,
-    update_logged = false, errors = 0,
-    binding_host = nil, binding_slots = {},
+    update_logged = false,
+    -- binding_host: the Mod Bindings Menu table registered with; binding_slots:
+    -- the shortcuts it accepted, by id; binding_retry: another try is due
+    -- (binding_retries made, binding_since frames ago, binding_revision then);
+    -- binding_poll: that table's poll answers the shortcuts (see poll_bindings).
+    binding_host = nil, binding_slots = {}, binding_retry = false, binding_retries = 0, binding_since = 0,
+    binding_revision = nil, binding_poll = false,
 }
 
 local loader = rawget(_G, 'CowboyBingusModLoader')
@@ -165,12 +185,47 @@ local function world_status(message)
     end
 end
 
+local function lookup_api_ready(engine)
+    return type(engine) == 'table' and type(engine.Application) == 'table'
+       and type(engine.World) == 'table' and type(engine.IdString64) == 'table'
+       and type(engine.Application.main_world) == 'function'
+       and type(engine.World.units_by_resource) == 'function'
+       and type(engine.IdString64.from_hex) == 'function'
+end
+
+-- The worlds to search, in order: the main world, then every listed world.
+-- One reused list, emptied before and after each lookup.
+local world_list = {}
+local function clear_worlds()
+    for index = #world_list, 1, -1 do world_list[index] = nil end
+end
+local function add_world(world)
+    if world and world ~= ffi.NULL then world_list[#world_list + 1] = world end
+end
+local function list_worlds(application)
+    clear_worlds()
+    local main_ok, main = pcall(application.main_world)
+    if main_ok then add_world(main) end
+    if type(application.worlds) == 'function' then
+        local list_ok, list = pcall(application.worlds)
+        if list_ok and type(list) == 'table' then
+            for _, world in ipairs(list) do add_world(world) end
+        end
+    end
+    return #world_list
+end
+
+-- The first listed world that holds the galaxy table, or nil.
+local function galaxy_world(units_by_resource, table_id)
+    for _, world in ipairs(world_list) do
+        local listed, units = pcall(units_by_resource, world, table_id)
+        if listed and type(units) == 'table' and next(units) ~= nil then return world end
+    end
+    return nil
+end
+
 local function ship_world(engine)
-    if type(engine) ~= 'table' or type(engine.Application) ~= 'table'
-       or type(engine.World) ~= 'table' or type(engine.IdString64) ~= 'table'
-       or type(engine.Application.main_world) ~= 'function'
-       or type(engine.World.units_by_resource) ~= 'function'
-       or type(engine.IdString64.from_hex) ~= 'function' then
+    if not lookup_api_ready(engine) then
         world_status('Stingray world lookup API unavailable')
         return nil
     end
@@ -179,46 +234,38 @@ local function ship_world(engine)
         world_status('could not convert galaxy table resource ID')
         return nil
     end
-    local worlds = {}
-    local function add_world(world)
-        if world and world ~= ffi.NULL then worlds[#worlds + 1] = world end
-    end
-    local main_ok, main = pcall(engine.Application.main_world)
-    if main_ok then add_world(main) end
-    if type(engine.Application.worlds) == 'function' then
-        local list_ok, list = pcall(engine.Application.worlds)
-        if list_ok and type(list) == 'table' then
-            for _, world in ipairs(list) do add_world(world) end
-        end
-    end
-    if #worlds == 0 then
+    local count = list_worlds(engine.Application)
+    if count == 0 then
         world_status('no active Stingray worlds')
         return nil
     end
-    for _, world in ipairs(worlds) do
-        local listed, units = pcall(engine.World.units_by_resource, world, table_id)
-        if listed and type(units) == 'table' and next(units) ~= nil then
-            world_status('galaxy table present (' .. #worlds .. ' worlds checked)')
-            return world
-        end
-    end
-    world_status('galaxy table absent (' .. #worlds .. ' worlds checked)')
-    return nil
+    local world = galaxy_world(engine.World.units_by_resource, table_id)
+    clear_worlds()
+    world_status('galaxy table ' .. (world and 'present' or 'absent') .. ' (' .. count .. ' worlds checked)')
+    return world
 end
 
-local function focused_game()
-    local window = user32.GetForegroundWindow()
-    if not window or window == ffi.NULL then return false end
-    local window_pid = ffi.new('GMH_u32[1]')
-    user32.GetWindowThreadProcessId(window, window_pid)
-    return tonumber(window_pid[0]) == process_id
+-- The foreground window's process, read into one reused buffer.
+local window_process = ffi.new('GMH_u32[1]')
+-- Whether the game window is in the foreground. Windows keeps window handles
+-- to 32 bits, sign-extended to 64, so they pass as plain numbers: no cdata per
+-- call. Unless full, a foreground window already found to belong to another
+-- process is not looked up again.
+local function focused_game(full)
+    local window = user32.GMH_GetForegroundWindow()
+    if window == 0 or (not full and window == state.other_window) then return false end
+    window_process[0] = 0
+    user32.GMH_GetWindowThreadProcessId(window, window_process)
+    local ours = window_process[0] == process_id
+    state.other_window = not ours and window or nil
+    return ours
 end
 local function key_down(key)
-    return bit.band(user32.GetAsyncKeyState(key), 0x8000) ~= 0
+    return bit.band(user32.GMH_GetAsyncKeyState(key), 0x8000) ~= 0
 end
 local function read(address, size)
     local buffer, received = ffi.new('GMH_u8[?]', size), ffi.new('size_t[1]')
-    if kernel32.ReadProcessMemory(process, ffi.cast('const void *', address),
+    if kernel32.GMH_ReadProcessMemory(process, ffi.cast('const void *', address),
             buffer, size, received) == 0 or tonumber(received[0]) ~= size then
         return nil
     end
@@ -238,61 +285,34 @@ local function pointer(blob)
     if address < 0x10000 or address >= 0x800000000000 then return nil end
     return address
 end
-local function module_sha256(module)
-    local path = ffi.new('GMH_u16[32768]')
-    local length = kernel32.GetModuleFileNameW(module, path, 32768)
-    assert(length > 0 and length < 32768, 'cannot resolve module path')
-    local file = kernel32.CreateFileW(path, 0x80000000, 7, nil, 3, 0x08000000, nil)
-    assert(file ~= ffi.NULL and file ~= ffi.cast('void *', -1), 'cannot read module file')
-    local algorithm, hash = ffi.new('void *[1]'), ffi.new('void *[1]')
-    local ok, result = pcall(function()
-        local name = ffi.new('GMH_u16[7]', {83, 72, 65, 50, 53, 54, 0})
-        assert(bcrypt.BCryptOpenAlgorithmProvider(algorithm, name, nil, 0) == 0,
-               'SHA256 unavailable')
-        assert(bcrypt.BCryptCreateHash(algorithm[0], hash, nil, 0, nil, 0, 0) == 0,
-               'SHA256 creation failed')
-        local buffer, received = ffi.new('GMH_u8[1048576]'), ffi.new('GMH_u32[1]')
-        while true do
-            assert(kernel32.ReadFile(file, buffer, 1048576, received, nil) ~= 0,
-                   'module read failed')
-            if received[0] == 0 then break end
-            assert(bcrypt.BCryptHashData(hash[0], buffer, received[0], 0) == 0,
-                   'SHA256 update failed')
-        end
-        local digest, hex = ffi.new('GMH_u8[32]'), {}
-        assert(bcrypt.BCryptFinishHash(hash[0], digest, 32, 0) == 0,
-               'SHA256 finish failed')
-        for i = 0, 31 do hex[#hex + 1] = string.format('%02X', digest[i]) end
-        return table.concat(hex)
-    end)
-    if hash[0] ~= nil then bcrypt.BCryptDestroyHash(hash[0]) end
-    if algorithm[0] ~= nil then bcrypt.BCryptCloseAlgorithmProvider(algorithm[0], 0) end
-    kernel32.CloseHandle(file)
-    if not ok then error(result) end
-    return result
+-- Raises reason as it is, without a position, for the guard's stop line.
+local function check(condition, reason)
+    if not condition then error(reason, 0) end
 end
-
+-- The native check, when the ship is first found. A build this release does not
+-- support stops the update for the session, the family's refusal:
+-- BingusRuntime.statuses shows "stopped: unsupported game build" (or the native
+-- change found), the log has that one stop line, that frame ends there (see
+-- enter_world), and no step runs again.
 local function initialize_native()
     if state.initialized then return end
     state.initialized = true
     local ok, result = pcall(function()
-        assert(ffi.abi('64bit'), 'Windows x64 required')
-        local game = kernel32.GetModuleHandleA('game.dll')
-        local exe = kernel32.GetModuleHandleA(nil)
-        assert(game ~= nil and game ~= ffi.NULL and exe ~= nil and
-               exe ~= ffi.NULL, 'game modules unavailable')
-        assert(module_sha256(game) == GAME_SHA256, 'unsupported game.dll build')
-        assert(module_sha256(exe) == EXE_SHA256, 'unsupported helldivers2.exe build')
-        local base = tonumber(ffi.cast('GMH_u64', game))
-        assert(read(base + ENTER_PRESENTER_RVA, #PRESENTER_PREFIX) ==
-               PRESENTER_PREFIX, 'native presenter changed in memory')
-        assert(read(base + START_ARCADE_RVA, #ARCADE_PREFIX) ==
-               ARCADE_PREFIX, 'native arcade start changed in memory')
-        assert(read(base + INSTANT_SEAT_RVA, #INSTANT_SEAT_PREFIX) ==
-               INSTANT_SEAT_PREFIX, 'native instant seat entry changed in memory')
-        assert(read(base + OPEN_BRIEFING_RVA, #BRIEFING_PREFIX) ==
-               BRIEFING_PREFIX, 'native Hellpod briefing entry changed in memory')
-        assert(pointer(read(base + UI_STATE_PTR_RVA, 8)), 'UI state unavailable')
+        check(ffi.abi('64bit'), 'Windows x64 required')
+        -- Each module file is hashed at most once per session for every mod
+        -- (Bingus Shared Runtime's cache); 'game modules unavailable' or
+        -- 'unsupported game build' when they do not match.
+        check(memory.verify_build({exe_sha256 = EXE_SHA256, game_sha256 = GAME_SHA256}))
+        local base = memory.address(memory.module('game.dll'))
+        check(read(base + ENTER_PRESENTER_RVA, #PRESENTER_PREFIX) ==
+              PRESENTER_PREFIX, 'native presenter changed in memory')
+        check(read(base + START_ARCADE_RVA, #ARCADE_PREFIX) ==
+              ARCADE_PREFIX, 'native arcade start changed in memory')
+        check(read(base + INSTANT_SEAT_RVA, #INSTANT_SEAT_PREFIX) ==
+              INSTANT_SEAT_PREFIX, 'native instant seat entry changed in memory')
+        check(read(base + OPEN_BRIEFING_RVA, #BRIEFING_PREFIX) ==
+              BRIEFING_PREFIX, 'native Hellpod briefing entry changed in memory')
+        check(pointer(read(base + UI_STATE_PTR_RVA, 8)), 'UI state unavailable')
         state.game_base = base
         state.open_presenter = ffi.cast('void (__fastcall *)(void *, int, void *)',
             base + ENTER_PRESENTER_RVA)
@@ -317,7 +337,7 @@ local function initialize_native()
     if ok then
         note('Native ship menu presenters ready for current game build.')
     else
-        note('Shortcut unavailable: ' .. tostring(result))
+        guard.stop(tostring(result))
     end
 end
 
@@ -712,95 +732,263 @@ local function service_hellpod(dt)
     end
 end
 
-local function binding_host()
-    local host = rawget(_G, 'ModBindingsMenu')
-    if host and type(host.register_binding) == 'function' and
-       type(host.is_down) == 'function' then
-        if state.binding_host ~= host then
-            state.binding_host = host
-            state.binding_slots = {}
-            local shortcuts = {MAP_SHORTCUT}
-            for _, shortcut in ipairs(MENU_SHORTCUTS) do
-                shortcuts[#shortcuts + 1] = shortcut
-            end
-            -- Mod Bindings Menu v2 groups rows under this header; v1 ignores it.
-            local options = {category = translation.binding_text(host, 'binding.section', 64)}
-            for _, shortcut in ipairs(shortcuts) do
-                local label = shortcut.label or translation.binding_text(host, shortcut.text, 127)
-                local called, result, reason = pcall(host.register_binding,
-                    shortcut.id, label, shortcut.slot, options)
-                if called and result then
-                    state.binding_slots[shortcut.id] = true
-                    note('Using Mod Bindings Menu slot ' .. shortcut.slot ..
-                         ' for ' .. shortcut.name .. '.')
-                else
-                    note('Mod binding registration failed for ' ..
-                         shortcut.name .. ': ' .. tostring(reason or result))
-                end
-            end
-        end
-        return host
-    end
-    return nil
+-- Registration with Mod Bindings Menu. Every shortcut registers once per Mod
+-- Bindings Menu table: a new table means a new registration. One that failed
+-- (returned false or raised) keeps its fixed key and is tried again, at most
+-- BINDING_RETRIES times per table: BINDING_RETRY_FRAMES frames after the last
+-- try and twice as long after each further one, or sooner once the table's
+-- revision changes (versions that publish one), but never twice within
+-- BINDING_RETRY_FRAMES frames. While every shortcut is registered, and once
+-- the tries are used up, a frame only compares the table's identity.
+local BINDING_RETRIES, BINDING_RETRY_FRAMES = 8, 60
+
+-- One registration, its texts included: a text lookup can raise.
+local function call_register(host, shortcut)
+    local label = shortcut.label or translation.binding_text(host, shortcut.text, 127)
+    -- Mod Bindings Menu v2 groups rows under this header; v1 ignores it.
+    local options = {category = translation.binding_text(host, 'binding.section', 64)}
+    return host.register_binding(shortcut.id, label, shortcut.slot, options)
 end
 
-local function shortcut_down(shortcut)
-    local host = binding_host()
+-- Registers one shortcut (try 0 is the first); a failure is logged on the
+-- first try only. Returns whether Mod Bindings Menu accepted it.
+local function register_shortcut(host, shortcut, try)
+    local called, result, reason = pcall(call_register, host, shortcut)
+    if called and result then
+        state.binding_slots[shortcut.id] = true
+        local retried = try > 0 and ' (try ' .. (try + 1) .. ')' or ''
+        note('Using Mod Bindings Menu slot ' .. shortcut.slot .. ' for ' .. shortcut.name .. retried .. '.')
+        return true
+    end
+    if try == 0 then
+        note('Mod binding registration failed for ' .. shortcut.name .. ': ' .. tostring(reason or result))
+    end
+    return false
+end
+
+-- Tries every shortcut not yet registered; returns the names still missing,
+-- or nil when none is.
+local function register_missing(host, try)
+    local missing
+    for _, shortcut in ipairs(SHORTCUTS) do
+        if not state.binding_slots[shortcut.id] and not register_shortcut(host, shortcut, try) then
+            missing = (missing and missing .. ', ' or '') .. shortcut.name
+        end
+    end
+    return missing
+end
+
+-- After a try: another one is due while a shortcut is missing and tries are left.
+local function schedule_retry(host, missing)
+    state.binding_since, state.binding_revision = 0, host.revision
+    state.binding_retry = missing ~= nil and state.binding_retries < BINDING_RETRIES
+    if missing and not state.binding_retry then
+        note('Mod binding registration still failing after ' .. BINDING_RETRIES .. ' retries for ' .. missing ..
+             '; the fixed keys stay in use for this session.')
+    end
+end
+
+-- A Mod Bindings Menu table seen for the first time: every shortcut registers.
+-- A table that offers poll (its field, never its version) answers them all in
+-- one call per frame.
+local function register_all(host)
+    state.binding_host, state.binding_slots, state.binding_retries = host, {}, 0
+    state.binding_poll = type(host.poll) == 'function'
+    schedule_retry(host, register_missing(host, 0))
+end
+
+-- A frame while a shortcut is missing: tries again once it is due.
+local function retry_bindings(host)
+    local since = state.binding_since + 1
+    state.binding_since = since
+    if since < BINDING_RETRY_FRAMES * 2 ^ state.binding_retries
+       and (since < BINDING_RETRY_FRAMES or host.revision == state.binding_revision) then
+        return
+    end
+    state.binding_retries = state.binding_retries + 1
+    schedule_retry(host, register_missing(host, state.binding_retries))
+end
+
+-- Whether host is a Mod Bindings Menu table this mod can register with.
+local function usable(host)
+    return type(host) == 'table' and type(host.register_binding) == 'function' and type(host.is_down) == 'function'
+end
+
+-- Once per frame: the Mod Bindings Menu to poll, or nil for the fixed keys.
+local function binding_host()
+    local host = rawget(_G, 'ModBindingsMenu')
+    if host == state.binding_host then
+        if state.binding_retry then retry_bindings(host) end
+        return host
+    end
+    if not usable(host) then return nil end
+    register_all(host)
+    return host
+end
+
+-- Bingus Shared Loader's after_startup (v19, capabilities.after_startup) runs
+-- this once every mod has started, before the first frame, whatever order the
+-- mods load in: every shortcut registers then. Mod Bindings Menu's native
+-- input may not be ready yet; registering does not need it, and until it is,
+-- is_down and poll answer nil and the fixed keys stay in use. With older
+-- loaders binding_host registers on the first frame instead. Either way
+-- binding_host keeps the bounded retry for a registration that failed, and
+-- registers again with a new Mod Bindings Menu table.
+local function register_after_startup()
+    local host = rawget(_G, 'ModBindingsMenu')
+    if host ~= state.binding_host and usable(host) then register_all(host) end
+end
+
+-- Mod Bindings Menu's poll, where it offers one, answers every shortcut in one
+-- call per focused frame: each record header, then all six states in one read
+-- (8 reads, where six is_down calls make 18). Only its down array is used, in
+-- place of is_down's answers: the edges stay this mod's own, so the fixed keys
+-- and the window focus count as before. POLL_IDS holds every shortcut's id in
+-- SHORTCUTS order, so polled.down is by SHORTCUTS index.
+local POLL_IDS, polled = {}, {}
+for index, shortcut in ipairs(SHORTCUTS) do POLL_IDS[index] = shortcut.id end
+
+-- Once per focused frame: whether polled.down holds this frame's answers. A
+-- poll that raises or refuses is logged once, and is_down answers for the rest
+-- of the session with that table, starting with this frame.
+local function poll_bindings(host)
+    if not (host and state.binding_poll and next(state.binding_slots)) then return false end
+    local called, done, reason = pcall(host.poll, POLL_IDS, polled)
+    if called and done == true then return true end
+    state.binding_poll = false
+    note('Mod Bindings Menu poll failed (' .. tostring(called and reason or done) ..
+         '); asking for each shortcut instead.')
+    return false
+end
+
+-- A shortcut's state: its binding's answer (from this frame's poll when
+-- batch, else from is_down), or its fixed key when there is none.
+local function shortcut_down(shortcut, host, index, batch)
     if host and state.binding_slots[shortcut.id] then
-        local ok, down = pcall(host.is_down, shortcut.id)
+        local ok, down = true, nil
+        if batch then
+            down = polled.down[index]
+        else
+            ok, down = pcall(host.is_down, shortcut.id)
+        end
         if ok and down ~= nil then return down end
     end
     return key_down(shortcut.key)
 end
 
+local function enter_world(world)
+    state.world = world
+    state.keys_down = {}
+    state.hellpod_wait = nil
+    state.hellpod_seat = nil
+    if world then
+        note('Super Destroyer detected.')
+        initialize_native()
+        -- A refused build has stopped the update: this frame ends here, aboard
+        -- no ship, without a focus check, a key read or an action.
+        if not guard.running() then state.world = nil end
+    end
+end
+
+-- Reads the context: the ship's world, then (aboard) the window focus.
+local function refresh_context()
+    state.context_frames = CONTEXT_FRAMES
+    local world = ship_world(rawget(_G, 'stingray'))
+    if state.world ~= world then enter_world(world) end
+    state.focused = state.world ~= nil and focused_game(true)
+end
+
+-- Runs once per frame before anything acts; returns whether it read the context.
+local function advance_context()
+    state.context_frames = state.context_frames - 1
+    if state.context_frames <= 0 or state.hellpod_wait or state.hellpod_seat then
+        refresh_context()
+        return true
+    end
+    if state.world and not state.focused then state.focused = focused_game(false) end
+    return false
+end
+
+-- Every shortcut's state on this frame, in order (none is polled while the game
+-- is not focused); returns whether one is newly pressed.
+local function poll_shortcuts(host)
+    local pressed, batch = false, state.focused and poll_bindings(host)
+    for index, shortcut in ipairs(SHORTCUTS) do
+        local down = state.focused and shortcut_down(shortcut, host, index, batch) or false
+        state.now[index] = down
+        pressed = pressed or (down and not state.keys_down[shortcut.id])
+    end
+    return pressed
+end
+
+local function act(shortcut)
+    if shortcut.arcade then activate_arcade()
+    elseif shortcut.hellpod then activate_hellpod()
+    else activate(shortcut.name, shortcut.presenter) end
+end
+
+-- Records this frame's states and acts on each newly pressed shortcut, in
+-- order. Nothing is down while the game is not focused.
+local function act_on_shortcuts()
+    for index, shortcut in ipairs(SHORTCUTS) do
+        local down = state.focused and state.now[index]
+        local pressed = down and not state.keys_down[shortcut.id]
+        state.keys_down[shortcut.id] = down
+        if pressed then act(shortcut) end
+    end
+end
+
+-- Shortcuts are polled on every frame aboard while the game is focused, and a
+-- shortcut acts on the frame it is first seen down, as before; only the
+-- context checks are spaced out (see CONTEXT_FRAMES).
 local function step(dt)
     if not state.update_logged then
         state.update_logged = true
         note('Update callback is running.')
     end
-    binding_host()
-    local world = ship_world(rawget(_G, 'stingray'))
-    if state.world ~= world then
-        state.world = world
-        state.hotkey_down = false
-        state.menu_keys_down = {}
-        state.hellpod_wait = nil
-        state.hellpod_seat = nil
-        if world then
-            note('Super Destroyer detected.')
-            initialize_native()
-        end
-    end
-    if not world then return end
+    local host = binding_host()
+    local fresh = advance_context()
+    if not state.world then return end
     if state.hellpod_wait then service_hellpod(tonumber(dt) or 0) end
     if state.hellpod_seat then service_hellpod_seat(tonumber(dt) or 0) end
-    local focused = focused_game()
-    local down = focused and shortcut_down(MAP_SHORTCUT)
-    local pressed = down and not state.hotkey_down
-    state.hotkey_down = down
-    if pressed then activate('Galactic Map', HOLOGRAM_PRESENTER) end
-    for _, shortcut in ipairs(MENU_SHORTCUTS) do
-        local key_is_down = focused and shortcut_down(shortcut)
-        local key_pressed = key_is_down and not state.menu_keys_down[shortcut.id]
-        state.menu_keys_down[shortcut.id] = key_is_down
-        if key_pressed then
-            if shortcut.arcade then activate_arcade()
-            elseif shortcut.hellpod then activate_hellpod()
-            else activate(shortcut.name, shortcut.presenter) end
-        end
+    -- A newly pressed shortcut acts only on a context read on this frame.
+    if poll_shortcuts(host) and not fresh then
+        refresh_context()
+        if not state.world then return end
     end
+    act_on_shortcuts()
 end
 
-local previous_update = rawget(_G, 'update')
-local function wrapped_update(dt)
-    local ok, err = pcall(step, dt)
-    if not ok then
-        state.errors = state.errors + 1
-        if state.errors <= 8 then note('Update error: ' .. tostring(err)) end
+-- An update below this mod raised: the shortcuts pause, and start afresh when
+-- they resume. Every shortcut counts as held until it is released, so a key
+-- held through the pause needs a fresh press; a Hellpod wait or seat still
+-- pending is cancelled; the context is read again on the next frame. The
+-- registrations with Mod Bindings Menu stay.
+local function pause_shortcuts()
+    for _, shortcut in ipairs(SHORTCUTS) do state.keys_down[shortcut.id] = true end
+    if state.hellpod_wait or state.hellpod_seat then
+        state.hellpod_wait, state.hellpod_seat = nil, nil
+        note('Hellpod shortcut cancelled; the update paused.')
     end
-    if type(previous_update) == 'function' then return previous_update(dt) end
+    state.context_frames = 0
 end
 
+-- The update chain, through Bingus Shared Runtime's guard: the previous update
+-- runs outside pcall, so its errors reach the game unchanged; the step's errors
+-- count in bursts (the 8th of a burst stops it for the session, 3600 error-free
+-- frames end a burst); after an error below this mod the shortcuts pause
+-- (pause_shortcuts) and resume once the updates below have returned on 60
+-- frames in a row, and 8 such errors in a burst stop them. A stop and the
+-- game's shutdown have no game state to restore: the shortcuts call the game's
+-- own presenter, arcade and seat entries. The first failure survives shutdown
+-- in BingusRuntime.statuses.ShipStationHotkeys. Every argument and return value
+-- pass through. Per frame: the step under pcall and a few tests and stores, no
+-- allocation (pinned in tests/test_hotkey.lua).
 _G.GalacticMenuHotkeyInstalled = true
-update = wrapped_update
+guard = runtime.guard({name = 'ShipStationHotkeys', step = step, pause = pause_shortcuts, log = note, env = _G}).install()
+if type(loader) == 'table' and type(loader.capabilities) == 'table' and loader.capabilities.after_startup == true
+   and type(loader.after_startup) == 'function' then
+    local accepted, reason = loader.after_startup(register_after_startup)
+    if not accepted then note('Registration after startup refused (' .. tostring(reason) .. '); registering on the first frame.') end
+end
 note('Ship menu hotkeys initialized (Tab, F1, F5-F8).')

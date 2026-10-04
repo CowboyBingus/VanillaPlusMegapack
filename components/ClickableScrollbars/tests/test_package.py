@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 sys.dont_write_bytecode = True
 
 from archive import ARCHIVE, resource_hash, sha  # noqa: E402
+from entry import entry_text  # noqa: E402
 
 MODULE = 'mods/cowboybingus/clickable_scrollbars'
 GUID = 'b13f1fdd-9b30-474d-a86b-b8e30511a19f'
@@ -52,22 +53,25 @@ def main(path=None):
         resource = payload[offset:offset + size]
         body_length, version = struct.unpack_from('<II', resource, 0)
         assert version == 2 and body_length == len(resource) - 8
-        assert resource[8:] == (ROOT / 'src/clickable_scrollbars.lua').read_bytes()
+        # The resource is the entry scripts/entry.py assembles from src/.
+        assert resource[8:] == entry_text(ROOT)
         from build import VERIFIED_SOURCE_SHA256
         assert provenance['runtime_verified'] == (sha(resource[8:]) == VERIFIED_SOURCE_SHA256)
         assert mechanism['runtime_screen_capture'] is False
         assert mechanism['diagnostics_default'] is False
         body = resource[8:].decode('utf-8')
         assert body.startswith('-- HD2-Addon: ' + MODULE + '\n')
-        assert 'SendInput' in body and 'GetAsyncKeyState' in body
+        assert 'GetAsyncKeyState' in body and 'GetCursorPos' in body
         # The native route reads the grid and writes its value through the same FFI
         # surface the shipped Armory mods use: the cross-process, hook and
         # code-patching APIs stay out of the payload.
         assert 'ReadProcessMemory' in body and 'GetModuleHandleA' in body
-        assert 'ffi.cast(\'float *\'' in body
+        assert 'ffi.typeof(\'float *\')' in body and 'ffi.cast(floats, address)' in body
         assert 'WriteProcessMemory' not in body and 'VirtualProtect' not in body
+        # The addon synthesizes no input: nothing for it is even declared.
         for forbidden in ('SetWindowsHookEx', 'UnhookWindowsHookEx', 'LoadLibrary',
-                          'VirtualAlloc', 'CreateRemoteThread', 'CreateThread'):
+                          'VirtualAlloc', 'CreateRemoteThread', 'CreateThread',
+                          'SendInput', 'mouse_event', 'keybd_event'):
             assert forbidden not in body, forbidden
     print(f'package: ok ({package.name})')
 

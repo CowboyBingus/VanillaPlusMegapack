@@ -6,9 +6,11 @@ from pathlib import Path
 NAME = 'mods/cowboybingus/better_lobby_management'
 EXE_SHA = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
 GAME_DLL_SHA = '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
-SOURCES = [('T', 'bingus_text.lua'), ('create_api', 'windows_api.lua'), ('G', 'game.lua'), ('L', 'lobby.lua'),
-           ('R', 'region.lua'), ('M', 'menu.lua'), ('C', 'chat.lua'), ('S', 'scanner.lua'), ('B', 'sos.lua'),
-           ('install', 'addon.lua')]
+# runtime and runtime_memory: Bingus Shared Runtime's core (the update guard) and read side (module hashes,
+# cached once per session for every mod), vendored byte-identical; the install call below wires them in.
+SOURCES = [('T', 'bingus_text.lua'), ('runtime', 'bingus_runtime.lua'), ('runtime_memory', 'bingus_memory.lua'),
+           ('create_api', 'windows_api.lua'), ('G', 'game.lua'), ('L', 'lobby.lua'), ('R', 'region.lua'),
+           ('M', 'menu.lua'), ('C', 'chat.lua'), ('S', 'scanner.lua'), ('B', 'sos.lua'), ('install', 'addon.lua')]
 DIAG_SOURCES = SOURCES[:-1] + [('D', 'diag.lua'), SOURCES[-1]]
 FORBIDDEN = (b'VirtualAlloc', b'VirtualProtect', b'FlushInstructionCache', b'CreateRemoteThread',
              b'LoadLibrary', b'jit.flush', b'jit.attach', b'jit.opt')
@@ -43,9 +45,10 @@ def entry_text(root, version, diag=False):
     for path in locales:
         target = 'locales.en' if path.name == 'en.lua' else f"locales.bundled['{path.stem}']"
         lines += [f'{target} = (function()', read_lua(path), 'end)()']
-    lines.append(f"install(create_api, G, L, R, M, C, S, B, T, locales, {{version = 'v{version}', "
-                 f"game_sha256 = '{GAME_DLL_SHA}', exe_sha256 = '{EXE_SHA}'"
-                 + (", diag = true}, D)" if diag else "})"))
+    # The memory api is built when the addon calls create_api, inside its startup checks.
+    lines.append(f"install(function() return create_api(runtime_memory.new(runtime)) end, G, L, R, M, C, S, B, T, "
+                 f"locales, {{version = 'v{version}', game_sha256 = '{GAME_DLL_SHA}', exe_sha256 = '{EXE_SHA}', "
+                 f"runtime = runtime" + (", diag = true}, D)" if diag else "})"))
     text = ('\n'.join(lines) + '\n').encode('utf-8')
     for word in FORBIDDEN:
         if word in text:
