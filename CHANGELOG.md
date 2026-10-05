@@ -1,284 +1,31 @@
 # v37
 
-- Every option is updated to its 2026-10-04 standalone release and ships that release's resource byte for byte: Sentry Aim Retention v1.1.0, Enemy Collision Synchronized v2.12.0, Consistent Vaulting v8.9, Controllable Hover Pack v1.8, Reinforcement Beacons Fixed v4.6, Arc Thrower Revamped v1.7, Armory Preview Cache v23, Clickable Scrollbars v2.15, Flame Damage Fixed v1.2, Hellpod Steering Unlocked v7.5, Know Your Constellation v4.1, Better Lobby Management v1.2, Mod Options Menu v1.2, Mod Bindings Menu v2.2, Ship Station Hotkeys v1.9, Shallow Water Diving v3.10, Better Stratagem Bounce v15.4.
-- Vanilla Plus Megapack: with a loader older than v18, the pack raises the LuaJIT machine-code limit to 64 MB instead of 16 MB, the same start as Bingus Shared Loader v19.
-- Vanilla Plus Megapack: the component tests run each mod's current suites and no longer need a person at the desktop.
-- Vanilla Plus Megapack: requires Bingus Shared Loader v18 or newer; v19 is current and recommended.
-- Vanilla Plus Megapack: measured in live play with every option, the 17 mods together cost 0.25 ms per frame in missions (0.59 before this release) and 0.17 on the ship.
-- Sentry Aim Retention: A deployed sentry's memory layout is now kept and re-verified with a few reads instead of located from scratch on every check: 26-29 reads per check instead of 68-90.
-- Sentry Aim Retention: A check now leaves about 0.1-0.3 KB of garbage instead of about 10 KB.
-- Sentry Aim Retention: The second check after the game update runs only while a sentry tracks a target, holds aim, pauses fire or waits on a target search; an idle sentry is checked once per frame.
-- Sentry Aim Retention: Targeting entries that are not sentries this machine controls are classified once instead of read on every check, which lowers the cost outside missions and on the ship.
-- Sentry Aim Retention: The muzzle pose is read through a kept path per sentry: 7 reads instead of 12 per check.
-- Sentry Aim Retention: Memory fields now decode from their bytes, so a NaN in game memory always fails the range checks.
-- Sentry Aim Retention: Errors from the game's update and shutdown, or from other mods, now reach the game unchanged with their original traceback, so they no longer look like errors in this mod.
-- Sentry Aim Retention: After a failed update of the game or of a mod loaded before this one, the mod restores the sentry controls it holds and pauses; it resumes once 60 updates in a row have succeeded.
-- Sentry Aim Retention: Eight such failures, each within about a minute of the last, stop the mod for the session; while paused it reads no game memory.
-- Sentry Aim Retention: An error or a refused write in the mod's own checks no longer stops it for the session: it restores the sentry controls it holds and starts afresh on the next update.
-- Sentry Aim Retention: Eight errors of its own, each within about a minute of the last, stop the mod; each burst of errors gets one log line.
-- Sentry Aim Retention: The shutdown status and log keep the reason the mod stopped (for example `stopped after: the previous update failed`).
-- Sentry Aim Retention: An error in the mod's own shutdown work can no longer prevent the shutdown callbacks of the game and other mods.
-- Sentry Aim Retention: A lost target now costs 5 memory-protection checks instead of 8 on that frame, and restoring a pending search or undoing a half-finished hold costs 1 instead of 2.
-- Sentry Aim Retention: Windows functions are now declared under private names from Bingus Shared Runtime v1, so another mod's declaration of the same function can no longer break this mod's memory access.
-- Sentry Aim Retention: The game's module hashes are computed once per session and shared with every other mod that uses Bingus Shared Runtime v1.
-- Sentry Aim Retention: Another game build is now reported as `unsupported game build` and missing game modules as `game modules unavailable`.
-- Sentry Aim Retention: Another mod leaving the shared `BingusRuntime` table incomplete can no longer stop this mod from starting: the missing fields are filled in.
-- Sentry Aim Retention: Memory reads no longer allocate a 64-bit number per call, and the muzzle pose and terrain checks read into reused buffers.
-- Sentry Aim Retention: The clock is now the shared runtime's performance-counter clock, so the 60 ms settle time and 200 ms sweep limit are timed to the frame instead of the 10-16 ms system timer.
-- Sentry Aim Retention: Binding the game's sentry setters and terrain query no longer adds entries to the C type table that every mod shares (35 per binding before).
-- Sentry Aim Retention: The public source now includes a small read-only memory capture of one Gatling sentry from build 25327279, which the build replays; it holds no names, paths or account ids.
-- Sentry Aim Retention: The mod is now licensed under the Zero-Clause BSD license (0BSD).
-- Sentry Aim Retention: Requires Bingus Shared Loader v18 or newer.
-- Sentry Aim Retention: Measured in live play: 0.020 ms per frame in missions with a sentry deployed (0.178 before) and 0.012 on the ship (0.057 before).
-- Enemy Collision Synchronized: Errors from the game's update and shutdown, or from other mods, now reach the game unchanged with their original traceback, so they no longer look like errors in this mod.
-- Enemy Collision Synchronized: After a failed update of the game or of a mod loaded before it, the mod pauses: it sends no commands, forgets what it was tracking and reports `paused_after_update_error` once.
-- Enemy Collision Synchronized: It starts afresh after 60 updates in a row without such an error; 8 such errors in one burst stop it for the session.
-- Enemy Collision Synchronized: A collision check that raises an error on 8 polls in a row now stops the mod for the session instead of being retried forever.
-- Enemy Collision Synchronized: The shutdown status keeps the first failure or refusal (`stopped after: <reason>`); plain `stopped` now means nothing failed.
-- Enemy Collision Synchronized: An error in the mod's own shutdown work can no longer prevent the shutdown callbacks of the game and other mods.
-- Enemy Collision Synchronized: Performance profiling is off again unless `CowboyBingusDiagnostics = true` is set before the mod starts; since v2.10.2 it ran in every game and rewrote its log every 10 s.
-- Enemy Collision Synchronized: Without diagnostics, `CorpseCollisionRepair.log` is again written only at startup, when the mod stops and at shutdown.
-- Enemy Collision Synchronized: The opt-in profiler counts failed game updates without timing them.
-- Enemy Collision Synchronized: Polls outside a mission, on the ship and in a mission with nothing to inspect no longer allocate Lua memory (about 1.8-2.5 KB per poll before).
-- Enemy Collision Synchronized: Scanning living enemies allocates no Lua memory (up to 32 bytes per listed enemy before), and an enemy type the mod does not handle no longer makes a Lua string.
-- Enemy Collision Synchronized: Outside a mission and on the ship a poll makes 1 and 2 memory reads instead of 4 and 5.
-- Enemy Collision Synchronized: Scanning eight living enemies takes 19 memory reads instead of 26, and 1 clock read instead of 8.
-- Enemy Collision Synchronized: Each inspected ragdoll costs up to four memory reads fewer, and each inspected corpse two fewer; every value is still validated on its own.
-- Enemy Collision Synchronized: A settled remote ragdoll's motion check takes 128 memory reads instead of 155, and a corpse realignment 120 instead of 140.
-- Enemy Collision Synchronized: Inspections allocate less Lua memory (settled corpse 26.6 to 23.7 KB, settled ragdoll 47.4 to 37.0 KB, realignment 37.8 to 34.7 KB, synthetic scene).
-- Enemy Collision Synchronized: Pose values are decoded from bytes, so a corrupted (NaN) value is always rejected as invalid.
-- Enemy Collision Synchronized: Every Windows function the mod calls is declared under a private name, so another mod's declaration of the same function can no longer stop the memory reader from starting.
-- Enemy Collision Synchronized: The update chain runs through Bingus Shared Runtime's guard, and the game build check uses its per-session module hashes.
-- Enemy Collision Synchronized: The enemy allowlist moved to its own source file, `src/corpse_profiles.lua`, and the inspection is split into small named steps with the same results.
-- Enemy Collision Synchronized: The technical notes name the supported game build (25480438) and the native addresses the mod calls in it.
-- Enemy Collision Synchronized: The mod is now licensed under the Zero-Clause BSD license (0BSD).
-- Enemy Collision Synchronized: Requires Bingus Shared Loader v18 or newer.
-- Enemy Collision Synchronized: Measured in live play: 0.067 ms per frame in client missions (0.188 in the previous session, which had more ragdolls) and 0.004 on the ship.
-- Consistent Vaulting: One check per frame instead of two while nothing is in progress; the second check, after the game's update, runs only while a vault edit is held, an assist or its press window is active, or a vault query meets the held input.
-- Consistent Vaulting: While the input is released, a check reads 7 values instead of 37-39: it re-verifies the local avatar it found before instead of locating it again.
-- Consistent Vaulting: With the input held but no vault query, a check reads 19 values instead of 37-39; neither case takes a timestamp.
-- Consistent Vaulting: Outside a mission a check reads 2 values instead of 4.
-- Consistent Vaulting: While no vault can happen, a check creates no Lua garbage (about 3.1 KB per frame in a mission and 0.8 KB outside one before).
-- Consistent Vaulting: While a vault query meets the held input, the vault part reuses the avatar the slope part just located (about 18 reads fewer per check).
-- Consistent Vaulting: A held vault edit stays in place while each check would make the same edit, instead of being restored and written again: up to six memory-protection queries per frame fewer.
-- Consistent Vaulting: A kept vault edit is no longer read a second time right after the check: 92 reads instead of 174 per check in the offline fixture; every write still checks first.
-- Consistent Vaulting: Memory protection is checked once per region a check writes: an assist arms with 2 protection queries instead of 6 and releases with 3 instead of 8.
-- Consistent Vaulting: Arming and releasing a slope or ledge assist verify its game data once around their writes: about 150 and 110 fewer memory reads per assist.
-- Consistent Vaulting: With the input held or an assist active, the assist settings come from a read already made (3 reads fewer per check), and an invalid float in memory decodes as a plain NaN.
-- Consistent Vaulting: An error raised by the game's update or another mod's now passes through unchanged, so its stack trace starts where it was raised.
-- Consistent Vaulting: After such an error the mod restores its changes and pauses, then resumes once the game's update has run without error for 60 frames.
-- Consistent Vaulting: An unexpected error inside the mod no longer stops it at once: it restores its changes and starts over.
-- Consistent Vaulting: Eight errors of either kind without an error-free minute between them still stop the mod for the session.
-- Consistent Vaulting: The shutdown status keeps the first failure (`stopped after: <reason>`) instead of overwriting it with `stopped`.
-- Consistent Vaulting: A restore that raises no longer reaches the game's update or shutdown; it is reported as `local_restore_failed`.
-- Consistent Vaulting: Calls Windows through Bingus Shared Runtime v1 under private names, so another mod's declarations of the same functions can no longer change this mod's calls.
-- Consistent Vaulting: Each game module's hash is read once per session for every mod that uses the runtime.
-- Consistent Vaulting: The mod is now licensed under the Zero-Clause BSD license (0BSD).
-- Consistent Vaulting: Measured in live play: 0.026 ms per frame in client missions and 0.011 on the ship.
-- Controllable Hover Pack: With a hover pack worn, each frame re-reads the pack's records where it last found them instead of locating them again: 16 memory reads instead of 41, and 8 instead of 25 without a backpack.
-- Controllable Hover Pack: A flight frame no longer reads every value a second time: 16 reads instead of 82; an early-descent press still locates the pack afresh before writing.
-- Controllable Hover Pack: With a hover pack worn but not flying, each frame skips the window-focus check, and during a flight the focus check makes two Windows calls instead of three.
-- Controllable Hover Pack: The per-frame check of a worn hover pack no longer creates Lua garbage (about 6-7 KB per frame before).
-- Controllable Hover Pack: The first early descent with each hover pack makes 5 memory-protection checks instead of 9, and still checks every location before the first write.
-- Controllable Hover Pack: The jump input's held time is decoded from its bytes, so an invalid value in memory is refused as unsupported input.
-- Controllable Hover Pack: An error raised by the game's update or another mod's now passes through unchanged, so its stack trace starts where it was raised.
-- Controllable Hover Pack: After such an error the mod restores the hover duration and pauses, then starts afresh once 60 frames in a row run without an error.
-- Controllable Hover Pack: An error in the mod itself no longer stops it at once, and each burst of errors gets one log line.
-- Controllable Hover Pack: Eight errors of either kind within about a minute of each other stop the mod for the session.
-- Controllable Hover Pack: The shutdown status keeps the first failure (`stopped after: <reason>`), and reads `restore_failed` when the shutdown restore fails.
-- Controllable Hover Pack: After the mod stops, a hover restore that keeps failing is tried on 10 spaced updates over about 8.5 seconds instead of every frame, with one log line when it gives up.
-- Controllable Hover Pack: Memory reads, protected writes and game-file checks come from Bingus Shared Runtime v1 under private names, so another mod's Windows declarations can no longer break them.
-- Controllable Hover Pack: The game-file checksums are computed once per session and shared with every mod that uses the runtime.
-- Controllable Hover Pack: The mod is now licensed under the Zero-Clause BSD license (0BSD).
-- Controllable Hover Pack: Requires Bingus Shared Loader v18 or newer.
-- Controllable Hover Pack: Measured in live play: 0.017 ms per frame in client missions (0.038 before) and 0.007 on the ship.
-- Reinforcement Beacons Fixed: Aboard the ship a check reads the mission mode first and stops there: 2 memory reads per frame instead of 4.
-- Reinforcement Beacons Fixed: Alive in a co-op mission it skips beacon positions unless a reinforcement is queued or pending: 10 reads per frame instead of 14 with one beacon out.
-- Reinforcement Beacons Fixed: Alive solo it reads the death-anchor source position only when capturing a new anchor: 9 reads per frame instead of 14.
-- Reinforcement Beacons Fixed: Each beacon list is read in one read instead of one read per beacon.
-- Reinforcement Beacons Fixed: Game data is read into kept buffers and decoded in place, so a frame creates less Lua garbage (aboard the ship 496 to 240 bytes, alive in a co-op mission 2408 to 1448 bytes).
-- Reinforcement Beacons Fixed: After an error in the game's update or another mod's, it puts back the original position of a pending correction, pauses and checks again once 60 frames run cleanly.
-- Reinforcement Beacons Fixed: Eight errors in a burst, its own or in the updates below it, stop the mod; it used to ignore errors below it, and an unsupported memory layout or failed write still stops it at once.
-- Reinforcement Beacons Fixed: When it stops, it puts back a pending correction that still holds the position it wrote; quitting the game writes nothing.
-- Reinforcement Beacons Fixed: It notices again when the player manager changes between checks; the old comparison never saw a change.
-- Reinforcement Beacons Fixed: A NaN or infinite position or countdown in game data now counts as unavailable instead of possibly stopping the mod.
-- Reinforcement Beacons Fixed: The game-state reader, the reinforcement plan and the correction are split into named steps that make the same reads and writes and give the same results.
-- Reinforcement Beacons Fixed: Memory access comes from Bingus Shared Runtime v1, vendored unchanged; module hashes are computed once per session for every mod that uses it.
-- Reinforcement Beacons Fixed: The mod is now licensed under the Zero-Clause BSD license (0BSD).
-- Reinforcement Beacons Fixed: Requires Bingus Shared Loader v18 or newer.
-- Reinforcement Beacons Fixed: Measured in live play: 0.021 ms per frame in client missions and 0.009 on the ship.
-- Arc Thrower Revamped: Windows functions and the memory-region record are declared under private names, so another mod that declared them first with other prototypes can no longer leave the addon idle for the session.
-- Arc Thrower Revamped: Memory reads go into reused buffers and fields are decoded in place, cutting Lua garbage per frame from about 1.7 KB to 33 B when idle in a mission and from 2.6 KB to 8 B while firing (measured offline).
-- Arc Thrower Revamped: While Fire is up, an update reads only the local Fire input (1 read instead of 16), and every 15th update checks the local avatar and the charge record in full. Outside a mission the updates between those checks make no Windows call.
-- Arc Thrower Revamped: A press that starts just after the Fire input becomes readable again (joining a mission, a respawn) is picked up at the next full check, within the press's first charge.
-- Arc Thrower Revamped: While Fire is held between full checks, an update verifies the avatar, Fire input and weapon-holder row found last instead of looking them up again: 12 memory reads per update while the Arc Thrower fires (26 before), 4 while another weapon fires (16 before).
-- Arc Thrower Revamped: The charging flag is written only when the game has not already set it, and its memory page is checked to be private read-write game data before the first write of each hold.
-- Arc Thrower Revamped: The weapon data record's page is checked, made writable for that one write and set back to read-only right after; a refused or failed protection change writes nothing and is logged.
-- Arc Thrower Revamped: An error from the game's update or a mod below this one still reaches the game unchanged; the addon then ends the hold, puts the Arc Thrower's record back and pauses until 60 clean updates in a row.
-- Arc Thrower Revamped: Eight errors in one burst stop the addon for the session with the record put back, and the count starts again after 3600 error-free updates. Before, its own errors were logged once and retried forever.
-- Arc Thrower Revamped: A refused write stops the addon and puts the record back; the log names the refused page's state, protection and type.
-- Arc Thrower Revamped: At shutdown the addon puts the record's auto-fire flag back; the log line reads `stopped`, or `stopped after: <first failure>` when something failed.
-- Arc Thrower Revamped: Only the idle path and the memory-read helpers are compiled by LuaJIT, so the addon takes about 5 KB of the code cache shared by the game and every mod (v1.6.1: about 10 KB).
-- Arc Thrower Revamped: Pause, stop and error handling now comes from Bingus Shared Runtime's update guard with the same behaviour; its log lines use the family's wording, for example `ArcThrowerRevamped paused: the previous update failed`.
-- Arc Thrower Revamped: Licensed under the Zero-Clause BSD license (0BSD).
-- Armory Preview Cache: A short visit keeps its thumbnails: the visible tiles are kept as soon as they have rendered, instead of only after the whole category finishes. Backing out early no longer discards the visit.
-- Armory Preview Cache: The offscreen items are kept later, when the rest of the category finishes, without capturing the visible tiles again.
-- Armory Preview Cache: Warm visits allocate no extra texture, and thumbnail registry reads are skipped on ticks where no handoff can happen.
-- Armory Preview Cache: Frames where nothing the thumbnail work uses has changed skip it and allocate nothing. Before, every frame re-read the whole Armory grid (113-117 KB of garbage per frame measured in game while thumbnails were generating).
-- Armory Preview Cache: With tiles bound, the check before the game update reads them only after a full update or a state change, instead of 7 reads per tile every frame.
-- Armory Preview Cache: The 50 ms asset step reuses its last reading while nothing it uses has changed and it has nothing left to load or retry.
-- Armory Preview Cache: Memory is polled every 50 ms only while low memory can change what the mod does (menus, prewarm, held packages or images, a low-memory trip); elsewhere, such as in missions, every 2 seconds.
-- Armory Preview Cache: Each frame checks the update thread once instead of twice, and the memory guard reads the clock only while it trips or recovers.
-- Armory Preview Cache: The per-frame image step no longer creates a function every frame, and the clock and memory readings no longer allocate.
-- Armory Preview Cache: The learned profile is encoded for a save only after it changed, instead of every 5 seconds outside the menu.
-- Armory Preview Cache: Errors from the game's update and shutdown, or from other mods, reach the game unchanged with their original traceback, so they no longer look like errors in this mod.
-- Armory Preview Cache: An error from the game's update or a mod below now pauses the mod: it hands every thumbnail back to the game, releases its asset leases and resumes after 60 clean updates. Eight errors in a burst still stop it.
-- Armory Preview Cache: An error in the mod's own shutdown work can no longer prevent the shutdown callbacks of the game and other mods.
-- Armory Preview Cache: The shutdown status keeps the first failure (`stopped after: <reason>`); plain `stopped` now means nothing failed.
-- Armory Preview Cache: When the mod stops itself, the log keeps the reason and the update it happened on (`disabled_reason`, `disabled_frame`).
-- Armory Preview Cache: Every Windows function the mod calls is declared under a private name, so another mod's different prototype can no longer stop the mod from starting, and mods loaded later keep their own prototypes.
-- Armory Preview Cache: `ArmoryPreviewCache.ini` is read on the first update, because reading it while the game loaded resources could miss an existing file. The log reports `settings=file` or `settings=defaults`.
-- Armory Preview Cache: The game build check uses the shared runtime's module hashes, read once per session for every mod.
-- Armory Preview Cache: The log adds `image_grid_hits`, `image_visible_retained` and gate counters (`image_gated_ticks`, `image_full_*`, `image_prune_*`, `state_refreshes`, `policy_steps_skipped`, `policy_steps_full`).
-- Armory Preview Cache: `verify_gate=1` in `ArmoryPreviewCache.ini` (diagnostic, off by default) also does the full read on skipped frames and logs any difference (`image_gate_misses`, `image_prune_misses`, `policy_gate_misses`).
-- Armory Preview Cache: Licensed under the Zero-Clause BSD license (0BSD).
-- Armory Preview Cache: Offline tests cover these changes, and the update gate ran in real play on 2026-10-04 with all mods installed, without errors and with thumbnails working. The short-visit handoff and a `verify_gate=1` session are not yet checked in game.
-- Clickable Scrollbars: Every game update is handled: at high frame rates several updates shared one clock value and the addon skipped all but the first, so drags were less smooth and very short clicks could be missed.
-- Clickable Scrollbars: Every Windows function is declared under a private name, so another mod that declared the same function first can no longer break the scrollbars or the memory reader (a third-party mod disabled v2.14 this way).
-- Clickable Scrollbars: The game's scroll and input functions are cast once per session from named types. v2.14 made new FFI types on every native call and, after about two minutes of grid dragging, filled the type table every mod shares.
-- Clickable Scrollbars: A frame with no press and no held scrollbar makes 1 Windows call instead of 5, and a press asks for the window focus once instead of twice.
-- Clickable Scrollbars: A held Armory drag frame makes 9 memory reads instead of 25 and no longer allocates about 3.8 KB; the drag still cancels the moment the list changes.
-- Clickable Scrollbars: Native scroll calls and writes, the foreground-window check and releasing a scrollbar no longer allocate memory.
-- Clickable Scrollbars: The addon no longer keeps a screen device context and a 1-4 MB capture bitmap allocated for the whole session.
-- Clickable Scrollbars: The unused input-synthesis function (SendInput) and the legacy pixel detector are no longer shipped; the detector stays in `src/detector.lua` for offline tests.
-- Clickable Scrollbars: An error in an update below the addon now pauses it, dropping any held gesture, and it resumes after 60 clean frames instead of stopping.
-- Clickable Scrollbars: The addon's own frame errors stop it only in a burst: 8 errors with fewer than 3600 error-free frames between them, instead of 8 over the whole session. The log is written once per burst and keeps the stop reason after shutdown.
-- Clickable Scrollbars: A second copy of the addon now loads nothing and leaves the first copy's log alone.
-- Clickable Scrollbars: The source is split into eight files under `src/`, and `scripts/entry.py` builds the one plaintext entry the loader runs; in every test suite its game calls, writes and logs match the single file's.
-- Clickable Scrollbars: New tests cover clashing Windows prototypes, FFI type growth over 20,000 native calls, per-frame allocation, the frame budget and the built entry; the build now also runs the captured Armory replay `tests/test_current_ui.lua`.
-- Clickable Scrollbars: Licensed under the Zero-Clause BSD license (0BSD).
-- Flame Damage Fixed: Windows functions are declared under private names, so another mod that declares them with other prototypes, before or after this one, can no longer stop this mod from starting or change how that mod's calls work.
-- Flame Damage Fixed: A Lumberer or Flame Sentry that disappears while its hit-boxes are being looked up again now leaves its private collision group; before, its hit-boxes could stay in it.
-- Flame Damage Fixed: A weapon's private collision group is checked at every burst and every 0.5 s. If the game no longer marks it free or other bodies carry it, the weapon moves to another free group, or keeps the game's own collision when none is left.
-- Flame Damage Fixed: When the game's update or a mod loaded before this one raises an error, the mod takes its hit-boxes and flames out of their groups and pauses until 60 clean frames; before, it kept running.
-- Flame Damage Fixed: Eight errors below it, or eight of its own, in one burst stop the mod for the session and take its hit-boxes and flames out of their groups. Before, its own errors stopped it after 8 per session.
-- Flame Damage Fixed: The log gets one line per error burst, and the first failure is kept in the mod's status at shutdown.
-- Flame Damage Fixed: The update guard comes from Bingus Shared Runtime with the same policy, and the game build is checked through its session-wide hash cache, so the game files are hashed once for every mod.
-- Flame Damage Fixed: Rarely-run code (burst starts, grouping, releases and the 0.5 s check) stays interpreted while the hit-box scan stays compiled, using about 35 KB of the shared LuaJIT code cache instead of 47 KB in the same offline test.
-- Flame Damage Fixed: README.md describes the private-group convention for other mod authors.
-- Flame Damage Fixed: Licensed under the Zero-Clause BSD license (0BSD).
-- Hellpod Steering Unlocked: Pauses after an error in the game's update or another mod's: it puts the game's own avoidance setting back and checks again once those updates have run cleanly for 60 frames.
-- Hellpod Steering Unlocked: Stops after 8 errors in a burst, its own or in the updates below it; before, it stopped at its own first error and ignored errors below it.
-- Hellpod Steering Unlocked: A memory layout it cannot verify still stops it at once.
-- Hellpod Steering Unlocked: When it stops, it puts the game's own avoidance setting back if its own change is still in place; quitting the game writes nothing.
-- Hellpod Steering Unlocked: Leaves the avoidance setting alone when another mod has set it to a value other than the game's own, reports this once and keeps checking; before, it stopped.
-- Hellpod Steering Unlocked: Checks the avoidance setting without creating any garbage for the Lua collector.
-- Hellpod Steering Unlocked: Licensed under the Zero-Clause BSD license (0BSD).
-- Know Your Constellation: New: Simplified Chinese translation by joyrhyme (pull request #3); it shows when the game's Text Language is Simplified Chinese.
-- Know Your Constellation: Fixed: Hive Worlds list Hive Lords again, and other planet campaign modifiers such as Dragonroach activity apply again. On game build 25480438 the forecast read a stale offset that switched every one of them off.
-- Know Your Constellation: Every Windows function the mod calls is declared under a private name, so another mod that declared the same functions first can no longer keep the forecast from starting.
-- Know Your Constellation: With a game language other than English, a shared translation table left incomplete by another mod no longer keeps the forecast hidden.
-- Know Your Constellation: A translation pack forces its language on every mod only when it sets `force = true`.
-- Know Your Constellation: With the war table or briefing open, the forecast no longer creates garbage every frame: 3-7 KB per frame before (measured in game), none now (measured in the game's Lua runtime outside the game).
-- Know Your Constellation: The 0.5 s refresh of a highlighted mission no longer creates garbage: 232 bytes per refresh before, 824 with spawn weights (measured in the game's Lua runtime outside the game).
-- Know Your Constellation: On the ship and in missions, where the forecast is hidden, it no longer creates 128 bytes of garbage every frame (measured in the game's Lua runtime outside the game).
-- Know Your Constellation: While the forecast waits for mission data with its panel up, it reuses one pending panel instead of making a new one every frame.
-- Know Your Constellation: With the panel up, the font's resource IDs and the status line are rebuilt only when they change. The font is still checked every frame, so an unloaded font hides the panel at once.
-- Know Your Constellation: Less of the mod's code is compiled into the game's shared LuaJIT code cache: about 49 KB instead of 59 KB in an offline play-like run.
-- Know Your Constellation: The update runs on Bingus Shared Runtime's guard, the error policy the family's mods share, and the game build check uses the runtime's module hashes, read once per session for every mod.
-- Know Your Constellation: After 8 errors in one burst the forecast removes its panel and stops for the session instead of retrying every frame. Errors about a minute (3600 frames) apart never add up, and each burst logs only its first error.
-- Know Your Constellation: When the game's update or another mod's raises an error, the forecast removes its panel and pauses until 60 frames pass without one; 8 of them in a burst stop it.
-- Know Your Constellation: Waiting while the game builds its menus or switches screens is not an error: the forecast hides and tries again on the next frame, however long it lasts.
-- Know Your Constellation: The shutdown status keeps the first failure (`stopped after: <reason>`); a session without one keeps its last status.
-- Know Your Constellation: Measured in live play: 0.007 ms per frame in missions and 0.013 on the ship.
-- Better Lobby Management: New: Simplified Chinese translation by joyrhyme (pull request #1); it shows when the game's Text Language is Simplified Chinese.
-- Better Lobby Management: The update hook is now Bingus Shared Runtime's guard, the error policy every CowboyBingus mod shares; its log lines name the mod, and its status is `BetterLobbyManagement.guard`.
-- Better Lobby Management: After an error in the game's update or another mod's, the mod pauses: it cancels a running action and puts the Lobby Region table and the scanner's value back. It resumes after 60 frames without such an error and applies its settings again.
-- Better Lobby Management: A pause keeps a CANCEL SOS you made: the first frame after it checks the session, the mission and the beacons again and turns a re-listed SOS off as before.
-- Better Lobby Management: The mod's own errors no longer stop it at the first one: each cancels the running action at the start of the next frame.
-- Better Lobby Management: 8 errors in a burst stop the mod for the session with everything put back; errors more than a minute apart never add up.
-- Better Lobby Management: The shutdown status keeps the first failure (`stopped after: <reason>`), and an error in the mod's own shutdown work can no longer keep the shutdowns of the game and other mods from running.
-- Better Lobby Management: The update passes every argument and return value through to the update it wraps, not just the frame time.
-- Better Lobby Management: Game module hashes come from the shared runtime's cache, so each module file is read once per session for all mods.
-- Better Lobby Management: Every Windows function the mod calls is declared under a private name, so another mod that declared the same functions first can no longer stop it from starting.
-- Better Lobby Management: A translation registry that another mod left incomplete, or a malformed translation pack, no longer stops the mod: missing parts are filled in and bad packs are skipped. A pack forces its language only with `force = true`.
-- Better Lobby Management: Mod Options Menu options are registered again when Mod Options Menu refused or failed the first attempt: up to 8 more tries in the first four minutes. Before, the options stayed missing for the session.
-- Better Lobby Management: With Bingus Shared Loader v19 the Mod Options Menu options are registered once, after every mod has started; with v18 the first-update registration and its retries stay.
-- Better Lobby Management: Measured in live play: 0.004 ms per frame in missions and 0.003 on the ship.
-- Mod Options Menu: More than 8 mods with options fit the MODS tab: the category buttons show 7 mods at a time, and the 8th button turns the page (up to 16 pages, 112 mods). A 9th mod's options used to be registered but never shown.
-- Mod Options Menu: Values are saved through a temp file, and the previous file is kept as `ModOptionsMenu.values.bak` for when the values file is missing or unreadable. A crash or a full disk during a save no longer loses every mod's settings.
-- Mod Options Menu: A failed save keeps the values, is logged once and is tried again 10 seconds later instead of every frame.
-- Mod Options Menu: The values file is written only when a value changed, and a save still due is written when the game shuts down.
-- Mod Options Menu: A saved NaN or infinite slider value always loads as the option's default; an infinity used to load as the slider's minimum or maximum.
-- Mod Options Menu: A MODS row whose slider the game or another mod sets to NaN or an infinity, or whose choice is past the option's choices, is set back to its value instead of becoming an edit that APPLY passes on.
-- Mod Options Menu: Every Windows function the addon calls is declared under a private name, so another mod's declarations of the same functions can no longer change the prototypes it calls.
-- Mod Options Menu: The update runs on Bingus Shared Runtime's guard, like the family's other mods: an error in an update below MOM pauses it until 60 frames run cleanly, handing an open MODS tab back to the game.
-- Mod Options Menu: After 8 errors in one burst the update stops for the session, handing an open MODS tab back to the game first; errors about a minute apart never add up, and the API keeps working.
-- Mod Options Menu: Each burst logs only its first error, pauses and resumes get a line each, and the status is in `BingusRuntime.statuses.ModOptionsMenu`.
-- Mod Options Menu: The update passes every argument and return value through to the update it wraps, not just the frame time.
-- Mod Options Menu: The game build check takes its module hashes from Bingus Shared Runtime's session cache, so each game file is hashed once per session for every mod.
-- Mod Options Menu: For mod authors (api `version` 3): a 113th mod's `register_option` returns `false` with the reason "all 112 mod categories are in use" instead of `true`.
-- Mod Options Menu: For mod authors: categories are keyed by the new `spec.mod_id` (a stable id such as 'author.mod'), or else by the registering addon and the first mod name it gave. A translated mod name no longer splits a mod into two categories, and two mods with the same name keep their own.
-- Mod Options Menu: For mod authors: `set()` no longer writes the MODS rows itself; the value counts at once and a shown row follows on the next frame, so a call while the menu closes cannot write into it.
-- Mod Options Menu: For mod authors: a slider's `min`, `max`, `step` and `default` must be finite numbers that fit a float, and `set()` refuses NaN and both infinities with "invalid value".
-- Mod Options Menu: For contributors: the build runs every test in a LuaJIT and in the game's lua51.dll before it packages anything.
-- Mod Options Menu: Measured in live play: 0.004 ms per frame in missions and 0.007 on the ship.
-- Mod Bindings Menu: For mod authors: `ModBindingsMenu.poll(ids, out)` answers several bindings in one call, with each one's state and whether it was pressed or released since your previous poll. Check for it with `type(ModBindingsMenu.poll) == 'function'`.
-- Mod Bindings Menu: One `poll` of six bindings reads game memory 8 times, where six `is_down` calls read it 18 times, and allocates nothing.
-- Mod Bindings Menu: For mod authors: `ModBindingsMenu.revision` grows whenever a binding registers, native input becomes ready or the bindings' texts change, so a mod can retry a failed registration when it changes.
-- Mod Bindings Menu: When no automatic action is free, `register_binding` returns `false` with a reason that tells actions reserved by mods not loaded this session from all 29 automatic actions in use.
-- Mod Bindings Menu: Automatic bindings keep their native action and keys across sessions, whatever order mods load in: a mod that loads late or skips a session no longer loses them to another mod.
-- Mod Bindings Menu: An automatic action goes to another binding only after its own binding has not registered for 30 sessions in which a mod asked for an automatic binding; its old keys are then cleared.
-- Mod Bindings Menu: Keys you set on the MODS tab are never deleted, even ones equal to a developer default the action shipped with.
-- Mod Bindings Menu: Developer defaults are cleared once per action, when a binding first uses it, and again only when the game restores them (Revert, a config reload, an old saved settings file).
-- Mod Bindings Menu: Native actions that no mod binding uses this session are left alone, so another mod that uses those developer actions keeps its keys.
-- Mod Bindings Menu: The assignments file is saved through a temporary file and a backup, and restored from the backup after an interrupted save or damage. Unchanged assignments are not rewritten, and a failed save is retried instead of lost.
-- Mod Bindings Menu: The background check of the bindings reads only the actions bindings use, once every 2 seconds, and allocates nothing while nothing changed. Before, it read every developer action's mappings (about 250 reads and 30 KB of garbage per check).
-- Mod Bindings Menu: `is_down` and the per-frame binding page check allocate nothing and read less: 3 reads per `is_down` call instead of 4, and 2 per frame outside a binding page instead of 4.
-- Mod Bindings Menu: Frames with a binding page open allocate nothing and read less: 5 reads instead of 6 on a native tab, and 6 instead of 15 on the MODS tab.
-- Mod Bindings Menu: A malformed translation pack is skipped instead of breaking the MODS tab's texts, and a pack forces its language only with `force = true`.
-- Mod Bindings Menu: Windows functions are declared under private names, so another mod's declarations (such as a textbook `VirtualQuery`) can no longer break the MODS tab.
-- Mod Bindings Menu: On a game build it does not support, the update stops for the session (status `stopped: unsupported game build`) and the bindings stay inert. The log warns that the input.config replacement is still deployed and says to remove or update the mod.
-- Mod Bindings Menu: The update runs through Bingus Shared Runtime's update guard, like the family's other mods, and its status, first failure included, survives the game's shutdown.
-- Mod Bindings Menu: After 8 errors in one burst the update stops and logs the burst's first error instead of failing every frame; 3600 error-free frames (about a minute) end a burst.
-- Mod Bindings Menu: On such a stop the MODS title and borrowed text slots go back to the game as when a binding page closes, or stay borrowed while a page is open.
-- Mod Bindings Menu: When the update of a mod below this one fails, the menu pauses and resumes after 60 frames without such an error; 8 such errors in a burst stop it. Your saved keys are never touched.
-- Mod Bindings Menu: The update passes every argument and return value through to the update it wraps, and no longer builds a new function every frame.
-- Mod Bindings Menu: The game's module files are hashed once per session for every mod together, through Bingus Shared Runtime, instead of once more by this mod.
-- Mod Bindings Menu: Measured in live play: 0.008 ms per frame in missions and 0.007 on the ship.
-- Ship Station Hotkeys: With Bingus Shared Loader v19 the shortcuts register with Mod Bindings Menu once every mod has started, before the first frame; with older loaders, on the first frame as before.
-- Ship Station Hotkeys: A shortcut whose Mod Bindings Menu registration failed is tried again up to 8 times over about four minutes, sooner when Mod Bindings Menu reports a new revision. Until then it keeps its fixed key; before, it kept the fixed key for the whole session.
-- Ship Station Hotkeys: With a Mod Bindings Menu release that offers `poll`, the six shortcuts are read in one call per frame while the game is focused aboard the ship: 8 reads of game memory instead of 18.
-- Ship Station Hotkeys: If that `poll` call fails, the failure is logged once and the shortcuts are read one by one, as with older releases.
-- Ship Station Hotkeys: The mod looks for the ship and checks the game window's focus every 15 frames and right before a shortcut acts, instead of every frame. Shortcuts are still read every frame and act on the frame they are pressed.
-- Ship Station Hotkeys: The mod allocates no memory of its own per frame: the ship lookup reuses its world list, and the focus check its buffer.
-- Ship Station Hotkeys: Every Windows function is declared under a private name, so another mod that declared the same function first with a different prototype can no longer break the shortcuts.
-- Ship Station Hotkeys: With a game language other than English, an incomplete shared translation table left by another mod no longer makes all six Mod Bindings Menu registrations fail.
-- Ship Station Hotkeys: A translation pack forces its language on every mod only when it sets `force = true`.
-- Ship Station Hotkeys: On a game build it does not support, the update stops for the session when the ship is first found (status `stopped: unsupported game build`), with one stop line in the log.
-- Ship Station Hotkeys: The update runs through Bingus Shared Runtime's update guard, like the family's other mods, and its status, first failure included, survives the game's shutdown.
-- Ship Station Hotkeys: After 8 errors less than 3600 error-free frames (about a minute) apart, the update stops for the session instead of failing every frame; each burst of errors is logged once.
-- Ship Station Hotkeys: When the update of a mod below this one fails, the shortcuts pause and resume after 60 frames without such an error; 8 such errors in a burst stop them.
-- Ship Station Hotkeys: A key held through a pause must be pressed again, and a waiting F8 is cancelled.
-- Ship Station Hotkeys: The update passes every argument and return value through to the update it wraps, not just the frame time.
-- Ship Station Hotkeys: The game's module files are hashed once per session for every mod together, through Bingus Shared Runtime, instead of once more by this mod.
-- Ship Station Hotkeys: Measured in live play: 0.006 ms per frame in missions and 0.023 on the ship, where the cost depends on the focused station.
-- Shallow Water Diving: Errors raised by the game's update or by another mod now pass through unchanged, so their stack trace starts where they were raised.
-- Shallow Water Diving: After such an error the mod restores its changes and pauses instead of stopping for the session, and resumes after 60 updates without one. Eight such errors within a minute still stop it.
-- Shallow Water Diving: An error inside the mod no longer stops it at once: eight within a minute do, and a minute without one resets the count. A refused or failed write still stops it at once.
-- Shallow Water Diving: The shutdown status keeps the first failure (`stopped after: <reason>`) instead of overwriting it with `stopped`.
-- Shallow Water Diving: The depth slider no longer goes missing for the session when Mod Options Menu is not ready on the first update or refuses it. Registration is retried when the menu appears, is replaced or reports a new revision, up to 8 times per session.
-- Shallow Water Diving: With Bingus Shared Loader v19 the depth slider registers once, after every mod has started and before the first update, whatever the mod-manager order. Nothing looks for Mod Options Menu during play; with loader v18 the retry above stays.
-- Shallow Water Diving: The loader is recognized by its features (API 1 and the shared log folder) instead of its version number. Requires Bingus Shared Loader v18 or newer.
-- Shallow Water Diving: Now licensed under the Zero-Clause BSD license (0BSD).
-- Shallow Water Diving: Measured in live play: 0.013 ms per frame in missions and 0.007 ms on the ship.
-- Better Stratagem Bounce: The one-time settings check at the first update builds its expected bytes once instead of once per changed flag, cutting that frame's short-lived Lua strings from about 16 MB to about 0.6 MB. A test keeps it under 2 MB.
-- Better Stratagem Bounce: The same one-time settings change checks memory protection once for the whole settings buffer instead of 104 times. In game each check costs about 0.3 ms.
-- Better Stratagem Bounce: Works alongside mods that change other stratagem navigation flags or already cleared the same one: it checks and changes only its own bit instead of stopping when any flag byte differs. After a failed write it puts back only that bit.
-- Better Stratagem Bounce: Calls Windows through Bingus Shared Runtime v1 under private, versioned names, so another mod's declarations of the same Windows functions can no longer change this mod's calls. Each game module's hash is read once per session for every mod that uses the runtime.
-- Better Stratagem Bounce: Requires Bingus Shared Loader v18 or newer (v19 is current).
-- Better Stratagem Bounce: Now licensed under the Zero-Clause BSD license (0BSD).
-- Better Stratagem Bounce: Measured in live play: 0.001 ms per frame in missions and 0.001 ms on the ship.
+- All mods: an error in the game or another mod now pauses the mod instead of stopping it; it resumes once updates run cleanly.
+- All mods: another mod's Windows declarations can no longer break them (Bingus Shared Runtime v1).
+- Arc Thrower Revamped v1.7: about half the memory reads while Fire is held.
+- Armory Preview Cache v23: short Armory visits keep the thumbnails they showed.
+- Armory Preview Cache v23: frames where nothing changed skip the thumbnail work.
+- Better Lobby Management v1.2: Simplified Chinese translation by joyrhyme.
+- Better Lobby Management v1.2: a pause keeps a CANCEL SOS you made.
+- Better Stratagem Bounce v15.4: works alongside mods that change other stratagem navigation flags.
+- Clickable Scrollbars v2.15: fixed skipped updates at high frame rates, for smoother drags and no missed clicks.
+- Clickable Scrollbars v2.15: an idle frame makes 1 Windows call instead of 5.
+- Consistent Vaulting v8.9: an idle check reads 7 values instead of 37-39.
+- Controllable Hover Pack v1.8: 16 memory reads per frame instead of 41 (82 in flight).
+- Enemy Collision Synchronized v2.12.0: fewer memory reads and less garbage per poll.
+- Flame Damage Fixed v1.2: each weapon's collision group is re-checked and moved if another user appears.
+- Hellpod Steering Unlocked v7.5: restores the game's avoidance setting when it pauses or stops.
+- Know Your Constellation v4.1: Hive Worlds list Hive Lords again, and other planet modifiers apply again.
+- Know Your Constellation v4.1: Simplified Chinese translation by joyrhyme.
+- Mod Bindings Menu v2.2: keys set on the MODS tab are never deleted, and bindings are saved with a backup.
+- Mod Options Menu v1.2: more than 8 mods fit the MODS tab, and settings are saved with a backup.
+- Reinforcement Beacons Fixed v4.6: half the memory reads per frame on the ship.
+- Sentry Aim Retention v1.1.0: sentries are no longer located again every check: 0.02 ms per frame with a sentry out instead of 0.18.
+- Shallow Water Diving v3.10: the depth slider no longer goes missing when Mod Options Menu loads late.
+- Ship Station Hotkeys v1.9: reads all six shortcuts in one call per frame.
+- Megapack: with a loader older than v18, the code cache starts at 64 MB instead of 16 MB.
+- Requires Bingus Shared Loader v18 or newer; v19 is recommended.
+- Measured in live play: all 17 mods together cost 0.25 ms per frame in missions (0.59 before) and 0.17 on the ship.
 
 # v36
 
