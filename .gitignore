@@ -1,4 +1,5 @@
 /build/
+components/*/build/
 /releases/
 /tools/
 __pycache__/

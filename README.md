@@ -2,7 +2,7 @@
 
 # Vanilla Plus Megapack
 
-Choose which of the twenty bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, Ship Station Hotkeys, Clickable Scrollbars, Better Lobby Management's host tools, and the Mod Options Menu and Mod Bindings Menu tabs.
+Choose which of the twenty-one bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, Ship Station Hotkeys, Clickable Scrollbars, Better Lobby Management's host tools, and the Mod Options Menu and Mod Bindings Menu tabs.
 
 **Requires the separately built Bingus Shared Loader v18 or newer (v19 is current).** Install two ZIPs: `Vanilla-Plus-Megapack-v38.zip` and `Bingus-Shared-Loader-v19.zip`. Mod managers do not install the dependency automatically.
 
@@ -17,7 +17,7 @@ The Rows package ended with v35: Know Your Constellation v4 has a single layout.
 5. Open the Megapack's **Options** (sliders button) in Arsenal, or its mod options in HD2MM. Check each mod you want and uncheck each mod you do not want. Confirm/save the selection.
 6. **Purge / Deploy**, then launch the game normally. Close the game and repeat these steps whenever you change options.
 
-Each of the twenty options is independent. Select all for the complete pack, any subset for a custom pack, or none to deploy no features from the pack. Enable Mod Bindings Menu with Ship Station Hotkeys to rebind its six shortcuts, including controller buttons. Enable Mod Options Menu to set Shallow Water Diving's maximum dive depth. The option was named Galactic Menu Hotkey before v29; confirm it is still checked after updating. Review your choices after importing or updating: initial selections depend on the manager's settings.
+Each of the twenty-one options is independent. Select all for the complete pack, any subset for a custom pack, or none to deploy no features from the pack. Enable Mod Bindings Menu with Ship Station Hotkeys to rebind its six shortcuts, including controller buttons. Enable Mod Options Menu to set Shallow Water Diving's maximum dive depth. The option was named Galactic Menu Hotkey before v29; confirm it is still checked after updating. Review your choices after importing or updating: initial selections depend on the manager's settings.
 
 An unchecked option removes only the pack's copy. An enabled standalone package or another megapack can still activate that feature, so disable those copies as well. Overlapping gameplay entries run once and their callbacks do not stack. If versions differ, manager priority selects the winner.
 
@@ -48,15 +48,16 @@ The game runs every Lua mod in its own LuaJIT, whose code cache keeps its 2015 l
 | [Better Lobby Management](https://github.com/CowboyBingus/BetterLobbyManagement) | v1.2 | Host tools in the escape menu: DISBAND SQUAD, PROMOTE, which moves the whole squad to the new host's ship, and CANCEL SOS in a mission (only the host needs the mod); a 5-second Galactic Map lobby scanner and an own-continent lobby filter. |
 | [Hellpod Drop Hold](https://github.com/CowboyBingus/HellpodDropHold) | v1.2 | Holds your own hellpod in the sky while your loading screen or the join cutscene is up, as when you join a mission in progress, then lets it fall as a normal drop with steering near the ground. |
 | [Laser Sentry Cooldown](https://github.com/CowboyBingus/LaserSentryCooldown) | v1.0 | At max heat the Laser Sentry overheats and stops firing as usual, then cools at its own normal rate (about 50 s) and fires again instead of burning out. No options. |
+| [Match Your Colors](https://github.com/CowboyBingus/MatchYourColors) | v1.2 | Your helmet takes your armor's colors, or your armor takes your helmet's (Mod Options Menu: Color Matching); only colors change, on your screen only. |
 | [Sticky Grenade Handles](https://github.com/CowboyBingus/StickyGrenadeHandles) | v1.0 | The G-123 Thermite and the sticky stun grenade stick when their handle hits first, instead of bouncing off. |
 
-All bundled components are pinned to the source and resource hashes in `components.lock.json`. Third-party HUD mods and the reserved, unreleased Wide Angle Stratagems module are not included. Mod Bindings Menu, Mod Options Menu, Flame Damage Fixed, Better Lobby Management, Hellpod Drop Hold, Laser Sentry Cooldown and Sticky Grenade Handles are also released on their own: use one copy of each, the standalone package or the pack option. The shared loader remains a separate dependency with its own repository and updates.
+All bundled components are pinned to the source and resource hashes in `components.lock.json`. Third-party HUD mods and the reserved, unreleased Wide Angle Stratagems module are not included. Mod Bindings Menu, Mod Options Menu, Flame Damage Fixed, Better Lobby Management, Hellpod Drop Hold, Laser Sentry Cooldown, Match Your Colors and Sticky Grenade Handles are also released on their own: use one copy of each, the standalone package or the pack option. The shared loader remains a separate dependency with its own repository and updates.
 
 Supported game: Steam build 25480438 / EXE 1.8.46015.0. Each bundled mod retains its behavior and compatibility checks.
 
 ## Translations
 
-Know Your Constellation, Better Lobby Management, Mod Options Menu, Mod Bindings Menu, Ship Station Hotkeys and Shallow Water Diving show their texts in the game's Text Language when a translation is installed. Texts without one show in English. To translate them, see [TRANSLATING.md](TRANSLATING.md). This repository's `components` folder is a kit of all six mods, for example `python scripts/translations.py template components zh-Hans`. A translation pack built with `scripts/translations.py pack` installs like any mod and works with this pack and the standalone mods alike.
+Know Your Constellation, Better Lobby Management, Mod Options Menu, Mod Bindings Menu, Ship Station Hotkeys, Shallow Water Diving and Match Your Colors show their texts in the game's Text Language when a translation is installed. Texts without one show in English. To translate them, see [TRANSLATING.md](TRANSLATING.md). This repository's `components` folder is a kit of all seven mods, for example `python scripts/translations.py template components zh-Hans`. A translation pack built with `scripts/translations.py pack` installs like any mod and works with this pack and the standalone mods alike.
 
 ## Compatibility and updates
 

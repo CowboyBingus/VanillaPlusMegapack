@@ -28,6 +28,7 @@ local pack = {
         'mods/cowboybingus/better_lobby_management',
         'mods/cowboybingus/hellpod_drop_hold',
         'mods/cowboybingus/laser_sentry_cooldown',
+        'mods/cowboybingus/match_your_colors',
         'mods/cowboybingus/sticky_grenade_handles',
     },
 }

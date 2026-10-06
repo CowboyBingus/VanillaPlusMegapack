@@ -29,9 +29,10 @@ local entries = {KnowYourConstellation = 'install.lua', ArmoryPreviewCache = 'in
                  ModBindingsMenu = 'mod_bindings_menu.lua',
                  BetterLobbyManagement = 'addon.lua',
                  LaserSentryCooldown = 'laser_sentry_cooldown.lua',
+                 MatchYourColors = 'addon.lua',
                  StickyGrenadeHandles = 'sticky_grenade_handles.lua'}
--- Laser Sentry Cooldown's and Sticky Grenade Handles' guards are in their assembled entries; Hellpod Drop Hold's
--- loader names the shared loader before its own guard, so all three are named here.
+-- Laser Sentry Cooldown's, Match Your Colors' and Sticky Grenade Handles' guards are in their assembled entries;
+-- Hellpod Drop Hold's loader names the shared loader before its own guard, so all four are named here.
 local guards = {ClickableScrollbars = 'ClickableScrollbars',
                 ArcThrowerRevamped = 'ArcThrowerRevampedInstalled',
                 GalacticMenuHotkey = 'GalacticMenuHotkeyInstalled',
@@ -41,6 +42,7 @@ local guards = {ClickableScrollbars = 'ClickableScrollbars',
                 BetterLobbyManagement = 'BetterLobbyManagement',
                 HellpodDropHold = 'HellpodDropHold',
                 LaserSentryCooldown = 'LaserSentryCooldownInstalled',
+                MatchYourColors = 'MatchYourColorsInstalled',
                 StickyGrenadeHandles = 'StickyGrenadeHandles'}
 for i = 4, #arg, 2 do
     local module, slug = arg[i], assert(arg[i + 1])
@@ -67,6 +69,7 @@ local registry_cannot_see = {['mods/cowboybingus/clickable_scrollbars'] = true,
                              ['mods/cowboybingus/better_lobby_management'] = true,
                              ['mods/cowboybingus/hellpod_drop_hold'] = true,
                              ['mods/cowboybingus/laser_sentry_cooldown'] = true,
+                             ['mods/cowboybingus/match_your_colors'] = true,
                              ['mods/cowboybingus/sticky_grenade_handles'] = true}
 -- The option selections to replay: every selection of at most two options, every one missing at most
 -- two, and 256 seeded pseudo-random ones. Interactions between options are pairwise, which the first two

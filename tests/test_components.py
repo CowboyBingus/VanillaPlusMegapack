@@ -15,7 +15,7 @@ def main():
     build = Path(sys.argv[1]) if len(sys.argv) > 1 and not sys.argv[1].startswith('--') else BUILD
     mods = ROOT / 'components'
     commands = (gameplay_commands(mods, build) + tool_commands(mods, build) + menu_commands(mods, build)
-                + data_change_commands(mods, build))
+                + data_change_commands(mods, build) + colour_commands(mods, build))
     corpse = mods / 'EnemyCollisionSynchronized'
     print(run([sys.executable, '-B', corpse / 'tests/test_profiles.py']).strip())
     print(translation_kit(mods))
@@ -195,6 +195,26 @@ def data_change_commands(mods, build):
     return commands
 
 
+def colour_commands(mods, build):
+    """Match Your Colors: the suites its own scripts/build.py runs, in LuaJIT and in the game's own lua51.dll
+    (tests/game_lua.py), and its parity test against the research pipeline (all kits in LuaJIT, 10 in the game's)."""
+    colours = mods / 'MatchYourColors'
+    # Its suites write scratch files to the component's build/ folder, which its own build creates first.
+    (colours / 'build').mkdir(exist_ok=True)
+    commands = []
+    for vm in ([], ['game']):
+        prefix = [colours / 'tests/game_lua.py'] if vm else []
+        for name in ('test_units', 'test_addon', 'test_install', 'test_idle_alloc', 'test_bingus_text', 'test_locales',
+                     'test_cache', 'test_job'):
+            # The shared translation test takes the folder holding bingus_text.lua.
+            target = colours / 'src' if name == 'test_bingus_text' else colours
+            commands.append([*prefix, colours / 'tests' / (name + '.lua'), target])
+        commands.append([*prefix, colours / 'tests/compile_entry.lua', build / 'MatchYourColors/entry.lua'])
+    commands.append([colours / 'tests/test_parity.lua', colours])
+    commands.append([colours / 'tests/game_lua.py', colours / 'tests/test_parity.lua', colours, '10'])
+    return commands
+
+
 def lua51_sha256():
     """The installed game's lua51.dll, which Better Lobby Management's native suites check (HD2_LUA51_DLL)."""
     dll = Path(os.environ.get('HD2_LUA51_DLL', Path(os.environ.get('PROGRAMFILES(X86)', r'C:\Program Files (x86)'))
@@ -203,8 +223,8 @@ def lua51_sha256():
 
 
 # The components that show text: each keeps its English texts in locales/en.lua.
-TEXT_COMPONENTS = ('BetterLobbyManagement', 'GalacticMenuHotkey', 'KnowYourConstellation', 'ModBindingsMenu',
-                   'ModOptionsMenu', 'ShallowWaterDiving')
+TEXT_COMPONENTS = ('BetterLobbyManagement', 'GalacticMenuHotkey', 'KnowYourConstellation', 'MatchYourColors',
+                   'ModBindingsMenu', 'ModOptionsMenu', 'ShallowWaterDiving')
 
 
 def translation_kit(mods):
