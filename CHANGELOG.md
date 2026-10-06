@@ -1,3 +1,13 @@
+# v38
+
+- New option: Hellpod Drop Hold v1.2: holds your hellpod in the sky while your loading screen or the join cutscene is up, so you see your drop when you join a mission in progress.
+- New option: Laser Sentry Cooldown v1.0: an overheated Laser Sentry cools down at its own rate and fires again instead of burning out.
+- New option: Sticky Grenade Handles v1.0: the G-123 Thermite and the sticky stun grenade stick when their handle hits first.
+- Twenty independent options; use one copy of each mod: its standalone package or the pack option.
+- The other seventeen mods are unchanged from v37.
+- Requires Bingus Shared Loader v18 or newer; v19 is recommended.
+- Measured in live play: the three new mods together add 0.007 ms per frame in missions (Hellpod Drop Hold 0.004, Laser Sentry Cooldown 0.002, Sticky Grenade Handles 0.001).
+
 # v37
 
 - All mods: an error in the game or another mod now pauses the mod instead of stopping it; it resumes once updates run cleanly.

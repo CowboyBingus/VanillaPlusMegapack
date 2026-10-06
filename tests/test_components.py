@@ -14,7 +14,8 @@ import translations  # noqa: E402  (scripts/translations.py, the translators' to
 def main():
     build = Path(sys.argv[1]) if len(sys.argv) > 1 and not sys.argv[1].startswith('--') else BUILD
     mods = ROOT / 'components'
-    commands = gameplay_commands(mods, build) + tool_commands(mods, build) + menu_commands(mods, build)
+    commands = (gameplay_commands(mods, build) + tool_commands(mods, build) + menu_commands(mods, build)
+                + data_change_commands(mods, build))
     corpse = mods / 'EnemyCollisionSynchronized'
     print(run([sys.executable, '-B', corpse / 'tests/test_profiles.py']).strip())
     print(translation_kit(mods))
@@ -167,6 +168,30 @@ def menu_commands(mods, build):
                          *arguments[1:]])
     version = next(c['version'] for c in load_components() if c['slug'] == 'BetterLobbyManagement')
     commands.append([blm / 'tests/test_entry.lua', build / 'BetterLobbyManagement/entry.lua', 'v' + version])
+    return commands
+
+
+def data_change_commands(mods, build):
+    """Hellpod Drop Hold, Laser Sentry Cooldown and Sticky Grenade Handles: the suites their own scripts/build.py
+    runs, in LuaJIT and in the game's own lua51.dll (each component's tests/game_lua.py, HD2_LUA51_DLL)."""
+    hold = mods / 'HellpodDropHold'
+    # test_hold.lua checks that the adapter's module hash is its host executable's.
+    commands = [[hold / 'tests/test_hold.lua', hold / 'src', sha(LUA.read_bytes())],
+                [hold / 'tests/game_lua.py', hold / 'tests/test_hold.lua', hold / 'src',
+                 sha(Path(sys.executable).read_bytes())]]
+    sentry = mods / 'LaserSentryCooldown'
+    handles = mods / 'StickyGrenadeHandles'
+    for vm in ([], ['game']):
+        sentry_prefix = [sentry / 'tests/game_lua.py'] if vm else []
+        commands += [[*sentry_prefix, sentry / 'tests/test_cooldown.lua', sentry],
+                     [*sentry_prefix, sentry / 'tests/test_hooks.lua', sentry],
+                     *[[*sentry_prefix, sentry / 'tests/test_adapter.lua', sentry, mode]
+                       for mode in ('plain', 'hostile', 'sdk')],
+                     [*sentry_prefix, sentry / 'tests/compile_entry.lua', build / 'LaserSentryCooldown/entry.lua']]
+        handles_prefix = [handles / 'tests/game_lua.py'] if vm else []
+        commands += [[*handles_prefix, handles / 'tests/test_mod.lua', handles],
+                     [*handles_prefix, handles / 'tests/compile_entry.lua', build / 'StickyGrenadeHandles/entry.lua'],
+                     [*handles_prefix, handles / 'tests/test_entry.lua', build / 'StickyGrenadeHandles/entry.lua']]
     return commands
 
 

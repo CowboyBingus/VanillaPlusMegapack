@@ -1,6 +1,11 @@
 Supports Helldivers 2 Steam build 25480438 / EXE 1.8.46015.0.
 
-Offline source, package and read-only module checks passed. v36 updates Know
+Offline source, package and read-only module checks passed. v38 adds Hellpod
+Drop Hold (v1.2), Laser Sentry Cooldown (v1.0) and Sticky Grenade Handles
+(v1.0), each played in recorded real play on this build as its standalone
+release, in joined missions (Hellpod Drop Hold held the pod in two joins). The v38
+package ran to the ship and quit cleanly with loader v19 and all twenty
+options: every option loaded and none reported a failure. v36 updates Know
 Your Constellation (v4.0), Better Lobby Management (v1.1), Mod Options Menu
 (v1.1), Mod Bindings Menu (v2.1), Ship Station Hotkeys (v1.8) and Shallow
 Water Diving (v3.9). The v36 package ran in recorded real play on this build

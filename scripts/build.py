@@ -14,7 +14,7 @@ from package import package_release
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build'
 MODULE = 'mods/cowboybingus/vanilla_plus_megapack'
-VERSION = '37'
+VERSION = '38'
 REVISION = f'megapack-v{VERSION}'
 GUID = '876060ae-0640-4ac5-95b6-ec7c9a0567d3'
 INPUT_ARCHIVE = ARCHIVE.replace('patch_0', 'patch_1')  # Mod Bindings Menu's input actions, beside its addon
@@ -36,6 +36,9 @@ OPTION_DESCRIPTIONS = {
     'ModOptionsMenu': 'Adds a native MODS tab to the Options screen, where mods such as Shallow Water Diving offer their settings.',
     'ModBindingsMenu': 'Adds a native MODS tab to the keyboard and controller binding pages, where mods such as Ship Station Hotkeys offer rebindable keys.',
     'BetterLobbyManagement': 'Host tools in the escape menu: DISBAND SQUAD, PROMOTE, which moves the whole squad to the new host\'s ship, and CANCEL SOS in a mission (only the host needs the mod). Also a 5-second Galactic Map lobby scanner and an own-continent lobby filter.',
+    'HellpodDropHold': 'Holds your own hellpod in the sky while your loading screen or the join cutscene is up, as when you join a mission in progress, then lets it fall as a normal drop with steering near the ground.',
+    'LaserSentryCooldown': 'At max heat the Laser Sentry overheats and stops firing as usual, then cools at its own normal rate (about 50 s) and fires again instead of burning out. No options.',
+    'StickyGrenadeHandles': 'The G-123 Thermite and the sticky stun grenade stick when their handle hits first, instead of bouncing off.',
 }
 
 
@@ -126,18 +129,43 @@ def write_entry(component, body, build):
     return payload
 
 
-def flame_entry(root):
-    """Flame Damage Fixed's scripts/build.py assemble(): its standalone entry, which already begins with the
-    declaration that the loader's entry_source would add, so the bytes are the same."""
+# Standalone addons whose scripts/build.py assemble(*arguments) returns their plaintext entry, declaration first.
+# Their standalone builds pass it through the loader's entry_source, which keeps such an entry as it is, so the
+# option ships the same bytes.
+BUILD_ASSEMBLED = {'FlameDamageFixed': (), 'LaserSentryCooldown': (False,), 'StickyGrenadeHandles': ()}
+# Resources a component ships beside its module (Hellpod Drop Hold's compiled implementation), by slug:
+# {resource hash: payload}. The lock pins each one in the component's extra_resources.
+EXTRA = {}
+
+
+def build_entry(root, slug):
+    """A BUILD_ASSEMBLED component's standalone entry, from its own scripts/build.py assemble()."""
     if 'build_addon' not in sys.modules:
         import types
         sys.modules['build_addon'] = types.ModuleType('build_addon')
         sys.modules['build_addon'].entry_source = None
-    module = load_script(root, 'scripts/build.py', 'flame_build')
-    body = module.assemble()
+    module = load_script(root, 'scripts/build.py', slug + '_build')
+    body = module.assemble(*BUILD_ASSEMBLED[slug])
     if not body.startswith(('-- HD2-Addon: ' + module.LUA_NAME + '\n').encode()):
-        raise ValueError('Flame Damage Fixed entry lacks its declaration')
+        raise ValueError(slug + ' entry lacks its declaration')
     return body
+
+
+def two_resource_entry(root, component, build):
+    """Hellpod Drop Hold's scripts/module.py build_module(): a plaintext entry that requires its compiled
+    implementation, a second resource. The entry is the option's resource; the implementation goes to EXTRA and to
+    build/<slug>/extra/ for the suites that load it."""
+    slug = component['slug']
+    module = load_script(root, 'scripts/module.py', slug + '_module')
+    resources = module.build_module(root, build / slug, component['module'], component['revision'])
+    payload = resources.pop(resource_hash(component['module']))
+    EXTRA[slug] = resources
+    folder = build / slug / 'extra'
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in component.get('extra_resources', {}):
+        if resource_hash(name) in resources:
+            (folder / (name.rsplit('/', 1)[-1] + '.lua.main')).write_bytes(resources[resource_hash(name)])
+    return payload
 
 
 def hover_source(root, component):
@@ -163,8 +191,10 @@ def component_resource(component, build):
         body = (module.entry_text(root, component['version']) if component.get('version')
                 else module.entry_text(root))
         return write_entry(component, body, build)
-    if slug == 'FlameDamageFixed':
-        return write_entry(component, flame_entry(root), build)
+    if slug in BUILD_ASSEMBLED:
+        return write_entry(component, build_entry(root, slug), build)
+    if slug == 'HellpodDropHold':
+        return two_resource_entry(root, component, build)
     if slug in MODULES:
         module = load_script(root, 'scripts/module.py', slug + '_module')
         (payload,) = module.build_module(root, build / slug, component['module'], component['patch'],
@@ -188,6 +218,13 @@ def build_component(component, build=BUILD):
     payload = component_resource(component, build)
     if sha(payload) != component['resource_sha256']:
         raise ValueError('Resource differs from the standalone build: ' + component['slug'] + ' ' + sha(payload))
+    extras = EXTRA.get(component['slug'], {})
+    pinned = component.get('extra_resources', {})
+    if set(extras) != {resource_hash(name) for name in pinned}:
+        raise ValueError('Extra resources differ from the pinned list: ' + component['slug'])
+    for name, expected in pinned.items():
+        if sha(extras[resource_hash(name)]) != expected:
+            raise ValueError('Extra resource differs from the standalone build: ' + name)
     return payload
 
 
@@ -240,6 +277,9 @@ def main():
         return discoverable_resource(component['module'], resource, build / component['slug'])
     resources = {resource_hash(c['module']): entry(c)
                  for c in [*components, {'module': MODULE, 'slug': ''}]}
+    # A component's extra resources (pinned in its extra_resources) ship verbatim beside its entry.
+    for component in components:
+        resources.update(EXTRA.get(component['slug'], {}))
     component_tests = [sys.executable, ROOT / 'tests/test_components.py', build]
     if args.desktop_capture: component_tests.append('--desktop-capture')
     loader_build = Path(os.environ.get('HD2_SHARED_LOADER_BUILD', ROOT.parent / 'BingusSharedLoader/build'))
@@ -255,7 +295,8 @@ def main():
         # Both managers deploy only enabled Include folders. Carry the identical
         # identity in each option so any nonempty selection reports the pack.
         # The loader resolves this stable resource ID once, as with standalones.
-        keys = (resource_hash(MODULE), resource_hash(component['module']))
+        keys = (resource_hash(MODULE), resource_hash(component['module']),
+                *(resource_hash(name) for name in component.get('extra_resources', {})))
         archive = make_archive({key: resources[key] for key in keys})
         for suffix, data in [('', archive), ('.stream', b''), ('.gpu_resources', b'')]:
             path = directory / (ARCHIVE + suffix)
@@ -272,14 +313,16 @@ def main():
                         'Include': [folder]})
     report = {
         'name': 'Vanilla Plus Megapack', 'slug': 'VanillaPlusMegapack', 'revision': REVISION, 'guid': GUID,
-        'description': 'Choose any of the seventeen bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v18. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. With default Arsenal priority put the loader last.',
+        'description': 'Choose any of the twenty bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v18. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. With default Arsenal priority put the loader last.',
         'requires': [{'name': 'Bingus Shared Loader', 'guid': '612eaf70-d682-43c7-9efd-16dcc695f977', 'api': 1, 'revision': 'loader-v18'}],
         'game_exe_sha256': EXE_SHA, 'game_dll_sha256': GAME_DLL_SHA,
         'deployment_files': files, 'options': options,
         'files': {p: sha((ROOT / p).read_bytes()) for p in files.values()},
         'runtime_verified': False, 'boot_replaced': False, 'loader_bundled': False,
         'desktop_capture_verified': args.desktop_capture,
-        'components': [{k: c[k] for k in ('name', 'slug', 'revision', 'module', 'resource_sha256')} for c in components],
+        'components': [{**{k: c[k] for k in ('name', 'slug', 'revision', 'module', 'resource_sha256')},
+                        **({'extra_resources': c['extra_resources']} if 'extra_resources' in c else {})}
+                       for c in components],
         'resource_sha256': {f'{key:016x}': sha(value) for key, value in sorted(resources.items())},
     }
     release = package_release(ROOT, build, report)

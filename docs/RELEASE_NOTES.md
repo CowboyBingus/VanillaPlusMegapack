@@ -1,26 +1,7 @@
-- All mods: an error in the game or another mod now pauses the mod instead of stopping it; it resumes once updates run cleanly.
-- All mods: another mod's Windows declarations can no longer break them (Bingus Shared Runtime v1).
-- Arc Thrower Revamped v1.7: about half the memory reads while Fire is held.
-- Armory Preview Cache v23: short Armory visits keep the thumbnails they showed.
-- Armory Preview Cache v23: frames where nothing changed skip the thumbnail work.
-- Better Lobby Management v1.2: Simplified Chinese translation by joyrhyme.
-- Better Lobby Management v1.2: a pause keeps a CANCEL SOS you made.
-- Better Stratagem Bounce v15.4: works alongside mods that change other stratagem navigation flags.
-- Clickable Scrollbars v2.15: fixed skipped updates at high frame rates, for smoother drags and no missed clicks.
-- Clickable Scrollbars v2.15: an idle frame makes 1 Windows call instead of 5.
-- Consistent Vaulting v8.9: an idle check reads 7 values instead of 37-39.
-- Controllable Hover Pack v1.8: 16 memory reads per frame instead of 41 (82 in flight).
-- Enemy Collision Synchronized v2.12.0: fewer memory reads and less garbage per poll.
-- Flame Damage Fixed v1.2: each weapon's collision group is re-checked and moved if another user appears.
-- Hellpod Steering Unlocked v7.5: restores the game's avoidance setting when it pauses or stops.
-- Know Your Constellation v4.1: Hive Worlds list Hive Lords again, and other planet modifiers apply again.
-- Know Your Constellation v4.1: Simplified Chinese translation by joyrhyme.
-- Mod Bindings Menu v2.2: keys set on the MODS tab are never deleted, and bindings are saved with a backup.
-- Mod Options Menu v1.2: more than 8 mods fit the MODS tab, and settings are saved with a backup.
-- Reinforcement Beacons Fixed v4.6: half the memory reads per frame on the ship.
-- Sentry Aim Retention v1.1.0: sentries are no longer located again every check: 0.02 ms per frame with a sentry out instead of 0.18.
-- Shallow Water Diving v3.10: the depth slider no longer goes missing when Mod Options Menu loads late.
-- Ship Station Hotkeys v1.9: reads all six shortcuts in one call per frame.
-- Megapack: with a loader older than v18, the code cache starts at 64 MB instead of 16 MB.
+- New option: Hellpod Drop Hold v1.2: holds your hellpod in the sky while your loading screen or the join cutscene is up, so you see your drop when you join a mission in progress.
+- New option: Laser Sentry Cooldown v1.0: an overheated Laser Sentry cools down at its own rate and fires again instead of burning out.
+- New option: Sticky Grenade Handles v1.0: the G-123 Thermite and the sticky stun grenade stick when their handle hits first.
+- Twenty independent options; use one copy of each mod: its standalone package or the pack option.
+- The other seventeen mods are unchanged from v37.
 - Requires Bingus Shared Loader v18 or newer; v19 is recommended.
-- Measured in live play: all 17 mods together cost 0.25 ms per frame in missions (0.59 before) and 0.17 on the ship.
+- Measured in live play: the three new mods together add 0.007 ms per frame in missions (Hellpod Drop Hold 0.004, Laser Sentry Cooldown 0.002, Sticky Grenade Handles 0.001).

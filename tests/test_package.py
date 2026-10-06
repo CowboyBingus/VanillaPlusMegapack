@@ -20,7 +20,14 @@ def input_actions(data):
     return {key: data[offset:offset + size]}
 
 
-def resources(data):
+def extras(component):
+    """The resource hashes a component ships beside its module (its pinned extra_resources)."""
+    return {resource_hash(name) for name in component.get('extra_resources', {})}
+
+
+def resources(data, compiled=frozenset()):
+    """Each Lua resource of an option archive: declaration-bearing plaintext entries, except the compiled extra
+    resources named in `compiled`, which must be the game's non-GC64 LuaJIT bytecode."""
     count = struct.unpack_from('<I', data, 8)[0]
     assert struct.unpack_from('<III', data) == (0xF0000011, 1, count)
     assert struct.unpack_from('<Q', data, 32)[0] == len(data)
@@ -37,7 +44,7 @@ def resources(data):
         occupied.update(range(offset, offset + size))
         payload = data[offset:offset + size]
         assert struct.unpack_from('<II', payload) == (size - 8, 2)
-        assert payload[8:].startswith(b'-- HD2-Addon: ')
+        assert payload[8:].startswith(b'\x1bLJ\x02\x02' if key in compiled else b'-- HD2-Addon: ')
         result[key] = payload
     return result
 
@@ -56,7 +63,7 @@ def main():
         assert len(package.namelist()) == len(expected) and set(package.namelist()) == expected
         manager = json.loads(package.read('manifest.json'))
         assert manager['Version'] == 1 and manager['Name'] == name+f' - v{VERSION}' and manager['Guid'] == GUID
-        assert len(manager['Options']) == len(components) == 17
+        assert len(manager['Options']) == len(components) == 20
         assert manager['IconPath'] == 'thumbnail.png'
         png = package.read('thumbnail.png')
         assert png[:8] == b'\x89PNG\r\n\x1a\n'
@@ -76,9 +83,12 @@ def main():
             assert option['Name'] == component['name']
             assert option['Description'] and option['Include'] == [folder]
             assert option['Image'] == 'thumbnail.png' and 'SubOptions' not in option
-            choice = resources(package.read(folder + '/' + ARCHIVE))
-            assert set(choice) == {resource_hash(MODULE), resource_hash(component['module'])}
+            choice = resources(package.read(folder + '/' + ARCHIVE), extras(component))
+            assert set(choice) == {resource_hash(MODULE), resource_hash(component['module'])} | extras(component)
             assert choice[resource_hash(MODULE)] == (build / 'entry.lua.main').read_bytes()
+            for name, digest in component.get('extra_resources', {}).items():
+                # Shipped beside the entry, byte for byte the standalone release's resource.
+                assert sha(choice[resource_hash(name)]) == digest
             for key, value in choice.items():
                 if key in payloads:
                     assert payloads[key] == value, 'Overlapping resources must be identical'
@@ -106,12 +116,14 @@ def main():
                 if mask & (1 << i):
                     selected.update(choice)
                     wanted.add(resource_hash(component['module']))
+                    wanted |= extras(component)
                     if component.get('input_archive_sha256'):
                         wanted.add(INPUT)
             if mask:
                 wanted.add(resource_hash(MODULE))
             assert set(selected) == wanted
-        assert set(payloads) == {resource_hash(c['module']) for c in components} | {resource_hash(MODULE), INPUT}
+        assert set(payloads) == ({resource_hash(c['module']) for c in components} | {resource_hash(MODULE), INPUT}
+                                 | {key for c in components for key in extras(c)})
         for component in components:
             original = (build / component['slug'] / 'mod.lua.main').read_bytes()
             assert sha(original) == component['resource_sha256']

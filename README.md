@@ -2,9 +2,9 @@
 
 # Vanilla Plus Megapack
 
-Choose which of the seventeen bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, Ship Station Hotkeys, Clickable Scrollbars, Better Lobby Management's host tools, and the Mod Options Menu and Mod Bindings Menu tabs.
+Choose which of the twenty bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, Ship Station Hotkeys, Clickable Scrollbars, Better Lobby Management's host tools, and the Mod Options Menu and Mod Bindings Menu tabs.
 
-**Requires the separately built Bingus Shared Loader v18 or newer (v19 is current).** Install two ZIPs: `Vanilla-Plus-Megapack-v37.zip` and `Bingus-Shared-Loader-v19.zip`. Mod managers do not install the dependency automatically.
+**Requires the separately built Bingus Shared Loader v18 or newer (v19 is current).** Install two ZIPs: `Vanilla-Plus-Megapack-v38.zip` and `Bingus-Shared-Loader-v19.zip`. Mod managers do not install the dependency automatically.
 
 The Rows package ended with v35: Know Your Constellation v4 has a single layout. If you used `Vanilla-Plus-Megapack-Rows`, disable it and enable this pack.
 
@@ -12,12 +12,12 @@ The Rows package ended with v35: Know Your Constellation v4 has a single layout.
 
 1. Close Helldivers 2. Use one mod manager.
 2. Replace any previous loader entry with v18. Disable old megapacks and standalone copies of features you want turned off.
-3. Import `Vanilla-Plus-Megapack-v37.zip` and `Bingus-Shared-Loader-v19.zip`, then enable both.
+3. Import `Vanilla-Plus-Megapack-v38.zip` and `Bingus-Shared-Loader-v19.zip`, then enable both.
 4. With Arsenal's default priority, put **Bingus Shared Loader last**, at the bottom. If first-mod priority is enabled, put the loader first.
 5. Open the Megapack's **Options** (sliders button) in Arsenal, or its mod options in HD2MM. Check each mod you want and uncheck each mod you do not want. Confirm/save the selection.
 6. **Purge / Deploy**, then launch the game normally. Close the game and repeat these steps whenever you change options.
 
-Each of the seventeen options is independent. Select all for the complete pack, any subset for a custom pack, or none to deploy no features from the pack. Enable Mod Bindings Menu with Ship Station Hotkeys to rebind its six shortcuts, including controller buttons. Enable Mod Options Menu to set Shallow Water Diving's maximum dive depth. The option was named Galactic Menu Hotkey before v29; confirm it is still checked after updating. Review your choices after importing or updating: initial selections depend on the manager's settings.
+Each of the twenty options is independent. Select all for the complete pack, any subset for a custom pack, or none to deploy no features from the pack. Enable Mod Bindings Menu with Ship Station Hotkeys to rebind its six shortcuts, including controller buttons. Enable Mod Options Menu to set Shallow Water Diving's maximum dive depth. The option was named Galactic Menu Hotkey before v29; confirm it is still checked after updating. Review your choices after importing or updating: initial selections depend on the manager's settings.
 
 An unchecked option removes only the pack's copy. An enabled standalone package or another megapack can still activate that feature, so disable those copies as well. Overlapping gameplay entries run once and their callbacks do not stack. If versions differ, manager priority selects the winner.
 
@@ -25,7 +25,7 @@ An unchecked option removes only the pack's copy. An enabled standalone package 
 
 The game runs every Lua mod in its own LuaJIT, whose code cache keeps its 2015 limits (512 KB of machine code, 1,000 traces) for the game and all mods together. When it fills, LuaJIT discards all compiled code and recompiles it during play. Bingus Shared Loader v18, required by this pack, raises and manages these limits. If an older loader is still installed, this pack raises them once at startup to the same starting values (64 MB, 8,000 traces), with no per-frame work and without the loader's growth or log line.
 
-## Included in v37
+## Included in v38
 
 | Mod | Version | Effect |
 | --- | --- | --- |
@@ -46,8 +46,11 @@ The game runs every Lua mod in its own LuaJIT, whose code cache keeps its 2015 l
 | [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) | v1.2 | Native MODS tab on the Options screen, where mods such as Shallow Water Diving offer their settings. |
 | [Mod Bindings Menu](https://github.com/CowboyBingus/ModBindingsMenu) | v2.2 | Native MODS tab on the keyboard and controller binding pages, where mods such as Ship Station Hotkeys offer rebindable keys. |
 | [Better Lobby Management](https://github.com/CowboyBingus/BetterLobbyManagement) | v1.2 | Host tools in the escape menu: DISBAND SQUAD, PROMOTE, which moves the whole squad to the new host's ship, and CANCEL SOS in a mission (only the host needs the mod); a 5-second Galactic Map lobby scanner and an own-continent lobby filter. |
+| [Hellpod Drop Hold](https://github.com/CowboyBingus/HellpodDropHold) | v1.2 | Holds your own hellpod in the sky while your loading screen or the join cutscene is up, as when you join a mission in progress, then lets it fall as a normal drop with steering near the ground. |
+| [Laser Sentry Cooldown](https://github.com/CowboyBingus/LaserSentryCooldown) | v1.0 | At max heat the Laser Sentry overheats and stops firing as usual, then cools at its own normal rate (about 50 s) and fires again instead of burning out. No options. |
+| [Sticky Grenade Handles](https://github.com/CowboyBingus/StickyGrenadeHandles) | v1.0 | The G-123 Thermite and the sticky stun grenade stick when their handle hits first, instead of bouncing off. |
 
-All bundled components are pinned to the source and resource hashes in `components.lock.json`. Third-party HUD mods and the reserved, unreleased Wide Angle Stratagems module are not included. Mod Bindings Menu, Mod Options Menu, Flame Damage Fixed and Better Lobby Management are also released on their own: use one copy of each, the standalone package or the pack option. The shared loader remains a separate dependency with its own repository and updates.
+All bundled components are pinned to the source and resource hashes in `components.lock.json`. Third-party HUD mods and the reserved, unreleased Wide Angle Stratagems module are not included. Mod Bindings Menu, Mod Options Menu, Flame Damage Fixed, Better Lobby Management, Hellpod Drop Hold, Laser Sentry Cooldown and Sticky Grenade Handles are also released on their own: use one copy of each, the standalone package or the pack option. The shared loader remains a separate dependency with its own repository and updates.
 
 Supported game: Steam build 25480438 / EXE 1.8.46015.0. Each bundled mod retains its behavior and compatibility checks.
 
@@ -71,7 +74,7 @@ The prior performance improvements remain included: bounded Arc Thrower scanning
 
 Current-build multiplayer checks for the earlier gameplay components remain pending.
 
-Current version: **v37**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).
+Current version: **v38**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).
 
 ## License
 
