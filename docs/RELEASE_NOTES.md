@@ -1,8 +1,7 @@
-- New option: Hellpod Drop Hold v1.2: holds your hellpod in the sky while your loading screen or the join cutscene is up, so you see your drop when you join a mission in progress.
-- New option: Laser Sentry Cooldown v1.0: an overheated Laser Sentry cools down at its own rate and fires again instead of burning out.
-- New option: Match Your Colors v1.2: your helmet takes your armor's colors, or your armor takes your helmet's (Mod Options Menu); only colors change, on your screen only.
-- New option: Sticky Grenade Handles v1.0: the G-123 Thermite and the sticky stun grenade stick when their handle hits first.
+- Laser Sentry Cooldown v1.1: an overheated Laser Sentry no longer explodes; it cools for about 50 s at its own rate, then its turret powers up and fires again.
+- Laser Sentry Cooldown v1.1: played in a mission, where the sentry fired again about 1 s after its cooldown ended.
+- v38 was a pre-release, so v39 also brings its four new options to anyone updating from v37: Hellpod Drop Hold v1.2, Laser Sentry Cooldown, Match Your Colors v1.2 and Sticky Grenade Handles v1.0.
+- The other twenty mods are unchanged from v38.
 - Twenty-one independent options; use one copy of each mod: its standalone package or the pack option.
-- The other seventeen mods are unchanged from v37.
 - Requires Bingus Shared Loader v18 or newer; v19 is recommended.
-- Measured in live play: the four new mods together add 0.015 ms per frame in missions (Match Your Colors 0.008, Hellpod Drop Hold 0.004, Laser Sentry Cooldown 0.002, Sticky Grenade Handles 0.001).
+- Measured in live play: the four mods new since v37 add 0.015 ms per frame in missions (Match Your Colors 0.008, Hellpod Drop Hold 0.004, Laser Sentry Cooldown v1.0 0.002, Sticky Grenade Handles 0.001); Laser Sentry Cooldown v1.1's turret check is not measured in game yet (1 to 3 memory reads every 120 frames).

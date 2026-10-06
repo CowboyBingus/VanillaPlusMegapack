@@ -56,6 +56,10 @@ local function le64(value)
     return table.concat(out)
 end
 local function poke(address, bytes) ffi.copy(ffi.cast('uint8_t *', address), bytes, #bytes) end
+local function fixture_word(bytes, offset)
+    local a, b, c, d = bytes:byte(offset + 1, offset + 4)
+    return a + b * 256 + c * 65536 + d * 16777216
+end
 local function peek(address, size) return ffi.string(ffi.cast('uint8_t *', address), size) end
 local function protect(address, size, protection)
     local previous = ffi.new('uint32_t[1]')
@@ -95,6 +99,11 @@ local api = Cooldown.adapter()
 assert(api.u64(root_slot) == root_object and api.u64(table_slot) == heat, 'u64 reads')
 assert(api.read(record_address, Cooldown.RECORD_SIZE) == record, 'read')
 assert(api.read(0x10, 8) == nil and api.u64(0x10) == nil, 'unreadable memory reads as nil')
+-- view: one read into the reused buffer, decoded in place (the turret watch's reads).
+assert(api.view(record_address, 24) and api.bytes[0] == record:byte(1) and api.words[1] == fixture_word(record, 4),
+       'view reads into api.bytes / api.words')
+assert(api.view(0x10, 8) == false and api.view(record_address, 0) == false and api.view(record_address, 4096) == false,
+       'view refuses unreadable memory and sizes outside 1..2048')
 local state, protection, kind, base, size = api.page(record_address)
 assert(state == MEM_COMMIT and protection == PAGE_READONLY and kind == MEM_PRIVATE, 'page attributes')
 -- VirtualQuery describes the region from the queried page onward (the live game reports the same).
@@ -104,37 +113,46 @@ assert(base == record_address - record_address % PAGE and base + size >= number(
 local lines = {}
 local instance = Cooldown.new(api, game, function(line) lines[#lines + 1] = line end)
 assert(instance.try() and instance.patched, 'patched: ' .. table.concat(lines, ' | '))
-local change = record_address + Cooldown.CHANGE_OFFSET
+local cooling = record_address + Cooldown.COOLING_OFFSET
+local ability = record_address + Cooldown.ABILITY_OFFSET
 local patched = record:sub(Cooldown.IDLE_COOLING_OFFSET + 1, Cooldown.IDLE_COOLING_OFFSET + 4) .. '\0'
-assert(patched == '\0\0\160\64\0' and peek(change, 5) == patched, 'change written: the idle cooling rate, then 0')
-assert(peek(record_address, Cooldown.CHANGE_OFFSET) == record:sub(1, Cooldown.CHANGE_OFFSET), 'bytes before untouched')
-assert(peek(change + 5, Cooldown.RECORD_SIZE - Cooldown.CHANGE_OFFSET - 5) == record:sub(Cooldown.CHANGE_OFFSET + 6),
-       'bytes after untouched')
+assert(patched == '\0\0\160\64\0' and peek(cooling, 5) == patched, 'cooling written: the idle cooling rate, then 0')
+assert(peek(ability, 4) == '\0\0\0\0', 'overheat ability written: none')
+-- Every other byte of the record is as it was: before, between and after the two ranges.
+local function untouched(from, to) return peek(record_address + from, to - from) == record:sub(from + 1, to) end
+assert(untouched(0, Cooldown.COOLING_OFFSET), 'bytes before untouched')
+assert(untouched(Cooldown.COOLING_OFFSET + 5, Cooldown.ABILITY_OFFSET), 'bytes between untouched')
+assert(untouched(Cooldown.ABILITY_OFFSET + 4, Cooldown.RECORD_SIZE), 'bytes after untouched')
 assert(select(2, api.page(record_address)) == PAGE_READONLY, 'read-only again after the write')
 instance.restore()
-assert(peek(change, 5) == Cooldown.VANILLA and select(2, api.page(record_address)) == PAGE_READONLY, 'restored')
+assert(peek(cooling, 5) == Cooldown.COOLING_VANILLA and peek(ability, 4) == Cooldown.ABILITY_VANILLA
+       and peek(record_address, Cooldown.RECORD_SIZE) == record, 'restored')
+assert(select(2, api.page(record_address)) == PAGE_READONLY, 'read-only again after the restore')
 
 -- Refusals on real pages: an image page (this process's kernel32) and an executable private page.
 local image = number(kernel.lsct1_GetModuleHandleA('kernel32.dll'))
-local ok, why = Cooldown.protected_write(api, image + 0x40, '\0')
+local ok, why = Cooldown.protected_write(api, image, {{0x40, '\0'}})
 assert(not ok and why:find('not committed private memory', 1, true), 'image page refused: ' .. tostring(why))
 local code = kernel.lsct1_VirtualAlloc(nil, PAGE, MEM_COMMIT + MEM_RESERVE, PAGE_EXECUTE_READ)
 allocations[#allocations + 1] = code
-ok, why = Cooldown.protected_write(api, number(code), '\0')
+ok, why = Cooldown.protected_write(api, number(code), {{0, '\0'}})
 assert(not ok and why == 'unexpected page protection 0x20', 'executable page refused: ' .. tostring(why))
 assert(select(2, api.page(number(code))) == PAGE_EXECUTE_READ, 'executable page untouched')
 
 -- No call creates C types once warm, and the per-frame ones allocate nothing.
 local function calls()
-    api.u64(root_slot); api.page(record_address); api.protect(record_address, 5, PAGE_READONLY)
+    api.u64(root_slot); api.view(record_address, 96); api.page(record_address)
+    api.protect(record_address, 5, PAGE_READONLY)
 end
 calls()
 local types = H.ctype_growth(function() for _ = 1, 50 do calls() end end)
 assert(types == 0, types .. ' C types created by adapter calls')
-local function polls(count) for _ = 1, count do api.u64(root_slot); api.u64(table_slot) end end
+local function polls(count)
+    for _ = 1, count do api.u64(root_slot); api.u64(table_slot); api.view(record_address, 96) end
+end
 polls(1000); polls(1000)
 local kb = H.heap_peak(polls, 1000)
-assert(kb == 0, string.format('pointer reads allocated %.3f KB', kb))
+assert(kb == 0, string.format('pointer reads and views allocated %.3f KB', kb))
 
 for _, allocation in ipairs(allocations) do kernel.lsct1_VirtualFree(allocation, 0, MEM_RELEASE) end
 print(string.format('PASS: test_adapter.lua %s (%s)', mode, jit and jit.version or _VERSION))

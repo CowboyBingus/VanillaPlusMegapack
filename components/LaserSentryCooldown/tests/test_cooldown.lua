@@ -13,8 +13,14 @@ local GAME, ROOT, HEAT = G.GAME, G.ROOT, G.HEAT
 local HEADER, SLOTS, RECORD, RECORD_ADDRESS = G.HEADER, G.SLOTS, G.RECORD, G.RECORD_ADDRESS
 local le32, le64, u32 = G.le32, G.le64, G.u32
 local world, fake_api, session, quiet = G.world, G.fake_api, G.session, G.quiet
--- The change's bytes: the record's own idle cooling rate (f32 at 0x80), then needs_reload_after_overheat 0.
-local PATCHED = RECORD:sub(Cooldown.IDLE_COOLING_OFFSET + 1, Cooldown.IDLE_COOLING_OFFSET + 4) .. '\0'
+-- The change's bytes, both ranges joined as session.record_change() returns them: the record's own idle cooling
+-- rate (f32 at 0x80) then needs_reload_after_overheat 0 at 0x8C; overheat_ability 0 at 0x248.
+local COOLING = RECORD:sub(Cooldown.IDLE_COOLING_OFFSET + 1, Cooldown.IDLE_COOLING_OFFSET + 4) .. '\0'
+local PATCHED = COOLING .. Cooldown.ABILITY_NONE
+local VANILLA = G.VANILLA
+-- The record with the whole change in place.
+local PATCHED_RECORD = RECORD:sub(1, 0x8C) .. COOLING .. RECORD:sub(0x92, 0x248) .. Cooldown.ABILITY_NONE
+    .. RECORD:sub(0x24D)
 local passed = 0
 local function check(name, fn)
     fn()
@@ -32,24 +38,56 @@ local function expect_counts(frame, expected, label)
         .. budget.describe(expected))
 end
 
--- The write a patch makes, in order: one page query, protection to read-write and back, one write.
-local PATCH_CALLS = {'page', 'protect 4', 'write', 'protect 2'}
+-- The writes a patch makes, in order: one page query, protection to read-write and back over the span of both
+-- ranges, and a write per range inside it.
+local PATCH_CALLS = {'page', 'protect 4', 'write', 'write', 'protect 2'}
 -- Calls of a frame that finds the table and writes: root and table pointers, header, slots and record, the
--- write, and its read-back.
-local PATCH_FRAME = {u64 = 2, read = 4, page = 1, protect = 2, write = 1}
+-- writes, and one read-back of both. write = 2 (v1.0: 1): v1.1 also writes the overheat ability, a second range
+-- of the record 444 bytes after the first, in the same read-write window. The read-back is a view (v1.0: a
+-- read): one ReadProcessMemory either way, into the reused view buffer instead of a new string. Patch frames
+-- only (once per session, and after a resume).
+local PATCH_FRAME = {u64 = 2, read = 3, view = 1, page = 1, protect = 2, write = 2}
+
+-- Runs count frames once the change is in place, each with exactly the calls an idle frame makes: none, except
+-- on the turret watch's look (every WATCH_FRAMES frames), its first read: the WeaponHeat manager pointer, which
+-- this world does not have, so the look stops there. view = 0, u64 = 1 per look (tests/test_turret.lua covers
+-- the watch itself).
+local function idle_frames(s, count, label)
+    for frame = 1, count do
+        local looks = s.instance.frames + 1 >= s.instance.interval
+        expect_counts(s.frame(), looks and {u64 = 1} or {}, label .. ' frame ' .. frame)
+    end
+end
 
 check('constants match the live data', function()
-    assert(PATCHED == '\0\0\160\64\0', 'the change: the live idle cooling rate 5.0 (f32 0x40A00000), then 0')
-    assert(Cooldown.f32_value(PATCHED) == 5, 'idle cooling rate 5 heat/s: 50 s from max heat 250')
-    assert(select(2, Cooldown.inspect(fake_api(world()), RECORD_ADDRESS)) == PATCHED, 'inspect returns the change')
-    assert(RECORD:sub(Cooldown.CHANGE_OFFSET + 1, Cooldown.CHANGE_OFFSET + 5) == Cooldown.VANILLA,
-           'the live record holds the vanilla bytes')
+    assert(COOLING == '\0\0\160\64\0', 'the cooling change: the live idle cooling rate 5.0 (f32 0x40A00000), then 0')
+    assert(Cooldown.f32_value(COOLING) == 5, 'idle cooling rate 5 heat/s: 50 s from max heat 250')
+    local found, edits = Cooldown.inspect(fake_api(world()), RECORD_ADDRESS)
+    assert(found == 'vanilla' and #edits == 2, 'inspect returns the change as two edits')
+    assert(edits[1][1] == 0x8C and edits[1][2] == COOLING, 'edit 1: the cooling rule')
+    assert(edits[2][1] == 0x248 and edits[2][2] == '\0\0\0\0', 'edit 2: no overheat ability')
+    assert(RECORD:sub(Cooldown.COOLING_OFFSET + 1, Cooldown.COOLING_OFFSET + 5) == Cooldown.COOLING_VANILLA,
+           'the live record holds the vanilla cooling bytes')
+    assert(RECORD:sub(Cooldown.ABILITY_OFFSET + 1, Cooldown.ABILITY_OFFSET + 4) == Cooldown.ABILITY_VANILLA
+           and u32(RECORD, Cooldown.ABILITY_OFFSET) == 2866, 'the live record names overheat ability 2866')
+    assert(Cooldown.INSPECT_SIZE == 588 and #PATCHED_RECORD == Cooldown.RECORD_SIZE, 'sizes')
     assert(Cooldown.first_slot(Cooldown.RESOURCE_LOW, Cooldown.RESOURCE_HIGH) == 10, 'first slot of the resource')
     assert(Cooldown.find_index(SLOTS, Cooldown.RESOURCE_LOW, Cooldown.RESOURCE_HIGH) == fixture.index,
            'probing finds the live index')
     assert(u32(HEADER, 8) == Cooldown.HEADER_TYPE and u32(HEADER, 0) == Cooldown.HEADER_MAGIC, 'live header')
     assert(Cooldown.locate(fake_api(world()), HEAT) == RECORD_ADDRESS, 'record address')
     assert(Cooldown.inspect(fake_api(world()), RECORD_ADDRESS) == 'vanilla', 'live record is vanilla')
+end)
+
+-- Reported 2026-10-05 (v1.0, in a mission): "it overheated and exploded mid-match". The explosion is the record's
+-- overheat ability (2866), which the game plays on the sentry the moment it overheats (0x763780); the cooling
+-- rule cannot stop it. Agreed outcome: with the change in place the record names no overheat ability, so none
+-- plays, and the overheated sentry cools at its own idle rate with no reload needed.
+check('reported 2026-10-05: an overheated Laser Sentry exploded (v1.0)', function()
+    local s = session()
+    assert(s.instance.patched, 'patched at install')
+    assert(u32(s.memory.peek(G.ABILITY, 4), 0) == 0, 'overheat ability 0: no explosion')
+    assert(s.memory.peek(G.COOLING, 5) == COOLING, 'cools at its own idle rate (5/s), no reload needed')
 end)
 
 check('probing follows the engine: collisions, wrap-around, an empty slot ends the search', function()
@@ -78,28 +116,39 @@ check('installed with the table ready: one write, protection back, then nothing 
     expect_counts(s.install_counts, PATCH_FRAME, 'install')
     assert(table.concat(s.calls, ',') == table.concat(PATCH_CALLS, ','), 'call order ' .. table.concat(s.calls, ','))
     assert(s.logged('heat record changed'), 'logged')
+    local looks = 0
     for frame = 1, 300 do
         local counts, below, dt = s.frame()
-        expect_counts(counts, {}, 'patched frame ' .. frame)
+        local expected = frame % Cooldown.WATCH_FRAMES == 0 and {u64 = 1} or {}
+        if expected.u64 then looks = looks + 1 end
+        expect_counts(counts, expected, 'patched frame ' .. frame)
         assert(below == 'below' and dt == 1 / 60, 'values pass through')
     end
+    assert(looks == 2 and Cooldown.WATCH_FRAMES == 120, 'one look every 120 frames')
     assert(s.env.frames == 300, 'the update below ran every frame')
     assert(rawget(s.env, 'LaserSentryCooldownInstalled') == true, 're-entry flag set')
 end)
 
 check('patched frames allocate nothing and create no C types', function()
     local s = session()
-    -- The same loop runs once to warm up: its own traces (GC objects) are recorded then, not while measured.
+    -- The same loop runs first to warm up: its own traces (GC objects) are recorded then, not while measured,
+    -- and so is LuaJIT's one-time handling of the step's look branch (four compile attempts, one every 10
+    -- looks, then a small stub that leaves the look to the interpreter for good).
     local function frames(count) for _ = 1, count do s.env.update(1 / 60) end end
-    frames(2000)
-    frames(2000)
-    local kb = H.heap_peak(frames, 2000)
+    frames(100 * Cooldown.WATCH_FRAMES)
+    -- The smallest of up to five windows: an allocation of the addon's shows in every one, LuaJIT's once-per-
+    -- session work (random backoff) in one at most.
+    local kb = math.huge
+    for _ = 1, 5 do
+        kb = math.min(kb, (H.heap_peak(frames, 2000)))
+        if kb == 0 then break end
+    end
     assert(kb == 0, format('idle frames allocated %.3f KB', kb))
     local types = H.ctype_growth(function() for _ = 1, 100 do s.env.update(1 / 60) end end)
     assert(types == 0, types .. ' C types per idle frames')
     local flush = H.jit_churn()
     flush()
-    for _ = 1, 50 do expect_counts(s.frame(), {}, 'after a JIT flush') end
+    idle_frames(s, 250, 'after a JIT flush')
 end)
 
 check('boot: waits for the table, one look every 30 frames, then writes once', function()
@@ -163,21 +212,33 @@ check('refusals leave the record and the page alone', function()
     refused('NaN idle cooling rate', {record = nan}, {}, 'unexpected Laser Sentry cooling rate')
     local other = RECORD:sub(1, 0x8C) .. le32(0x3F800000) .. RECORD:sub(0x91) -- 1.0 heat/s from someone else
     refused('changed by something else', {record = other}, {}, 'already changed by something else')
+    local ability = RECORD:sub(1, 0x248) .. le32(1234) .. RECORD:sub(0x24D)  -- another overheat ability
+    refused('ability changed by something else', {record = ability}, {}, 'already changed by something else')
+    -- One range changed and the other vanilla is not this addon's work (it writes both or neither).
+    local half = RECORD:sub(1, 0x8C) .. COOLING .. RECORD:sub(0x92)
+    refused('only the cooling range changed', {record = half}, {}, 'already changed by something else')
     local s = refused('image page', {kind = MEM_IMAGE}, {'page'}, 'not committed private memory')
-    assert(s.record_change() == Cooldown.VANILLA, 'unchanged')
+    assert(s.record_change() == VANILLA, 'unchanged')
     refused('executable page', {protection = PAGE_EXECUTE_READ}, {'page'}, 'unexpected page protection 0x20')
     refused('page query', {failures = {query = true}}, {'page'}, 'page query failed')
     refused('protection refused', {failures = {protect = true}}, {'page', 'protect 4'}, 'page protection change refused')
-    s = refused('write fails', {failures = {write = true}}, PATCH_CALLS, 'write failed')
-    assert(s.record_change() == Cooldown.VANILLA, 'unchanged after a failed write')
-    -- The write landed but the protection could not be put back: the stop writes the vanilla bytes again
+    -- The first write fails: the second is not tried and nothing landed.
+    s = refused('write fails', {failures = {write = true}}, {'page', 'protect 4', 'write', 'protect 2'}, 'write failed')
+    assert(s.record_change() == VANILLA, 'unchanged after a failed write')
+    -- The first range landed and the second write failed: the stop puts the vanilla bytes of both back.
+    local landed_once = {'page', 'protect 4', 'write', 'write', 'protect 2', 'page', 'protect 4', 'write', 'write',
+                         'protect 2'}
+    s = refused('second write fails', {failures = {second_write = true}}, landed_once, 'write failed')
+    assert(s.record_change() == VANILLA and s.memory.block.protection == PAGE_READONLY, 'vanilla again, read-only')
+    -- The writes landed but the protection could not be put back: the stop writes the vanilla bytes again
     -- (the page is still read-write, so directly) and the page stays read-write.
-    local after_lost = {'page', 'protect 4', 'write', 'protect 2', 'page', 'write'}
+    local after_lost = {'page', 'protect 4', 'write', 'write', 'protect 2', 'page', 'write', 'write'}
     s = refused('protection not restored', {failures = {restore = true}}, after_lost, 'could not be restored',
                 {protection = PAGE_READWRITE})
-    assert(s.instance.protection_lost and s.record_change() == Cooldown.VANILLA, 'flagged, vanilla again')
-    -- The write landed but reads back wrong: the stop tries the vanilla bytes, which fail the same way here.
-    local twice = {'page', 'protect 4', 'write', 'protect 2', 'page', 'protect 4', 'write', 'protect 2'}
+    assert(s.instance.protection_lost and s.record_change() == VANILLA, 'flagged, vanilla again')
+    -- The writes landed but read back wrong: the stop tries the vanilla bytes, which fail the same way here.
+    local twice = {'page', 'protect 4', 'write', 'write', 'protect 2', 'page', 'protect 4', 'write', 'write',
+                   'protect 2'}
     s = refused('no read-back', {failures = {garble = true}}, twice, 'did not read back', {record_changed = true})
     assert(s.logged('restore failed: write did not read back'), 'the failed restore is logged')
 end)
@@ -185,13 +246,13 @@ end)
 check('a read-write page is written directly', function()
     local s = session({protection = PAGE_READWRITE})
     assert(s.instance.patched and s.record_change() == PATCHED)
-    assert(table.concat(s.calls, ',') == 'page,write', table.concat(s.calls, ','))
-    expect_counts(s.install_counts, {u64 = 2, read = 4, page = 1, write = 1}, 'read-write install')
+    assert(table.concat(s.calls, ',') == 'page,write,write', table.concat(s.calls, ','))
+    -- write = 2: both ranges; view = 1: the read-back (see PATCH_FRAME).
+    expect_counts(s.install_counts, {u64 = 2, read = 3, view = 1, page = 1, write = 2}, 'read-write install')
 end)
 
 check('a record that already holds the change is kept without a write', function()
-    local patched = RECORD:sub(1, 0x8C) .. PATCHED .. RECORD:sub(0x92)
-    local s = session({record = patched})
+    local s = session({record = PATCHED_RECORD})
     assert(s.instance.patched and #s.calls == 0, 'no write')
     expect_counts(s.install_counts, {u64 = 2, read = 3}, 'already patched')
     assert(s.logged('already changed'), 'logged')
@@ -204,8 +265,8 @@ check('an update below that fails pauses (vanilla back), resume writes again', f
     assert(not ok and type(problem) == 'table' and problem.hostile_vm == 'throw_below', 'the error below reaches the game')
     for i = 1, #s.calls do s.calls[i] = nil end
     local counts = s.frame()
-    expect_counts(counts, {page = 1, protect = 2, write = 1, read = 1}, 'pause restores')
-    assert(s.record_change() == Cooldown.VANILLA and s.memory.block.protection == PAGE_READONLY, 'vanilla, read-only')
+    expect_counts(counts, {page = 1, protect = 2, write = 2, view = 1}, 'pause restores both ranges')
+    assert(s.record_change() == VANILLA and s.memory.block.protection == PAGE_READONLY, 'vanilla, read-only')
     assert(s.instance.guard.status.state:find('paused', 1, true), 'paused: ' .. s.instance.guard.status.state)
     local frames = 0
     repeat
@@ -225,7 +286,7 @@ check('a stop restores the vanilla bytes; shutdown restores nothing', function()
     print = quiet
     s.instance.guard.stop('test stop')
     print = saved
-    assert(s.record_change() == Cooldown.VANILLA and s.memory.block.protection == PAGE_READONLY, 'restored on stop')
+    assert(s.record_change() == VANILLA and s.memory.block.protection == PAGE_READONLY, 'restored on stop')
     assert(s.logged('Stopped (test stop)'), 'logged')
     for frame = 1, 20 do expect_counts(s.frame(), {}, 'stopped frame ' .. frame) end
     local t = session()

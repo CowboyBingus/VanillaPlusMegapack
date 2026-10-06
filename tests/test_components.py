@@ -185,6 +185,7 @@ def data_change_commands(mods, build):
         sentry_prefix = [sentry / 'tests/game_lua.py'] if vm else []
         commands += [[*sentry_prefix, sentry / 'tests/test_cooldown.lua', sentry],
                      [*sentry_prefix, sentry / 'tests/test_hooks.lua', sentry],
+                     [*sentry_prefix, sentry / 'tests/test_turret.lua', sentry],
                      *[[*sentry_prefix, sentry / 'tests/test_adapter.lua', sentry, mode]
                        for mode in ('plain', 'hostile', 'sdk')],
                      [*sentry_prefix, sentry / 'tests/compile_entry.lua', build / 'LaserSentryCooldown/entry.lua']]

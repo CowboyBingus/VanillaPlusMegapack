@@ -3,16 +3,16 @@
 --   - every SAMPLE_FRAMES frames it reads the WeaponHeat manager ([game+0x3326D48]: +20/+24/+28 instance
 --     counts, +64 entity record pointers, +88 12-byte replicated state: spare heat sinks, temperature,
 --     overheated, firing) and logs each Laser Sentry when it appears, when its temperature band (25 heat),
---     overheated, firing or heat sinks change, and when it disappears, with the time since its last overheat;
+--     overheated, firing, heat sinks or turret state (its AI behavior state: 13 firing, 6 switched off after an
+--     overheat, 7 powering up) change, and when it disappears, with the time since its last overheat;
 --   - a RESULT line when an overheated Laser Sentry recovers (cooled and able to fire again) or disappears
 --     while still overheated;
---   - every RECORD_CHECK_FRAMES frames, whether the heat record still holds the change (a game that rebuilt its
---     weapon data mid-session would show up here).
+--   - every RECORD_CHECK_FRAMES frames, whether the heat record still holds the change, both ranges (a game that
+--     rebuilt its weapon data mid-session would show up here).
 -- Returns install(Cooldown, instance, runtime, memory).
 local ffi = require('ffi')
 local format = string.format
 
-local MANAGER_RVA = 0x3326D48
 local SAMPLE_FRAMES = 6
 local RECORD_CHECK_FRAMES = 300
 local MAX_INSTANCES = 128 -- 8-byte pointers in one read of the adapter's 1 KB buffer
@@ -46,7 +46,7 @@ return function(Cooldown, instance, runtime, memory)
 
     -- The manager's header (96 bytes) with its instance counts logged when they change, or nil.
     local function manager_header()
-        local manager = api.u64(game + MANAGER_RVA)
+        local manager = api.u64(game + Cooldown.HEAT_MANAGER_RVA)
         if not manager or manager < 0x10000 then return nil end
         local header = api.read(manager, 96)
         if not header then return nil end
@@ -58,19 +58,28 @@ return function(Cooldown, instance, runtime, memory)
         return header
     end
 
-    -- The entity id and owned bit of the Laser Sentry whose record pointer is at slot index, or nil.
+    -- The entity id, owned bit and record address of the Laser Sentry whose record pointer is at slot index, or nil.
     local function laser_sentry(pointers, index)
         local entity = u64(pointers, 8 * index)
         local record = entity >= 0x10000 and api.read(entity, 24)
         if not record or u32(record, 0) ~= Cooldown.RESOURCE_LOW or u32(record, 4) ~= Cooldown.RESOURCE_HIGH then
             return nil
         end
-        return u32(record, 8), record:byte(21) % 2
+        return u32(record, 8), record:byte(21) % 2, entity
+    end
+
+    -- The turret's AI state (behavior block +8: 13 firing, 6 switched off after an overheat, 7 powering up), or
+    -- '?' when its behavior cannot be read (it runs on another machine, or the manager is not there).
+    local function turret_state(id, entity)
+        local block = Cooldown.behavior_block(api, game, id, entity)
+        if not block or not api.view(block, 20) then return '?' end
+        return tostring(api.words[2])
     end
 
     local function changed(current, previous)
         return current.bucket ~= previous.bucket or current.overheated ~= previous.overheated
             or current.firing ~= previous.firing or current.magazines ~= previous.magazines
+            or current.turret ~= previous.turret
     end
 
     -- The RESULT line of a Laser Sentry whose overheated flag just fell: it cooled and can fire again.
@@ -79,11 +88,11 @@ return function(Cooldown, instance, runtime, memory)
                    id, now() - current.overheat_at, current.temperature))
     end
 
-    -- Logs one Laser Sentry's replicated heat state (12 bytes) when it appears or changes.
-    local function observe(id, owned, index, values)
+    -- Logs one Laser Sentry's replicated heat state (12 bytes) and turret state when it appears or changes.
+    local function observe(id, owned, index, values, entity)
         local temperature = f32(values, 4)
         local current = {temperature = temperature, bucket = math.floor(temperature / 25), overheated = values:byte(9),
-                         firing = values:byte(10), magazines = u32(values, 0)}
+                         firing = values:byte(10), magazines = u32(values, 0), turret = turret_state(id, entity)}
         local previous = state.sentries[id]
         state.sentries[id] = current
         if not previous then
@@ -98,8 +107,8 @@ return function(Cooldown, instance, runtime, memory)
             if not changed(current, previous) then return end
         end
         local since = current.overheat_at and format(', %.2f s after overheat', now() - current.overheat_at) or ''
-        log(format('sentry %d: temperature %.1f, overheated %d, firing %d, heat sinks %d%s', id, temperature,
-                   current.overheated, current.firing, current.magazines, since))
+        log(format('sentry %d: temperature %.1f, overheated %d, firing %d, heat sinks %d, turret state %s%s', id,
+                   temperature, current.overheated, current.firing, current.magazines, current.turret, since))
     end
 
     -- Logs and forgets every Laser Sentry this sample did not see.
@@ -127,26 +136,37 @@ return function(Cooldown, instance, runtime, memory)
         local pointers = count > 0 and api.read(u64(header, 64), 8 * count)
         local seen = {}
         for index = 0, (pointers and count or 0) - 1 do
-            local id, owned = laser_sentry(pointers, index)
+            local id, owned, entity = laser_sentry(pointers, index)
             local values = id and api.read(u64(header, 88) + 12 * index, 12)
             if values then
                 seen[id] = true
-                observe(id, owned, index, values)
+                observe(id, owned, index, values, entity)
             end
         end
         forget_missing(seen)
     end
 
+    -- The bytes of each edit's range in the record, joined, or nil when one is unreadable.
+    local function ranges(edits)
+        local parts = {}
+        for index, edit in ipairs(edits) do
+            parts[index] = api.read(instance.record + edit[1], #edit[2])
+            if not parts[index] then return nil end
+        end
+        return table.concat(parts)
+    end
+
     -- Does the record still hold what the addon wrote (or the vanilla bytes while it is not active)?
     local function check_record()
         if not instance.record then return end
-        local change = api.read(instance.record + Cooldown.CHANGE_OFFSET, #Cooldown.VANILLA)
-        local expected = instance.patched and instance.patched_bytes or Cooldown.VANILLA
-        local ok = change == expected
+        local edits = instance.patched and instance.edits or Cooldown.VANILLA_EDITS
+        local current = ranges(edits)
+        local expected = edits[1][2] .. edits[2][2]
+        local ok = current == expected
         if ok ~= state.record_ok then
             state.record_ok = ok
             log(ok and format('record check: %s bytes in place', instance.patched and 'changed' or 'vanilla')
-                or format('record check: UNEXPECTED bytes %s (expected %s)', hex(change), hex(expected)))
+                or format('record check: UNEXPECTED bytes %s (expected %s)', hex(current), hex(expected)))
         end
     end
 

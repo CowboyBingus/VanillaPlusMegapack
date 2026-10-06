@@ -365,6 +365,7 @@
   "components/LaserSentryCooldown/tests/test_adapter.lua",
   "components/LaserSentryCooldown/tests/test_cooldown.lua",
   "components/LaserSentryCooldown/tests/test_hooks.lua",
+  "components/LaserSentryCooldown/tests/test_turret.lua",
   "components/MatchYourColors/locales/en.lua",
   "components/MatchYourColors/scripts/build.py",
   "components/MatchYourColors/src/addon.lua",

@@ -62,10 +62,12 @@ frames(6)
 assert(not s.logged('temperature 124.0'), 'no line within the same 25-heat band')
 heat(0, 250, 1, 0)
 frames(6)
-assert(s.logged('temperature 250.0, overheated 1, firing 0, heat sinks 0, 0.00 s after overheat'), 'overheat')
+assert(s.logged('temperature 250.0, overheated 1, firing 0, heat sinks 0, turret state ?, 0.00 s after overheat'),
+       'overheat (no behavior manager in this world: turret state ?)')
 heat(0, 100, 1, 0)
 frames(6)
-assert(s.logged('temperature 100.0, overheated 1, firing 0, heat sinks 0, 0.10 s after overheat'), 'cooling')
+assert(s.logged('temperature 100.0, overheated 1, firing 0, heat sinks 0, turret state ?, 0.10 s after overheat'),
+       'cooling')
 heat(0, 0, 0, 0)
 frames(6)
 assert(s.logged(string.format('RESULT sentry %d recovered: overheated for 0.2 s, temperature now 0.0', SENTRY_ID)),
@@ -81,12 +83,13 @@ assert(s.logged(string.format('RESULT sentry %d disappeared while overheated, 0.
 assert(s.logged(string.format('sentry %d disappeared 0.10 s after its last overheat', SENTRY_ID)), 'disappeared')
 assert(s.logged('heat instances total/active/owned 1/1/1'), 'new counts')
 
--- The record check: in place, then something else rewrites the change bytes.
+-- The record check: both ranges in place, then something else puts the vanilla overheat ability back.
 frames(300)
 assert(s.logged('record check: changed bytes in place'), 'record check ok')
-memory.poke(G.CHANGE, Cooldown.VANILLA)
+memory.poke(G.ABILITY, Cooldown.ABILITY_VANILLA)
 frames(300)
-assert(s.logged('record check: UNEXPECTED bytes 0000c84301 (expected 0000a04000)'), 'reverted record reported')
+assert(s.logged('record check: UNEXPECTED bytes 0000a04000320b0000 (expected 0000a0400000000000)'),
+       'reverted overheat ability reported')
 
 rawset(_G, 'CowboyBingusModLoader', nil)
 print(string.format('PASS: test_hooks.lua (%s)', jit and jit.version or _VERSION))

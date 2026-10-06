@@ -1,6 +1,9 @@
 Supports Helldivers 2 Steam build 25480438 / EXE 1.8.46015.0.
 
-Offline source, package and read-only module checks passed. v38 adds Hellpod
+Offline source, package and read-only module checks passed. v39 updates Laser
+Sentry Cooldown to v1.1, played in a mission on this build as its standalone
+release: an overheated sentry cooled, its turret powered up and it fired again.
+v38 adds Hellpod
 Drop Hold (v1.2), Laser Sentry Cooldown (v1.0), Match Your Colors (v1.2) and
 Sticky Grenade Handles (v1.0), each played in recorded real play on this build as its standalone
 release, in joined missions (Hellpod Drop Hold held the pod in two joins). The v38
