@@ -46,8 +46,14 @@ Engine.GET_ENGINE_API_RVA = 0xa4e50
 Engine.GET_ENGINE_API_PREFIX = '\72\131\236\40\131\249\1\15\133' -- sub rsp, 28h; cmp ecx, 1; jnz
 Engine.LUT_SLOT = 0x7e662968
 Engine.PATTERN_SLOT = 0x81d4c49d
+Engine.CAPE_LUT_SLOT = 0x0e494183 -- 'cape_lut' (the cape shader's __tex_cape_lut, t2: KB match-your-colors-cape-tint)
+Engine.DECAL_SLOT = 0x632a8b80 -- 'decal_sheet' (the cape shader's __tex_decal_sheet, t9: the emblems' colors)
 Engine.TEXTURE_TYPE = 0xCD4238C6A0C69E32ULL
 Engine.RGBA32F = 0x80820820
+-- RenderBufferApi's compressed formats are 0x10000000 + n (compressed_format +0x08 = exe 0x1c7480); its format table
+-- (exe 0x190c840, 8 bits per texel for n = 2) gives BC1, BC2, BC3, BC4, BC5, BC6H, BC7 for n = 0-6. A BC3 sheet with
+-- its full mip chain (DDS order) made and bound on a cape live (2026-10-07, research/live/live_emblem_probe.py).
+Engine.BC3 = 0x10000002
 Engine.TEXTURE_VIEW = 3
 Engine.UPDATABLE = 1 -- create_buffer's validity: the texture takes update_buffer
 -- {table, slot offset, expected executable offset} for every function the mod calls.
@@ -140,7 +146,8 @@ function Engine.unit_materials(native, unit)
     return out
 end
 
--- The texture object bound to a material's texture slot (Engine.LUT_SLOT, Engine.PATTERN_SLOT), or nil.
+-- The texture object bound to a material's texture slot (Engine.LUT_SLOT, Engine.PATTERN_SLOT,
+-- Engine.CAPE_LUT_SLOT), or nil.
 -- read(address number, size, buffer) -> true; buffer: >= 16 bytes, big: >= 64 x 16 bytes.
 function Engine.binding(read, material, slot, buffer, big)
     if not read(material + 24, 16, buffer) then return nil end
@@ -160,13 +167,18 @@ function Engine.binding(read, material, slot, buffer, big)
     return nil
 end
 
--- A runtime LUT texture, updatable: {handle, object, data, view, width, height}; data: float array of width x
--- height x 4 (kept). Waits for the render thread (see above). Returns nil and why when the engine gives no render
--- handle.
-function Engine.create_texture(native, width, height, data, read, buffer)
+-- A runtime texture, updatable: {handle, object, data, view, width, height, format, mips, size}. spec: {width,
+-- height, data, format, mips, size}: a LUT is RGBA32F of one mip (data: width x height x 4 floats; format, mips and
+-- size left out); a cape's decal sheet copy is BC3 with its mip chain (format Engine.BC3, mips, size: its bytes, mips
+-- in DDS order: create_buffer takes the mip count from view[6] and each mip's bytes from the format). data is kept
+-- referenced. Waits for the render thread (see above). Returns nil and why when the engine gives no render handle.
+function Engine.create_texture(native, spec, read, buffer)
+    local width, height, data = spec.width, spec.height, spec.data
+    local format, mips = spec.format or Engine.RGBA32F, spec.mips or 1
+    local size = spec.size or width * height * 16
     local view = ffi.new('uint32_t[14]')
-    view[0], view[1], view[2], view[3], view[4], view[5], view[6] = Engine.RGBA32F, 0, width, height, 1, 1, 1
-    local handle = native.create(width * height * 16, Engine.UPDATABLE, Engine.TEXTURE_VIEW, view, data)
+    view[0], view[1], view[2], view[3], view[4], view[5], view[6] = format, 0, width, height, 1, 1, mips
+    local handle = native.create(size, Engine.UPDATABLE, Engine.TEXTURE_VIEW, view, data)
     local object = tonumber(native.resource(handle))
     if not object or object == 0 or not read(object, 4, buffer) then
         native.destroy(handle)
@@ -177,13 +189,14 @@ function Engine.create_texture(native, width, height, data, read, buffer)
         native.destroy(handle)
         return nil, 'no render handle'
     end
-    return {handle = handle, object = object, data = data, view = view, width = width, height = height}
+    return {handle = handle, object = object, data = data, view = view, width = width, height = height,
+            format = format, mips = mips, size = size}
 end
 
--- New data for a runtime texture of the same size (queued for the render thread, no wait); the texture keeps
--- `data` referenced while it holds it.
+-- New data for a runtime texture of the same size and format (queued for the render thread, no wait); the texture
+-- keeps `data` referenced while it holds it.
 function Engine.update_texture(native, texture, data)
-    native.update(texture.handle, texture.width * texture.height * 16, data)
+    native.update(texture.handle, texture.size or texture.width * texture.height * 16, data)
     texture.data = data
 end
 

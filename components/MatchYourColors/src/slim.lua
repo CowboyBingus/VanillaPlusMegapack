@@ -90,9 +90,9 @@ end
 
 -- LZ4 block decoder (the block format, no frame). src: uint8_t pointer, src_size bytes; dst: uint8_t
 -- pointer with room for capacity bytes; pause (optional): called after every LZ4_PAUSE bytes of output, so a
--- job can pause inside a chunk (a 256 KB chunk is several ms of work in the game). Returns the decoded size,
--- or raises on malformed input.
-local LZ4_PAUSE = 32768
+-- job can pause inside a chunk (a 256 KB chunk is several ms of work in the game; 16 KB about 0.2 ms outside it).
+-- Returns the decoded size, or raises on malformed input.
+local LZ4_PAUSE = 16384
 function Slim.lz4(src, src_size, dst, capacity, pause)
     local ip, op = 0, 0
     local next_pause = pause and LZ4_PAUSE or math.huge

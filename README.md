@@ -4,7 +4,7 @@
 
 Choose which of the twenty-one bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, Ship Station Hotkeys, Clickable Scrollbars, Better Lobby Management's host tools, and the Mod Options Menu and Mod Bindings Menu tabs.
 
-**Requires the separately built Bingus Shared Loader v18 or newer (v19 is current).** Install two ZIPs: `Vanilla-Plus-Megapack-v39.zip` and `Bingus-Shared-Loader-v19.zip`. Mod managers do not install the dependency automatically.
+**Requires the separately built Bingus Shared Loader v18 or newer (v19 is current).** Install two ZIPs: `Vanilla-Plus-Megapack-v40.zip` and `Bingus-Shared-Loader-v19.zip`. Mod managers do not install the dependency automatically.
 
 The Rows package ended with v35: Know Your Constellation v4 has a single layout. If you used `Vanilla-Plus-Megapack-Rows`, disable it and enable this pack.
 
@@ -12,7 +12,7 @@ The Rows package ended with v35: Know Your Constellation v4 has a single layout.
 
 1. Close Helldivers 2. Use one mod manager.
 2. Replace any previous loader entry with v18. Disable old megapacks and standalone copies of features you want turned off.
-3. Import `Vanilla-Plus-Megapack-v39.zip` and `Bingus-Shared-Loader-v19.zip`, then enable both.
+3. Import `Vanilla-Plus-Megapack-v40.zip` and `Bingus-Shared-Loader-v19.zip`, then enable both.
 4. With Arsenal's default priority, put **Bingus Shared Loader last**, at the bottom. If first-mod priority is enabled, put the loader first.
 5. Open the Megapack's **Options** (sliders button) in Arsenal, or its mod options in HD2MM. Check each mod you want and uncheck each mod you do not want. Confirm/save the selection.
 6. **Purge / Deploy**, then launch the game normally. Close the game and repeat these steps whenever you change options.
@@ -25,7 +25,7 @@ An unchecked option removes only the pack's copy. An enabled standalone package 
 
 The game runs every Lua mod in its own LuaJIT, whose code cache keeps its 2015 limits (512 KB of machine code, 1,000 traces) for the game and all mods together. When it fills, LuaJIT discards all compiled code and recompiles it during play. Bingus Shared Loader v18, required by this pack, raises and manages these limits. If an older loader is still installed, this pack raises them once at startup to the same starting values (64 MB, 8,000 traces), with no per-frame work and without the loader's growth or log line.
 
-## Included in v39
+## Included in v40
 
 | Mod | Version | Effect |
 | --- | --- | --- |
@@ -48,7 +48,7 @@ The game runs every Lua mod in its own LuaJIT, whose code cache keeps its 2015 l
 | [Better Lobby Management](https://github.com/CowboyBingus/BetterLobbyManagement) | v1.2 | Host tools in the escape menu: DISBAND SQUAD, PROMOTE, which moves the whole squad to the new host's ship, and CANCEL SOS in a mission (only the host needs the mod); a 5-second Galactic Map lobby scanner and an own-continent lobby filter. |
 | [Hellpod Drop Hold](https://github.com/CowboyBingus/HellpodDropHold) | v1.2 | Holds your own hellpod in the sky while your loading screen or the join cutscene is up, as when you join a mission in progress, then lets it fall as a normal drop with steering near the ground. |
 | [Laser Sentry Cooldown](https://github.com/CowboyBingus/LaserSentryCooldown) | v1.1 | At max heat the Laser Sentry overheats and stops firing as usual, then cools at its own normal rate (about 50 s), powers its turret up and fires again instead of exploding. No options. |
-| [Match Your Colors](https://github.com/CowboyBingus/MatchYourColors) | v1.2 | Your helmet takes your armor's colors, or your armor takes your helmet's (Mod Options Menu: Color Matching); only colors change, on your screen only. |
+| [Match Your Colors](https://github.com/CowboyBingus/MatchYourColors) | v1.3 | Your helmet takes your armor's colors, or your armor takes your helmet's, or both take one of the game's weapon paint schemes; your cape can follow (Mod Options Menu). Squadmates who use the mod see your colors too. |
 | [Sticky Grenade Handles](https://github.com/CowboyBingus/StickyGrenadeHandles) | v1.0 | The G-123 Thermite and the sticky stun grenade stick when their handle hits first, instead of bouncing off. |
 
 All bundled components are pinned to the source and resource hashes in `components.lock.json`. Third-party HUD mods and the reserved, unreleased Wide Angle Stratagems module are not included. Mod Bindings Menu, Mod Options Menu, Flame Damage Fixed, Better Lobby Management, Hellpod Drop Hold, Laser Sentry Cooldown, Match Your Colors and Sticky Grenade Handles are also released on their own: use one copy of each, the standalone package or the pack option. The shared loader remains a separate dependency with its own repository and updates.
@@ -75,7 +75,7 @@ The prior performance improvements remain included: bounded Arc Thrower scanning
 
 Current-build multiplayer checks for the earlier gameplay components remain pending.
 
-Current version: **v39**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).
+Current version: **v40**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).
 
 ## License
 

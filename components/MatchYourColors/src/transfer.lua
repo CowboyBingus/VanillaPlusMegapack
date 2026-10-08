@@ -35,13 +35,16 @@ local function hue_gap(a1, b1, a2, b2)
     return d > 180.0 and 360.0 - d or d
 end
 
--- The rule of one color (lab = {L, a, b}) for paint P: 'tint', 'shade', 'shift' or nil (it stays).
+-- The rule of one color (lab = {L, a, b}) for paint P: 'tint', 'hue' (a camo color of another hue), 'shade',
+-- 'shift' or nil (it stays).
 local function rule_of(i, lab, P, chromatic, neutral_below, de2000)
     local near = i >= CAMO_FIRST or de2000(lab[1], lab[2], lab[3], P[1], P[2], P[3]) < Transfer.CLOSE_DE
     local neutral = chroma(lab[2], lab[3]) < neutral_below
     if chromatic and not neutral then
-        if i >= CAMO_FIRST or hue_gap(lab[2], lab[3], P[2], P[3]) <= Transfer.TINT_HUE then return 'tint' end
-        return nil
+        if hue_gap(lab[2], lab[3], P[2], P[3]) <= Transfer.TINT_HUE then return 'tint' end
+        -- a camo color of another hue takes the new hue (a rigid turn sent the TG-8 Sharpshooter's brown camo, 55
+        -- degrees, to purple when its olive turned the UF-50 Bloodhound's maroon; user 2026-10-07)
+        return i >= CAMO_FIRST and 'hue' or nil
     end
     if not near then return nil end
     if neutral and chromatic then return 'shade' end
@@ -79,23 +82,48 @@ local function follow(lab, rule, P, T)
         local cc, h = chroma(lab[2], lab[3]) * scale, atan2(lab[3], lab[2]) + turn
         return L, cc * cos(h), cc * sin(h)
     end
+    if rule == 'hue' then -- the target's hue, its own chroma scaled with the paint's
+        local cc, h = chroma(lab[2], lab[3]) * chroma(T[2], T[3]) / chroma(P[2], P[3]), atan2(T[3], T[2])
+        return L, cc * cos(h), cc * sin(h)
+    end
     return L, lab[2], lab[3] -- shade
 end
 
 -- T with its chroma at most 1.5 x the desired chroma + CHROMA_HEADROOM (no runaway compensation for colors
--- that stay).
-local function cap_chroma(T, D)
-    local limit = chroma(D[2], D[3]) * 1.5 + Transfer.CHROMA_HEADROOM
+-- that stay); on bare metal (metallic > 0.5) at most the desired chroma. A metal's reflections take its paint's color
+-- at full strength, so the eye reads the paint's chroma where its mean look is diluted by its dark parts: the CPR-80
+-- Bulwark from the DP-8 Mountain-Scaled's dull navy (look chroma 9) got a paint of chroma 17 and turned deep blue on
+-- screen (user 2026-10-06).
+local function cap_chroma(T, D, metal)
+    local limit = metal and chroma(D[2], D[3]) or chroma(D[2], D[3]) * 1.5 + Transfer.CHROMA_HEADROOM
     local cc = chroma(T[2], T[3])
     if cc > limit then T[2], T[3] = T[2] * (limit / cc), T[3] * (limit / cc) end
     return T
 end
 
--- Transfer.new(Colour, colour model) -> {fit, apply}. fit(c, L, a, b, cal): c (row_values) gets the fitted colors;
--- returns the perceived color reached and its CIEDE2000 error. cal: the row's measured response (matcher v12,
--- src/appearance.lua): the fit then reaches the color the row shows in the game, else the model color.
-function Transfer.new(Colour, model)
+-- Transfer.new(Colour, colour model, yield) -> {fit, apply}. fit(c, L, a, b, cal, base_only): c (row_values) gets the
+-- fitted colors; returns the perceived color reached and its CIEDE2000 error. cal: the row's measured response
+-- (matcher v12, src/appearance.lua): the fit then reaches the color the row shows in the game, else the model color.
+-- base_only: only the base color (column 0) moves (a cape's tint: the shader blends column 0 alone toward it). yield
+-- (optional, a job's): called after every perceived-color evaluation (up to FIT_STEPS + 1 per row, each about
+-- 0.07 ms outside the game), so a job can pause inside a row.
+local function no_pause() end
+
+-- Whether the fit toward goal (a, b) adjusts lightness only: a neutral goal, unless the row's response is a cape's
+-- borrowed one (cal.hue: its cloth's own tint is cancelled, src/matcher.lua borrow_rows).
+local function neutral_goal(a, b, cal)
+    return chroma(a, b) < Transfer.TINT_C and not (cal and cal.hue)
+end
+
+-- The row's own error against the goal: where a fit starts (a NaN goal is never reached: infinity).
+local function own_error(de2000, pL, pa, pb, L, a, b)
+    local err = de2000(pL, pa, pb, L, a, b)
+    return err == err and err or math.huge
+end
+
+function Transfer.new(Colour, model, yield)
     local de2000, srgb_to_lab, lab_to_srgb = Colour.de2000, Colour.srgb_to_lab, Colour.lab_to_srgb
+    local pause = yield or no_pause
     local self = {}
 
     -- The row's colors for paint color T (written into c).
@@ -106,19 +134,32 @@ function Transfer.new(Colour, model)
         end
     end
 
-    function self.fit(c, L, a, b, cal)
-        local look = model.perceived
-        if cal then look = function(x) return model.look(x, cal) end end
+    -- The look the fit reaches for row c: through its measured response cal, else the model. A matte soft row (cloth:
+    -- mode 1, column 8 x at 0) counts its whole gloss floor (Colour.seen): the TG-8 Sharpshooter's cloth fitted to the
+    -- UF-50 Bloodhound's red at L 22 looked salmon, its look L 29 (rendered check 2026-10-07).
+    local function look_of(c, cal)
+        if not cal then return model.perceived end
+        local soft = math.abs(c[4] - 1) < 0.5 and math.abs(c[33]) < 0.05
+        return function(x) return model.look(x, cal, soft) end
+    end
+
+    function self.fit(c, L, a, b, cal, base_only)
+        local look = look_of(c, cal)
         local D = {L, a, b}
         local P = {model.albedo_lab(c)}
         local labs = {}
         local rules = rules_of(c, P, D, labs, de2000, srgb_to_lab)
-        local neutral = chroma(a, b) < Transfer.TINT_C -- the fit then adjusts lightness only
+        if base_only then rules = {[1] = rules[1]} end
+        local neutral = neutral_goal(a, b, cal)
+        local metal = c[28] > 0.5 -- column 6 w: metallic (src/colour.lua)
         local pL, pa, pb = look(c)
-        local T = cap_chroma({P[1] + (L - pL), P[2] + (a - pa), P[3] + (b - pb)}, D)
+        pause()
+        local T = cap_chroma({P[1] + (L - pL), P[2] + (a - pa), P[3] + (b - pb)}, D, metal)
         if neutral then T[2], T[3] = a, b end
-        -- The row's own colors stand until a step is better (a NaN goal never is: the row stays unchanged).
-        local best, best_err, best_L, best_a, best_b = {}, math.huge, pL, pa, pb
+        -- The row's own colors stand until a step is better: a fit never ends farther from the goal than the row
+        -- started (v1.3: 126 of 1,865 sampled rows did, one from dE 0.44 to 2.38). A NaN goal is never reached: the
+        -- row stays unchanged.
+        local best, best_err, best_L, best_a, best_b = {}, own_error(de2000, pL, pa, pb, L, a, b), pL, pa, pb
         for i in pairs(rules) do
             local o = COLUMNS[i] * 4
             best[i] = {c[o + 1], c[o + 2], c[o + 3]}
@@ -138,14 +179,25 @@ function Transfer.new(Colour, model)
             if neutral then
                 T[1] = T[1] + (L - gL)
             else
-                T = cap_chroma({T[1] + (L - gL), T[2] + (a - ga), T[3] + (b - gb)}, D)
+                T = cap_chroma({T[1] + (L - gL), T[2] + (a - ga), T[3] + (b - gb)}, D, metal)
             end
+            pause()
         end
         for i, color in pairs(best) do
             local o = COLUMNS[i] * 4
             c[o + 1], c[o + 2], c[o + 3] = color[1], color[2], color[3]
         end
         return best_L, best_a, best_b, best_err
+    end
+
+    -- The base color (column 0 RGB) that brings LUT row `row` of values (width columns), with base `tint` ({r, g, b})
+    -- instead of its own, to goal ({L, a, b, cal}: a plan's) when only the base moves: a cape's tint (src/capes.lua),
+    -- which the shader blends into column 0 alone. Returns R, G, B and the error; values stay as they are.
+    function self.fit_base(values, width, row, tint, goal)
+        local c = Colour.row_values(values, width, row)
+        c[1], c[2], c[3] = tint[1], tint[2], tint[3]
+        local _, _, _, err = self.fit(c, goal.L, goal.a, goal.b, goal.cal, true)
+        return c[1], c[2], c[3], err
     end
 
     -- Writes the fitted colors of LUT row `row` into values (float array, width columns); returns the error.
@@ -165,7 +217,8 @@ end
 Transfer.COLUMNS = COLUMNS
 -- Runs inside a job, a few dozen rows per plan: interpreted (the albedo loop it calls stays compiled).
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({chroma, hue_gap, rule_of, rules_of, follow, cap_chroma, Transfer.new}) do
+    for _, fn in ipairs({chroma, hue_gap, rule_of, rules_of, follow, cap_chroma, no_pause, neutral_goal, own_error,
+                         Transfer.new}) do
         jit.off(fn, true)
     end
 end

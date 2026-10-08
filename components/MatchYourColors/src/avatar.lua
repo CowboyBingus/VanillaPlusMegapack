@@ -13,7 +13,8 @@
 -- slots 1-9 armor). Previews [game + 0x346D580]: per-player slots +2080 + 2184 * s (peer id +0, entry count
 -- +64, 132-byte entries from +68 with the same arrays at +12/+52/+92).
 --
--- Only the local player's own records are used; other players' avatars and preview slots are never touched.
+-- The local player's records drive the recolor; other players' records are read only for Sync With Mod Users
+-- (Avatar.players, Avatar.resolve_remote; src/remote.lua). Other players' preview slots are never touched.
 -- Maps are open-addressing u32 tables {data +0, capacity +8, empty key +12, multiplier +16} probed at
 -- (capacity - 1) & (key * multiplier + i), as the game probes them.
 local ffi = require('ffi')
@@ -130,8 +131,9 @@ local function applied_kits(read, game, out)
     return true
 end
 
--- The Helldiver's avatar record (an avatar entity owned by this machine) into out; true or nil and why.
-local function avatar_record(read, game, out)
+-- The Helldiver's avatar record (an avatar entity owned by this machine, or with remote any player's) into out;
+-- true or nil and why.
+local function avatar_record(read, game, out, remote)
     local entities = pointer(read, game + Avatar.ENTITIES)
     local entity_index = entities and Avatar.lookup(read, entities + E_MAP, out.unit)
     if not entity_index then return nil, 'Helldiver entity not found' end
@@ -139,7 +141,7 @@ local function avatar_record(read, game, out)
     if not entity or u32(entity, 0) ~= AVATAR_LOW or u32(entity, 4) ~= AVATAR_HIGH then
         return nil, 'not an avatar entity'
     end
-    if entity[20] % 2 == 0 then return nil, 'Helldiver not owned by this machine' end
+    if not remote and entity[20] % 2 == 0 then return nil, 'Helldiver not owned by this machine' end
     local avatar_id = u32(entity, 8)
     local avatars = pointer(read, game + Avatar.AVATARS)
     local index = avatars and Avatar.lookup(read, avatars + A_MAP, avatar_id)
@@ -163,6 +165,48 @@ function Avatar.resolve(memory, game, read, out)
         if not ok then return nil, why end
     end
     out.previews = pointer(read, game + Avatar.PREVIEWS)
+    return out
+end
+
+-- One player record (player manager entity record i) as {player = entity id, index, local (bool), peer_low,
+-- peer_high, unit}, or nil when it has no Helldiver.
+local function player_at(read, players, i)
+    local entity = pointer(read, players + P_ENTITIES + 8 * i)
+    local b = entity and read(entity, 24)
+    if not b then return nil end
+    local entity_id, owned = u32(b, 8), b[20] % 2 == 1
+    local index = Avatar.lookup(read, players + P_MAP, entity_id)
+    if not index or index >= MAX_PLAYERS then return nil end
+    local peer = read(players + P_PEERS + 56 * index, 8)
+    if not peer then return nil end
+    local peer_low, peer_high = u32(peer, 0), u32(peer, 4)
+    local unit = word(read, players + P_UNITS + 32 * index)
+    if not unit or unit == 0 then return nil end
+    return {player = entity_id, index = index, ['local'] = owned, peer_low = peer_low, peer_high = peer_high, unit = unit}
+end
+
+-- Every player with a Helldiver (the local one marked local): a list of player_at records. About 6 reads each.
+function Avatar.players(read, game)
+    local out = {}
+    local players = pointer(read, game + Avatar.PLAYERS)
+    local count = players and word(read, players + P_COUNT)
+    if not count or count == 0 or count > MAX_PLAYERS then return out end
+    for i = 0, count - 1 do
+        local found = player_at(read, players, i)
+        if found then out[#out + 1] = found end
+    end
+    return out
+end
+
+-- Another player's Helldiver (a player record from Avatar.players): its applied kits and avatar record as resolve
+-- gives them for the local player, or nil and why. Its avatar entity is not owned by this machine.
+function Avatar.resolve_remote(read, game, player, out)
+    out = out or {}
+    out.player, out.unit, out.peer_low, out.peer_high = player.player, player.unit, player.peer_low, player.peer_high
+    local ok, why = applied_kits(read, game, out)
+    if not ok then return nil, why end
+    ok, why = avatar_record(read, game, out, true)
+    if not ok then return nil, why end
     return out
 end
 
@@ -219,48 +263,46 @@ end
 -- (plus its entries while it has any). watch(identity, slot) builds it; changed() is true when anything
 -- differs from the last call (the first call reports a change). No allocation per call.
 function Avatar.watch(memory, identity, slot)
-    local units_at, count_at = at(identity.units_at), slot and at(slot + V_COUNT) or nil
-    local entries_at = slot and at(slot + V_ENTRIES) or nil
+    local units_at, copies_at = at(identity.units_at), slot and at(slot + V_COUNT) or nil
     local now, kept = ffi.new('uint32_t[30]'), ffi.new('uint32_t[30]')
-    local count_now, count_kept = ffi.new('uint32_t[1]'), ffi.new('uint32_t[1]')
-    local entries_size = V_ENTRY_SIZE * Avatar.MAX_PREVIEWS
-    local entries_now, entries_kept = ffi.new('uint8_t[?]', entries_size), ffi.new('uint8_t[?]', entries_size)
-    local primed = false
+    -- The body-copy slot's entry count (+64) and its entries (+68, 132 bytes each) are adjacent: one read of both.
+    local copies_size = 4 + V_ENTRY_SIZE * Avatar.MAX_PREVIEWS
+    local copies_now, copies_kept = ffi.new('uint8_t[?]', copies_size), ffi.new('uint8_t[?]', copies_size)
+    local primed, copies_primed = false, false
     local self = {reads = 0}
 
     local function same_units()
         for i = 0, 29 do if now[i] ~= kept[i] then return false end end
         return true
     end
-    local function same_entries(size)
-        for i = 0, size - 1 do if entries_now[i] ~= entries_kept[i] then return false end end
+    -- The count and the entries in use, against the last read.
+    local function same_copies()
+        local count = math.min(copies_now[0] + copies_now[1] * 256 + copies_now[2] * 65536 + copies_now[3] * 16777216,
+                                Avatar.MAX_PREVIEWS)
+        for i = 0, 3 + V_ENTRY_SIZE * count do if copies_now[i] ~= copies_kept[i] then return false end end
         return true
     end
 
-    -- True when the units or the preview entries changed (or cannot be read) since the last call.
-    function self.changed()
+    -- The body-copy slot's count and entries: true when they changed (or cannot be read) since its last read.
+    local function copies_changed()
+        self.reads = self.reads + 1
+        if not memory.read_into(copies_at, copies_size, copies_now) then return true end
+        if copies_primed and same_copies() then return false end
+        ffi.copy(copies_kept, copies_now, copies_size)
+        copies_primed = true
+        return true
+    end
+
+    -- True when the units changed (or cannot be read) since the last call, or, when `copies` is true, the body-copy
+    -- slot did since its last read. The caller reads the slot on every other frame: the game moves the avatar's
+    -- (recolored) units into it at death, or spawns new units there; one more frame before those are recolored.
+    function self.changed(copies)
         self.reads = self.reads + 1
         local ok = memory.read_into(units_at, 120, now)
         local changed = not ok or not primed or not same_units()
-        if ok then ffi.copy(kept, now, 120) end
-        if count_at then
-            self.reads = self.reads + 1
-            local count_ok = memory.read_into(count_at, 4, count_now)
-            local count = count_ok and math.min(count_now[0], Avatar.MAX_PREVIEWS) or 0
-            changed = changed or not count_ok or count_now[0] ~= count_kept[0]
-            count_kept[0] = count_now[0]
-            if count > 0 then
-                self.reads = self.reads + 1
-                local size = V_ENTRY_SIZE * count
-                if memory.read_into(entries_at, size, entries_now) then
-                    changed = changed or not same_entries(size)
-                    ffi.copy(entries_kept, entries_now, size)
-                else
-                    changed = true
-                end
-            end
-        end
+        if changed and ok then ffi.copy(kept, now, 120) end
         primed = true
+        if copies and copies_at and copies_changed() then changed = true end
         return changed
     end
     return self
@@ -270,7 +312,8 @@ end
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({low32_product, Avatar.reader, pointer, word, Avatar.lookup, local_player, applied_kits, avatar_record,
-        Avatar.resolve, Avatar.copy, Avatar.preview_slot, Avatar.units}) do
+        Avatar.resolve, player_at, Avatar.players, Avatar.resolve_remote, Avatar.copy, Avatar.preview_slot,
+        Avatar.units}) do
         jit.off(fn, true)
     end
 end

@@ -1,6 +1,8 @@
 Supports Helldivers 2 Steam build 25480438 / EXE 1.8.46015.0.
 
-Offline source, package and read-only module checks passed. v39 updates Laser
+Offline source, package and read-only module checks passed. v40 updates Match
+Your Colors to v1.3, played on this build as its standalone release (its colors
+shared between a host and a client). v39 updates Laser
 Sentry Cooldown to v1.1, played in a mission on this build as its standalone
 release: an overheated sentry cooled, its turret powered up and it fired again.
 v38 adds Hellpod

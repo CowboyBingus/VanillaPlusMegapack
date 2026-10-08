@@ -192,9 +192,9 @@ function Colour.new(detail, detail_layers, camo, camo_layers)
 
     -- The look of a row through its measured response cal = {gr, gg, gb, sr, sg, sb} (src/appearance.lua): the
     -- CIELAB of Colour.seen(g x mean albedo, s).
-    function self.look(c, cal)
+    function self.look(c, cal, soft)
         local r, g, b = albedo(c)
-        return Colour.linear_to_lab(Colour.seen(cal, r, g, b))
+        return Colour.linear_to_lab(Colour.seen(cal, r, g, b, soft))
     end
 
     function self.row_info(values, width, row)
@@ -211,14 +211,23 @@ end
 -- The color the eye takes for a paint through its measured response cal = {gr, gg, gb, sr, sg, sb} at mean albedo
 -- (r, g, b): its diffuse color g x albedo plus its gloss floor s, the floor weighed 1 - chroma / GLOSS_C (clipped to
 -- 0-1): on neutral paint gloss reads as lightness, on colored paint as highlights over the paint (match12.seen).
+-- soft: a matte soft row (Colour.is_soft: cloth) counts its whole floor, a broad sheen the eye takes for lightness on
+-- any paint; the fit passes it (src/transfer.lua), the items' own looks keep the hard rule (match12.perceived_key).
 -- Display-linear r, g, b, clipped at 0.
 Colour.GLOSS_C = 20.0
-function Colour.seen(cal, r, g, b)
+function Colour.seen(cal, r, g, b, soft)
     local dr, dg, db = max(cal[1] * r, 0), max(cal[2] * g, 0), max(cal[3] * b, 0)
-    local _, A, B = Colour.linear_to_lab(dr, dg, db)
-    local w = min(max(1 - math.sqrt(A * A + B * B) / Colour.GLOSS_C, 0), 1)
+    local w = 1
+    if not soft then
+        local _, A, B = Colour.linear_to_lab(dr, dg, db)
+        w = min(max(1 - math.sqrt(A * A + B * B) / Colour.GLOSS_C, 0), 1)
+    end
     return max(dr + w * cal[4], 0), max(dg + w * cal[5], 0), max(db + w * cal[6], 0)
 end
+
+-- Whether a LUT row (row_values) is matte soft: mode 1 (c[4], column 0 w: cloth, leather, rubber) with no specular
+-- (c[33], column 8 x, at 0: the cloth rows; glossy leather has 0.3, the UF-84 Doubt Killer's red trim among them).
+function Colour.is_soft(c) return math.abs(c[4] - 1) < 0.5 and math.abs(c[33]) < 0.05 end
 
 Colour.SAMPLES = SAMPLES
 -- Code that runs once or rarely (jobs, startup, events) stays interpreted, sub-functions included: it must not

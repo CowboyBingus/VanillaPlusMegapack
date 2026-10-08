@@ -280,8 +280,15 @@ local function add_piece(acc, out, kit, piece, body, deps)
     end
 end
 
+-- A row's emissive intensity (column 13 x): above 0 a paint row glows (the game's light strips; glowing visors of
+-- LUT mods). lut: {values, width, height}.
+function Kits.emissive(lut, r)
+    if lut.width <= 13 then return 0 end
+    return lut.values[(r * lut.width + 13) * 4]
+end
+
 -- A kit's analysis for one body type: {kit, rows = {{key, area, under, L, a, b, metal, camo, mode, full, ar, ag,
--- ab (mean linear albedo)}, ...},
+-- ab (mean linear albedo), emissive}, ...},
 -- pieces = {{piece, weight, materials, skin}}, luts = {hash -> {values, width, height}} (pattern textures too),
 -- patterns = {{pattern, area}, ...} in first-seen order}. deps: {slim,
 -- find (the kit's archive, then the shared one), scratch, yield, textures (Kits.textures), colour
@@ -297,7 +304,7 @@ function Kits.analyse(kit, body, deps)
         local L, a, b, metal, camo, mode, full, ar, ag, ab = deps.colour.row_info(lut.values, lut.width, r)
         out.rows[#out.rows + 1] = {key = key, lut = lut_name, row = r, area = acc.area[key], under = acc.under[key],
                                    L = L, a = a, b = b, metal = metal, camo = camo, mode = mode, full = full, ar = ar,
-                                   ag = ag, ab = ab}
+                                   ag = ag, ab = ab, emissive = Kits.emissive(lut, r)}
         deps.yield()
     end
     out.patterns = {}
@@ -307,14 +314,105 @@ function Kits.analyse(kit, body, deps)
     return out
 end
 
+-- The color columns of a LUT row (their RGB; src/transfer.lua's): every other value is the row's finish.
+local COLOR_COLUMNS = {[0] = true, [2] = true, [5] = true, [6] = true, [16] = true, [17] = true, [18] = true,
+                       [19] = true}
+
+-- How row r of lut differs from the archived original (both {values, width, height}): 'finish' when a value outside
+-- the color columns' RGB differs (or the row is new), 'color' when only those differ, nil when it is the same.
+local function row_change(lut, original, r)
+    if original.width ~= lut.width or r >= original.height then return 'finish' end
+    local color = false
+    for c = 0, lut.width - 1 do
+        for ch = 0, 3 do
+            local i = (r * lut.width + c) * 4 + ch
+            local x, y = lut.values[i], original.values[i]
+            if math.abs(x - y) > 1e-3 * math.max(1, math.abs(y)) then
+                if not (COLOR_COLUMNS[c] and ch < 3) then return 'finish' end
+                color = true
+            end
+        end
+    end
+    return color and 'color' or nil
+end
+
+-- Whether a weighted piece's geometry came from a patch: its unit, a material, an ID mask or a pattern mask.
+local function piece_patched(entry, patched)
+    if patched[entry.piece.path .. ' ' .. Kits.TYPE_UNIT] then return true end
+    for _, m in ipairs(entry.materials) do
+        if patched[m.material .. ' ' .. Kits.TYPE_MATERIAL] or (m.mask and patched[m.mask .. ' ' .. Kits.TYPE_TEXTURE])
+            or (m.pattern_mask and patched[m.pattern_mask .. ' ' .. Kits.TYPE_TEXTURE]) then
+            return true
+        end
+    end
+    return false
+end
+
+-- One row of a patched LUT against the archived one (original(name) -> LUT or nil): finish_changed and vanilla.
+local function mark_row(row, lut, original, colour)
+    local base = original(row.lut)
+    local change = not base and 'finish' or row_change(lut, base, row.row)
+    if not change then return end
+    row.finish_changed = change == 'finish'
+    if base and row.row < base.height then
+        local L, a, b, _, _, _, _, ar, ag, ab = colour.row_info(base.values, base.width, row.row)
+        row.vanilla = {L = L, a = a, b = b, ar = ar, ag = ag, ab = ab}
+    end
+end
+
+-- What an analysis read from mods' patches (touched: {['<archive> <name> <type>'] = record} of the patched
+-- resources the job's reader served; KB match-your-colors-review-transmog-v13). geometry_patched: a weighted piece's
+-- unit, material, ID mask or pattern mask came from a patch (its measured screen pixels no longer hold). On each row
+-- of a patched LUT that differs from the archived one (original(name) -> {values, width, height} or nil):
+-- finish_changed (a value outside the color columns' RGB differs: its measured response no longer holds) and
+-- vanilla = {L, a, b, ar, ag, ab}, the archived row's model color and albedo (the measured light is rescaled from
+-- them, src/matcher.lua). colour: the color model (row_info).
+function Kits.mark_patched(analysis, touched, original, colour)
+    local patched = {}
+    for key in pairs(touched) do patched[key:match('^%S+ (%S+ %S+)$')] = true end
+    for _, entry in ipairs(analysis.pieces) do
+        if entry.weight > 0 and not entry.skin and piece_patched(entry, patched) then analysis.geometry_patched = true end
+    end
+    for _, row in ipairs(analysis.rows) do
+        if patched[row.lut .. ' ' .. Kits.TYPE_TEXTURE] then mark_row(row, analysis.luts[row.lut], original, colour) end
+    end
+    return analysis
+end
+
+-- A kit record's content as one string (its fields and every piece): an analysis is made of what a record lists, and
+-- a record another mod recomposes at runtime (a transmog's carrier) lists other pieces under the same id.
+function Kits.signature(kit)
+    local parts = {string.format('%08x', kit.id), tostring(kit.name_upper), tostring(kit.archive), tostring(kit.kit_type)}
+    for _, p in ipairs(kit.pieces) do
+        parts[#parts + 1] = table.concat({p.path, p.slot, p.type, p.body, p.lut, p.pattern or '', p.tone, p.fields or ''},
+                                         ',') .. (p.cape_lut and (',' .. p.cape_lut .. ',' .. (p.gradient or '') .. ','
+                                                    .. (p.decal or '')) or '')
+    end
+    return table.concat(parts, ';')
+end
+
 -- The kit catalogue in game memory (customization manager [game + 0x33264F8]: kit pointers at +0, count
--- at +8). read(address, size, buffer) -> true. Kits are read on demand and kept for the session.
+-- at +8). read(address, size, buffer) -> true. Kits are read on demand; src/recolor.lua reads a record again on
+-- every job.
 Kits.KIT_ID, Kits.KIT_NAME_UPPER, Kits.KIT_ARCHIVE, Kits.KIT_TYPE = 0, 12, 32, 40
 Kits.KIT_BODIES, Kits.KIT_BODY_COUNT = 48, 56
 Kits.BODY_RECORD, Kits.PIECE_RECORD = 24, 96
 local KIT_TYPES = {[0] = Kits.ARMOR, Kits.HELMET, 'Cape'}
 
--- One kit read from memory at `address`: {id, name_upper, archive, kit_type, pieces}, or nil and why.
+-- One piece record (in `buffer`) of a body: {path, slot, type, body, lut, pattern, tone} and, for a cape, its cape
+-- LUT (+40: the tint and emblem-layer parameters per row), gradient (+48: where the tint shows), decal scalar fields
+-- (+64: which LUT row shows where) and decal sheet (+80: the emblems' own colors; src/capes.lua).
+local function piece_of(buffer, body, cape)
+    local piece = {path = hex64(buffer, 0), slot = u32(buffer, 8), type = u32(buffer, 12), body = body,
+                   lut = hex64(buffer, 24), pattern = hex64(buffer, 32), tone = buffer[88]}
+    if cape then
+        piece.cape_lut, piece.gradient, piece.fields = hex64(buffer, 40), hex64(buffer, 48), hex64(buffer, 64)
+        piece.decal = hex64(buffer, 80)
+    end
+    return piece
+end
+
+-- One kit read from memory at `address`: {id, name_upper, archive, kit_type, pieces (piece_of's)}, or nil and why.
 function Kits.read_kit(read, address, buffer)
     if not read(address, 64, buffer) then return nil, 'kit unreadable' end
     local kit = {id = u32(buffer, 0), name_upper = u32(buffer, 12), archive = hex64(buffer, 32),
@@ -330,9 +428,7 @@ function Kits.read_kit(read, address, buffer)
         if count > 32 then return nil, 'unexpected kit body' end
         for p = 0, count - 1 do
             if not read(pieces + Kits.PIECE_RECORD * p, 96, buffer) then return nil, 'kit piece unreadable' end
-            kit.pieces[#kit.pieces + 1] = {path = hex64(buffer, 0), slot = u32(buffer, 8), type = u32(buffer, 12),
-                                          body = body, lut = hex64(buffer, 24), pattern = hex64(buffer, 32),
-                                          tone = buffer[88]}
+            kit.pieces[#kit.pieces + 1] = piece_of(buffer, body, kit.kit_type == 'Cape')
         end
     end
     return kit
@@ -343,7 +439,8 @@ Kits.buffer = function() return ffi.new('uint8_t[96]') end
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({hex64, Kits.weight, unit_materials, material_textures, Kits.textures, Kits.shared_samples,
-        add_pattern_textures, piece_materials, add_pattern, add_rows, add_piece, Kits.analyse, Kits.read_kit}) do
+        add_pattern_textures, piece_materials, add_pattern, add_rows, add_piece, Kits.emissive, Kits.analyse,
+        row_change, piece_patched, mark_row, Kits.mark_patched, Kits.signature, piece_of, Kits.read_kit}) do
         jit.off(fn, true)
     end
 end

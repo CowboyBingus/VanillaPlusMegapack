@@ -5,16 +5,19 @@
 -- lighting). Parsed on demand and kept for the session; nothing here runs per frame.
 local Appearance = {}
 
--- Appearance.new(data) -> {row(lut, r), kit(id)}. data: the table src/appearance_data.lua returns.
+-- Appearance.new(data) -> {row(lut, r), kit(id), hoods(id)}. data: the table src/appearance_data.lua returns.
 -- row(lut hash, row index) -> {gr, gg, gb, sr, sg, sb} or nil (not measured).
 -- kit(kit id, 8 hex digits) -> {luts = {hash -> true}, rows = {['lut:row'] -> {px, light}}, patterns = {hash -> {px,
 -- gain}}} or nil; light: the row's pixels x mean screen luminance; gain {r, g, b} or nil (pattern seen too little to
 -- measure its color).
+-- hoods(kit id) -> {['lut:row'] -> true}: a hooded helmet's hood rows (the Recolor Hoods option), or nil.
+-- kit_for(luts) -> kit, id: the one measured kit whose LUTs are exactly luts ({hash -> true}), or nil (none, or several:
+-- a native look worn on another kit record, as a transmog's carrier, keeps its own measurement).
 function Appearance.new(data)
     local self = {}
     local index = {}
     for i, lut in ipairs(data.luts) do index[lut] = i end
-    local parsed_rows, parsed_kits = {}, {}
+    local parsed_rows, parsed_kits, parsed_hoods = {}, {}, {}
 
     local function numbers(text)
         local out = {}
@@ -57,6 +60,37 @@ function Appearance.new(data)
         if not text then return nil end
         if not parsed_kits[id] then parsed_kits[id] = parse_kit(text) end
         return parsed_kits[id]
+    end
+
+    local by_luts -- sorted LUT list -> kit id, or false when two kits share it
+    function self.kit_for(luts)
+        if not by_luts then
+            by_luts = {}
+            for id, text in pairs(data.kits) do
+                local names = {}
+                for i in text:match('^([^;]*)'):gmatch('%d+') do names[#names + 1] = data.luts[tonumber(i)] end
+                table.sort(names)
+                local key = table.concat(names, ',')
+                by_luts[key] = by_luts[key] == nil and id or false
+            end
+        end
+        local names = {}
+        for name in pairs(luts) do names[#names + 1] = name end
+        table.sort(names)
+        local id = by_luts[table.concat(names, ',')]
+        if not id then return nil end
+        return self.kit(id), id
+    end
+
+    function self.hoods(id)
+        local text = data.hoods and data.hoods[id]
+        if not text then return nil end
+        if not parsed_hoods[id] then
+            local keys = {}
+            for i, r in text:gmatch('(%d+)%.(%d+)') do keys[data.luts[tonumber(i)] .. ':' .. r] = true end
+            parsed_hoods[id] = keys
+        end
+        return parsed_hoods[id]
     end
     return self
 end

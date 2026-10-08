@@ -9,7 +9,7 @@ local ffi = require('ffi')
 local Fake = dofile(root .. '/tests/fake_game.lua')
 local modules = {}
 for _, name in ipairs({'avatar', 'preview', 'recolor', 'engine', 'files', 'slim', 'texture', 'colour', 'transfer',
-                       'matcher', 'kits', 'cache', 'addon'}) do
+                       'matcher', 'kits', 'cache', 'schemes', 'capes', 'patches', 'sync', 'remote', 'addon'}) do
     modules[name] = require(name)
 end
 local Engine, Addon = modules.engine, modules.addon
@@ -98,7 +98,8 @@ local function install(options)
                env = env, get_engine_api = get_api}
     for name, module in pairs({Avatar = 'avatar', Preview = 'preview', Recolor = 'recolor', Engine = 'engine',
                                Files = 'files', Slim = 'slim', Texture = 'texture', Colour = 'colour', Transfer = 'transfer',
-                               Matcher = 'matcher', Kits = 'kits', Cache = 'cache'}) do
+                               Matcher = 'matcher', Kits = 'kits', Cache = 'cache', Schemes = 'schemes',
+                               Capes = 'capes', Patches = 'patches', Sync = 'sync', Remote = 'remote'}) do
         m[name] = modules[module]
     end
     local instance = Addon.install(m)
@@ -121,10 +122,41 @@ check('install: engine functions verified, guard on the update chain, options re
     assert(mode.mod_id == Addon.MOD_ID and type(mode.label) == 'function' and mode.choices[1] == 'Off', 'texts')
     assert(mode.label() == 'Color Matching' and mode.choices[2]() == 'Helmet Matches Armor', 'English texts')
     assert(sets and sets.type == 'toggle' and sets.default == true, 'complete-set toggle')
+    local hoods, materials = w.menu.registered[Addon.OPTION_HOODS], w.menu.registered[Addon.OPTION_MATERIALS]
+    assert(hoods and hoods.type == 'toggle' and hoods.default == true and hoods.label() == 'Recolor Hoods',
+           'hood toggle: on by default (hoods recolored, as before v1.3)')
+    assert(materials and materials.type == 'toggle' and materials.default == false
+           and materials.label() == 'Match Materials', 'material toggle: off by default')
+    local scheme = w.menu.registered[Addon.OPTION_SCHEME]
+    assert(scheme and scheme.type == 'choice' and #scheme.choices == 12 and scheme.default == 1
+           and scheme.choices[1] == 'Off' and scheme.choices[2]() == 'Helldiver' and scheme.choices[12]() == 'Venus'
+           and scheme.label() == 'Paint Scheme', 'paint scheme choice: Off, then the 11 schemes')
+    -- Sync With Mod Users is always on (no option since 2026-10-07): nothing registered for it
+    for id in pairs(w.menu.registered) do assert(not id:find('sync', 1, true), 'no sync option: ' .. id) end
+    local capes = w.menu.registered[Addon.OPTION_CAPES]
+    assert(capes and capes.type == 'toggle' and capes.default == false and capes.label() == 'Recolor Cape',
+           'cape toggle: off by default')
+    local o = instance.state.options
+    assert(o.recolor_hoods == true and o.match_materials == false and o.scheme == 0 and o.sync == nil
+           and o.recolor_cape == false, 'defaults applied at registration')
+    w.menu.callbacks[Addon.OPTION_CAPES](true)
+    assert(o.recolor_cape == true, 'on_change applies the cape toggle')
+    w.menu.callbacks[Addon.OPTION_CAPES](false)
+    w.menu.callbacks[Addon.OPTION_SCHEME](4)
+    assert(o.scheme == 3, 'the fourth choice is the third scheme')
+    w.menu.callbacks[Addon.OPTION_SCHEME](1)
+    instance.set_option('sync', false) -- a stale setting of the old option: refused
+    assert(o.scheme == 0 and o.sync == nil, 'Off; no sync option to set')
     w.menu.callbacks[Addon.OPTION_MODE](3)
-    assert(instance.state.options.mode == 3, 'on_change applies the mode')
+    assert(o.mode == 3, 'on_change applies the mode')
     w.menu.callbacks[Addon.OPTION_SETS](false)
-    assert(instance.state.options.keep_sets == false, 'on_change applies the toggle')
+    assert(o.keep_sets == false, 'on_change applies the toggle')
+    w.menu.callbacks[Addon.OPTION_HOODS](false)
+    w.menu.callbacks[Addon.OPTION_MATERIALS](true)
+    assert(o.recolor_hoods == false and o.match_materials == true and o.keep_sets == false,
+           'on_change applies the hood and material toggles, each to its own option')
+    w.menu.callbacks[Addon.OPTION_MATERIALS]('yes')
+    assert(o.match_materials == true, 'a value that is no boolean is ignored')
     for _ = 1, 30 do w.env.update(0.016) end -- no local Helldiver: resolves only, no engine call
     assert(instance.state.frame == 30 and instance.state.status == 'starting', 'stepping through the guard')
 end)

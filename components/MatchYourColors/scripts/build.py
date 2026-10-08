@@ -40,13 +40,15 @@ sys.path.insert(0, str(loader_checkout() / 'scripts'))
 from archive import ARCHIVE, make_archive, resource_hash  # noqa: E402
 from build_addon import entry_source  # noqa: E402
 
-VERSION = '1.2'
+VERSION = '1.3'
 LUA_NAME = 'mods/cowboybingus/match_your_colors'
 GUID = 'b0694ff1-c08f-43e9-8611-e0ec75ea3ab5'
 TITLE = 'Match Your Colors v' + VERSION
-DESCRIPTION = ('Recolors your helmet to match your armor, or your armor to match your helmet (Mod Options Menu). '
-               'Only your own Helldiver, only on your screen; colors come from the game\'s own files, so new '
-               'armor and helmets work as released. Steam build 25480438. Requires Bingus Shared Loader v18+.')
+DESCRIPTION = ('Recolors your helmet to match your armor, or your armor to match your helmet, or paints both in one '
+               'of the game\'s weapon paint schemes (Mod Options Menu). Squadmates who use the mod see each '
+               'other\'s colors (Sync With Mod Users, always on); players without it see your gear as it is. Colors '
+               'come from the game\'s own files, so new armor and helmets work as released. Steam build 25480438. '
+               'Requires Bingus Shared Loader v18+.')
 TEST_GUID = '5c3c2f7e-9a41-4d0b-9f0e-7a2b6c1d8e34'
 TEST_TITLE = 'Match Your Colors v' + VERSION + ' TEST'
 TEST_DESCRIPTION = ('Live test build of Match Your Colors: behaves like the release and leaves its instance in a '
@@ -65,18 +67,21 @@ CANONICAL = {'tests/frame_budget.lua': 'PerformanceBaseline/frame_budget.lua',
              'TRANSLATING.md': 'Translations/TRANSLATING.md'}
 # The modules, assembled in this order, each as `local <name> = (function() <file> end)()`.
 SOURCES = [('T', 'bingus_text.lua'), ('runtime', 'bingus_runtime.lua'), ('runtime_memory', 'bingus_memory.lua'),
-           ('Files', 'files.lua'), ('Slim', 'slim.lua'), ('Texture', 'texture.lua'), ('Colour', 'colour.lua'),
-           ('Transfer', 'transfer.lua'), ('Matcher', 'matcher.lua'), ('Appearance', 'appearance.lua'),
-           ('AppearanceData', 'appearance_data.lua'), ('Kits', 'kits.lua'), ('Cache', 'cache.lua'),
-           ('Engine', 'engine.lua'), ('Avatar', 'avatar.lua'), ('Preview', 'preview.lua'), ('Recolor', 'recolor.lua'),
+           ('Files', 'files.lua'), ('Slim', 'slim.lua'), ('Patches', 'patches.lua'), ('Texture', 'texture.lua'),
+           ('Colour', 'colour.lua'),
+           ('Transfer', 'transfer.lua'), ('Matcher', 'matcher.lua'), ('Schemes', 'schemes.lua'),
+           ('Appearance', 'appearance.lua'), ('AppearanceData', 'appearance_data.lua'), ('Kits', 'kits.lua'),
+           ('Cache', 'cache.lua'), ('Capes', 'capes.lua'), ('Engine', 'engine.lua'), ('Avatar', 'avatar.lua'),
+           ('Preview', 'preview.lua'), ('Recolor', 'recolor.lua'), ('Sync', 'sync.lua'), ('Remote', 'remote.lua'),
            ('Addon', 'addon.lua')]
 VENDORED = ('bingus_text.lua', 'bingus_runtime.lua', 'bingus_memory.lua')
 # Names the mod's own sources must never contain: code or thread creation, page protection, library loading,
-# network calls, and the JIT controls every mod shares.
+# the game's network and RPC calls, and the JIT controls every mod shares. (Sync With Mod Users, always on, posts
+# one lobby member property through the PlayFab library the game has loaded; src/sync.lua.)
 FORBIDDEN = ('VirtualAlloc', 'VirtualProtect', 'FlushInstructionCache', 'CreateRemoteThread', 'LoadLibrary',
              'Network.', 'RPC.', 'jit.flush', 'jit.attach', 'jit.opt', 'WriteProcessMemory', 'collectgarbage')
 TESTS = ['test_units.lua', 'test_addon.lua', 'test_install.lua', 'test_idle_alloc.lua', 'test_bingus_text.lua',
-         'test_locales.lua', 'test_cache.lua', 'test_job.lua']
+         'test_locales.lua', 'test_cache.lua', 'test_job.lua', 'test_sync.lua', 'test_patches.lua']
 
 
 def read_lua(path: Path) -> str:
@@ -108,9 +113,11 @@ def assemble(test: bool = False) -> bytes:
         lines += [f'{target} = (function()', read_lua(path), 'end)()']
     lines.append('local instance = Addon.install({runtime = runtime, memory = runtime_memory, T = T, '
                  'locales = locales, Avatar = Avatar, Preview = Preview, Recolor = Recolor, Engine = Engine, '
-                 'Files = Files, Slim = Slim, '
+                 'Files = Files, Slim = Slim, Patches = Patches, '
                  'Texture = Texture, Colour = Colour, Transfer = Transfer, Matcher = Matcher, Kits = Kits, '
-                 'Cache = Cache, Appearance = Appearance, AppearanceData = AppearanceData})')
+                 'Cache = Cache, Appearance = Appearance, AppearanceData = AppearanceData, Schemes = Schemes, '
+                 'Capes = Capes, '
+                 'Sync = Sync, Remote = Remote})')
     if test:
         lines.append("rawset(_G, 'MatchYourColorsTest', instance) -- lint-ok: R8 live test build only, never published")
     text = '\n'.join(lines) + '\n'
@@ -150,6 +157,7 @@ def test(quick: bool = False) -> list[str]:
     static_checks()
     build = HERE / 'build'
     build.mkdir(exist_ok=True)
+    (build / 'test-patches').mkdir(exist_ok=True)  # tests/test_patches.lua writes its patch files here
     entry = build / 'entry-check.lua'
     entry.write_bytes(assemble())
     test_entry = build / 'entry-check-test.lua'

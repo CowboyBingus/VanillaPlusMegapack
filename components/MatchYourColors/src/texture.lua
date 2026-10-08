@@ -21,12 +21,15 @@ local DDS_HEADER, DX10_HEADER = 128, 20
 local u32 = function(p, o) return p[o] + p[o + 1] * 256 + p[o + 2] * 65536 + p[o + 3] * 16777216 end
 Texture.FORMAT_RGBA16F, Texture.FORMAT_RGBA8, Texture.FORMAT_RGBA8_SRGB, Texture.FORMAT_BC7 = 10, 28, 29, 98
 Texture.FORMAT_R8 = 61
+Texture.FORMAT_BC3 = 77 -- capes' scalar fields (src/capes.lua decodes its blocks)
+Texture.FORMAT_BC4 = 80 -- capes' gradients (src/capes.lua)
 
 -- Bytes of mip `m` of a w x h layer in `format`.
 local function mip_bytes(format, w, h, m)
     local mw, mh = math.max(1, rshift(w, m)), math.max(1, rshift(h, m))
-    if format == Texture.FORMAT_BC7 then
-        return math.max(1, rshift(mw + 3, 2)) * math.max(1, rshift(mh + 3, 2)) * 16
+    if format == Texture.FORMAT_BC7 or format == Texture.FORMAT_BC3 or format == Texture.FORMAT_BC4 then
+        local block = format == Texture.FORMAT_BC4 and 8 or 16
+        return math.max(1, rshift(mw + 3, 2)) * math.max(1, rshift(mh + 3, 2)) * block
     end
     local per_texel = format == Texture.FORMAT_RGBA16F and 8 or (format == Texture.FORMAT_R8 and 1 or 4)
     return mw * mh * per_texel
@@ -45,7 +48,8 @@ function Texture.describe(main, size)
     info.format, info.layers = u32(main, d + 128), math.max(1, u32(main, d + 140))
     local f = info.format
     if f ~= Texture.FORMAT_RGBA16F and f ~= Texture.FORMAT_RGBA8 and f ~= Texture.FORMAT_RGBA8_SRGB
-        and f ~= Texture.FORMAT_BC7 and f ~= Texture.FORMAT_R8 then
+        and f ~= Texture.FORMAT_BC7 and f ~= Texture.FORMAT_R8 and f ~= Texture.FORMAT_BC3
+        and f ~= Texture.FORMAT_BC4 then
         error('unsupported texture format ' .. f, 0)
     end
     info.mip_offsets, info.layer_bytes = {}, 0
@@ -235,19 +239,22 @@ local WEIGHTS = {
     [4] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64},
 }
 
--- Bit reader over 16 bytes at block (LSB first).
-local function bits_reader(block)
-    local position = 0
-    return function(count)
-        local value = 0
-        for i = 0, count - 1 do
-            local p = position + i
-            if band(rshift(block[rshift(p, 3)], band(p, 7)), 1) == 1 then value = bor(value, lshift(1, i)) end
-        end
-        position = position + count
-        return value
-    end
+-- The block being decoded (its 16 bytes from bits_block[bits_offset]) and the next bit, read LSB first. The decoder
+-- keeps its state here and in the tables below, refilled per block: it allocates nothing per block (a cape's fields
+-- are up to 1,024 blocks, decoded inside a recolor job).
+local bits_block, bits_offset, bits_position = nil, 0, 0
+-- count is at most 8, so the bits lie in two bytes; the second is read only when they reach it (never past the
+-- block's 16 bytes: a block's fields end at bit 128).
+local function read_bits(count)
+    local p = bits_position
+    local at, shift = bits_offset + rshift(p, 3), band(p, 7)
+    local value = bits_block[at]
+    if shift + count > 8 then value = value + bits_block[at + 1] * 256 end
+    bits_position = p + count
+    return band(rshift(value, shift), lshift(1, count) - 1)
 end
+-- Endpoints [channel][endpoint], p-bits, the primary and secondary index lists and the parsed block.
+local ENDPOINTS, PBITS, PRIMARY, SECONDARY, BLOCK = {{}, {}, {}, {}}, {}, {}, {}, {}
 
 -- The subset of texel t (0-based) and whether it is its subset's anchor.
 local function subset_of(subsets, partition, t)
@@ -265,25 +272,26 @@ local function widen(value, bits)
     return bor(value, rshift(value, bits))
 end
 
--- Raw endpoint values: e[channel][endpoint] (channels 1-4 = R, G, B, A; endpoints 1..count); alpha 255 when
--- the mode has none.
-local function raw_endpoints(read, count, color_bits, alpha_bits)
-    local e = {{}, {}, {}, {}}
+-- Raw endpoint values into ENDPOINTS: e[channel][endpoint] (channels 1-4 = R, G, B, A; endpoints 1..count); alpha
+-- 255 when the mode has none.
+local function raw_endpoints(count, color_bits, alpha_bits)
+    local e = ENDPOINTS
     for c = 1, 3 do
-        for i = 1, count do e[c][i] = read(color_bits) end
+        local channel = e[c]
+        for i = 1, count do channel[i] = read_bits(color_bits) end
     end
-    for i = 1, count do e[4][i] = alpha_bits > 0 and read(alpha_bits) or 255 end
+    for i = 1, count do e[4][i] = alpha_bits > 0 and read_bits(alpha_bits) or 255 end
     return e
 end
 
--- The p-bits: one per endpoint, or one per subset shared by its two endpoints.
-local function read_pbits(read, count, subsets, per_endpoint)
-    local p = {}
+-- The p-bits into PBITS: one per endpoint, or one per subset shared by its two endpoints.
+local function read_pbits(count, subsets, per_endpoint)
+    local p = PBITS
     if per_endpoint then
-        for i = 1, count do p[i] = read(1) end
+        for i = 1, count do p[i] = read_bits(1) end
     else
         for s = 1, subsets do
-            local v = read(1)
+            local v = read_bits(1)
             p[2 * s - 1], p[2 * s] = v, v
         end
     end
@@ -305,25 +313,24 @@ local function finish_endpoints(e, p, count, color_bits, alpha_bits)
 end
 
 -- Endpoints: e[channel][endpoint] (channels 1-4 = R, G, B, A; endpoints 1..2*subsets), widened to 8 bits.
-local function read_endpoints(read, m)
+local function read_endpoints(m)
     local subsets, color_bits, alpha_bits = m[2], m[3], m[4]
     local count = subsets * 2
-    local e = raw_endpoints(read, count, color_bits, alpha_bits)
+    local e = raw_endpoints(count, color_bits, alpha_bits)
     local p = nil
     if m[5] or m[6] then
-        p = read_pbits(read, count, subsets, m[5])
+        p = read_pbits(count, subsets, m[5])
         color_bits, alpha_bits = color_bits + 1, alpha_bits > 0 and alpha_bits + 1 or 0
     end
     finish_endpoints(e, p, count, color_bits, alpha_bits)
     return e
 end
 
--- Index lists: primary (16 entries) and, for modes 4 and 5, secondary.
-local function read_indices(read, subsets, partition, bits)
-    local out = {}
+-- An index list (16 entries) into out: the primary one and, for modes 4 and 5, the secondary one.
+local function read_indices(subsets, partition, bits, out)
     for t = 0, 15 do
         local _, anchor = subset_of(subsets, partition, t)
-        out[t + 1] = read(anchor and bits - 1 or bits)
+        out[t + 1] = read_bits(anchor and bits - 1 or bits)
     end
     return out
 end
@@ -347,29 +354,37 @@ local function decode_texel(b, t, out)
     out[4 * t], out[4 * t + 1], out[4 * t + 2], out[4 * t + 3] = r, g, bl, a
 end
 
--- Decodes one BC7 block (16 bytes at block) into out (64 bytes, RGBA per texel, row-major 4 x 4). An
--- invalid mode gives zeros, as the format defines.
-function Texture.bc7_block(block, out)
-    local first = block[0]
+-- The block's fields after its mode bits, parsed into BLOCK: partition, rotation, endpoints, index lists.
+local function parse_block(mode)
+    local m = MODES[mode]
+    local b = BLOCK
+    b.subsets = m[2]
+    b.partition = m[1] > 0 and read_bits(m[1]) or 0
+    b.rotation = (mode == 4 or mode == 5) and read_bits(2) or 0
+    local selector = mode == 4 and read_bits(1) or 0
+    b.e = read_endpoints(m)
+    local primary = read_indices(b.subsets, b.partition, m[7], PRIMARY)
+    local secondary = m[8] > 0 and read_indices(1, 0, m[8], SECONDARY) or nil
+    b.color_index, b.alpha_index, b.color_bits, b.alpha_bits = primary, secondary, m[7], m[8]
+    if selector == 1 then b.color_index, b.alpha_index, b.color_bits, b.alpha_bits = secondary, primary, m[8], m[7] end
+    return b
+end
+
+-- Decodes one BC7 block (the 16 bytes from block[offset], offset 0 by default: no pointer made per block) into out
+-- (64 bytes, RGBA per texel, row-major 4 x 4). An invalid mode gives zeros, as the format defines.
+function Texture.bc7_block(block, out, offset)
+    offset = offset or 0
+    local first = block[offset]
     if first == 0 then
         for i = 0, 63 do out[i] = 0 end
         return
     end
     local mode = 0
     while band(rshift(first, mode), 1) == 0 do mode = mode + 1 end
-    local read = bits_reader(block)
-    read(mode + 1)
-    local m = MODES[mode]
-    local b = {subsets = m[2]}
-    b.partition = m[1] > 0 and read(m[1]) or 0
-    b.rotation = (mode == 4 or mode == 5) and read(2) or 0
-    local selector = mode == 4 and read(1) or 0
-    b.e = read_endpoints(read, m)
-    local primary = read_indices(read, b.subsets, b.partition, m[7])
-    local secondary = m[8] > 0 and read_indices(read, 1, 0, m[8]) or nil
-    b.color_index, b.alpha_index, b.color_bits, b.alpha_bits = primary, secondary, m[7], m[8]
-    if selector == 1 then b.color_index, b.alpha_index, b.color_bits, b.alpha_bits = secondary, primary, m[8], m[7] end
+    bits_block, bits_offset, bits_position = block, offset, mode + 1
+    local b = parse_block(mode)
     for t = 0, 15 do decode_texel(b, t, out) end
+    bits_block = nil
 end
 
 -- Stores the 16 texels of one decoded 4 x 4 block (texel: 64 bytes RGBA) at block position (bx, by) into
@@ -385,7 +400,7 @@ local function place_block(texel, bx, by, w, count, values)
 end
 
 -- The first `count` texels (row-major) of a BC7 mip `w` texels wide starting at `base`, into values.
-local function bc7_texels(pixels, base, w, count, scratch, values)
+local function bc7_texels(pixels, base, w, count, scratch, values, yield)
     local texel = ffi.new('uint8_t[64]')
     local blocks_wide = math.max(1, rshift(w + 3, 2))
     local block_rows = math.ceil(math.ceil(count / w) / 4)
@@ -393,9 +408,10 @@ local function bc7_texels(pixels, base, w, count, scratch, values)
     pixels(base, blocks_wide * block_rows * 16, raw, 0)
     for by = 0, block_rows - 1 do
         for bx = 0, blocks_wide - 1 do
-            Texture.bc7_block(raw + (by * blocks_wide + bx) * 16, texel)
+            Texture.bc7_block(raw, texel, (by * blocks_wide + bx) * 16)
             place_block(texel, bx, by, w, count, values)
         end
+        if yield then yield() end
     end
 end
 
@@ -408,7 +424,7 @@ function Texture.samples(pixels, info, mip, count, scratch, yield)
         local base = l * info.layer_bytes + info.mip_offsets[mip]
         local values = ffi.new('double[?]', count * 4)
         if info.format == Texture.FORMAT_BC7 then
-            bc7_texels(pixels, base, w, count, scratch, values)
+            bc7_texels(pixels, base, w, count, scratch, values, yield)
         else
             local raw = scratch(count * 4)
             pixels(base, count * 4, raw, 0)
@@ -423,8 +439,9 @@ end
 -- Code that runs once or rarely (jobs, startup, events) stays interpreted, sub-functions included: it must not
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({mip_bytes, Texture.describe, Texture.pixels, half, Texture.lut, bits_reader, subset_of, widen, raw_endpoints,
-        read_pbits, finish_endpoints, read_endpoints, read_indices, interpolate, decode_texel, Texture.bc7_block,
+    for _, fn in ipairs({mip_bytes, Texture.describe, Texture.pixels, half, Texture.lut, read_bits, subset_of, widen, raw_endpoints,
+        read_pbits, finish_endpoints, read_endpoints, read_indices, interpolate, decode_texel, parse_block,
+        Texture.bc7_block,
         place_block, bc7_texels, Texture.samples, Texture.mask_coverage}) do
         jit.off(fn, true)
     end

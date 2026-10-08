@@ -200,13 +200,14 @@ def colour_commands(mods, build):
     """Match Your Colors: the suites its own scripts/build.py runs, in LuaJIT and in the game's own lua51.dll
     (tests/game_lua.py), and its parity test against the research pipeline (all kits in LuaJIT, 10 in the game's)."""
     colours = mods / 'MatchYourColors'
-    # Its suites write scratch files to the component's build/ folder, which its own build creates first.
-    (colours / 'build').mkdir(exist_ok=True)
+    # Its suites write scratch files to the component's build/ folder (tests/test_patches.lua its patch files to
+    # build/test-patches), which its own build creates first.
+    (colours / 'build' / 'test-patches').mkdir(parents=True, exist_ok=True)
     commands = []
     for vm in ([], ['game']):
         prefix = [colours / 'tests/game_lua.py'] if vm else []
         for name in ('test_units', 'test_addon', 'test_install', 'test_idle_alloc', 'test_bingus_text', 'test_locales',
-                     'test_cache', 'test_job'):
+                     'test_cache', 'test_job', 'test_sync', 'test_patches'):
             # The shared translation test takes the folder holding bingus_text.lua.
             target = colours / 'src' if name == 'test_bingus_text' else colours
             commands.append([*prefix, colours / 'tests' / (name + '.lua'), target])

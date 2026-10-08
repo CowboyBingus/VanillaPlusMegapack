@@ -14,7 +14,7 @@ from package import package_release
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build'
 MODULE = 'mods/cowboybingus/vanilla_plus_megapack'
-VERSION = '39'
+VERSION = '40'
 REVISION = f'megapack-v{VERSION}'
 GUID = '876060ae-0640-4ac5-95b6-ec7c9a0567d3'
 INPUT_ARCHIVE = ARCHIVE.replace('patch_0', 'patch_1')  # Mod Bindings Menu's input actions, beside its addon
@@ -38,7 +38,7 @@ OPTION_DESCRIPTIONS = {
     'BetterLobbyManagement': 'Host tools in the escape menu: DISBAND SQUAD, PROMOTE, which moves the whole squad to the new host\'s ship, and CANCEL SOS in a mission (only the host needs the mod). Also a 5-second Galactic Map lobby scanner and an own-continent lobby filter.',
     'HellpodDropHold': 'Holds your own hellpod in the sky while your loading screen or the join cutscene is up, as when you join a mission in progress, then lets it fall as a normal drop with steering near the ground.',
     'LaserSentryCooldown': 'At max heat the Laser Sentry overheats and stops firing as usual, then cools at its own normal rate (about 50 s), powers its turret up and fires again instead of exploding. No options.',
-    'MatchYourColors': 'Your helmet takes your armor\'s colors, or your armor takes your helmet\'s (Mod Options Menu: Color Matching); only colors change, on your screen only.',
+    'MatchYourColors': 'Your helmet takes your armor\'s colors, or your armor takes your helmet\'s, or both take one of the game\'s weapon paint schemes; your cape can follow (Mod Options Menu). Squadmates who use the mod see your colors too.',
     'StickyGrenadeHandles': 'The G-123 Thermite and the sticky stun grenade stick when their handle hits first, instead of bouncing off.',
 }
 

@@ -15,7 +15,7 @@ Preview.SYSTEM = 0x347CE60
 Preview.MAX_SLOT = 3
 Preview.RECORD_BYTES = 160
 local SLOTS, GATE, UNITS = 49160, 50440, 12
-local BODY, ARMOR, HELMET, KITS_END = 136, 140, 144, 148 -- the cape (+148) is never recolored
+local BODY, ARMOR, HELMET, CAPE, KITS_END = 136, 140, 144, 148, 152
 local MAX_OCCUPIED = 8
 
 local function at(address) return ffi.cast('const uint8_t *', address) end
@@ -34,14 +34,16 @@ function Preview.locate(read, game, ui_slot)
             bit = 2 ^ ui_slot}
 end
 
--- The watch over the slot: poll() reads the occupied mask (8 bytes) and, when the slot is occupied, its record
--- (160 bytes). It returns 'absent' (slot free or unreadable), 'kits' (the kits shown changed, or the slot
--- appeared), 'units' (only its units changed) or 'same'. kits() gives the helmet, armor and body shown at the
--- last poll. No allocation per call.
+-- The watch over the slot: poll() reads the slot's record (160 bytes) and the occupied count and mask (8 bytes) in
+-- one read: the records (slots 0-7) end where the count begins, so the span from the slot's record to the mask is
+-- contiguous (1,288 bytes for slot 0). It returns 'absent' (slot free or unreadable), 'kits' (the kits shown
+-- changed, or the slot appeared), 'units' (only its units changed) or 'same'. kits() gives the helmet, armor, body
+-- and cape shown at the last poll. No allocation per call.
 function Preview.watch(memory, where)
-    local gate_at, record_at = at(where.gate), at(where.record)
-    local gate = ffi.new('uint32_t[2]')
-    local now, kept = ffi.new('uint8_t[?]', Preview.RECORD_BYTES), ffi.new('uint8_t[?]', Preview.RECORD_BYTES)
+    local record_at = at(where.record)
+    local gate_offset = GATE - SLOTS - Preview.RECORD_BYTES * where.slot
+    local span = gate_offset + 8
+    local now, kept = ffi.new('uint8_t[?]', span), ffi.new('uint8_t[?]', Preview.RECORD_BYTES)
     local present = false
     local self = {reads = 0}
 
@@ -52,12 +54,8 @@ function Preview.watch(memory, where)
 
     function self.poll()
         self.reads = self.reads + 1
-        if not memory.read_into(gate_at, 8, gate) or gate[0] > MAX_OCCUPIED or band(gate[1], where.bit) == 0 then
-            present = false
-            return 'absent'
-        end
-        self.reads = self.reads + 1
-        if not memory.read_into(record_at, Preview.RECORD_BYTES, now) then
+        if not memory.read_into(record_at, span, now) or u32(now, gate_offset) > MAX_OCCUPIED
+            or band(u32(now, gate_offset + 4), where.bit) == 0 then
             present = false
             return 'absent'
         end
@@ -67,13 +65,13 @@ function Preview.watch(memory, where)
         elseif differs(UNITS, BODY) then
             status = 'units'
         end
-        ffi.copy(kept, now, Preview.RECORD_BYTES)
+        if status ~= 'same' then ffi.copy(kept, now, Preview.RECORD_BYTES) end
         present = true
         return status
     end
 
     function self.kits()
-        return u32(kept, HELMET), u32(kept, ARMOR), u32(kept, BODY)
+        return u32(kept, HELMET), u32(kept, ARMOR), u32(kept, BODY), u32(kept, CAPE)
     end
     return self
 end
