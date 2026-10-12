@@ -1,3 +1,13 @@
+# v42
+
+- Mod Bindings Menu v2.2.1: the MODS tab's first section header is no longer blank in game languages other than English, Japanese and Simplified Chinese.
+- Mod Bindings Menu v2.2.1: every game text ID it borrows now exists in all of the game's languages; up to 59 different texts show on the MODS tab at once, down from 65.
+- Mod Bindings Menu v2.2.1: per-frame work is unchanged from v2.2, measured there at 0.008 ms per frame in missions.
+- Mod Bindings Menu v2.2.1: not yet checked in game in a language other than English.
+- The other twenty mods are unchanged from v41.
+- Twenty-one independent options; use one copy of each mod: its standalone package or the pack option.
+- Requires Bingus Shared Loader v18 or newer; v19 is recommended.
+
 # v41
 
 - Match Your Colors v1.4: new Color Matching choice Helmet and Armor Match Cape: your helmet and armor take the colors of the cape you wear, and the cape keeps its own.

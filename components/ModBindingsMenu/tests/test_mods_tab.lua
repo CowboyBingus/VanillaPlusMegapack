@@ -178,9 +178,11 @@ end
 put32(screen + 8, 3)
 show_page(screen)
 assert(calls.builds == 1 and get32(listing + 2411916) == 1)
-assert(header_label(0) == 0x77bf158a and slot_text(0x3327800) == 'NO MOD BINDINGS INSTALLED')
+-- The first pooled ID is one every game language has (0x77bf158a, used before,
+-- exists only in English, Japanese and Simplified Chinese and showed blank elsewhere).
+assert(header_label(0) == 0x76ad93e3 and slot_text(0x3327550) == 'NO MOD BINDINGS INSTALLED')
 release_labels()
-assert(slot_text(0x3327800) == nil)
+assert(slot_text(0x3327550) == nil)
 state.layout = nil
 calls.builds = 0
 
@@ -188,7 +190,7 @@ calls.builds = 0
 assert(host.register_binding('map', 0xb46c8096, 1, {category = 'Ship Station Hotkeys'}))
 assert(host.register_binding('external', 'Toggle HUD', 2))
 -- A pooled slot the game already filled is skipped.
-ffi.cast('uint64_t *', base + 0x3327800)[0] = 1
+ffi.cast('uint64_t *', base + 0x3327550)[0] = 1
 put32(screen + 8, 0)
 show_page(screen)
 assert(calls.builds == 0)
@@ -197,13 +199,13 @@ show_page(screen)
 assert(calls.builds == 1 and calls.resets[#calls.resets] == 3)
 -- Sections sort by name: MODS (derived fallback) before SHIP STATION HOTKEYS.
 assert(get32(listing + 2411916) == 4)
-assert(header_label(0) == 0x76ad93e3 and slot_text(0x3327550) == 'MODS')
+assert(header_label(0) == 0xa9cf13bb and slot_text(0x3328230) == 'MODS')
 assert(get32(listing + 7856 + 24784 + 24760) == 12 * 65536 + 0)
-assert(header_label(2) == 0x431da596 and slot_text(0x3328238) == 'SHIP STATION HOTKEYS')
+assert(header_label(2) == 0xc80d6bd6 and slot_text(0x3328248) == 'SHIP STATION HOTKEYS')
 assert(get32(listing + 7856 + 3 * 24784 + 24760) == 12 * 65536 + 1)
 -- The string row label borrows a pooled ID written to the action label table.
-assert(slot_text(0x3328230) == 'TOGGLE HUD')
-assert(get32(base + 0x26438a0 + (12 * 97 + 0) * 4) == 0xa9cf13bb)
+assert(slot_text(0x3328238) == 'TOGGLE HUD')
+assert(get32(base + 0x26438a0 + (12 * 97 + 0) * 4) == 0x431da596)
 assert(get32(base + 0x26438a0 + (12 * 97 + 1) * 4) == 0xb46c8096)
 assert(MODS_TITLE_ID == 0x781e104c)
 -- Rebuilt rows are recognised, so later frames do not rebuild.
@@ -220,13 +222,13 @@ assert(calls.builds == 2)
 assert(host.register_binding('late', 0x3ef7f7ad, 3, {category = 'Arc Tools'}))
 show_page(screen)
 assert(calls.builds == 3 and get32(listing + 2411916) == 6)
-assert(slot_text(0x3328248) == 'ARC TOOLS' and header_label(0) == 0xc80d6bd6)
+assert(slot_text(0x3328250) == 'ARC TOOLS' and header_label(0) == 0x9845cd37)
 -- Leaving the page returns every borrowed slot and pooled row label.
 release_labels()
-for _, rva in ipairs({0x3327550, 0x3328230, 0x3328238, 0x3328248}) do
+for _, rva in ipairs({0x3328230, 0x3328238, 0x3328248, 0x3328250}) do
     assert(slot_text(rva) == nil)
 end
-assert(ffi.cast('uint64_t *', base + 0x3327800)[0] == 1)
+assert(ffi.cast('uint64_t *', base + 0x3327550)[0] == 1)
 assert(get32(base + 0x26438a0 + (12 * 97 + 0) * 4) == original_label[12 * 65536])
 print('Native MODS tab relabel, per-mod sections, label pool and rebuild OK')
 
@@ -331,7 +333,8 @@ assert(calls.builds == builds + 1, 'MODS tab must still be rebuilt')
 -- Headers fall back to the MODS title (kept alive for the addon's lifetime);
 -- all sections share that single header.
 assert(header_label(0) == MODS_TITLE_ID and get32(listing + 2411916) == 4)
-for _, rva in ipairs({0x3327550, 0x3328230, 0x3328238, 0x3328248}) do
+-- 0x3327550 still holds the fake game value set above, so the claimable slots follow it.
+for _, rva in ipairs({0x3328230, 0x3328238, 0x3328248, 0x3328250}) do
     assert(slot_text(rva) == nil, 'refused writes must not claim slots')
 end
 -- A claim whose slot cannot be cleared stays alive.

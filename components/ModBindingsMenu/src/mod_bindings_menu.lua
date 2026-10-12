@@ -101,8 +101,13 @@ local ASSIGNMENTS_FILE = 'ModBindingsMenu.assignments'
 -- formats with arguments, so they bypass the cache elsewhere. Category
 -- headers and string row labels borrow empty slots only while the bindings
 -- page is displayed. Each entry is {localization ID, cache slot RVA}.
+-- Every ID here is in all 15 of the game's language string sets (checked on
+-- build 25480438 against every strings resource in the game data): the game
+-- shows nothing for an ID its current language lacks, whatever the slot holds.
+-- 0x77bf158a, 0x4b7ce100, 0x74f55d93, 0x59500445, 0x8bc421a5 and 0xacf702d0
+-- exist only in English, Japanese and Simplified Chinese, so they are not used.
 local LABEL_POOL = {
-    {0x77bf158a, 0x3327800}, {0x76ad93e3, 0x3327550},
+    {0x76ad93e3, 0x3327550},
     {0xa9cf13bb, 0x3328230}, {0x431da596, 0x3328238}, {0xc80d6bd6, 0x3328248},
     {0x9845cd37, 0x3328250}, {0x9f020af7, 0x3328260}, {0x766f7a90, 0x3328268},
     {0x3707c006, 0x3328270}, {0x57063e09, 0x3328278}, {0x039cdc47, 0x3328280},
@@ -122,8 +127,7 @@ local LABEL_POOL = {
     {0x43213f6d, 0x3328440}, {0x2ec24cb3, 0x3328448}, {0xf40bd215, 0x3328450},
     {0xafba9b8b, 0x3328458}, {0x0944ce13, 0x3328460}, {0xddc61cbf, 0x3328468},
     {0x61d0e824, 0x3328470}, {0xa95fd6a0, 0x3328478}, {0x7505bcbf, 0x3328480},
-    {0x4777d7c3, 0x3328488}, {0x4b7ce100, 0x3328490}, {0x74f55d93, 0x3328498},
-    {0x59500445, 0x33284b8}, {0x8bc421a5, 0x33284c0}, {0xacf702d0, 0x3328500},
+    {0x4777d7c3, 0x3328488},
 }
 local ROW_LIST_OFFSET = 338344
 local ROW_STRIDE, ROW_START = 24784, 7856

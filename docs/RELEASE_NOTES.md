@@ -1,9 +1,7 @@
-- Match Your Colors v1.4: new Color Matching choice Helmet and Armor Match Cape: your helmet and armor take the colors of the cape you wear, and the cape keeps its own.
-- Match Your Colors v1.4: new SEAF paint scheme in the game's SEAF trooper colors, matched against SEAF troopers in the game.
-- Match Your Colors v1.4: color fixes from rendered reviews, among them camo patterns, metal parts, bands and stripes, dark parts and clothing on pieces that also show skin.
-- Match Your Colors v1.4: LUT mods that save their colors as 32-bit float textures no longer make recolors fail.
-- Match Your Colors v1.4: your Helldiver is recolored the frame after it appears, and the textures a recolor needs are made while the game loads, never during play.
-- Match Your Colors v1.4: in 7 minutes of real play, applying a recolor took 0.56-0.61 ms at the median and 1.33 ms at most; its per-frame cost in real play is not measured yet.
-- The other twenty mods are unchanged from v40.
+- Mod Bindings Menu v2.2.1: the MODS tab's first section header is no longer blank in game languages other than English, Japanese and Simplified Chinese.
+- Mod Bindings Menu v2.2.1: every game text ID it borrows now exists in all of the game's languages; up to 59 different texts show on the MODS tab at once, down from 65.
+- Mod Bindings Menu v2.2.1: per-frame work is unchanged from v2.2, measured there at 0.008 ms per frame in missions.
+- Mod Bindings Menu v2.2.1: not yet checked in game in a language other than English.
+- The other twenty mods are unchanged from v41.
 - Twenty-one independent options; use one copy of each mod: its standalone package or the pack option.
 - Requires Bingus Shared Loader v18 or newer; v19 is recommended.

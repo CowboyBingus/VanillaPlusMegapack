@@ -34,7 +34,7 @@ import translations  # noqa: E402
 
 HERE = Path(__file__).resolve().parents[1]
 BASE_CONFIG = Path(os.environ.get("HD2_INPUT_CONFIG", str(HERE / "research" / "input.config")))
-VERSION = "2.2"
+VERSION = "2.2.1"
 CONFIG_SHA256 = "E509D85AC3603721E5AFE5686C7041798587A108AA86E2DA961A2EA451881A1B"
 CONFIG_NAME = resource_hash("content/input")
 CONFIG_TYPE = resource_hash("config")
