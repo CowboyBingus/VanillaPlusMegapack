@@ -40,12 +40,13 @@ sys.path.insert(0, str(loader_checkout() / 'scripts'))
 from archive import ARCHIVE, make_archive, resource_hash  # noqa: E402
 from build_addon import entry_source  # noqa: E402
 
-VERSION = '1.3'
+VERSION = '1.4'
 LUA_NAME = 'mods/cowboybingus/match_your_colors'
 GUID = 'b0694ff1-c08f-43e9-8611-e0ec75ea3ab5'
 TITLE = 'Match Your Colors v' + VERSION
-DESCRIPTION = ('Recolors your helmet to match your armor, or your armor to match your helmet, or paints both in one '
-               'of the game\'s weapon paint schemes (Mod Options Menu). Squadmates who use the mod see each '
+DESCRIPTION = ('Recolors your helmet to match your armor, your armor to match your helmet, or both to match your '
+               'cape, or paints both in one of the game\'s weapon paint schemes or SEAF colors (Mod Options Menu). '
+               'Squadmates who use the mod see each '
                'other\'s colors (Sync With Mod Users, always on); players without it see your gear as it is. Colors '
                'come from the game\'s own files, so new armor and helmets work as released. Steam build 25480438. '
                'Requires Bingus Shared Loader v18+.')

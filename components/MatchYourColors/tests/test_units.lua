@@ -38,6 +38,253 @@ check('malformed LZ4 blocks raise instead of writing out of bounds', function()
     assert(not pcall(Slim.lz4, ffi.cast('const uint8_t *', long), #long, out, 16), 'match overrun accepted')
 end)
 
+check('LZ4: long overlapping matches (copied in whole periods) decode as byte by byte, at every offset and length '
+      .. 'around the switch, up to a whole 256 KB chunk', function()
+    -- One block: sequences of a few literals and a match, the expected output built byte by byte as the format says.
+    local state = 12345
+    local function random(n) -- deterministic (Park-Miller: exact in doubles), 0 .. n - 1
+        state = (state * 16807) % 2147483647
+        return state % n
+    end
+    local function length_bytes(rest) -- LZ4's 255-run extension of a length past 15
+        local out = {}
+        while rest >= 255 do out[#out + 1] = string.char(255) rest = rest - 255 end
+        out[#out + 1] = string.char(rest)
+        return table.concat(out)
+    end
+    local function block(matches)
+        local total = 5
+        for _, m in ipairs(matches) do total = total + m.literals + m.length end
+        local packed, expected, n = {}, ffi.new('uint8_t[?]', total), 0
+        for _, m in ipairs(matches) do
+            local literals = {}
+            for i = 1, m.literals do
+                local byte = random(256)
+                literals[i], expected[n] = string.char(byte), byte
+                n = n + 1
+            end
+            local lit = table.concat(literals)
+            local offset, length = math.min(m.offset, n), m.length
+            local token = (#lit >= 15 and 15 or #lit) * 16 + (length - 4 >= 15 and 15 or length - 4)
+            packed[#packed + 1] = string.char(token) .. (#lit >= 15 and length_bytes(#lit - 15) or '') .. lit
+                .. string.char(offset % 256, math.floor(offset / 256)) .. (length - 4 >= 15 and length_bytes(length - 19) or '')
+            for _ = 1, length do
+                expected[n] = expected[n - offset]
+                n = n + 1
+            end
+        end
+        packed[#packed + 1] = string.char(0x50) .. 'tail!' -- the last sequence: literals only
+        ffi.copy(expected + n, 'tail!', 5)
+        return table.concat(packed), ffi.string(expected, n + 5)
+    end
+    -- The game's LuaJIT 2.1.0-alpha miscompiled this generator in some layouts of loaded modules (wrong bytes, an
+    -- access violation; 2026-10-08): it runs interpreted. The decoder under test stays compiled.
+    jit.off(block, true) -- lint-ok: R5 test generator only
+    jit.off(random) -- lint-ok: R5 test generator only
+    local cases = {}
+    for _, offset in ipairs({1, 2, 3, 7, 64, 255, 256, 300}) do
+        for _, length in ipairs({4, 255, 256, 257, 511, 4096, 20000}) do
+            cases[#cases + 1] = {literals = 1 + random(300), offset = offset, length = length}
+        end
+    end
+    for _ = 1, 200 do cases[#cases + 1] = {literals = random(40), offset = 1 + random(600), length = 4 + random(3000)} end
+    local packed, expected = block(cases)
+    local out = ffi.new('uint8_t[?]', #expected)
+    assert(Slim.lz4(ffi.cast('const uint8_t *', packed), #packed, out, #expected) == #expected
+           and ffi.string(out, #expected) == expected, 'mixed block')
+    local chunk = 262144 -- one offset-1 match filling a chunk (its first byte a literal), as in the game's data
+    packed, expected = block({{literals = 1, offset = 1, length = chunk - 6}})
+    out = ffi.new('uint8_t[?]', chunk)
+    assert(Slim.lz4(ffi.cast('const uint8_t *', packed), #packed, out, chunk) == chunk
+           and ffi.string(out, chunk) == expected, 'a 256 KB run')
+end)
+
+check('a pattern mask is summed in blocks of whole rows with a pause after each, to the whole mip\'s sum exactly',
+      function()
+    -- the coverage before v1.4: the whole mip read and summed in one piece
+    local function whole(pixels, info, layer, mip)
+        local per = info.format == Texture.FORMAT_R8 and 1 or 4
+        mip = math.min(mip, info.mips - 1)
+        local w, h = math.max(1, bit.rshift(info.width, mip)), math.max(1, bit.rshift(info.height, mip))
+        local data = ffi.new('uint8_t[?]', w * h * per)
+        pixels((layer % info.layers) * info.layer_bytes + info.mip_offsets[mip], w * h * per, data, 0)
+        local sum = 0
+        for i = 0, w * h - 1 do
+            local v = 100 * (data[i * per] / 255 - 0.5)
+            if v > 1 then v = 1 elseif v < 0 then v = 0 end
+            sum = sum + v
+        end
+        return sum / (w * h)
+    end
+    local function mask(format, width, height, mips, layers)
+        local per = format == Texture.FORMAT_R8 and 1 or 4
+        local info = {format = format, width = width, height = height, mips = mips, layers = layers, mip_offsets = {},
+                      layer_bytes = 0}
+        for m = 0, mips - 1 do
+            info.mip_offsets[m] = info.layer_bytes
+            info.layer_bytes = info.layer_bytes + math.max(1, bit.rshift(width, m)) * math.max(1, bit.rshift(height, m)) * per
+        end
+        local bytes = ffi.new('uint8_t[?]', info.layer_bytes * layers)
+        for i = 0, info.layer_bytes * layers - 1 do bytes[i] = (i * 37 + math.floor(i / 7)) % 256 end
+        local reads = 0
+        local function pixels(at, size, out, out_offset)
+            reads = reads + 1
+            ffi.copy(out + (out_offset or 0), bytes + at, size)
+        end
+        return info, pixels, function() return reads end
+    end
+    local grower = Slim.grower(64)
+    for _, c in ipairs({{Texture.FORMAT_R8, 256, 256, 9, 1, 2}, {Texture.FORMAT_RGBA8, 256, 256, 9, 2, 3},
+                        {Texture.FORMAT_R8, 2048, 300, 1, 1, 0}, {Texture.FORMAT_RGBA8, 300, 70, 1, 1, 0},
+                        {Texture.FORMAT_R8, 1, 1, 1, 1, 4}, {Texture.FORMAT_R8, 32768, 2, 1, 1, 0}}) do
+        local info, pixels, reads = mask(c[1], c[2], c[3], c[4], c[5])
+        local pauses = 0
+        local got = Texture.mask_coverage(pixels, info, c[6], 2, grower, function() pauses = pauses + 1 end)
+        local mip = math.min(2, c[4] - 1)
+        local w, h = math.max(1, bit.rshift(c[2], mip)), math.max(1, bit.rshift(c[3], mip))
+        local rows = math.max(1, math.floor(Texture.MASK_BLOCK / w))
+        local blocks = math.ceil(h / rows)
+        assert(got == whole(pixels, info, c[6], 2), string.format('%dx%d: %.17g', c[2], c[3], got))
+        assert(pauses == blocks and reads() == blocks + 1, string.format('%dx%d: %d pauses, %d reads, %d blocks', c[2],
+               c[3], pauses, reads() - 1, blocks))
+    end
+end)
+
+check('R32G32B32A32_FLOAT (mods\' LUTs, user report 2026-10-08): singles decode exactly from their bytes (NaN as 0/0); '
+      .. 'its header, mip sizes, LUTs, patterns, tilers and cape cells read', function()
+    local function bytes_of(bits) -- the four little-endian bytes of a 32-bit pattern
+        local p = ffi.new('uint8_t[4]')
+        for k = 0, 3 do p[k] = math.floor(bits / 256 ^ k) % 256 end
+        return p
+    end
+    local cases = {{0x3F800000, 1}, {0xC0200000, -2.5}, {0x00000001, 2 ^ -149}, {0x80000001, -2 ^ -149},
+                   {0x007FFFFF, (2 ^ 23 - 1) * 2 ^ -149}, {0x7F7FFFFF, (2 - 2 ^ -23) * 2 ^ 127}, {0x00800000, 2 ^ -126},
+                   {0x7F800000, math.huge}, {0xFF800000, -math.huge}, {0x3EAAAAAB, 0.3333333432674408}}
+    for _, c in ipairs(cases) do
+        local got = Texture.single(bytes_of(c[1]), 0)
+        assert(got == c[2], string.format('%08x: %.17g', c[1], got))
+    end
+    local zero = Texture.single(bytes_of(0x80000000), 0)
+    assert(zero == 0 and 1 / zero < 0, 'negative zero')
+    for _, bits in ipairs({0x7FC00000, 0x7F800001, 0xFFFFFFFF, 0x7FA5A5A5}) do
+        local nan = Texture.single(bytes_of(bits), 0)
+        assert(type(nan) == 'number' and nan ~= nan, string.format('%08x: a NaN', bits))
+    end
+    -- every float a float array holds comes back from its bytes
+    local f = ffi.new('float[1]')
+    local view = ffi.cast('const uint8_t *', f)
+    for i = 1, 2000 do
+        f[0] = (i % 2 == 0 and -1 or 1) * (i * 7919 % 100003) / 997 * 2 ^ ((i % 60) - 30)
+        assert(Texture.single(view, 0) == f[0], 'float ' .. i)
+    end
+    -- a 23 x 8 LUT with 3 mips: header, sizes, values
+    local main = ffi.new('uint8_t[?]', 0xC0 + 148)
+    local function put(o, v) for k = 0, 3 do main[o + k] = math.floor(v / 256 ^ k) % 256 end end
+    put(0xC0, 0x20534444) put(0xC0 + 12, 8) put(0xC0 + 16, 23) put(0xC0 + 28, 3) put(0xC0 + 84, 0x30315844)
+    put(0xC0 + 128, Texture.FORMAT_RGBA32F) put(0xC0 + 140, 1)
+    local info = Texture.describe(main, 0xC0 + 148)
+    assert(info.format == 2 and info.layer_bytes == (23 * 8 + 11 * 4 + 5 * 2) * 16 and info.mip_offsets[1] == 2944,
+           'RGBA32F mip sizes: 16 bytes a texel')
+    local floats = ffi.new('float[?]', info.total / 4)
+    for i = 0, 23 * 8 * 4 - 1 do floats[i] = (i % 13) / 8 - 0.5 end
+    ffi.copy(ffi.cast('uint8_t *', floats) + 7 * 4, bytes_of(0x7FA5A5A5), 4) -- a NaN with a payload in the LUT
+    local raw = ffi.cast('const uint8_t *', floats)
+    local function pixels(at, size, out, out_offset) ffi.copy(out + (out_offset or 0), raw + at, size) end
+    local values, width, height = Texture.lut(pixels, info, Slim.grower(64))
+    assert(width == 23 and height == 8, 'size')
+    for i = 0, 23 * 8 * 4 - 1 do
+        if i == 7 then
+            assert(values[i] ~= values[i] and tonumber(values[i]) ~= nil, 'the NaN canonical')
+        else
+            assert(values[i] == (i % 13) / 8 - 0.5, 'value ' .. i)
+        end
+    end
+    -- a tiler of floats reads as 8-bit channels (what the disk cache keeps); a format the samples cannot read raises
+    info.width, info.height, info.mips, info.mip_offsets = 512, 1, 1, {[0] = 0}
+    local tiler = ffi.new('float[2048]')
+    for i = 0, 2047 do tiler[i] = (i % 300) / 255 - 0.1 end
+    raw = ffi.cast('const uint8_t *', tiler)
+    local samples = Texture.samples(pixels, info, 0, 512, Slim.grower(64))
+    for i = 0, 2047 do
+        local v = math.min(math.max((i % 300) / 255 - 0.1, 0), 1)
+        assert(samples[0][i] == math.floor(tiler[i] < 0 and 0 or math.min(tiler[i], 1) * 255 + 0.5) / 255
+               and math.abs(samples[0][i] - v) <= 0.5 / 255 + 1e-9, 'tiler value ' .. i)
+    end
+    info.format = Texture.FORMAT_R8
+    assert(not pcall(Texture.samples, pixels, info, 0, 512, Slim.grower(64)), 'an R8 tiler raises')
+end)
+
+check('emblem sheets: a recipe whose prepared sheet something still holds is found again (three live capes, recipes '
+      .. '1 2 3 1 2 3: three copies, not six); a dropped one beyond the two kept is made again', function()
+    local size = 4096
+    local original = Recolor.c_buffer(size)
+    ffi.fill(original, size, 7)
+    local copies = 0
+    local ctx = {p = {sheet = function() return original end}, cape_kit = {archive = '0000000000000001'},
+                 deps = {Capes = {recolor_sheet = function() copies = copies + 1 end}, Colour = {}}}
+    local function recipe(color)
+        return {name = '0000000000001234', width = 32, height = 32, mips = 1, size = size,
+                cells = {{rect = {0, 0, 4, 4}, shift = {color, 0, 0}}}}
+    end
+    local held = {}
+    for _, color in ipairs({1, 2, 3, 1, 2, 3}) do held[color] = Recolor.sheet_spec(ctx, recipe(color), function() end) end
+    assert(copies == 3, 'three recipes, three copies: ' .. copies)
+    for _, color in ipairs({1, 2, 3}) do
+        assert(Recolor.sheet_spec(ctx, recipe(color), function() end) == held[color], 'the same spec ' .. color)
+    end
+    held = {}
+    collectgarbage('collect') -- lint-ok: R4 test process only
+    copies = 0
+    Recolor.sheet_spec(ctx, recipe(4), function() end)
+    Recolor.sheet_spec(ctx, recipe(5), function() end) -- 4 and 5 kept now
+    Recolor.sheet_spec(ctx, recipe(1), function() end)
+    assert(copies == 3, 'recipe 1, held by nothing and no longer kept, is made again: ' .. copies)
+end)
+
+check('ID-mask coverage reads mip 0 of the game\'s masks (at most 512 x 512) and of a mask without mips, else the first '
+      .. 'mip no larger than 512 on either side (a mod\'s 2K or 4K mask), as a mask of that mip alone', function()
+    local function mask(width, height, mips, layers)
+        local info = {format = Texture.FORMAT_RGBA8, width = width, height = height, mips = mips, layers = layers,
+                      mip_offsets = {}, layer_bytes = 0}
+        for m = 0, mips - 1 do
+            info.mip_offsets[m] = info.layer_bytes
+            info.layer_bytes = info.layer_bytes + math.max(1, bit.rshift(width, m)) * math.max(1, bit.rshift(height, m)) * 4
+        end
+        local bytes = ffi.new('uint8_t[?]', info.layer_bytes * layers)
+        for i = 0, info.layer_bytes * layers - 1 do bytes[i] = (i * 13 + math.floor(i / 11)) % 256 end
+        local read = 0
+        local function pixels(at, size, out, out_offset)
+            read = read + size
+            ffi.copy(out + (out_offset or 0), bytes + at, size)
+        end
+        return info, pixels, bytes, function() return read end
+    end
+    local grower = Slim.grower(64)
+    -- the same texels as a one-mip mask of their own
+    local function alone(info, bytes, m)
+        local w, h = math.max(1, bit.rshift(info.width, m)), math.max(1, bit.rshift(info.height, m))
+        local one = {format = info.format, width = w, height = h, mips = 1, layers = info.layers,
+                     mip_offsets = {[0] = 0}, layer_bytes = w * h * 4}
+        local copy = ffi.new('uint8_t[?]', one.layer_bytes * info.layers)
+        for l = 0, info.layers - 1 do
+            ffi.copy(copy + l * one.layer_bytes, bytes + l * info.layer_bytes + info.mip_offsets[m], one.layer_bytes)
+        end
+        return Texture.coverage(function(at, size, out, out_offset) ffi.copy(out + (out_offset or 0), copy + at, size) end,
+                                one, Slim.grower(64))
+    end
+    for _, c in ipairs({{512, 512, 10, 2, 0}, {256, 512, 10, 1, 0}, {2048, 2048, 12, 2, 2}, {4096, 1024, 13, 1, 3},
+                        {2048, 2048, 1, 1, 0}}) do
+        local info, pixels, bytes, read = mask(c[1], c[2], c[3], c[4])
+        local got = assert(Texture.coverage(pixels, info, grower))
+        local want = alone(info, bytes, c[5])
+        for k = 1, 4 * c[4] do
+            assert(got[k] == want[k], string.format('%dx%d mip %d slot %d: %.17g vs %.17g', c[1], c[2], c[5], k, got[k], want[k]))
+        end
+        local w, h = math.max(1, bit.rshift(c[1], c[5])), math.max(1, bit.rshift(c[2], c[5]))
+        assert(read() == w * h * 4 * c[4], string.format('%dx%d: only mip %d read (%d bytes)', c[1], c[2], c[5], read()))
+    end
+end)
+
 check('half floats', function()
     local cases = {{0x00, 0x3C, 1}, {0x00, 0xC0, -2}, {0xFF, 0x7B, 65504}, {0x01, 0x00, 2 ^ -24},
                    {0x00, 0x7C, math.huge}, {0x00, 0x00, 0}, {0x00, 0x38, 0.5}, {0x55, 0x35, 0.333251953125}}
@@ -91,10 +338,10 @@ end)
 
 check('numpy summation order (sequential below 8 terms, eight lanes from 8)', function()
     local a = {1e16, 1, -1e16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}
-    assert(Matcher.npsum(a, 3) == ((1e16 + 1) - 1e16), 'sequential')
+    assert(Colour.npsum(a, 3) == ((1e16 + 1) - 1e16), 'sequential')
     local r = {a[1] + a[9], a[2] + a[10], a[3] + a[11], a[4] + a[12], a[5], a[6], a[7], a[8]}
     local expected = ((r[1] + r[2]) + (r[3] + r[4])) + ((r[5] + r[6]) + (r[7] + r[8])) + a[13]
-    assert(Matcher.npsum(a, 13) == expected, 'pairwise')
+    assert(Colour.npsum(a, 13) == expected, 'pairwise')
 end)
 
 check('CIEDE2000 reference pairs (Sharma, Wu and Dalal 2005)', function()
@@ -192,6 +439,118 @@ check('a mod\'s LUT row keeps its measured response only while its finish is the
     assert(item.rows[2].light > 20 and plain.rows[2].light == 20, 'the finish-changed row brighter by the model')
 end)
 
+check('an item without a measurement of its own (a mod patched its geometry; a kit the study did not see) still uses '
+      .. 'the study: a row no kit showed on 0.1% of its view weighs nothing unless a mod changed it, rows of LUTs the '
+      .. 'study never measured keep their coverage, and rows take their measured response (end user 2026-10-08: a '
+      .. 'hidden debug green became the armor\'s accent and every helmet\'s stripes)', function()
+    local Appearance = require('appearance')
+    -- kit 11111111 measured with LUTs aaaa and cccc (200,000 px: its rows' and its pattern's): aaaa row 0 seen on
+    -- 99,995 px, row 1 on 5 (a sliver), row 2 never, no row of cccc seen; LUT bbbb is not in the study
+    local data = {luts = {'aaaa', 'cccc'}, rows = {'0 1 1 1 0 0 0|1 1 1 1 0 0 0'},
+                  kits = {['11111111'] = '1 2;1.0=99995,40 1.1=5,1;dddd=100000,1,1,1'}}
+    local look = Appearance.new(data)
+    assert(math.abs(look.seen_share('aaaa', 0) - 0.499975) < 1e-12 and look.seen_share('aaaa', 1) == 2.5e-5
+           and look.seen_share('aaaa', 2) == 0 and look.seen_share('cccc', 0) == 0 and look.seen_share('bbbb', 0) == nil,
+           'best shares of the kit\'s pixels, patterns included: seen, a sliver, never, a measured LUT never seen, not '
+           .. 'studied')
+    local function row(lut, r, area, L, a, b)
+        return {key = lut .. ':' .. r, lut = lut, row = r, area = area, under = 0, L = L, a = a, b = b, ar = 0.2,
+                ag = 0.2, ab = 0.2, metal = false, camo = false, mode = 0, full = false}
+    end
+    -- the armor: a grey main, the debug green hidden (3% of its texture), a red sliver, an orange of a LUT the study
+    -- never measured
+    local function armor(changed)
+        local rows = {row('aaaa', 0, 0.80, 40, 0, 0), row('aaaa', 2, 0.03, 87, -86, 83), row('aaaa', 1, 0.03, 50, 70, 50),
+                      row('bbbb', 0, 0.02, 65, 35, 60)}
+        if changed then rows[2].vanilla = {L = 40, a = 0, b = 0, ar = 0.05, ag = 0.05, ab = 0.05} end
+        local analysis = {kit = {id = 0x11111111, kit_type = 'Armor'}, rows = rows, geometry_patched = true}
+        return Matcher.item(rows, true, nil, Recolor.look_of(analysis, look))
+    end
+    local s = armor()
+    assert(not s.measured and s.rows[2].area == 0 and s.rows[3].area == 0 and s.rows[2].tex_area == 0.03,
+           'the hidden row and the sliver weigh nothing (their coverage kept as tex_area)')
+    assert(s.rows[4].area == 0.02 and s.rows[1].area == 0.80, 'a seen row and a row of an unmeasured LUT keep coverage')
+    assert(s.rows[1].cal and math.abs(s.rows[1].L - 51.84) < 0.1 and not s.rows[4].cal,
+           'the measured response gives the seen row its perceived color (albedo 0.2 through gain 1: L 51.8, model 40)')
+    local helmet = Matcher.item({row('h', 0, 0.85, 30, 0, 0), row('h', 1, 0.15, 70, -5, 60)}, false)
+    local plan = Matcher.plan(helmet, s)
+    assert(plan['h:1'] and plan['h:1'].kind == 'accent' and plan['h:1'].source == 'bbbb:0',
+           'the helmet\'s stripe takes the orange, not the hidden green: ' .. tostring(plan['h:1'] and plan['h:1'].source))
+    local modded = armor(true)
+    assert(modded.rows[2].area == 0.03, 'a row a mod changed may be in use: its coverage kept')
+    -- a measured kit is unchanged: the hidden row has no pixels anyway, and the index is not made for it
+    local built, index_seen = 0, look.index_seen
+    look.index_seen = function(yield) built = built + 1 return index_seen(yield) end
+    local measured_rows = {row('aaaa', 0, 0.80, 40, 0, 0), row('aaaa', 2, 0.03, 87, -86, 83)}
+    local m = Matcher.item(measured_rows, true, nil,
+                           Recolor.look_of({kit = {id = 0x11111111, kit_type = 'Armor'}, rows = measured_rows}, look))
+    assert(m.measured and m.rows[2].area == 0 and m.rows[1].area == 99995, 'measured: pixels, as before')
+    assert(built == 0, 'a measured item does not make the index')
+    armor()
+    assert(built == 1, 'an unmeasured item makes it (once made, a no-op)')
+end)
+
+check('a row 0 that ID-mask coverage leaves out (texels of blank weights draw row 0) takes its group\'s color and '
+      .. 'weighs nothing even where the study saw it; a group nothing weighs looks like its rows, not black (image '
+      .. 'review 2026-10-09: the PH-56 Jaguar\'s shin wraps kept their tan)', function()
+    local Appearance = require('appearance')
+    -- kit 22222222 measured with LUT aaaa: row 0 seen on 30,000 px, row 1 on 60,000, row 2 on 10,000
+    local look = Appearance.new({luts = {'aaaa'}, rows = {'0 1 1 1 0 0 0|1 1 1 1 0 0 0|2 1 1 1 0 0 0'},
+                                 kits = {['22222222'] = '1;1.0=30000,10 1.1=60000,30 1.2=10000,5;'}})
+    local function row(r, area, L, a, b, lut)
+        lut = lut or 'aaaa'
+        return {key = lut .. ':' .. r, lut = lut, row = r, area = area, under = 0, L = L, a = a, b = b,
+                ar = 0.1, ag = 0.08, ab = 0.05, metal = false, camo = false, mode = 0, full = false}
+    end
+    -- the wraps (row 0, no coverage) share the tan of the main cloth (row 1); a blue trim of no coverage stands alone
+    local rows = {row(0, 0, 50, 5, 20), row(1, 0.7, 51, 5, 21), row(2, 0.3, 30, 0, 0), row(3, 0, 40, -10, -40)}
+    local t = Matcher.item(rows, true, nil, Recolor.look_of({kit = {id = 0x22222222, kit_type = 'Armor'}, rows = rows},
+                                                            look))
+    assert(t.measured and t.rows[1].area == 0 and t.rows[2].area == 60000 and t.rows[1].tex_area == 0,
+           'the wraps weigh nothing though seen; the cloth takes its pixels')
+    local wraps, trim
+    for _, g in ipairs(t.groups) do
+        for _, r in ipairs(g.rows) do
+            if r.key == 'aaaa:0' then wraps = g end
+            if r.key == 'aaaa:3' then trim = g end
+        end
+    end
+    assert(wraps and wraps.rows[1].key == 'aaaa:1', 'the wraps join the cloth\'s group by their model color')
+    assert(trim.share == 0 and trim.L > 30, 'a group nothing weighs looks like its rows (L ' .. trim.L .. '), not black')
+    local helmet = Matcher.item({row(0, 0.9, 35, 0, 0, 'hhhh'), row(1, 0.1, 20, 0, 0, 'hhhh')}, false)
+    local plan = Matcher.plan(t, helmet)
+    assert(plan['aaaa:0'] and plan['aaaa:1'] and plan['aaaa:0'].source == plan['aaaa:1'].source,
+           'the wraps take the cloth\'s color')
+end)
+
+check('the study\'s index of seen rows is made in pieces, a pause every 32 kits, and kept only once whole (about 3 ms '
+      .. 'outside the game, made in a job only for an item without a measurement)', function()
+    local Appearance = require('appearance')
+    local look = Appearance.new(require('appearance_data'))
+    local pauses = 0
+    local function counting() pauses = pauses + 1 coroutine.yield() end
+    local dropped = coroutine.create(function() look.index_seen(counting) end)
+    coroutine.resume(dropped) -- the first piece, then the job is dropped
+    assert(pauses == 1, 'paused after the first 32 kits')
+    pauses = 0
+    local whole = coroutine.create(function() look.index_seen(counting) end)
+    while coroutine.status(whole) ~= 'dead' do assert(coroutine.resume(whole)) end
+    assert(pauses == 9, 'made anew from the first kit (nothing half-made kept), 293 kits: 9 pauses, ' .. pauses)
+    pauses = 0
+    look.index_seen(counting)
+    assert(pauses == 0 and look.seen_share('19a4fb2cd5670ff2', 2) == 0
+           and look.seen_share('19a4fb2cd5670ff2', 0) > 0.001, 'made once: the CE-27 Ground Breaker\'s debug green '
+           .. 'never seen, its row 0 seen')
+    -- the look of an item without a measurement makes it with the job's pauses
+    local fresh = Appearance.new(require('appearance_data'))
+    local job = coroutine.create(function()
+        Recolor.look_of({kit = {id = 0x7edf6505, kit_type = 'Armor'}, rows = {}, geometry_patched = true}, fresh,
+                        counting)
+    end)
+    while coroutine.status(job) ~= 'dead' do assert(coroutine.resume(job)) end
+    assert(pauses == 9, 'look_of passes the job\'s pauses: ' .. pauses)
+end)
+
 check('overlapped reads: a pending read waits frames, a quick one none, a failure raises, an abandoned one is '
       .. 'cancelled and waited out before its handle closes', function()
     local Files = require('files')
@@ -251,6 +610,48 @@ check('overlapped reads: a pending read waits frames, a quick one none, a failur
     calls, polls_left = {}, -1
     plain.read(plain.open('b'), 0, 16, buffer)
     assert(calls[1] == 'open ' .. 0x10000000 and calls[2] == 'read' and #calls == 2, 'no wait: a plain read')
+end)
+
+check('a job dropped while it built a reader leaves no handle open: Files.abandon closes what job adapters hold, '
+      .. 'once each, after settling a read in flight', function()
+    local Files = require('files')
+    local next_handle, open, closes = 0x5000, {}, 0
+    local fake = {}
+    function fake.myc1_CreateFileW()
+        next_handle = next_handle + 8
+        open[next_handle] = true
+        return ffi.cast('void *', next_handle)
+    end
+    function fake.myc1_CloseHandle(handle)
+        local n = tonumber(ffi.cast('intptr_t', handle))
+        assert(open[n], 'closed once: ' .. n)
+        open[n], closes = nil, closes + 1
+        return 1
+    end
+    local function count() local n = 0 for _ in pairs(open) do n = n + 1 end return n end
+    Files.abandon() -- nothing held: nothing happens
+    local job = Files.new('fake/', nil, nil, coroutine.yield, fake)
+    local a, b, c = job.open('a'), job.open('b'), job.open('c')
+    job.close(b)
+    local plain = Files.new('fake/', nil, nil, nil, fake) -- tests' and tools' adapters are not job adapters
+    local mine = plain.open('d')
+    assert(Files.held() == 2 and count() == 3, 'held: ' .. Files.held())
+    Files.abandon()
+    assert(Files.held() == 0 and count() == 1 and closes == 3, 'the two left open closed, the plain one kept')
+    Files.abandon()
+    assert(closes == 3, 'nothing closed twice')
+    plain.close(mine)
+    assert(count() == 0 and a and c, 'the plain adapter closes its own')
+    -- a reader dropped (src/recolor.lua): its adapter closes later, a few handles at a time
+    local reader = Files.new('fake/', nil, nil, coroutine.yield, fake)
+    local handles = {}
+    for i = 1, 5 do handles[i] = reader.open('r' .. i) end
+    reader.close_later = true
+    for _, handle in ipairs(handles) do reader.close(handle) end
+    assert(count() == 5 and Files.held() == 0, 'queued: still open, no longer held')
+    assert(Files.close_some(2) == 3 and count() == 3, 'two closed, three left')
+    Files.abandon()
+    assert(count() == 0 and closes == 3 + 1 + 5 and Files.close_some(4) == 0, 'the rest closed by Files.abandon, once')
 end)
 
 check('the idle watch reports a change once, then only real changes; the body-copy slot in one read when asked',
@@ -369,6 +770,36 @@ check('a job\'s transfer pauses after every perceived-color evaluation of a fit:
     for k = 1, #a do assert(a[k] == b[k], 'value ' .. k) end
 end)
 
+check('camo colors toward a colored goal become shades of it: a green camo toward a yellow-green goal never lime or '
+      .. 'lavender, toward a blue one never cyan or lilac (image review 2026-10-09)', function()
+    local transfer = Transfer.new(Colour, flat_model())
+    local function camo_hues(goal_L, goal_a, goal_b)
+        local c = test_row()
+        c[1], c[2], c[3] = 0.25, 0.35, 0.15 -- a green paint
+        c[85], c[86], c[87], c[88] = 1, 0, 1, 2 -- camo layer 2
+        local camo = {{0.20, 0.32, 0.12}, {0.40, 0.45, 0.20}, {0.35, 0.28, 0.18}, {0.42, 0.42, 0.40}} -- greens, a brown,
+        for k, rgb in ipairs(camo) do                                                                  -- a near grey
+            local o = (15 + k) * 4
+            c[o + 1], c[o + 2], c[o + 3] = rgb[1], rgb[2], rgb[3]
+        end
+        transfer.fit(c, goal_L, goal_a, goal_b)
+        local goal_h = math.deg(math.atan2(goal_b, goal_a))
+        local worst = 0
+        for column = 16, 19 do
+            local o = column * 4
+            local _, a, b = Colour.srgb_to_lab(c[o + 1], c[o + 2], c[o + 3])
+            if math.sqrt(a * a + b * b) > 3 then
+                local d = math.abs(math.deg(math.atan2(b, a)) - goal_h) % 360
+                worst = math.max(worst, d > 180 and 360 - d or d)
+            end
+        end
+        return worst
+    end
+    local yellow = camo_hues(60, -6, 50)   -- the Light of Eternal Liberty's yellow
+    local blue = camo_hues(54, 3, -22)     -- the SEAF blue
+    assert(yellow < 3 and blue < 3, string.format('camo hues off the goal: %.1f and %.1f degrees', yellow, blue))
+end)
+
 check('a red paint going neutral leaves no tint: its neutral detail color stays neutral (the brown Bloodhound)', function()
     local transfer = Transfer.new(Colour, flat_model())
     local c = test_row()
@@ -383,18 +814,654 @@ check('a red paint going neutral leaves no tint: its neutral detail color stays 
     assert(c[21] == 0.95 and c[22] == 0.95 and c[23] == 0.95, 'the white wear color far from the paint stays')
 end)
 
+check('a paint that darkens by DARKEN_FOLLOW_L or more takes its neutral detail color along: a cream shell matched '
+      .. 'to black kept its grey detail and its scuffs read as grime (the IX-VOIDWALKER on the B-01 Tactical, image '
+      .. 'review 2026-10-09); a smaller change keeps it', function()
+    local transfer = Transfer.new(Colour, flat_model())
+    local function shell()
+        local c = test_row()
+        c[1], c[2], c[3] = 0.70, 0.67, 0.62  -- cream base
+        c[9], c[10], c[11] = 0.44, 0.41, 0.40 -- a grey detail color, far from the cream (stays without the rule)
+        return c
+    end
+    local detail_L = Colour.srgb_to_lab(0.44, 0.41, 0.40)
+    local dark = shell()
+    transfer.fit(dark, 22, 0, 0)
+    local after = Colour.srgb_to_lab(dark[9], dark[10], dark[11])
+    assert(after < detail_L - 20, string.format('to black: the detail follows (L %.1f -> %.1f)', detail_L, after))
+    local mid = shell()
+    transfer.fit(mid, 60, 0, 0)
+    assert(mid[9] == 0.44 and mid[10] == 0.41 and mid[11] == 0.40, 'a smaller change keeps the detail color')
+end)
+
+check('a light glossy paint turned dark takes its source row\'s roughness (Transfer.DARK_L): the IX-VOIDWALKER\'s '
+      .. 'white shell turned black kept its gloss, which showed its scuffs as grey-white marbled grime (independent '
+      .. 'image reviews 2026-10-09); not when it stays light, from cloth or a smoother source, or under a flat role '
+      .. 'color. Its color is fitted through the model then, not its glossy measured response, whose reflection floor '
+      .. 'drove the color to black (user 2026-10-09: the Winter Warrior and Trench Paramedic helmets on the B-01 '
+      .. '"way too dark relative to the armor")', function()
+    local transfer = Transfer.new(Colour, flat_model())
+    local base_L
+    local function roughness(goal, source_row, grey)
+        local function lut(row)
+            local values = ffi.new('float[?]', 23 * 4)
+            for k = 1, 92 do values[k - 1] = row[k] end
+            return {values = values, width = 23, height = 1}
+        end
+        local shell = test_row()
+        shell[1], shell[2], shell[3] = 0.70, 0.67, 0.62 -- a cream shell
+        if grey then shell[1], shell[2], shell[3] = grey, grey, grey end
+        shell[28], shell[33], shell[41] = 0, 0.2, 0.2   -- not metal, a hard paint, glossy
+        local target = {luts = {aaaaaaaaaaaaaaaa = lut(shell)}}
+        local source = {luts = {bbbbbbbbbbbbbbbb = lut(source_row)}}
+        goal.kind, goal.source = goal.kind or 'pair', 'bbbbbbbbbbbbbbbb:0'
+        local data = Recolor.build_luts(target, {['aaaaaaaaaaaaaaaa:0'] = goal}, transfer, function() end, source)
+        local d = data.aaaaaaaaaaaaaaaa.data
+        base_L = Colour.srgb_to_lab(d[0], d[1], d[2])
+        return d[40]
+    end
+    local function black(rough, cloth)
+        local row = test_row()
+        row[1], row[2], row[3], row[28], row[41] = 0.05, 0.05, 0.05, 0, rough
+        row[4], row[33] = cloth and 1 or 0, cloth and 0 or 0.3
+        return row
+    end
+    local function near(x, y) return math.abs(x - y) < 1e-6 end
+    assert(near(roughness({L = 20, a = 0, b = 0}, black(0.7)), 0.7), 'to black: the black\'s matte finish')
+    assert(near(roughness({L = 45, a = 0, b = 0}, black(0.7)), 0.2), 'a smaller darkening keeps the gloss')
+    assert(near(roughness({L = 35, a = 0, b = 0}, black(0.7)), 0.2), 'a dark grey (L 35) keeps the gloss')
+    assert(near(roughness({L = 20, a = 0, b = 0}, black(0.7), 0.42), 0.2), 'a mid grey shell (L 45) to L 20 keeps it')
+    assert(near(roughness({L = 20, a = 0, b = 0}, black(0.9, true)), 0.2), 'a cloth source gives no finish')
+    assert(near(roughness({L = 20, a = 0, b = 0}, black(0.1)), 0.2), 'a glossier source never makes it glossier')
+    assert(near(roughness({L = 20, a = 0, b = 0, all = true}, black(0.7)), 0.2), 'a flat role color keeps its finish')
+    -- a glossy response whose reflection floor (0.072, the IX-VOIDWALKER shell's) alone shows L 32; the plan's goal
+    -- counts the row's own gloss over the diffuse color it asks (src/matcher.lua diffuse_colors): diffuse L 20 here
+    local glossy = {0.65, 0.62, 0.61, 0.072, 0.072, 0.072}
+    local function with_floor(L, s)
+        local y = Colour.lab_to_linear(L, 0, 0) + s
+        return (Colour.linear_to_lab(y, y, y))
+    end
+    roughness({L = with_floor(20, 0.072), a = 0, b = 0, cal = glossy}, black(0.7))
+    assert(base_L > 12, string.format('matte: the color carries the lightness (base L %.1f)', base_L))
+    -- through its gain without its gloss floor, at the goal less that gloss (Transfer.diffuse_goal): the floor was
+    -- measured at its own gloss; the gain still counts (through the model the paint came out darker by it)
+    roughness({L = 20, a = 0, b = 0, cal = {0.65, 0.62, 0.61, 0, 0, 0}}, black(0.7))
+    local gain_L = base_L
+    roughness({L = with_floor(20, 0.01), a = 0, b = 0, cal = {0.65, 0.62, 0.61, 0.01, 0.01, 0.01}}, black(0.7))
+    assert(math.abs(base_L - gain_L) < 0.01, string.format('a glossy response without its floor under the dark finish: '
+           .. 'base L %.2f, through its gain alone %.2f', base_L, gain_L))
+    roughness({L = 20, a = 0, b = 0}, black(0.7))
+    assert(gain_L > base_L + 3, string.format('its gain counts: base L %.2f, through the model %.2f', gain_L, base_L))
+    -- still glossy (no dark finish from a glossier source): through its response, its paint carries the diffuse color
+    roughness({L = with_floor(20, 0.072), a = 0, b = 0, cal = glossy}, black(0.1))
+    assert(base_L > 12, string.format('still glossy: its color carries the lightness (base L %.1f)', base_L))
+end)
+
+-- Exact bits of a number, -0 and NaN included.
+local function bits(x) return string.format('%a', x) end
+
+check('albedo linearizes each distinct sample color once and gives the same bits as shading every sample (v1.3): rows '
+      .. 'with a detail layer (repeated and distinct sample controls), without one (every sample alike) and with camo, '
+      .. 'and again once the layer\'s distinct samples are known (KB match-your-colors-stress-test)', function()
+    local seed = 12345
+    local function random()
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        return seed / 2147483648
+    end
+    local detail, camo = {}, {}
+    for l = 0, 25 do
+        local values = ffi.new('double[2048]')
+        for i = 0, 511 do
+            values[i * 4], values[i * 4 + 1] = random(), random()
+            if l == 25 then -- every sample its own controls
+                values[i * 4 + 2], values[i * 4 + 3] = i / 511, (511 - i) / 511
+            else -- few distinct pairs, one w under several z
+                values[i * 4 + 2], values[i * 4 + 3] = ((i * (l + 3)) % 9) / 8, ((i * (l + 5)) % 7) / 6
+            end
+        end
+        detail[l] = values
+    end
+    for l = 0, 4 do
+        local values = ffi.new('double[2048]')
+        for i = 0, 2047 do values[i] = random() end
+        camo[l] = values
+    end
+    local function clip(x) return math.min(math.max(x, 0), 1) end
+    local lin = Colour.srgb_to_linear
+    local function camo_sample(c, s, i, md0, md1) -- v1.3's, as src/colour.lua has it
+        local m0 = clip((s[i * 4] - 0.5) * c[85] + c[86])
+        local m1 = clip((s[i * 4 + 1] - 0.5) * c[85] + c[86])
+        local m2 = clip((s[i * 4 + 2] - 0.5) * c[85] + c[86])
+        local r = ((c[65] * (1 - m0) + c[69] * m0) * (1 - m1) + c[73] * m1) * (1 - m2) + c[77] * m2
+        local g = ((c[66] * (1 - m0) + c[70] * m0) * (1 - m1) + c[74] * m1) * (1 - m2) + c[78] * m2
+        local b = ((c[67] * (1 - m0) + c[71] * m0) * (1 - m1) + c[75] * m1) * (1 - m2) + c[79] * m2
+        if c[4] ~= 1.0 then
+            local mix = clip(md0 * c[72] + md1 * c[76] - c[84])
+            return mix, r * (1 - mix) + c[1] * mix, g * (1 - mix) + c[2] * mix, b * (1 - mix) + c[3] * mix
+        end
+        return 1, r, g, b
+    end
+    local function reference(c) -- v1.3's albedo: every sample shaded and linearized
+        local d = c[4] <= 3.0 and detail[c[5] % 26] or nil
+        local s = c[88] >= 0.0 and camo[c[88] % 5] or nil
+        local sum_r, sum_g, sum_b = 0, 0, 0
+        for i = 0, 511 do
+            local md0, md1 = 0, 0
+            if d then md0, md1 = d[i * 4 + 2] - 0.5, d[i * 4 + 3] - 0.5 end
+            local rough = clip(md0 * c[17] + md1 * c[18] + c[8])
+            local intensity = clip(md0 * c[13] + md1 * c[14] + c[7])
+            local mix, r, g, b = 1, c[1], c[2], c[3]
+            if s then mix, r, g, b = camo_sample(c, s, i, md0, md1) end
+            local cr = rough * mix
+            local cr2 = cr * rough
+            r, g, b = r + intensity * (c[9] - r), g + intensity * (c[10] - g), b + intensity * (c[11] - b)
+            r, g, b = r + cr * (c[25] - r), g + cr * (c[26] - g), b + cr * (c[27] - b)
+            r, g, b = r + cr2 * (c[21] - r), g + cr2 * (c[22] - g), b + cr2 * (c[23] - b)
+            sum_r, sum_g, sum_b = sum_r + lin(r), sum_g + lin(g), sum_b + lin(b)
+        end
+        return sum_r / 512, sum_g / 512, sum_b / 512
+    end
+    local model = Colour.new(detail, 26, camo, 5)
+    local kinds = {}
+    for n = 1, 90 do
+        local c = {}
+        for k = 1, 92 do c[k] = random() * 1.4 - 0.2 end
+        c[4] = ({0, 2, 3, 3.5, 5, 1})[n % 6 + 1] -- a mode over 3: no detail layer
+        c[5] = n % 26
+        c[88] = n % 4 == 0 and n % 5 or -1
+        local kind = c[88] >= 0 and 'camo' or (c[4] <= 3 and 'detail' or 'flat')
+        kinds[kind] = (kinds[kind] or 0) + 1
+        local r0, g0, b0 = reference(c)
+        for pass = 1, 2 do
+            local r, g, b = model.albedo(c)
+            assert(bits(r) == bits(r0) and bits(g) == bits(g0) and bits(b) == bits(b0),
+                   string.format('row %d (%s), pass %d: %s %s %s against %s %s %s', n, kind, pass, bits(r), bits(g),
+                                 bits(b), bits(r0), bits(g0), bits(b0)))
+        end
+    end
+    assert(kinds.camo > 10 and kinds.detail > 10 and kinds.flat > 10, 'every kind of row')
+end)
+
+check('Transfer.apply with the row\'s origin (its own albedo kept per origin and row) writes the same bits as without '
+      .. 'one, again once kept, rows 0 and 1, a dark finish\'s row too (KB match-your-colors-stress-test)', function()
+    local kept, plain = Transfer.new(Colour, flat_model()), Transfer.new(Colour, flat_model())
+    local function shell(r, g, b)
+        local row = test_row()
+        row[1], row[2], row[3] = r, g, b
+        row[28], row[33], row[41] = 0, 0.2, 0.2 -- not metal, a hard paint, glossy
+        return row
+    end
+    local function lut(rows)
+        local values = ffi.new('float[?]', 23 * 4 * #rows)
+        for n, row in ipairs(rows) do
+            for k = 1, 92 do values[(n - 1) * 92 + k - 1] = row[k] end
+        end
+        return {values = values, width = 23, height = #rows}
+    end
+    local black = test_row()
+    black[1], black[2], black[3], black[28], black[41], black[4], black[33] = 0.05, 0.05, 0.05, 0, 0.7, 0, 0.3
+    local source = {luts = {bbbbbbbbbbbbbbbb = lut({black})}}
+    local rows = {shell(0.70, 0.67, 0.62), shell(0.30, 0.45, 0.62)}
+    local origin = lut(rows)
+    local glossy = {0.65, 0.62, 0.61, 0.072, 0.072, 0.072}
+    local goals = {{L = 20, a = 0, b = 0, kind = 'pair', source = 'bbbbbbbbbbbbbbbb:0'}, -- the dark finish
+                   {L = 45, a = 3, b = -4, kind = 'pair', source = 'bbbbbbbbbbbbbbbb:0'},
+                   {L = 50, a = 20, b = 10, cal = glossy, kind = 'pair', source = 'bbbbbbbbbbbbbbbb:0'},
+                   {L = 30, a = -5, b = 8, all = true}}
+    local finished = 0
+    for g, goal in ipairs(goals) do
+        for pass = 1, 2 do
+            for row = 0, 1 do
+                local a, b = lut(rows), lut(rows)
+                local err_a = kept.apply(a.values, 23, row, goal, source, origin)
+                local err_b = plain.apply(b.values, 23, row, goal, source)
+                assert(bits(err_a) == bits(err_b), string.format('goal %d, pass %d, row %d: error', g, pass, row))
+                for i = 0, 2 * 92 - 1 do
+                    assert(bits(a.values[i]) == bits(b.values[i]),
+                           string.format('goal %d, pass %d, row %d: value %d %s against %s', g, pass, row, i,
+                                         bits(a.values[i]), bits(b.values[i])))
+                end
+                if math.abs(a.values[row * 92 + 40] - 0.7) < 1e-6 then finished = finished + 1 end
+            end
+        end
+    end
+    assert(finished >= 2, 'the dark finish was taken: ' .. finished)
+end)
+
+check('a fit through a measured response that misses its goal by Transfer.RESPONSE_MISS or more is done through the '
+      .. 'model (gallery 2026-10-10: the I-44 Salamander\'s bare-metal plates, response 0.19, went to a pale cream '
+      .. 'L 98 under the Light of Eternal Liberty cape\'s yellow); a goal the response reaches keeps it', function()
+    local transfer = Transfer.new(Colour, flat_model())
+    local function fitted(cal, goal)
+        local row = test_row()
+        row[1], row[2], row[3], row[28], row[33] = 0.42, 0.42, 0.42, 0, 0.3 -- a grey hard paint
+        local values = ffi.new('float[?]', 23 * 4)
+        for k = 1, 92 do values[k - 1] = row[k] end
+        local err = transfer.apply(values, 23, 0, {L = goal[1], a = goal[2], b = goal[3], cal = cal, kind = 'pair'})
+        return {Colour.srgb_to_lab(values[0], values[1], values[2])}, err
+    end
+    local dim = {0.19, 0.19, 0.19, 0, 0, 0}
+    local lab, err = fitted(dim, {59, -7, 50})
+    assert(lab[1] < 90 and math.sqrt(lab[2] ^ 2 + lab[3] ^ 2) > 45,
+           string.format('a dim response asked a yellow: the model\'s base L %.1f a %.1f b %.1f', lab[1], lab[2], lab[3]))
+    assert(err < Transfer.RESPONSE_MISS, string.format('its error through the model: %.1f', err))
+    -- a neutral goal it misses: through the model at the goal less the gloss its response shows (Transfer.diffuse_goal)
+    local glossy_dim = {0.19, 0.19, 0.19, 0.1, 0.1, 0.1}
+    local grey = fitted(glossy_dim, {70, 0, 0})
+    local want = Transfer.diffuse_goal(Colour, {L = 70, a = 0, b = 0, cal = glossy_dim})
+    assert(math.abs(grey[1] - want) < 1.5 and want < 65, string.format('the refit\'s base L %.1f, the goal less its '
+           .. 'gloss L %.1f', grey[1], want))
+    local reached, reached_err = fitted({0.6, 0.6, 0.6, 0, 0, 0}, {40, 0, 0})
+    assert(reached_err < 1 and reached[1] > 45, string.format('a reachable goal keeps its response (a lighter paint '
+           .. 'for its 0.6): base L %.1f, error %.1f', reached[1], reached_err))
+end)
+
+check('a fit through a measured response toward a colored goal under its floor (the look of black paint) that turns '
+      .. 'its paint Transfer.FLOOR_TURN degrees or more off the goal\'s hue is done through the model (gallery '
+      .. '2026-10-11, case 33: the UF-16 Inspector\'s red cloth sleeve under a navy cape took a near-black purple paint '
+      .. 'and read purple); above its floor a turned paint keeps its response', function()
+    local model = flat_model()
+    local transfer = Transfer.new(Colour, model)
+    local function fitted(cal, goal)
+        local row = test_row()
+        row[4], row[33] = 1, 0 -- cloth (mode 1, column 8 x at 0): its look counts its whole gloss floor
+        local values = ffi.new('float[?]', 23 * 4)
+        for k = 1, 92 do values[k - 1] = row[k] end
+        transfer.apply(values, 23, 0, {L = goal[1], a = goal[2], b = goal[3], cal = cal, kind = 'pair'})
+        local _, pa, pb = Colour.linear_to_lab(model.albedo(Colour.row_values(values, 23, 0)))
+        local d = math.abs(math.deg(math.atan2(pb, pa) - math.atan2(goal[3], goal[2]))) % 360
+        return {Colour.srgb_to_lab(values[0], values[1], values[2])}, math.min(d, 360 - d)
+    end
+    -- the sleeve's response: gain 1.15, a cyan sheen of L 19.2; through it the fit took paint L 0.7 a 4.4 b -10.3
+    local cyan = {1.145, 1.148, 1.156, 0.0101, 0.0326, 0.0357}
+    local navy = {L = 17.4, a = -3.8, b = -10.4, cal = cyan}
+    local base = fitted(cyan, {navy.L, navy.a, navy.b})
+    local want = {Transfer.diffuse_goal(Colour, navy)}
+    local off = math.sqrt((base[1] - want[1]) ^ 2 + (base[2] - want[2]) ^ 2 + (base[3] - want[3]) ^ 2)
+    assert(off < 2.5 and base[1] > 5 and base[2] < 2, string.format('the navy goal through the model at L %.1f a %.1f '
+           .. 'b %.1f: base L %.1f a %.1f b %.1f', want[1], want[2], want[3], base[1], base[2], base[3]))
+    -- a salmon above a green sheen (L 32.8): its paint turned 33 degrees to cancel the sheen keeps its response
+    local kept, turn = fitted({1, 1, 1, 0.01, 0.10, 0.01}, {45, 20, 10})
+    assert(turn >= Transfer.FLOOR_TURN and kept[2] > 35, string.format('above its floor the response\'s paint: base L '
+           .. '%.1f a %.1f b %.1f, turned %.0f degrees', kept[1], kept[2], kept[3], turn))
+end)
+
+check('a fit through the model (the dark finish, a missed response) aims at the goal less the gloss the row\'s own '
+      .. 'response shows at it: the plan\'s goal counts the target\'s highlights (Matcher diffuse_colors), which through '
+      .. 'the model would turn into paint; a band\'s goal is a paint already', function()
+    local cal = {0.6, 0.6, 0.6, 0.05, 0.05, 0.05}
+    local L, a, b = Transfer.diffuse_goal(Colour, {L = 40, a = 0, b = 0, cal = cal})
+    local y = Colour.lab_to_linear(40, 0, 0) - 0.05
+    assert(math.abs(L - Colour.linear_to_lab(y, y, y)) < 1e-3 and math.abs(a) < 1e-3 and math.abs(b) < 1e-3,
+           string.format('a neutral goal less its whole floor: L %.2f', L))
+    local cL, _, cb = Transfer.diffuse_goal(Colour, {L = 50, a = 10, b = 25, cal = cal})
+    assert(math.abs(cL - 50) < 1e-4 and math.abs(cb - 25) < 1e-4, 'a colored goal (chroma 20 or more) keeps all of it')
+    assert(Transfer.diffuse_goal(Colour, {L = 40, a = 0, b = 0, cal = cal, band = true}) == 40, 'a band\'s paint as it is')
+    assert(Transfer.diffuse_goal(Colour, {L = 40, a = 0, b = 0}) == 40, 'no response: the goal')
+end)
+
+check('an accent band\'s row (goal.band) is one coat of the accent\'s paint, fitted through the model: every following '
+      .. 'color takes it (user 2026-10-10: the IX-VOIDWALKER\'s band "doesn\'t match the armor\'s own accenting", '
+      .. 'its detail colors lime and light grey)', function()
+    local transfer = Transfer.new(Colour, flat_model())
+    local row = test_row()
+    row[1], row[2], row[3], row[28], row[33] = 0.33, 0.50, 0.67, 0, 0.5 -- a navy base
+    row[9], row[10], row[11] = 0.17, 0.21, 0.30                         -- a darker navy detail
+    row[21], row[22], row[23], row[25], row[26], row[27] = 0.26, 0.36, 0.5, 0.3, 0.4, 0.55 -- navy wear
+    local values = ffi.new('float[?]', 23 * 4)
+    for k = 1, 92 do values[k - 1] = row[k] end
+    transfer.apply(values, 23, 0, {L = 72.9, a = 1.7, b = 62.7, cal = {0.52, 0.51, 0.52, 0.004, 0.006, 0.006},
+                                   kind = 'pair', band = true})
+    for _, column in ipairs({2, 5, 6}) do
+        for ch = 0, 2 do
+            assert(math.abs(values[column * 4 + ch] - values[ch]) < 1e-9, 'column ' .. column .. ' takes the base')
+        end
+    end
+    local L, a, b = Colour.srgb_to_lab(values[0], values[1], values[2])
+    assert(math.abs(L - 72.9) < 2 and math.abs(b - 62.7) < 3,
+           string.format('the paint itself, not its look through the response: L %.1f a %.1f b %.1f', L, a, b))
+end)
+
+check('a flat role color (SEAF, goal.all): no colored detail or wear color stays or turns rigidly; rust flecks go '
+      .. 'grey on the uniform, brown straps take the blue, an olive camo plate\'s brown wear never turns magenta '
+      .. '(independent image review 2026-10-09)', function()
+    local transfer = Transfer.new(Colour, flat_model())
+    local function hue_of(c, o)
+        local _, a, b = Colour.srgb_to_lab(c[o + 1], c[o + 2], c[o + 3])
+        return math.deg(math.atan2(b, a)) % 360, math.sqrt(a * a + b * b)
+    end
+    local function gap(h1, h2)
+        local d = math.abs(h1 - h2) % 360
+        return d > 180 and 360 - d or d
+    end
+    -- a tan cloth with a rust detail color of another hue (off the paint's family: kept without all) toward the grey
+    local function tan_cloth()
+        local c = test_row()
+        c[1], c[2], c[3] = 0.62, 0.55, 0.42  -- tan base
+        c[9], c[10], c[11] = 0.55, 0.22, 0.30 -- a rust-magenta detail color, far from the tan's hue
+        return c
+    end
+    local kept, flat = tan_cloth(), tan_cloth()
+    transfer.fit(kept, 40, 0, 0)
+    transfer.fit(flat, 40, 0, 0, nil, nil, true)
+    local _, kept_c = hue_of(kept, 8)
+    local _, flat_c = hue_of(flat, 8)
+    assert(kept_c > 10, 'without all the off-hue detail color stays colored: chroma ' .. kept_c)
+    assert(flat_c < 1.5, 'with all it goes grey: chroma ' .. flat_c)
+    local L_before = Colour.srgb_to_lab(0.55, 0.22, 0.30)
+    local L_after = Colour.srgb_to_lab(flat[9], flat[10], flat[11])
+    assert(math.abs(L_after - L_before) < 25, 'it keeps about its tone')
+    -- a black pad with a brown strap (wear color, far from the black: kept without all) toward the SEAF blue
+    local pad = test_row()
+    pad[1], pad[2], pad[3] = 0.06, 0.06, 0.06
+    pad[25], pad[26], pad[27] = 0.40, 0.26, 0.15
+    transfer.fit(pad, 35, -0.5, -14, nil, nil, true)
+    local strap_h, strap_c = hue_of(pad, 24)
+    assert(strap_c > 2 and gap(strap_h, math.deg(math.atan2(-14, -0.5)) % 360) < 3,
+           string.format('the strap takes the blue hue: %.1f degrees, chroma %.1f', strap_h, strap_c))
+    -- a muted color (chroma about 10, under the goal's 14) keeps its own chroma: the goal's hue, not its strength
+    local muted = test_row()
+    muted[1], muted[2], muted[3] = 0.06, 0.06, 0.06
+    muted[25], muted[26], muted[27] = 0.36, 0.31, 0.27
+    local _, own_c = hue_of(muted, 24)
+    transfer.fit(muted, 35, -0.5, -14, nil, nil, true)
+    local _, muted_c = hue_of(muted, 24)
+    assert(own_c > 8 and own_c < 13 and math.abs(muted_c - own_c) < 1.5,
+           string.format('a muted color keeps its chroma: %.1f, now %.1f', own_c, muted_c))
+    -- an olive plate with a brown wear color in its hue family (a rigid turn sends it to magenta) toward the blue
+    local function olive()
+        local c = test_row()
+        c[1], c[2], c[3] = 0.33, 0.36, 0.20
+        c[25], c[26], c[27] = 0.42, 0.33, 0.20
+        return c
+    end
+    local turned, hued = olive(), olive()
+    transfer.fit(turned, 35, -0.5, -14)
+    transfer.fit(hued, 35, -0.5, -14, nil, nil, true)
+    local goal_h = math.deg(math.atan2(-14, -0.5)) % 360
+    local turned_h = hue_of(turned, 24)
+    local hued_h = hue_of(hued, 24)
+    assert(gap(turned_h, goal_h) > 15, string.format('without all the wear turns rigidly: %.1f degrees off', gap(turned_h, goal_h)))
+    assert(gap(hued_h, goal_h) < 3, string.format('with all it takes the blue hue: %.1f degrees off', gap(hued_h, goal_h)))
+end)
+
+check('a flat role color fitted without a response sets a cloth row\'s sheen (column 12) to the goal\'s hue at its own '
+      .. 'lightness: the DS-191 Scorpion\'s brown vest sheen read brown on SEAF black gear (round 8 renders 2026-10-09); '
+      .. 'a fit through a response, a hard row, or no flat color leave the sheen alone; flat camo keeps half its '
+      .. 'contrast (the SA-12 Twigsnapper\'s near-white stripes)', function()
+    local transfer = Transfer.new(Colour, flat_model())
+    local function cloth()
+        local c = test_row()
+        c[1], c[2], c[3], c[4] = 0.18, 0.11, 0.02, 1 -- the Scorpion's vest: a dark brown cloth (mode 1)
+        c[49], c[50], c[51], c[52] = 0.148, 0.098, 0.062, 0.76 -- its brown sheen
+        return c
+    end
+    local function sheen_chroma(c)
+        local _, a, b = Colour.srgb_to_lab(c[49], c[50], c[51])
+        return math.sqrt(a * a + b * b)
+    end
+    local before = sheen_chroma(cloth())
+    local flat = cloth()
+    transfer.fit(flat, 20, 0, 0, nil, nil, true)
+    assert(before > 5 and sheen_chroma(flat) < 1, 'the sheen goes neutral: chroma ' .. sheen_chroma(flat))
+    local L0 = Colour.srgb_to_lab(0.148, 0.098, 0.062)
+    assert(math.abs(Colour.srgb_to_lab(flat[49], flat[50], flat[51]) - L0) < 0.5 and flat[52] == 0.76,
+           'at its own lightness, its strength kept')
+    local cal = {1, 1, 1, 0, 0, 0}
+    for _, case in ipairs({{nil, false, 'no flat color'}, {cal, true, 'through a response'}}) do
+        local c = cloth()
+        transfer.fit(c, 20, 0, 0, case[1], nil, case[2])
+        assert(c[49] == 0.148 and c[50] == 0.098 and c[51] == 0.062, case[3] .. ': the sheen stays')
+    end
+    local plate = cloth()
+    plate[4] = 0 -- mode 0: column 12 is no sheen there
+    transfer.fit(plate, 20, 0, 0, nil, nil, true)
+    assert(plate[49] == 0.148 and plate[50] == 0.098 and plate[51] == 0.062, 'a hard row\'s column 12 stays')
+    -- through apply: the sheen is written into the LUT with a flat color only
+    local values = ffi.new('float[?]', 23 * 4)
+    local c = cloth()
+    for k = 1, 92 do values[k - 1] = c[k] end
+    transfer.apply(values, 23, 0, {L = 20, a = 0, b = 0, all = true})
+    local _, sa, sb = Colour.srgb_to_lab(values[48], values[49], values[50])
+    assert(math.sqrt(sa * sa + sb * sb) < 1, 'apply writes the neutral sheen')
+    -- flat camo: a quarter of the lightness offsets of the camo colors and of the base between them, all in the
+    -- target's color (the SA-12 Twigsnapper's light grey base stayed white splashes, round 9 review)
+    local function flat_camo(all)
+        local r = test_row()
+        r[1], r[2], r[3] = 0.77, 0.77, 0.77 -- a light grey base under an olive camo
+        r[85], r[86], r[87], r[88] = 1, 0, 1, 2
+        local camo = {{0.10, 0.14, 0.08}, {0.85, 0.88, 0.80}, {0.30, 0.38, 0.20}, {0.20, 0.30, 0.12}}
+        for k, rgb in ipairs(camo) do
+            local o = (15 + k) * 4
+            r[o + 1], r[o + 2], r[o + 3] = rgb[1], rgb[2], rgb[3]
+        end
+        transfer.fit(r, 35, -0.5, -14, nil, nil, all)
+        local lo, hi = 100, 0
+        for column = 16, 19 do
+            local L = Colour.srgb_to_lab(r[column * 4 + 1], r[column * 4 + 2], r[column * 4 + 3])
+            lo, hi = math.min(lo, L), math.max(hi, L)
+        end
+        return hi - lo, r
+    end
+    local full, kept = flat_camo(false)
+    local flat_spread, flat_row = flat_camo(true)
+    assert(flat_spread < 0.4 * full and flat_spread > 0.1 * full,
+           string.format('camo spread %.1f, flat %.1f', full, flat_spread))
+    local _, ka, kb = Colour.srgb_to_lab(kept[1], kept[2], kept[3])
+    local fL, fa, fb = Colour.srgb_to_lab(flat_row[1], flat_row[2], flat_row[3])
+    local base_hue = math.deg(math.atan2(fb, fa)) % 360
+    assert(math.sqrt(ka * ka + kb * kb) < 8, 'without all the camo base keeps no blue of its own')
+    assert(math.sqrt(fa * fa + fb * fb) > 8 and base_hue > 250 and base_hue < 290 and fL < 60,
+           string.format('with all the base takes the blue: L %.1f a %.1f b %.1f', fL, fa, fb))
+end)
+
 -- An item from {key, area, L, a, b[, bare metal[, undergarment fraction]]} rows (no camo; paint unless the 6th is
 -- true) and patterns {{pattern, area, r, g, b}} (texel 0 in sRGB).
 local function item(rows, armor, patterns)
     local out = {}
     for i, r in ipairs(rows) do
         out[i] = {key = r[1], area = r[2], under = r[2] * (r[7] or 0), L = r[3], a = r[4], b = r[5],
-                  metal = r[6] == true, camo = false, mode = 0, full = r[6] == true}
+                  metal = r[6] == true, camo = false, mode = r[8] or 0, full = r[6] == true}
     end
     return Matcher.item(out, armor, patterns)
 end
 
+check('a cape of one dark color and vivid ones shows each of 15% or more on a muted part, never a smaller one; a muted '
+      .. 'color of 10% keeps the vivid guard (gallery 2026-10-11: the FS-37 Ravager one dark grey under the black cape '
+      .. '0beb97bc with its 21% red)', function()
+    local armor = {{'aaaaaaaaaaaaaaaa:0', 45, 31.9, 2, 7}, {'aaaaaaaaaaaaaaaa:1', 30, 24, 0, 0},
+                   {'aaaaaaaaaaaaaaaa:2', 15, 35.7, -5, 7}, {'aaaaaaaaaaaaaaaa:3', 10, 33, 1, 4}}
+    local function reds(cape_rows, not_cape, target)
+        local s = item(cape_rows, false)
+        s.cape_source = not not_cape
+        local n = 0
+        for _, m in pairs(Matcher.plan(item(target or armor, true), s)) do
+            if m.source == 'bbbbbbbbbbbbbbbb:1' then n = n + 1 end
+        end
+        return n
+    end
+    local red = {33.9, 33, 25}
+    local n = reds({{'bbbbbbbbbbbbbbbb:0', 79, 22.4, 0, 0}, {'bbbbbbbbbbbbbbbb:1', 21, red[1], red[2], red[3]}})
+    assert(n >= 1, 'black 79%, red 21%: a muted part takes the red')
+    n = reds({{'bbbbbbbbbbbbbbbb:0', 86, 22.4, 0, 0}, {'bbbbbbbbbbbbbbbb:1', 14, red[1], red[2], red[3]}})
+    assert(n == 0, 'black 86%, red 14%: the red a minority, guarded (' .. n .. ' parts)')
+    n = reds({{'bbbbbbbbbbbbbbbb:0', 60, 22.4, 0, 0}, {'bbbbbbbbbbbbbbbb:1', 25, red[1], red[2], red[3]},
+              {'bbbbbbbbbbbbbbbb:2', 15, 50, 0, 2}})
+    assert(n == 0, 'black 60%, red 25%, grey 15%: the grey gives the second color, the red guarded (' .. n .. ' parts)')
+    -- a vivid second main color (25% or more, 20 L lighter) is no minority from any source (the Thundering Hooves'
+    -- gold, user 2026-10-10)
+    local plated = {{'aaaaaaaaaaaaaaaa:0', 50, 30, 2, 7}, {'aaaaaaaaaaaaaaaa:1', 25, 24, 0, 0},
+                    {'aaaaaaaaaaaaaaaa:2', 25, 65, 0, 2}}
+    n = reds({{'bbbbbbbbbbbbbbbb:0', 55, 22.4, 0, 0}, {'bbbbbbbbbbbbbbbb:1', 30, 71, 5, 60},
+              {'bbbbbbbbbbbbbbbb:2', 15, 50, 0, 2}}, true, plated)
+    assert(n >= 1, 'black 55%, gold 30% (L 71), grey 15%, not a cape: the light grey plates take the gold')
+    -- one as dark as the main is a minority still: a red of 30% (L 34) on black stays off the muted parts
+    n = reds({{'bbbbbbbbbbbbbbbb:0', 70, 22.4, 0, 0}, {'bbbbbbbbbbbbbbbb:1', 30, red[1], red[2], red[3]}}, true)
+    assert(n == 0, 'black 70%, red 30% (L 34), not a cape: the red guarded (' .. n .. ' parts)')
+    -- and makes its identity the dark one for the anchor: a red identity (L 36, not dark) under a lighter gold landed
+    -- on the light plates and the dark main took the red too (the Thundering Hooves on the SR-64 Cinderblock, user
+    -- 2026-10-10; a cape now goes by its outside, so a helmet or armor source keeps the case)
+    local s = item({{'bbbbbbbbbbbbbbbb:0', 55, 35.5, 46.8, 28.3}, {'bbbbbbbbbbbbbbbb:1', 40, 70.5, 8.0, 46.4},
+                    {'bbbbbbbbbbbbbbbb:2', 5, 25.5, 21.2, 9.6}}, false)
+    local plan = Matcher.plan(item({{'aaaaaaaaaaaaaaaa:0', 72, 21, 0, 1}, {'aaaaaaaaaaaaaaaa:1', 19, 43, 0, 1},
+                                    {'aaaaaaaaaaaaaaaa:2', 9, 50, 1, 4}}, true), s)
+    assert(plan['aaaaaaaaaaaaaaaa:0'].source == 'bbbbbbbbbbbbbbbb:0' and plan['aaaaaaaaaaaaaaaa:1'].source
+           == 'bbbbbbbbbbbbbbbb:1', string.format('the dark main the red, the light plates the gold (%s, %s)',
+           plan['aaaaaaaaaaaaaaaa:0'].source, plan['aaaaaaaaaaaaaaaa:1'].source))
+end)
+
+check('a colored band paired with a neutral black takes the source accent\'s color (user 2026-10-09: the '
+      .. 'IX-VOIDWALKER\'s navy band "turns pitch black on multiple armors"; 2026-10-10: its darker shade read orange '
+      .. 'on the B-01 Tactical, "should be yellow"); a source with no colored paint gives its light strips\' color (a '
+      .. 'B-01 Tactical helmet\'s red stripes went grey with the KDM-763 Pacesetter\'s yellow lights); without either '
+      .. 'it stays', function()
+    local helmet = {{'aaaaaaaaaaaaaaaa:0', 65, 66.7, 0, 7.3}, {'aaaaaaaaaaaaaaaa:1', 26, 32.8, -1.6, -10.1},
+                    {'aaaaaaaaaaaaaaaa:3', 9, 20.3, 0, 0}}
+    local band = 'aaaaaaaaaaaaaaaa:1'
+    -- black with a vivid red the band may not take itself (vivid_minor_guard): black is its pair
+    local dress = {{'bbbbbbbbbbbbbbbb:0', 85, 25.3, 0.5, 0.5}, {'bbbbbbbbbbbbbbbb:2', 15, 33.9, 33, 25}}
+    local plain = {{'cccccccccccccccc:0', 80, 25.3, 0.5, 0.5}, {'cccccccccccccccc:1', 12, 69.5, 0, 0.5},
+                   {'cccccccccccccccc:2', 8, 45, 1, 3}}
+    local t = item(helmet, false)
+    local m = Matcher.plan(t, item(dress, true))[band]
+    assert(math.abs(m.L - 33.9) < 0.01 and math.abs(m.a - 33) < 0.01 and math.abs(m.b - 25) < 0.01,
+           string.format('the accent\'s red: L %.1f a %.1f b %.1f', m.L, m.a, m.b))
+    -- black paint with yellow light strips (mode 3: no paint, no accent)
+    local lit = {{'dddddddddddddddd:0', 90, 25.3, 0.5, 0.5}, {'dddddddddddddddd:1', 5, 47, -8, 45, false, 0, 3}}
+    local y = Matcher.plan(t, item(lit, true))[band]
+    assert(math.abs(y.L - 47) < 0.01 and math.abs(y.b - 45) < 0.01,
+           string.format('the light strips\' yellow: L %.1f a %.1f b %.1f', y.L, y.a, y.b))
+    local kept = Matcher.plan(t, item(plain, true))[band]
+    assert(kept.source:find('^cccc') and math.sqrt(kept.a ^ 2 + kept.b ^ 2) < 5,
+           string.format('no colored source part: as paired (%s a %.1f b %.1f)', kept.source, kept.a, kept.b))
+    -- the item's largest part is its main, never a band (a red main of 45% turned yellow: "inverted"); a light stripe
+    -- the pairing turned black is one (its white stripe, 18%, takes the yellow)
+    local red = {{'eeeeeeeeeeeeeeee:0', 45, 22, 32, 18}, {'eeeeeeeeeeeeeeee:1', 37, 22, 0, 0},
+                 {'eeeeeeeeeeeeeeee:2', 18, 68, 0, 7}}
+    local striped = Matcher.plan(item(red, false), item(lit, true))
+    local main, stripe = striped['eeeeeeeeeeeeeeee:0'], striped['eeeeeeeeeeeeeeee:2']
+    assert(math.sqrt(main.a ^ 2 + main.b ^ 2) < 5, string.format('the red main as paired: a %.1f b %.1f', main.a, main.b))
+    assert(math.abs(stripe.L - 47) < 0.01 and math.abs(stripe.b - 45) < 0.01,
+           string.format('the white stripe the yellow: L %.1f a %.1f b %.1f', stripe.L, stripe.a, stripe.b))
+    -- a hard paint part of the stripe's color (4%, a group of its own) takes it too; a bare-metal part of that color is
+    -- a metal finish and keeps its pairing (the B-01 Tactical helmet's silver jaw badges, gallery round 22), as does a
+    -- part of another color; the helmet's own white dome stripes are a pattern (the pattern plan's band coat)
+    red[4] = {'eeeeeeeeeeeeeeee:3', 4, 70, -1, 0, true}
+    red[5] = {'eeeeeeeeeeeeeeee:4', 4, 40, 0, 0}
+    red[6] = {'eeeeeeeeeeeeeeee:5', 4, 69, 0, -1} -- dE 7 from the stripe: a group of its own, under KEEP_DE
+    local more = Matcher.plan(item(red, false), item(lit, true))
+    local metal, grey, painted = more['eeeeeeeeeeeeeeee:3'], more['eeeeeeeeeeeeeeee:4'], more['eeeeeeeeeeeeeeee:5']
+    assert(painted and painted.band and math.abs(painted.b - 45) < 0.01, 'a painted part of the stripe\'s color the yellow')
+    assert(metal and not metal.band and math.abs(metal.b) < 5, 'a bare-metal part of that color as paired')
+    assert(grey and not grey.band and math.abs(grey.b) < 5, 'a grey part of another color as paired')
+    red[4], red[5], red[6] = nil, nil, nil
+    -- a muted part (model chroma under 9) is no band
+    helmet[2][4], helmet[2][5] = -1, -5
+    local muted = Matcher.plan(item(helmet, false), item(dress, true))[band]
+    assert(muted.source:find('^bbbb') and math.sqrt(muted.a ^ 2 + muted.b ^ 2) < 1, string.format(
+           'a muted part as paired (%s a %.1f b %.1f)', muted.source, muted.a, muted.b))
+end)
+
+-- SEAF material roles on small synthetic armors: {key ('lut:row'), area, L, mode (0 hard, 1 soft), undergarment
+-- fraction} rows, neutral colors; the scheme's three rows as their own source item.
+local Schemes = require('schemes')
+local function role_item(rows)
+    local out = {}
+    for i, r in ipairs(rows) do
+        out[i] = {key = r[1], lut = r[1]:match('^(%x+):'), row = tonumber(r[1]:match(':(%d+)$')), area = r[2],
+                  under = r[2] * r[5], L = r[3], a = 0, b = 0, metal = false, camo = false, mode = r[4], full = false}
+    end
+    return Matcher.item(out, true)
+end
+local function seaf_roles(rows)
+    local source = Matcher.item({
+        {key = 'eeee:2', lut = 'eeee', row = 2, area = 0.6, under = 0, L = 35, a = -0.5, b = -14, mode = 0},
+        {key = 'eeee:1', lut = 'eeee', row = 1, area = 0.25, under = 0, L = 40, a = 0, b = 0, mode = 1},
+        {key = 'eeee:3', lut = 'eeee', row = 3, area = 0.15, under = 0.15, L = 20, a = 0, b = 0, mode = 1}}, true)
+    local plan = Schemes.role_plan(Matcher, role_item(rows), source, {'eeee:2', 'eeee:1', 'eeee:3'})
+    local names = {['eeee:2'] = 'blue', ['eeee:1'] = 'uniform', ['eeee:3'] = 'gear'}
+    local out = {}
+    for key, m in pairs(plan) do out[key] = names[m.source] end
+    return out
+end
+
+check('SEAF roles: an armor with its own light clothing keeps its dark clothing black, even a LUT\'s only dark row '
+      .. '(gloves of their own); an all-black armor takes the uniform on a LUT\'s clearly largest dark cloth only, not '
+      .. 'on near-equal rows (the SA-12 Twigsnapper\'s trousers and boots; independent image review 2026-10-09)',
+      function()
+    local with_shirt = seaf_roles({
+        {'aaaa:0', 30, 60, 1, 1},   -- a light shirt (undergarment)
+        {'bbbb:0', 8, 15, 1, 1},    -- black gloves, alone in their LUT
+        {'dddd:0', 22, 15, 1, 1},   -- black trousers, alone in their LUT
+        {'cccc:0', 40, 50, 0, 0}})  -- light plates
+    assert(with_shirt['aaaa:0'] == 'uniform' and with_shirt['cccc:0'] == 'blue', 'shirt grey, plates blue')
+    assert(with_shirt['bbbb:0'] == 'gear' and with_shirt['dddd:0'] == 'gear', 'gloves and trousers stay black')
+    local all_black = seaf_roles({
+        {'aaaa:0', 20, 15, 1, 1}, {'aaaa:1', 5, 15, 1, 1},     -- torso: jacket clearly largest, then gloves
+        {'dddd:0', 10, 15, 1, 1}, {'dddd:1', 9.5, 15, 1, 1},   -- legs: near-equal trousers and boots
+        {'cccc:0', 40, 15, 0, 0}})                               -- black plates
+    assert(all_black['aaaa:0'] == 'uniform' and all_black['aaaa:1'] == 'gear', 'jacket grey, gloves black')
+    assert(all_black['dddd:0'] == 'gear' and all_black['dddd:1'] == 'gear', 'near-equal trousers and boots stay black')
+    assert(all_black['cccc:0'] == 'blue', 'its black plates blue')
+end)
+
 local Capes = require('capes')
+
+check('Match Cape: a dark muted part (gloves, boots) never takes a light cape color it does not match; left with none '
+      .. 'it takes the cape\'s darkest; light parts and colored dark parts keep their choices (independent image '
+      .. 'review 2026-10-09)', function()
+    local t = {{mL = 17, ma = 0.3, mb = 13.8, share = 0.3}, {mL = 50, ma = 0, mb = 10, share = 0.3},
+               {mL = 20, ma = 30, mb = 10, share = 0.3}}
+    -- every color on the cape's outside (the lining guard keeps out), the largest not the darkest (its fallback differs)
+    local outside = {{area = 1, outside = 1}}
+    local s = {{L = 30, ma = 0, mb = 0, share = 0.2, rows = outside}, {L = 71, ma = 0, mb = 0, share = 0.3, rows = outside},
+               {L = 32, ma = 0, mb = 0, share = 0.5, rows = outside}}
+    local function fresh() return {{true, true, true}, {true, true, true}, {true, true, true}} end
+    local keep = {{false, false, false}, {false, false, false}, {false, false, false}}
+    local allowed = fresh()
+    Capes.dark_parts_guard(allowed, t, s, keep, 20)
+    assert(allowed[1][1] and not allowed[1][2] and allowed[1][3], 'the dark part loses the cream only')
+    assert(allowed[2][2] and allowed[3][2], 'a light part and a colored dark part keep it')
+    local only_light = {{false, true, false}, {true, true, true}, {true, true, true}}
+    Capes.dark_parts_guard(only_light, t, s, keep, 20)
+    assert(not only_light[1][2] and only_light[1][1] and not only_light[1][3], 'left with none: the darkest (L 30)')
+    local matched = fresh()
+    keep[1][2] = true
+    Capes.dark_parts_guard(matched, t, s, keep, 20)
+    assert(matched[1][2], 'a part that already matches the cream keeps it')
+end)
+
+check('Match Cape: a tinted cape color shown only on its lining (under Capes.LINING_OUTSIDE outside) paints no part '
+      .. 'larger than an accent it does not match; left with none, the part takes the most outside color; a color the '
+      .. 'outside shows too, or a grey lining, stays (independent review 2026-10-11, case 70: the EX-00 Prototype X\'s '
+      .. 'grey dome took a taupe lining; the user chose "outside first"; a guarded grey lining made one yellow suit)',
+      function()
+    local t = {{mL = 44, ma = 0, mb = 0, share = 0.6}, {mL = 44, ma = 0, mb = 0, share = 0.05},
+               {mL = 44, ma = 0, mb = 0, share = 0.3}}
+    local s = {{L = 40, ma = 3.7, mb = 9.6, share = 0.33, rows = {{area = 1, outside = 0}}},   -- the lining alone, taupe
+               {L = 21, ma = 0, mb = 0, share = 0.29, rows = {{area = 1, outside = 1}}},       -- outside
+               {L = 36, ma = 0, mb = 12, share = 0.38,
+                rows = {{area = 2, outside = 0}, {area = 1, outside = 1}}}}                     -- a third outside
+    local function fresh() return {{true, true, true}, {true, true, true}, {true, true, true}} end
+    local keep = {{false, false, false}, {false, false, false}, {false, false, false}}
+    local allowed = fresh()
+    Capes.dark_parts_guard(allowed, t, s, keep, 20)
+    assert(not allowed[1][1] and allowed[1][2] and allowed[1][3], 'a large part loses the lining-only color only')
+    assert(allowed[2][1], 'an accent-size part (5%) may take it')
+    local only_lining = {{true, false, false}, fresh()[2], fresh()[3]}
+    Capes.dark_parts_guard(only_lining, t, s, keep, 20)
+    assert(not only_lining[1][1] and only_lining[1][2] and not only_lining[1][3],
+           'left with none: the most outside color (29% all outside over 38% a third outside)')
+    keep[3][1] = true
+    local matched = fresh()
+    Capes.dark_parts_guard(matched, t, s, keep, 20)
+    assert(matched[3][1] and not matched[1][1], 'a part that already matches the lining color keeps it')
+    s[1].ma, s[1].mb = 0.3, 1.0 -- a grey lining (the Light of Eternal Liberty's, chroma 1)
+    keep[3][1] = false
+    local grey = fresh()
+    Capes.dark_parts_guard(grey, t, s, keep, 20)
+    assert(grey[1][1], 'a grey lining stays a shade a large part may take')
+end)
 
 check('capes: BC3 blocks decode as Pillow decodes them (the parity reference), in both alpha modes', function()
     local out = ffi.new('uint8_t[64]')
@@ -502,6 +1569,60 @@ check('capes: cells inside the outline sample the smallest mip of at least the g
         if outline[i] == 1 then
             assert(cells[i * 4] == 0 and cells[i * 4 + 3] == 255, 'RGBA16F 0 and 1 to bytes 0 and 255')
         end
+    end
+    -- a mod's RGBA32F texture: the same values as 32-bit floats (R 0.25, G 2 clamps to 1, B NaN to 0, A -1 to 0)
+    local floats = info(Texture.FORMAT_RGBA32F, 4, 4, 3, 16)
+    local texel = ffi.new('float[4]', {0.25, 2, 0, -1})
+    local texel_bytes = ffi.cast('uint8_t *', texel)
+    texel_bytes[8], texel_bytes[9], texel_bytes[10], texel_bytes[11] = 0x01, 0x00, 0xC0, 0x7F -- B: a NaN
+    Capes.cells(Texture, function(at, size, out, offset)
+        for k = 0, size - 1 do out[offset + k] = texel_bytes[(at + k) % 16] end
+    end, floats, Slim.grower(64), cells)
+    for i = 0, g * g - 1 do
+        if outline[i] == 1 then
+            assert(cells[i * 4] == 64 and cells[i * 4 + 1] == 255 and cells[i * 4 + 2] == 0 and cells[i * 4 + 3] == 0,
+                   'RGBA32F clamped and rounded to bytes')
+        end
+    end
+end)
+
+check('an uncompressed (RGBA8) decal sheet\'s texels read one by one (an emblem\'s colors) are its own bytes, also '
+      .. 'while Capes.cells is paused at a pause point (its RGBA8 cells are copied as words through views it sets for '
+      .. 'its loop; independent review 2026-10-11: the sheet read went through them while unset)', function()
+    local Texture = require('texture')
+    local w, h = 8, 4
+    local sheet_info = {format = Texture.FORMAT_RGBA8, width = w, height = h, mips = 1, mip_offsets = {[0] = 0},
+                        layer_bytes = w * h * 4, layers = 1}
+    local function sheet_pixels(at, size, out, offset)
+        for k = 0, size - 1 do out[offset + k] = (at + k) % 251 end
+    end
+    local raw, cell, codec = Capes.read_mip(Texture, sheet_pixels, sheet_info, 0, Slim.grower(256))
+    local sheet = {raw = raw, cell = cell, codec = codec, wide = w}
+    local function check_sheet(when)
+        for y = 0, h - 1 do
+            for x = 0, w - 1 do
+                local texel, o = Capes.sheet_texel(sheet, x, y), (y * w + x) * 4
+                for c = 0, 3 do
+                    assert(texel[c] == (o + c) % 251, string.format('%s: texel %d,%d channel %d', when, x, y, c))
+                end
+            end
+        end
+    end
+    check_sheet('before any cells')
+    local g = Capes.GRID
+    local cells = ffi.new('uint8_t[?]', g * g * 4)
+    local big = {format = Texture.FORMAT_RGBA8, width = 64, height = 64, mips = 1, mip_offsets = {[0] = 0},
+                 layer_bytes = 64 * 64 * 4, layers = 1}
+    local paused = 0
+    Capes.cells(Texture, function(at, size, out, offset)
+        for k = 0, size - 1 do out[offset + k] = 200 end
+    end, big, Slim.grower(1024), cells, function()
+        paused = paused + 1
+        if paused == 3 then check_sheet('at a pause point of Capes.cells') end
+    end)
+    check_sheet('after Capes.cells')
+    for i = 0, g * g - 1 do
+        if Capes.outline()[i] == 1 then assert(cells[i * 4] == 200, 'the cells as words') end
     end
 end)
 
@@ -611,7 +1732,7 @@ check('cape zones: an emblem that read against its cloth and does not as planned
     -- a dark cloth with a light emblem; a source of light and dark: both take its light, the emblem then its dark
     local target = Matcher.item({row('c:0', 0, 0.9, 30), row('c:2', 2, 0.1, 80)}, false)
     local source = item({{'s:0', 0.8, 75, 0, 0}, {'s:1', 0.2, 20, 0, 0}}, false)
-    local plan = Matcher.plan(target, source)
+    local plan = Matcher.plan(target, source, nil, true)
     assert(plan['c:0'].source == 's:0' and plan['c:2'].source == 's:0', 'the plan: both the light')
     Matcher.cape_zones(plan, target, source, zones, nil)
     assert(plan['c:2'].source == 's:1' and plan['c:2'].kind == 'zone' and plan['c:2'].L == 20, 'the emblem: the dark')
@@ -619,14 +1740,14 @@ check('cape zones: an emblem that read against its cloth and does not as planned
     -- a zone still reading as planned stays
     local apart = item({{'s:0', 0.8, 75, 0, 0}, {'s:1', 0.2, 20, 0, 0}}, false)
     local reading = Matcher.item({row('c:0', 0, 0.9, 80), row('c:2', 2, 0.1, 30)}, false)
-    plan = Matcher.plan(reading, apart)
+    plan = Matcher.plan(reading, apart, nil, true)
     local before = plan['c:2'] and plan['c:2'].source
     Matcher.cape_zones(plan, reading, apart, zones, nil)
     assert(plan['c:2'] and plan['c:2'].source == before and plan['c:2'].kind ~= 'zone', 'a readable plan stays')
     -- a one-color source: no color reads, the emblem keeps its own (it reads against the new cloth)
     local one = item({{'s:0', 1.0, 60, 0, 0}}, false)
     local dark = Matcher.item({row('c:0', 0, 0.9, 62), row('c:2', 2, 0.1, 20)}, false)
-    plan = Matcher.plan(dark, one)
+    plan = Matcher.plan(dark, one, nil, true)
     assert(plan['c:2'], 'the emblem planned')
     Matcher.cape_zones(plan, dark, one, zones, nil)
     assert(plan['c:2'] == nil and plan['c:0'], 'the emblem keeps its own colors')
@@ -642,7 +1763,7 @@ check('cape zones: when no source color reads by lightness, a lost zone takes on
     local bloodhound = item({{'s:0', 0.62, 21, 20, 11}, {'s:1', 0.38, 21, 0, 0}}, false)
     -- the Pillars of Freedom: black cloth, red bars; the cloth takes the red and the bars too: they take the black
     local pillars = Matcher.item({row('c:0', 0, 0.9, 5, 0, 0), row('c:2', 2, 0.1, 34, 37, 27)}, false)
-    local plan = Matcher.plan(pillars, bloodhound)
+    local plan = Matcher.plan(pillars, bloodhound, nil, true)
     assert(plan['c:0'].source == 's:0' and plan['c:2'].source == 's:0', 'the plan: cloth and bars red')
     Matcher.cape_zones(plan, pillars, bloodhound, zones, nil)
     assert(plan['c:2'].source == 's:1' and plan['c:2'].kind == 'zone', 'the bars: black on the red')
@@ -650,14 +1771,14 @@ check('cape zones: when no source color reads by lightness, a lost zone takes on
     -- the Judgment Day: grey cloth, yellow marks; the cloth takes the black and the marks the red: they keep the red
     -- (the lightness rule put their yellow back)
     local judgment = Matcher.item({row('c:0', 0, 0.9, 26, 0, 0), row('c:2', 2, 0.1, 65, -9, 55)}, false)
-    plan = Matcher.plan(judgment, bloodhound)
+    plan = Matcher.plan(judgment, bloodhound, nil, true)
     local marks = plan['c:2'] and plan['c:2'].source
     assert(plan['c:0'].source == 's:1' and marks == 's:0', 'the plan: cloth black, marks red')
     Matcher.cape_zones(plan, judgment, bloodhound, zones, nil)
     assert(plan['c:2'] and plan['c:2'].source == 's:0', 'the marks stay red, not their own yellow')
     -- a source whose colors read neither way: the marks keep their own colors, as before
     local grey = item({{'s:0', 0.62, 27, 0, 0}, {'s:1', 0.38, 25, 1, 1}}, false)
-    plan = Matcher.plan(judgment, grey)
+    plan = Matcher.plan(judgment, grey, nil, true)
     Matcher.cape_zones(plan, judgment, grey, zones, nil)
     assert(plan['c:2'] == nil, 'no color reads: the marks keep their own colors')
 end)
@@ -698,8 +1819,8 @@ end)
 check('pysum adds as Python\'s sum() of floats (compensated since 3.12): the Cover of Darkness\'s paint sums to 1',
       function()
     local a = {0.5400885118937857, 0.0019177576986907615, 0.10799373040752351, 0.35}
-    assert(a[1] + a[2] + a[3] + a[4] ~= 1.0 and Matcher.pysum(a, 4) == 1.0, 'compensated')
-    assert(Matcher.pysum({}, 0) == 0 and Matcher.pysum({0.1}, 1) == 0.1 and Matcher.pysum({1, 2, 3}, 3) == 6,
+    assert(a[1] + a[2] + a[3] + a[4] ~= 1.0 and Colour.pysum(a, 4) == 1.0, 'compensated')
+    assert(Colour.pysum({}, 0) == 0 and Colour.pysum({0.1}, 1) == 0.1 and Colour.pysum({1, 2, 3}, 3) == 6,
            'empty, one value, integers')
 end)
 
@@ -889,6 +2010,89 @@ check('accents of any size and pattern accents take the source accent; a pattern
            'the orange accent takes the armor\'s yellow pattern')
     assert(Matcher.pattern_plan(battle, b01).aaaaaaaaaaaaaaaa == nil,
            'a pattern that already matches the source accent keeps its color')
+    -- a cape of one color repaints a pattern accent with its identity ("repaint for capes"; fresh gallery case 37: the
+    -- FS-23 Battle Master's yellow stripes under the dark grey e7619545); a helmet or armor of one color leaves it
+    local grey = item({{'g:0', 1.0, 22, 0, 0}}, false)
+    assert(Matcher.pattern_plan(battle, grey).aaaaaaaaaaaaaaaa == nil, 'a one-color helmet source: the pattern stays')
+    grey.cape_source = true
+    local repainted = Matcher.pattern_plan(battle, grey).aaaaaaaaaaaaaaaa
+    assert(repainted and repainted.source == 'g:0' and repainted.L == 22, 'a one-color cape: the pattern takes its grey')
+end)
+
+check('a neutral color with a part\'s gloss floor takes at most Colour.GLOSS_TINT_C of the floor\'s tint (fresh gallery '
+      .. '2026-10-11, case 103: the FS-05 Marksman\'s dome under a black cape aimed at its cyan floor\'s teal); a slight '
+      .. 'cast and a colored goal stay as they were', function()
+    local cyan = {0.538, 0.532, 0.536, 0.0017, 0.052, 0.0518}
+    local L, a, b = Colour.with_gloss(9.2, 0, 0, cyan)
+    assert(math.sqrt(a * a + b * b) <= Colour.GLOSS_TINT_C + 1e-9 and L > 20,
+           string.format('black under a cyan floor: L %.1f a %.1f b %.1f', L, a, b))
+    local warm = {1.08, 1.0, 0.87, 0.012, 0.010, 0.007}
+    local wL, wa, wb = Colour.with_gloss(25, 0, 0, warm)
+    local r, g, bl = Colour.lab_to_linear(25, 0, 0)
+    local eL, ea, eb = Colour.linear_to_lab(r + warm[4], g + warm[5], bl + warm[6])
+    assert(math.abs(wL - eL) < 1e-9 and math.abs(wa - ea) < 1e-9 and math.abs(wb - eb) < 1e-9,
+           'a slight warm cast stays in full')
+    local cL, ca, cb = Colour.with_gloss(30, 8, 6, cyan)
+    local w = 1 - 10 / Colour.GLOSS_C -- chroma 10
+    r, g, bl = Colour.lab_to_linear(30, 8, 6)
+    eL, ea, eb = Colour.linear_to_lab(r + w * cyan[4], g + w * cyan[5], bl + w * cyan[6])
+    assert(math.abs(cL - eL) < 1e-9 and math.abs(ca - ea) < 1e-9 and math.abs(cb - eb) < 1e-9,
+           'a colored goal keeps the floor\'s tint')
+end)
+
+check('Match Cape: a cape\'s second main color (25% or more, apart from its identity, mostly outside) takes the largest '
+      .. 'near-neutral main part the search left without it (fresh gallery 2026-10-11, case 36: the BP-32 Jackboot all '
+      .. 'black under 1264718e\'s 37% yellow); a colored part keeps its band, a lining color stays out', function()
+    local out = {{area = 1, outside = 1}}
+    local lim = {second = 0.25, main = 0.10, keep = 8.0, own_c = 9.0}
+    local function cape(second_rows, yellow)
+        return {{share = 0.63, L = 25.7, a = 0, b = 0, rows = out},
+                {share = 0.37, L = yellow and 64.7 or 27, a = yellow and -8.8 or 0, b = yellow and 55.5 or 1,
+                 rows = second_rows or out}}
+    end
+    local t = {{share = 0.47, ma = 0, mb = 0}, {share = 0.30, ma = 0, mb = 9.7}, {share = 0.16, ma = 0, mb = 0.3},
+               {share = 0.06, ma = 0, mb = 0}}
+    local function assigned(s, allowed, assign)
+        assign = assign or {1, 1, 1, 1}
+        Colour.cape_second({t = t, s = s, allowed = allowed or {{true, true}, {true, true}, {true, true}, {true, true}}},
+                           assign, 1, 1, lim)
+        return assign
+    end
+    local a = assigned(cape(nil, true))
+    assert(a[3] == 2 and a[2] == 1 and a[1] == 1 and a[4] == 1, 'the near-neutral 16% part takes the yellow, the colored '
+           .. '30% part keeps its pair: ' .. table.concat(a, ','))
+    a = assigned(cape(nil, true), nil, {1, 2, 1, 1})
+    assert(a[3] == 1, 'a main part already showing it: no change')
+    a = assigned(cape({{area = 1, outside = 0}}, true))
+    assert(a[3] == 1, 'a lining color: no change')
+    a = assigned(cape(nil, false))
+    assert(a[3] == 1, 'a second color like the identity: no change')
+    a = assigned(cape(nil, true), {{true, true}, {true, true}, {true, false}, {true, true}})
+    assert(a[3] == 1, 'a part that may not take it: no change')
+end)
+
+check('Match Cape: under a cape of no dark neutral an undersuit takes the nearest by lightness of its main colors that '
+      .. 'the cape\'s part guard allows it; with none it keeps its color (fresh gallery 2026-10-11, case 80: the IE-3 '
+      .. 'Martyr\'s olive undersuit under Federation\'s Embrace\'s blue and gold)', function()
+    local out, inside = {{area = 1, outside = 1}}, {{area = 1, outside = 0}}
+    local lim = {main = 0.10, keep = 8.0, accent_c = 20.0}
+    local function pick(palette, group)
+        local pairs, used = {}, {}
+        Colour.cape_structure({group}, palette, Capes.dark_parts_guard, lim, pairs, used)
+        return pairs[1] and pairs[1][2], used
+    end
+    local suit = {L = 22, a = 2, b = 6, mL = 22, ma = 2, mb = 6, share = 0.4}
+    local blue = {L = 37.5, a = -1.7, b = -19.5, ma = -1.7, mb = -19.5, share = 0.92, rows = out}
+    local gold = {L = 66, a = -0.5, b = 29.8, ma = -0.5, mb = 29.8, share = 0.08, rows = out}
+    local n, used = pick({blue, gold}, suit)
+    assert(n == blue and math.abs(used[blue] - 0.4) < 1e-12, 'blue and gold: the blue')
+    local cream = {L = 81.5, a = 0.4, b = 11.8, ma = 0.4, mb = 11.8, share = 0.655, rows = out}
+    local slate = {L = 37.1, a = -0.4, b = -6.3, ma = -0.4, mb = -6.3, share = 0.276, rows = out}
+    local red = {L = 36.3, a = 35, b = 19.5, ma = 35, mb = 19.5, share = 0.07, rows = out}
+    assert(pick({cream, slate, red}, suit) == slate, 'the Drape of Glory: the blue-grey, not its 7% red')
+    local cream60 = {L = 60.2, a = 4.5, b = 18.5, ma = 4.5, mb = 18.5, share = 0.62, rows = out}
+    local taupe = {L = 39.5, a = 3.7, b = 9.6, ma = 3.7, mb = 9.6, share = 0.33, rows = inside}
+    assert(pick({cream60, taupe, red}, suit) == nil, 'a light cream and a tinted lining only: it keeps its color')
 end)
 
 check('the CM-09 Bonesnapper armor: cream plates are its main color, its red trim the accent (2026-10-05)', function()
@@ -941,10 +2145,16 @@ check('bare metal taking paint aims for the paint\'s 0.04 white reflection more 
     local plan = Matcher.plan(helmet, item({{'s:0', 1.0, 21, 0, 0}}, true))
     near(plan['t:0'], lifted(21, 0.04), 'the metal row aims for the paint plus its reflection')
     near(plan['t:1'], 21, 'the paint row takes the paint as it is')
-    -- the other direction: paint takes the metal's color as it is (taking the light away turned paint black below
-    -- L 23: the FS-37 Ravager helmet from the PH-202 Twigsnapper's dark bronze)
-    local back = Matcher.plan(item({{'t:0', 1.0, 21, 0, 0}}, true), item({{'s:0', 1.0, 23, 0, 0, true}}, false))
-    near(back['t:0'], 23, 'the paint row takes the metal color as it is')
+    -- the other direction: paint takes the metal's color without the reflection taken away (taking it away turned
+    -- paint black below L 23: the FS-37 Ravager helmet from the PH-202 Twigsnapper's dark bronze, 2026-10-05), only
+    -- the sets' metal shift scaled to the metal's lightness (2026-10-09): the helmet 2.8 x 23 / 36.6 darker, never black
+    local back = Matcher.plan(item({{'t:0', 1.0, 21, 0, 0}}, false), item({{'s:0', 1.0, 23, 0, 0, true}}, true))
+    near(back['t:0'], 23 - 2.8 * 23 / 36.6, 'the helmet paint takes the dark bronze, barely darker')
+    assert(back['t:0'].L > 20, 'never black')
+    -- an armor's matte paint from a helmet's metal: the sets' 9.4 L darker at L 36.6, scaled (the CPR-80 Bulwark's own
+    -- armor L 30 against its helmet steel's L 39; user 2026-10-09: armors from it "way too bright")
+    local steel = Matcher.plan(item({{'t:0', 1.0, 21, 0, 0}}, true), item({{'s:0', 1.0, 39.4, 0, 0, true}}, false))
+    near(steel['t:0'], 39.4 - 9.4 * 39.4 / 36.6, 'the armor paint from the helmet steel, darker')
     -- metal against metal: as it is
     local same = Matcher.plan(item({{'t:0', 1.0, 45, 0, 0, true}}, false), item({{'s:0', 1.0, 60, 0, 0, true}}, true))
     near(same['t:0'], 60, 'a metal row takes a metal color as it is')
@@ -958,8 +2168,8 @@ check('new LUTs fit the planned rows only and leave the vanilla data alone', fun
     end
     local target = {luts = {aaaaaaaaaaaaaaaa = lut(8)}}
     local calls, yields = {}, 0
-    local transfer = {apply = function(values, width, row, L, a, b)
-        calls[#calls + 1] = {row, L, a, b}
+    local transfer = {apply = function(values, width, row, goal)
+        calls[#calls + 1] = {row, goal.L, goal.a, goal.b}
         values[row * width * 4] = -1
         return 0
     end}
@@ -1362,6 +2572,21 @@ check('Match Materials: the finish copy takes metallic, specular and roughness; 
     assert(target.luts.aaaaaaaaaaaaaaaa.values[base + 27] == base + 27, 'the vanilla LUT is untouched')
     local ok, why = pcall(Recolor.apply_finish, data, 23, 1, source, 'cccccccccccccccc:0')
     assert(not ok and tostring(why):find('not in the source analysis', 1, true), 'a missing source LUT is an error')
+end)
+
+check('Match Materials from a cape as the source: a tint row (its cape LUT, 16 columns) gives its material row\'s '
+      .. 'finish, never columns of the cape LUT (Helmet and Armor Match Cape)', function()
+    local mat, cape = ffi.new('float[?]', 23 * 3 * 4), ffi.new('float[?]', 16 * 3 * 4)
+    for i = 0, 23 * 3 * 4 - 1 do mat[i] = 0.001 * i end
+    for i = 0, 16 * 3 * 4 - 1 do cape[i] = -1 end
+    local source = {luts = {mmmmmmmmmmmmmmmm = {values = mat, width = 23, height = 3},
+                            cccccccccccccccc = {values = cape, width = 16, height = 3}},
+                    tint_of = {cccccccccccccccc = 'mmmmmmmmmmmmmmmm'}}
+    local data = ffi.new('float[?]', 23 * 4)
+    Recolor.apply_finish(data, 23, 0, source, 'cccccccccccccccc:2')
+    local s = 2 * 23 * 4
+    assert(data[27] == math.min(math.max(mat[s + 27], 0), 1) and data[32] == mat[s + 32] and data[35] == mat[s + 35]
+           and data[40] == mat[s + 40], 'the material row 2 finish: ' .. data[32])
 end)
 
 print('PASS test_units (' .. passed .. ' checks)')

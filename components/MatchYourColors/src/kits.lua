@@ -8,8 +8,11 @@
 -- missing ID mask gives uniform rows. This is the data scope of research/eval_scope.py: matcher v10 on it
 -- equals the proven quality on all 42,660 pairs.
 --
--- Row area = piece weight x ID-mask coverage / materials of the piece; skin pieces (tone variations) add no
--- rows. Patterns (v11.4, research/patterns.py): a piece's pattern texture (the kit's, else the material's default)
+-- Row area = piece weight x ID-mask coverage / materials of the piece. A piece with skin tones (tone variations)
+-- counts like any other: its LUT materials are clothing (the PH-9 Predator's camo shirt, the IE-57 Hell-Bent's vest,
+-- the O-2 Heavy Operator's sleeves) and its skin shows no material LUT row in the appearance study's row maps; until
+-- 2026-10-09 such pieces added no rows and were never recolored (user ticket: those shirts kept their own yellow and
+-- green). Patterns (v11.4, research/patterns.py): a piece's pattern texture (the kit's, else the material's default)
 -- is drawn where the material's pattern mask is set; pattern area = piece weight x mask coverage (mip
 -- PATTERN_MIP of its layer) / materials of the piece, per pattern texture. Nothing here runs per frame:
 -- Kits.analyse runs inside a recolor job and calls yield() between steps.
@@ -90,6 +93,13 @@ end
 -- pattern_coverage(hash, layer) -> number or nil. deps: {slim, texture (src/texture.lua), find, scratch,
 -- big_scratch (ID-mask row blocks, up to Texture.COVERAGE_BLOCK bytes), yield}, read at each call (the reader and
 -- its buffers exist only while a job runs).
+-- A texture's error with its name and, when a mod's patch served it, the patch file (v1.3 logged only "unsupported
+-- texture format 2", user report 2026-10-08).
+local function texture_error(name, record, why)
+    return string.format('texture %s%s: %s', name, record and record.file and (' (from ' .. record.file .. ')') or '',
+                         tostring(why))
+end
+
 function Kits.textures(deps)
     local Texture = deps.texture
     local luts, coverages = {}, {}
@@ -102,16 +112,18 @@ function Kits.textures(deps)
         local size = slim.part_size(record, 'main')
         local main = deps.scratch(size)
         slim.part(archive, record, 'main', 0, size, main, 0)
-        local info = Texture.describe(main, size)
-        return info, Texture.pixels(slim, archive, record, info)
+        local ok, info = pcall(Texture.describe, main, size)
+        if not ok then error(texture_error(name, record, info), 0) end
+        return info, Texture.pixels(slim, archive, record, info), record
     end
 
     function self.lut(name)
         local found = luts[name]
         if found ~= nil then return found or nil end
-        local info, pixels = describe(name)
+        local info, pixels, record = describe(name)
         if not info then luts[name] = false return nil end
-        local values, width, height = Texture.lut(pixels, info, deps.scratch)
+        local ok, values, width, height = pcall(Texture.lut, pixels, info, deps.scratch)
+        if not ok then error(texture_error(name, record, values), 0) end
         found = {values = values, width = width, height = height}
         luts[name] = found
         return found
@@ -139,7 +151,8 @@ function Kits.textures(deps)
         if found ~= nil then return found or nil end
         local info, pixels = describe_any(name)
         found = false
-        if info and info.format == Texture.FORMAT_RGBA16F and info.width == 3 and info.height == 1 then
+        if info and (info.format == Texture.FORMAT_RGBA16F or info.format == Texture.FORMAT_RGBA32F) and info.width == 3
+            and info.height == 1 then
             local values, width, height = Texture.lut(pixels, info, deps.scratch)
             found = {values = values, width = width, height = height}
         end
@@ -152,7 +165,7 @@ function Kits.textures(deps)
         local found = pattern_coverages[key]
         if found ~= nil then return found or nil end
         local info, pixels = describe_any(name)
-        found = info and Texture.mask_coverage(pixels, info, layer, Kits.PATTERN_MIP, deps.scratch) or false
+        found = info and Texture.mask_coverage(pixels, info, layer, Kits.PATTERN_MIP, deps.scratch, deps.yield) or false
         pattern_coverages[key] = found
         return found or nil
     end
@@ -237,7 +250,10 @@ local function add_pattern(acc, out, deps, weight, count, material)
     acc.pattern_area[name] = acc.pattern_area[name] + weight * coverage / count
 end
 
--- Adds one material's rows to the accumulators: area = weight x coverage / materials.
+-- Adds one material's rows to the accumulators: area = weight x coverage / materials. Row 0 is always added (area 0
+-- where coverage is 0): the shader draws a texel whose slot weights are (near) blank with row 0, and coverage leaves
+-- those texels out; the PH-56 Jaguar's shin wraps (their mask 71% blank, 8% of its measured view) kept their color
+-- (image review 2026-10-09). Such a row takes its group's color and weighs nothing (src/matcher.lua measure_rows).
 local function add_rows(acc, piece, weight, count, material, lut, coverage)
     local n = lut.height
     local cov = coverage
@@ -247,7 +263,7 @@ local function add_rows(acc, piece, weight, count, material, lut, coverage)
     end
     for r = 0, math.min(n, #cov) - 1 do
         local area = weight * cov[r + 1] / count
-        if area > 1e-6 then
+        if area > 1e-6 or r == 0 then
             local key = material.lut .. ':' .. r
             if acc.area[key] == nil then
                 acc.order[#acc.order + 1] = key
@@ -259,7 +275,8 @@ local function add_rows(acc, piece, weight, count, material, lut, coverage)
     end
 end
 
--- One piece: its materials (when spawned for this body) and, for a weighted non-skin piece, its rows.
+-- One piece: its materials (when spawned for this body) and, for a weighted piece, its rows. skin: the piece has
+-- skin tones (kept for the cache and logs; it no longer leaves the piece out).
 local function add_piece(acc, out, kit, piece, body, deps)
     local weight = Kits.weight(kit.kit_type, piece, body)
     -- Pieces of the other body type are never spawned for this avatar: not read at all.
@@ -268,7 +285,7 @@ local function add_piece(acc, out, kit, piece, body, deps)
     if spawned and not materials then out.dropped = out.dropped + 1 end
     local entry = {piece = piece, weight = weight, materials = materials or {}, skin = piece.tone > 0}
     out.pieces[#out.pieces + 1] = entry
-    if weight <= 0 or not materials or entry.skin then return end
+    if weight <= 0 or not materials then return end
     for _, material in ipairs(materials) do
         local lut = deps.textures.lut(material.lut)
         out.luts[material.lut] = lut
@@ -371,7 +388,7 @@ function Kits.mark_patched(analysis, touched, original, colour)
     local patched = {}
     for key in pairs(touched) do patched[key:match('^%S+ (%S+ %S+)$')] = true end
     for _, entry in ipairs(analysis.pieces) do
-        if entry.weight > 0 and not entry.skin and piece_patched(entry, patched) then analysis.geometry_patched = true end
+        if entry.weight > 0 and piece_patched(entry, patched) then analysis.geometry_patched = true end
     end
     for _, row in ipairs(analysis.rows) do
         if patched[row.lut .. ' ' .. Kits.TYPE_TEXTURE] then mark_row(row, analysis.luts[row.lut], original, colour) end
@@ -380,15 +397,23 @@ function Kits.mark_patched(analysis, touched, original, colour)
 end
 
 -- A kit record's content as one string (its fields and every piece): an analysis is made of what a record lists, and
--- a record another mod recomposes at runtime (a transmog's carrier) lists other pieces under the same id.
+-- a record another mod recomposes at runtime (a transmog's carrier) lists other pieces under the same id. Made once
+-- per kit (weak keys): a kit is not changed once read (kit_of), and the catalogue gives the kit it kept while
+-- its record reads the same; in game a plan kept from before spent most of its job on the keys made from it
+-- (harness profile 2026-10-11, KB match-your-colors-stress-test).
+local signatures = setmetatable({}, {__mode = 'k'})
 function Kits.signature(kit)
+    local made = signatures[kit]
+    if made then return made end
     local parts = {string.format('%08x', kit.id), tostring(kit.name_upper), tostring(kit.archive), tostring(kit.kit_type)}
     for _, p in ipairs(kit.pieces) do
         parts[#parts + 1] = table.concat({p.path, p.slot, p.type, p.body, p.lut, p.pattern or '', p.tone, p.fields or ''},
                                          ',') .. (p.cape_lut and (',' .. p.cape_lut .. ',' .. (p.gradient or '') .. ','
                                                     .. (p.decal or '')) or '')
     end
-    return table.concat(parts, ';')
+    made = table.concat(parts, ';')
+    signatures[kit] = made
+    return made
 end
 
 -- The kit catalogue in game memory (customization manager [game + 0x33264F8]: kit pointers at +0, count
@@ -399,48 +424,137 @@ Kits.KIT_BODIES, Kits.KIT_BODY_COUNT = 48, 56
 Kits.BODY_RECORD, Kits.PIECE_RECORD = 24, 96
 local KIT_TYPES = {[0] = Kits.ARMOR, Kits.HELMET, 'Cape'}
 
--- One piece record (in `buffer`) of a body: {path, slot, type, body, lut, pattern, tone} and, for a cape, its cape
+-- One piece record (at buffer[o]) of a body: {path, slot, type, body, lut, pattern, tone} and, for a cape, its cape
 -- LUT (+40: the tint and emblem-layer parameters per row), gradient (+48: where the tint shows), decal scalar fields
 -- (+64: which LUT row shows where) and decal sheet (+80: the emblems' own colors; src/capes.lua).
-local function piece_of(buffer, body, cape)
-    local piece = {path = hex64(buffer, 0), slot = u32(buffer, 8), type = u32(buffer, 12), body = body,
-                   lut = hex64(buffer, 24), pattern = hex64(buffer, 32), tone = buffer[88]}
+local function piece_of(buffer, o, body, cape)
+    local piece = {path = hex64(buffer, o), slot = u32(buffer, o + 8), type = u32(buffer, o + 12), body = body,
+                   lut = hex64(buffer, o + 24), pattern = hex64(buffer, o + 32), tone = buffer[o + 88]}
     if cape then
-        piece.cape_lut, piece.gradient, piece.fields = hex64(buffer, 40), hex64(buffer, 48), hex64(buffer, 64)
-        piece.decal = hex64(buffer, 80)
+        piece.cape_lut, piece.gradient = hex64(buffer, o + 40), hex64(buffer, o + 48)
+        piece.fields, piece.decal = hex64(buffer, o + 64), hex64(buffer, o + 80)
     end
     return piece
 end
 
--- One kit read from memory at `address`: {id, name_upper, archive, kit_type, pieces (piece_of's)}, or nil and why.
-function Kits.read_kit(read, address, buffer)
-    if not read(address, 64, buffer) then return nil, 'kit unreadable' end
-    local kit = {id = u32(buffer, 0), name_upper = u32(buffer, 12), archive = hex64(buffer, 32),
-                 kit_type = KIT_TYPES[u32(buffer, 40)], pieces = {}}
-    local bodies = u32(buffer, 48) + u32(buffer, 52) * HIGH
-    local body_count = u32(buffer, 56)
-    if not kit.kit_type or body_count > 8 then return nil, 'unexpected kit record' end
+-- A kit record's bytes, read into `record` (Kits.record(): at least RECORD_BYTES): its 64 bytes, then its bodies (24
+-- each, one read), then each body's pieces (96 each, one read a body: v1.3 read every body and piece apart). Returns
+-- how many bytes it holds, or nil and why.
+local MAX_BODIES, MAX_PIECES = 8, 32
+Kits.RECORD_BYTES = 64 + MAX_BODIES * Kits.BODY_RECORD + MAX_BODIES * MAX_PIECES * Kits.PIECE_RECORD
+local function read_record(read, address, record)
+    if not read(address, 64, record) then return nil, 'kit unreadable' end
+    local body_count = u32(record, 56)
+    if not KIT_TYPES[u32(record, 40)] or body_count > MAX_BODIES then return nil, 'unexpected kit record' end
+    local at = 64 + body_count * Kits.BODY_RECORD
+    if body_count > 0 and not read(u32(record, 48) + u32(record, 52) * HIGH, at - 64, record + 64) then
+        return nil, 'kit body unreadable'
+    end
     for b = 0, body_count - 1 do
-        if not read(bodies + Kits.BODY_RECORD * b, 24, buffer) then return nil, 'kit body unreadable' end
-        local body = u32(buffer, 0)
-        local pieces = u32(buffer, 8) + u32(buffer, 12) * HIGH
-        local count = u32(buffer, 16)
-        if count > 32 then return nil, 'unexpected kit body' end
-        for p = 0, count - 1 do
-            if not read(pieces + Kits.PIECE_RECORD * p, 96, buffer) then return nil, 'kit piece unreadable' end
-            kit.pieces[#kit.pieces + 1] = piece_of(buffer, body, kit.kit_type == 'Cape')
+        local o = 64 + Kits.BODY_RECORD * b
+        local count = u32(record, o + 16)
+        if count > MAX_PIECES then return nil, 'unexpected kit body' end
+        if count > 0 and not read(u32(record, o + 8) + u32(record, o + 12) * HIGH, count * Kits.PIECE_RECORD,
+                                  record + at) then
+            return nil, 'kit piece unreadable'
         end
+        at = at + count * Kits.PIECE_RECORD
+    end
+    return at
+end
+
+-- The kit of a record read_record read (size: its bytes): {id, name_upper, archive, kit_type, pieces (piece_of's)}.
+local function kit_of(record)
+    local kit = {id = u32(record, 0), name_upper = u32(record, 12), archive = hex64(record, 32),
+                 kit_type = KIT_TYPES[u32(record, 40)], pieces = {}}
+    local body_count = u32(record, 56)
+    local at = 64 + body_count * Kits.BODY_RECORD
+    for b = 0, body_count - 1 do
+        local o = 64 + Kits.BODY_RECORD * b
+        local body, count = u32(record, o), u32(record, o + 16)
+        for p = 0, count - 1 do
+            kit.pieces[#kit.pieces + 1] = piece_of(record, at + p * Kits.PIECE_RECORD, body, kit.kit_type == 'Cape')
+        end
+        at = at + count * Kits.PIECE_RECORD
     end
     return kit
 end
 
-Kits.buffer = function() return ffi.new('uint8_t[96]') end
+Kits.record = function() return ffi.new('uint8_t[?]', Kits.RECORD_BYTES) end
+
+-- The game's kit catalogue (customization manager [game + 0x33264F8]: kit pointers at +0, count at +8):
+-- find(id) -> kit (kit_of), its record read again on every call (a job's three): a transmog mod
+-- recomposes a record at runtime under the same id (its carrier, KB match-your-colors-review-transmog-v13), and the
+-- kit kept is replaced when the record lists anything else. A record whose bytes read as they did gives the kit kept
+-- without decoding it (v1.3 decoded every read and compared their signatures). signature(id): the record's content
+-- now (no catalogue scan, no pause; nil before the first lookup). The first lookup reads every kit's id (one read
+-- each); a miss reads them again once (kits loaded later).
+function Kits.catalogue(memory, game, yield)
+    local u8p = 'const uint8_t *'
+    local function read(address, size, out) return memory.read_into(ffi.cast(u8p, address), size, out) end
+    local function u64(b, o)
+        return (b[o] + b[o + 1] * 256 + b[o + 2] * 65536 + b[o + 3] * 16777216) + (b[o + 4] + b[o + 5] * 256) * HIGH
+    end
+    local addresses, kits, bytes = nil, {}, {} -- bytes[id]: the record bytes kits[id] was read from
+    local buffer, record = ffi.new('uint8_t[16]'), Kits.record()
+
+    local function scan()
+        addresses = {}
+        if not read(game + 0x33264F8, 8, buffer) then error('kit catalogue unreadable', 0) end
+        local manager = u64(buffer, 0)
+        if not read(manager, 16, buffer) then error('kit catalogue unreadable', 0) end
+        local pointers = u64(buffer, 0)
+        local count = buffer[8] + buffer[9] * 256 + buffer[10] * 65536 + buffer[11] * 16777216
+        if count == 0 or count > 4096 then error('unexpected kit catalogue', 0) end
+        local list = ffi.new('uint8_t[?]', count * 8)
+        if not read(pointers, count * 8, list) then error('kit catalogue unreadable', 0) end
+        for i = 0, count - 1 do
+            if i % 64 == 63 then yield() end
+            local address = u64(list, i * 8)
+            if read(address, 4, buffer) then
+                addresses[buffer[0] + buffer[1] * 256 + buffer[2] * 65536 + buffer[3] * 16777216] = address
+            end
+        end
+    end
+
+    -- The kit at `address` as its record reads now: the kit kept for id while its bytes are the same, or one with the
+    -- same signature (the record moved), else the new one, kept. nil and why when unreadable.
+    local function current(id, address)
+        local size, why = read_record(read, address, record)
+        if not size then return nil, why end
+        local now, known = ffi.string(record, size), kits[id]
+        if known and bytes[id] == now then return known end
+        local kit = kit_of(record)
+        if not (known and Kits.signature(known) == Kits.signature(kit)) then kits[id] = kit end
+        bytes[id] = now
+        return kits[id]
+    end
+
+    local self = {}
+    function self.find(id)
+        if not addresses or not addresses[id] then scan() end
+        local address = addresses[id]
+        if not address then error(string.format('kit %08x not in the catalogue', id), 0) end
+        local kit, why = current(id, address)
+        if not kit then error(why, 0) end
+        return kit
+    end
+
+    function self.signature(id)
+        local address = addresses and addresses[id]
+        local kit = address and current(id, address)
+        return kit and Kits.signature(kit) or nil
+    end
+    return self
+end
 -- Code that runs once or rarely (jobs, startup, events) stays interpreted, sub-functions included: it must not
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({hex64, Kits.weight, unit_materials, material_textures, Kits.textures, Kits.shared_samples,
+    for _, fn in ipairs({hex64, Kits.weight, unit_materials, material_textures, texture_error, Kits.textures,
+        Kits.shared_samples,
         add_pattern_textures, piece_materials, add_pattern, add_rows, add_piece, Kits.emissive, Kits.analyse,
-        row_change, piece_patched, mark_row, Kits.mark_patched, Kits.signature, piece_of, Kits.read_kit}) do
+        row_change, piece_patched, mark_row, Kits.mark_patched, Kits.signature, piece_of, read_record, kit_of,
+        Kits.catalogue}) do
         jit.off(fn, true)
     end
 end

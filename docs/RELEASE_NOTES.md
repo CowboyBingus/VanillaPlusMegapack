@@ -1,10 +1,9 @@
-- Match Your Colors v1.3: new options Recolor Hoods, Match Materials, Paint Scheme (one of the game's 11 weapon paint schemes) and Recolor Cape (your cape takes the same colors, its emblems kept readable).
-- Match Your Colors v1.3: squadmates who use the mod see each other's colors (Sync With Mod Users, always on); only the settings travel, as a value of the squad's online lobby.
-- Match Your Colors v1.3: helmets and armors changed by other mods are recolored from their modded colors, and glowing parts keep their colors.
-- Match Your Colors v1.3: color fixes from manual testing and rendered reviews, among them dark suits, hoods, metal parts, accents and patterns.
-- Match Your Colors v1.3: a slow game-data read or cache save no longer holds up a frame; the recolor work waits a frame instead.
-- Match Your Colors v1.3: Sync With Mod Users played between a host and a client, each seeing the other's colors.
-- Match Your Colors v1.3: its per-frame costs are measured offline only; v1.2 measured 0.008 ms per frame in missions.
-- The other twenty mods are unchanged from v39.
+- Match Your Colors v1.4: new Color Matching choice Helmet and Armor Match Cape: your helmet and armor take the colors of the cape you wear, and the cape keeps its own.
+- Match Your Colors v1.4: new SEAF paint scheme in the game's SEAF trooper colors, matched against SEAF troopers in the game.
+- Match Your Colors v1.4: color fixes from rendered reviews, among them camo patterns, metal parts, bands and stripes, dark parts and clothing on pieces that also show skin.
+- Match Your Colors v1.4: LUT mods that save their colors as 32-bit float textures no longer make recolors fail.
+- Match Your Colors v1.4: your Helldiver is recolored the frame after it appears, and the textures a recolor needs are made while the game loads, never during play.
+- Match Your Colors v1.4: in 7 minutes of real play, applying a recolor took 0.56-0.61 ms at the median and 1.33 ms at most; its per-frame cost in real play is not measured yet.
+- The other twenty mods are unchanged from v40.
 - Twenty-one independent options; use one copy of each mod: its standalone package or the pack option.
 - Requires Bingus Shared Loader v18 or newer; v19 is recommended.

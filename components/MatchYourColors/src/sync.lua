@@ -44,7 +44,7 @@ function Sync.decode(text)
     if type(text) ~= 'string' or #text > 40 then return nil end
     local version, mode, flags, scheme = text:match('^(%d+)|(%d+)|(%d+)|(%d+)$')
     version, mode, flags, scheme = tonumber(version), tonumber(mode), tonumber(flags), tonumber(scheme)
-    if version ~= Sync.VERSION or not mode or mode < 1 or mode > 3 or flags > 15 or scheme > 64 then return nil end
+    if version ~= Sync.VERSION or not mode or mode < 1 or mode > 4 or flags > 15 or scheme > 64 then return nil end
     return {mode = mode, keep_sets = flags % 2 == 1, recolor_hoods = math.floor(flags / 2) % 2 == 1,
             match_materials = math.floor(flags / 4) % 2 == 1, recolor_cape = math.floor(flags / 8) % 2 == 1,
             scheme = scheme}

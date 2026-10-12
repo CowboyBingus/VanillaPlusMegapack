@@ -146,25 +146,39 @@ function Engine.unit_materials(native, unit)
     return out
 end
 
--- The texture object bound to a material's texture slot (Engine.LUT_SLOT, Engine.PATTERN_SLOT,
--- Engine.CAPE_LUT_SLOT), or nil.
--- read(address number, size, buffer) -> true; buffer: >= 16 bytes, big: >= 64 x 16 bytes.
-function Engine.binding(read, material, slot, buffer, big)
+-- A material's texture bindings read into big (16 bytes each: the slot u32 at +0, the texture object at +8): how many,
+-- or nil. read(address number, size, buffer) -> true; buffer: >= 16 bytes, big: >= 64 x 16 bytes.
+function Engine.bindings(read, material, buffer, big)
     if not read(material + 24, 16, buffer) then return nil end
     local count = buffer[0] + buffer[1] * 256 + buffer[2] * 65536 + buffer[3] * 16777216
     local array = (buffer[8] + buffer[9] * 256 + buffer[10] * 65536 + buffer[11] * 16777216)
         + (buffer[12] + buffer[13] * 256) * HIGH
     if count == 0 or count > MAX_BINDINGS or array < 0x10000 then return nil end
     if not read(array, count * 16, big) then return nil end
+    return count
+end
+
+-- The texture object bound to `slot` among the count bindings in big (Engine.bindings), or nil. An entry's low byte
+-- is compared first: most are other slots, and this runs interpreted (one index of big instead of four; the apply
+-- spent a fifth of its time decoding slots, harness profile 2026-10-11).
+function Engine.binding_in(big, count, slot)
+    local low = slot % 256
     for i = 0, count - 1 do
         local o = i * 16
-        local at = big[o] + big[o + 1] * 256 + big[o + 2] * 65536 + big[o + 3] * 16777216
-        if at == slot then
+        if big[o] == low and big[o] + big[o + 1] * 256 + big[o + 2] * 65536 + big[o + 3] * 16777216 == slot then
             return (big[o + 8] + big[o + 9] * 256 + big[o + 10] * 65536 + big[o + 11] * 16777216)
                 + (big[o + 12] + big[o + 13] * 256) * HIGH
         end
     end
     return nil
+end
+
+-- The texture object bound to a material's texture slot (Engine.LUT_SLOT, Engine.PATTERN_SLOT,
+-- Engine.CAPE_LUT_SLOT), or nil. Arguments as Engine.bindings.
+function Engine.binding(read, material, slot, buffer, big)
+    local count = Engine.bindings(read, material, buffer, big)
+    if not count then return nil end
+    return Engine.binding_in(big, count, slot)
 end
 
 -- A runtime texture, updatable: {handle, object, data, view, width, height, format, mips, size}. spec: {width,
@@ -205,10 +219,167 @@ function Engine.bind(native, material, slot, object)
     native.set_resource(material, slot, object)
 end
 
+Engine.POOL_SPARES = 2 -- free textures made beside one that must be made (that frame waits for the renderer anyway)
+Engine.POOL_MAX_FREE = 48 -- free textures kept per size; one more given back is destroyed (a 23 x 8 one is 2.9 KB)
+Engine.POOL_MAX_FREE_SHEETS = 1 -- free decal sheet copies kept (5.6 MB each, and their data)
+-- textures of a prepared plan's sizes made ahead, per texture it has (pool.stock): with 4 the harness's stress pass (an
+-- armor, a helmet and a cape in turn every 0.05 s in the Armory) still made 9 in an 8.7 ms frame (2026-10-11)
+Engine.POOL_STOCK = 6
+-- Every LUT size of the game's kits and capes (build 25480438; research/profiling/lut_sizes.lua, MYC_SET=capes for the
+-- capes): 23 x 8 every kit's, 23 x 5 most capes' material, 16 x 5 most capes' tint, 3 x 1 patterns; the rest rare.
+Engine.POOL_SIZES = {{23, 8}, {23, 7}, {23, 6}, {23, 5}, {23, 4}, {16, 8}, {16, 5}, {16, 3}, {16, 1}, {3, 1}}
+-- The runtime textures both controllers use, kept and refilled instead of made and destroyed per plan.
+-- reserve(spec, count): an apply's demand of one size made room for first (below). take(spec) -> texture: a free
+-- texture of the spec's size refilled with its data (update_buffer, no wait), else a new one plus POOL_SPARES free
+-- ones made in the same frame; nil and why when the engine gives none.
+-- give(texture): back among the free ones; callers give a texture RETIRE_FRAMES frames after its last binding was
+-- undone, so no frame in flight still draws with it (src/recolor.lua RETIRE_FRAMES). deps: {native, memory}.
+function Engine.pool(deps)
+    local native, memory = deps.native, deps.memory
+    local POINTER = ffi.typeof('const uint8_t *')
+    local small = ffi.new('uint8_t[16]')
+    local free = {} -- [width * 65536 + height] = {texture, ...}; decal sheets under 'sheet:<width>x<height>'
+    local self = {made = 0, refilled = 0, destroyed = 0}
+
+    local function read(address, size, out) return memory.read_into(ffi.cast(POINTER, address), size, out) end
+    local function list_for(width, height, sheet)
+        local key = sheet and ('sheet:' .. width .. 'x' .. height) or width * 65536 + height
+        local list = free[key]
+        if not list then
+            list = {}
+            free[key] = list
+        end
+        return list
+    end
+    local function make(spec)
+        local texture, why
+        if spec.sheet then
+            texture, why = Engine.create_texture(native, {width = spec.width, height = spec.height, data = spec.data,
+                                                          format = Engine.BC3, mips = spec.mips, size = spec.size}, read,
+                                                 small)
+            if texture then texture.sheet = true end
+        else
+            texture, why = Engine.create_texture(native, spec, read, small)
+        end
+        if texture then self.made = self.made + 1 end
+        return texture, why
+    end
+
+    function self.take(spec)
+        local list = list_for(spec.width, spec.height, spec.sheet)
+        local texture = list[#list]
+        if texture then
+            list[#list] = nil
+            if texture.data ~= spec.data then -- a spec's data never changes once built: the same buffer, the same texels
+                Engine.update_texture(native, texture, spec.data)
+                self.refilled = self.refilled + 1
+            end
+            return texture
+        end
+        local made, why = make(spec)
+        if not made then return nil, why end
+        for _ = 1, spec.sheet and 0 or Engine.POOL_SPARES do
+            local spare = make(spec)
+            if not spare then break end
+            list[#list + 1] = spare
+        end
+        return made
+    end
+
+    -- Room for `count` textures of spec's size before an apply takes them: when fewer are free, the shortfall plus as
+    -- many spares as count (at least POOL_SPARES; a sheet none) are made now. Making a texture waits until the render
+    -- thread has worked through its backlog; the makings after it in the same frame find it idle (the audit's Armory
+    -- log: 1 texture 7.58 ms, 4 textures 7.49 ms, 3 textures 5.1-5.4 ms). So the frame that must grow covers the next
+    -- plan of the same shape too, which is applied while this one is still bound or retiring: v1.3 grew a 9-LUT plan's
+    -- size again on the next such plan, a second 5-7 ms frame. A helmet's plan (one texture a size) grows as before.
+    function self.reserve(spec, count)
+        local list = list_for(spec.width, spec.height, spec.sheet)
+        local free = #list
+        if free >= count then return end
+        local spares = spec.sheet and 0 or math.max(Engine.POOL_SPARES, count)
+        local made = {}
+        for _ = 1, count - free + spares do
+            local texture = make(spec)
+            if not texture then break end -- the engine gives none: take() reports why
+            made[#made + 1] = texture
+        end
+        for i = #made, 1, -1 do list[#list + 1] = made[i] end -- taken in the order made (spec's own data first)
+    end
+
+    -- Up to `want` free textures of spec's size (made with spec's data).
+    local function fill(spec, want)
+        local list = list_for(spec.width, spec.height, spec.sheet)
+        for _ = #list + 1, want do
+            local texture = make(spec)
+            if not texture then return end
+            list[#list + 1] = texture
+        end
+    end
+
+    -- A plan's sizes in the order met: {{spec, count}, ...}.
+    local function sizes_of(result)
+        local sizes, order = {}, {}
+        for _, kind in ipairs({'luts', 'patterns'}) do
+            for _, spec in pairs(result[kind] or {}) do
+                local list = list_for(spec.width, spec.height, spec.sheet)
+                local size = sizes[list]
+                if not size then
+                    size = {spec = spec, count = 0}
+                    sizes[list], order[#order + 1] = size, size
+                end
+                size.count = size.count + 1
+            end
+        end
+        return order
+    end
+
+    -- Makes, ahead of an apply, the textures a prepared plan's apply would make (src/addon.lua finish_ahead: while the
+    -- game loads, before the Helldiver is made), and more for the plans after it: of each of its sizes STOCK times its
+    -- count free (at most POOL_MAX_FREE; a decal sheet copy its count), and of every other LUT size of the game
+    -- (POOL_SIZES) POOL_SPARES + 1, made with zeros. Making textures waits for the render thread once per frame: the
+    -- first apply on the ship made 20 in a frame of 7.8 ms, Armory browsing more in frames of 4-6 ms, a ship outfit with
+    -- a 23 x 7 LUT 3 in 5.1 ms; ahead, while loading, 36 took 1.5 ms (harness profiles 2026-10-11, KB
+    -- match-your-colors-stress-test). result: a job's {luts, patterns}. Returns how many it made.
+    function self.stock(result)
+        local before = self.made
+        for _, size in ipairs(sizes_of(result)) do
+            fill(size.spec, size.spec.sheet and size.count
+                 or math.min(size.count * Engine.POOL_STOCK, Engine.POOL_MAX_FREE))
+        end
+        for _, size in ipairs(Engine.POOL_SIZES) do
+            local width, height = size[1], size[2]
+            if #list_for(width, height) <= Engine.POOL_SPARES then
+                fill({width = width, height = height, data = ffi.new('float[?]', width * height * 4)},
+                     Engine.POOL_SPARES + 1)
+            end
+        end
+        return self.made - before
+    end
+
+    function self.give(texture)
+        local list = list_for(texture.width, texture.height, texture.sheet)
+        if #list >= (texture.sheet and Engine.POOL_MAX_FREE_SHEETS or Engine.POOL_MAX_FREE) then
+            native.destroy(texture.handle)
+            self.destroyed = self.destroyed + 1
+            return
+        end
+        list[#list + 1] = texture
+    end
+
+    -- How many free textures the pool holds.
+    function self.free()
+        local count = 0
+        for _, list in pairs(free) do count = count + #list end
+        return count
+    end
+    return self
+end
+
 -- Code that runs once or rarely (jobs, startup, events) stays interpreted, sub-functions included: it must not
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({Engine.open, Engine.name64, Engine.texture_object, Engine.unit_materials, Engine.binding,
+    for _, fn in ipairs({Engine.open, Engine.name64, Engine.texture_object, Engine.unit_materials, Engine.bindings,
+        Engine.binding_in, Engine.binding, Engine.pool,
         Engine.create_texture, Engine.update_texture, Engine.bind}) do
         jit.off(fn, true)
     end

@@ -130,18 +130,98 @@ check('the boot patches win over every archive, the higher patch first; an archi
     assert(base.closed == 1, 'closing closes the archive reader too')
 end)
 
-check('the signature changes with a resource\'s bytes, not with a Lua addon\'s patch or the order of listing', function()
+check('the signature changes with the entries a patch holds, not with their bytes (v1.4: two reads a patch; the '
+      .. 'analyses\' content hashes see bytes), a Lua addon\'s patch or the order of listing', function()
     clear()
     write_patch(BOOT .. '.patch_0', {{X, TEXTURE, 'main', 'black visor'}})
-    local first = index().signature
+    local files = Files.new(FOLDER)
+    local opened = files.opened
+    local idx = Patches.index(files, {TEXTURE, MATERIAL, UNIT}, Slim.grower(64), function() end)
+    local first = idx.signature
+    assert(files.opened - opened == 1, 'only the patch file is opened (its table of contents), no part files')
     assert(index().signature == first, 'stable')
     write_patch(BOOT .. '.patch_0', {{X, TEXTURE, 'main', 'blue visor!'}}) -- same sizes, other pixels
+    assert(index().signature == first, 'another variant of the same LUT mod: the same entries')
+    write_patch(BOOT .. '.patch_0', {{X, TEXTURE, 'main', 'bigger blue visor'}}) -- another size
     local second = index().signature
-    assert(second ~= first, 'another variant of the same LUT mod')
+    assert(second ~= first, 'an entry of another size')
     write_patch(BOOT .. '.patch_1', {{Z, LUA, 'print(1)', ''}})
     assert(index().signature == second, 'a Lua addon\'s patch changes nothing')
     clear()
     assert(index().signature == '0:0:0:00000001', 'no patch: ' .. index().signature)
+end)
+
+check('a content hash covers the byte ranges read (merged, parts in order), so another variant\'s pixels differ while '
+      .. 'bytes nobody read do not; ranges survive as text', function()
+    clear()
+    local pixels = string.rep('a', 5000) .. 'black visor' .. string.rep('b', 300000)
+    write_patch(BOOT .. '.patch_0', {{X, TEXTURE, 'header', pixels}})
+    local files = Files.new(FOLDER)
+    local reader = Patches.over(base_reader({}), index(), files)
+    local record = assert(reader.locate(KIT, X, TEXTURE))
+    reader.ranges = {}
+    local out = ffi.new('uint8_t[300000]')
+    reader.part(KIT, record, 'gpu', 4000, 2000, out, 0)
+    reader.part(KIT, record, 'gpu', 5005, 6, out, 0) -- overlapping: merged
+    reader.part(KIT, record, 'main', 0, 6, out, 0)
+    reader.part(KIT, record, 'gpu', 6000, 262144 + 10, out, 0) -- adjacent, and longer than a chunk
+    local ranges = reader.ranges[record]
+    assert(Patches.ranges_text(ranges) == 'main:0+6|gpu:4000+264154', Patches.ranges_text(ranges))
+    local parsed = assert(Patches.parse_ranges(Patches.ranges_text(ranges)))
+    local function sum(bytes)
+        local a, b = 1, 0
+        for i = 1, #bytes do a = (a + bytes:byte(i)) % 65521 b = (b + a) % 65521 end
+        return string.format('%d:%08x', #bytes, b * 65536 + a)
+    end
+    local expected = sum('header' .. pixels:sub(4001, 4000 + 264154))
+    local pauses = 0
+    local hash = Patches.content_hash(files, record, Slim.grower(64), function() pauses = pauses + 1 end, parsed)
+    assert(hash == expected and pauses == 3, hash .. ' vs ' .. expected .. ', ' .. pauses .. ' pauses')
+    assert(Patches.content_hash(files, record, Slim.grower(64), nil, ranges) == expected, 'the noted ranges as they are')
+    reader.close()
+    write_patch(BOOT .. '.patch_0', {{X, TEXTURE, 'header', pixels:gsub('black', 'white')}}) -- read bytes changed
+    local again = Patches.record(index(), KIT, X, TEXTURE)
+    assert(Patches.content_hash(files, again, Slim.grower(64), nil, parsed) ~= expected, 'a read byte changed')
+    write_patch(BOOT .. '.patch_0', {{X, TEXTURE, 'header', pixels:sub(1, #pixels - 1) .. 'c'}}) -- an unread byte changed
+    again = Patches.record(index(), KIT, X, TEXTURE)
+    assert(Patches.content_hash(files, again, Slim.grower(64), nil, parsed) == expected, 'an unread byte: the same')
+    assert(Patches.content_hash(files, again, Slim.grower(64), nil, {}) == '0:00000001', 'nothing read: presence only')
+    assert(Patches.parse_ranges('-') and not Patches.parse_ranges('x:1+2') and not Patches.parse_ranges('gpu:'),
+           'malformed ranges')
+end)
+
+check('the signature\'s checksum is the Adler-32 of each indexed entry\'s file name and its 80 TOC bytes, in file '
+      .. 'order (a byte-by-byte reference)', function()
+    clear()
+    local function bytes(n, seed)
+        local out = {}
+        for i = 1, n do out[i] = string.char((i * 31 + seed * 7 + math.floor(i / 255)) % 256) end
+        return table.concat(out)
+    end
+    local entries = {{X, TEXTURE, bytes(4097, 1), bytes(9000, 2)}, {Z, LUA, 'print(1)', ''},
+                     {Y, MATERIAL, bytes(1, 3), bytes(65536, 4)}, {Z, UNIT, bytes(70000, 5), bytes(255, 6)}}
+    local file = BOOT .. '.patch_0'
+    write_patch(file, entries)
+    local f = assert(io.open(FOLDER .. file, 'rb'))
+    local whole = f:read('*a')
+    f:close()
+    local a, b = 1, 0
+    local function sum(s)
+        for i = 1, #s do
+            a = (a + s:byte(i)) % 65521
+            b = (b + a) % 65521
+        end
+    end
+    local base = 72 + 32
+    for i, e in ipairs(entries) do
+        if e[2] ~= LUA then
+            sum(file)
+            sum(whole:sub(base + 80 * (i - 1) + 1, base + 80 * i))
+        end
+    end
+    local signature = index().signature
+    assert(signature == string.format('1:3:0:%08x', b * 65536 + a), signature .. ' vs reference '
+           .. string.format('%08x', b * 65536 + a))
 end)
 
 clear()

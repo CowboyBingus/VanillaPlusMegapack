@@ -29,6 +29,11 @@ local STORED_DIRECT = 4194304 -- stored chunks above this size are read in place
 -- Decoded chunks kept: reads alternating between two regions (an ID mask's layers) decode each chunk once, also
 -- where a read crosses a chunk boundary.
 local CHUNK_SLOTS = 3
+-- Decoded small chunks (SMALL_CHUNK bytes or less) are kept apart, each in its own buffer, up to SMALL_BYTES in all
+-- for the reader's life (then let go all at once): an analysis reads the same small chunks (materials, texture heads)
+-- again and again, and the three slots had let them go between uses (2026-10-08, 17 Armory-like jobs on the game's
+-- files: 436 of 483 repeated decodes were of chunks of 4 KB or less, about half of a new item's reads in all).
+Slim.SMALL_CHUNK, Slim.SMALL_BYTES = 16384, 1048576
 local ENTRY_CACHE = 16
 Slim.TOC_MAGIC = 0xF0000011
 
@@ -68,8 +73,13 @@ local function copy_literals(src, ip, src_size, dst, op, capacity, count)
     return ip + count, op + count
 end
 
--- Copies one sequence's match (offset, then length from the token's low nibble plus 4); overlapping matches
--- copy byte by byte. Returns the next input and output positions.
+-- Copies one sequence's match (offset, then length from the token's low nibble plus 4). An overlapping match
+-- (offset below its length) repeats its first `offset` bytes: a short one is copied byte by byte, a long one in
+-- whole periods from its start, each copy as long as all written before it (memcpy calls that never overlap; the
+-- result is the byte-by-byte one). The game's data holds such runs of up to a whole 256 KB chunk (370 over 16 KB in
+-- 8,518 sampled chunks): byte by byte that is 0.36 ms compiled and 12 ms interpreted in the game's VM, in one piece.
+-- Returns the next input and output positions.
+local LONG_MATCH = 256
 local function copy_match(src, ip, src_size, dst, op, capacity, token)
     if ip + 2 > src_size then error('lz4: truncated offset', 0) end
     local offset = src[ip] + src[ip + 1] * 256
@@ -82,16 +92,25 @@ local function copy_match(src, ip, src_size, dst, op, capacity, token)
     local from = op - offset
     if offset >= length then
         ffi.copy(dst + op, dst + from, length)
-    else
+    elseif length < LONG_MATCH then
         for k = 0, length - 1 do dst[op + k] = dst[from + k] end
+    else
+        local done = 0 -- a whole number of periods, so dst + from holds what comes next
+        while done < length do
+            local n = math.min(done + offset, length - done)
+            ffi.copy(dst + op + done, dst + from, n)
+            done = done + n
+        end
     end
     return ip, op + length
 end
 
 -- LZ4 block decoder (the block format, no frame). src: uint8_t pointer, src_size bytes; dst: uint8_t
--- pointer with room for capacity bytes; pause (optional): called after every LZ4_PAUSE bytes of output, so a
--- job can pause inside a chunk (a 256 KB chunk is several ms of work in the game; 16 KB about 0.2 ms outside it).
--- Returns the decoded size, or raises on malformed input.
+-- pointer with room for capacity bytes; pause (optional): called once at least LZ4_PAUSE bytes of output followed the
+-- last call, after a sequence, so a job can pause inside a chunk (a 256 KB chunk is several ms of work in the game;
+-- 16 KB about 0.2 ms outside it). A sequence's literals and a long match are memcpy calls (copy_match), so even one
+-- that fills a whole chunk adds only copying time between two calls. Returns the decoded size, or raises on malformed
+-- input.
 local LZ4_PAUSE = 16384
 function Slim.lz4(src, src_size, dst, capacity, pause)
     local ip, op = 0, 0
@@ -155,7 +174,46 @@ local function dsar(files, path, scratch)
     -- The decoded bytes of chunk k: a pointer into one of the shared chunk slots (every file's), valid until
     -- CHUNK_SLOTS other chunks were decoded. The least recently used slot takes a new chunk; a slot's buffer is
     -- made when first needed.
+    -- Reads chunk k (size bytes decoded) into out.
+    local function fill(k, out, size)
+        local base = k * CHUNK_RECORD
+        local packed_at, packed_size, compression = u64(chunks, base + 8), u32(chunks, base + 20), chunks[base + 24]
+        if compression == 0 then
+            files.read(handle, packed_at, size, out)
+        elseif compression == 3 then
+            local packed = scratch.packed(packed_size)
+            files.read(handle, packed_at, packed_size, packed)
+            if Slim.lz4(packed, packed_size, out, size, scratch.yield) ~= size then
+                error('lz4: short chunk in ' .. path, 0)
+            end
+        else
+            error(format('compression %d in %s', compression, path), 0)
+        end
+        scratch.decodes = scratch.decodes + 1
+    end
+
+    -- A small chunk, decoded into a buffer of its own and kept (Slim.SMALL_CHUNK); kept only once whole, so a decode
+    -- the job abandons at a pause leaves nothing behind.
+    local function decoded_small(k, size)
+        local out = ffi.new('uint8_t[?]', math.max(1, size))
+        fill(k, out, size)
+        if scratch.small_bytes + size > Slim.SMALL_BYTES then scratch.small, scratch.small_bytes = {}, 0 end
+        local mine = scratch.small[self]
+        if not mine then
+            mine = {}
+            scratch.small[self] = mine
+        end
+        mine[k], scratch.small_bytes = out, scratch.small_bytes + size
+        if scratch.yield then scratch.yield() end -- a job may pause between chunks (the chunk stays kept)
+        return out
+    end
+
     local function decoded(k)
+        local mine = scratch.small[self]
+        local kept = mine and mine[k]
+        if kept then return kept end
+        local size = u32(chunks, k * CHUNK_RECORD + 16)
+        if size <= Slim.SMALL_CHUNK then return decoded_small(k, size) end
         local slots = scratch.slots
         scratch.tick = scratch.tick + 1
         local slot = slots[1]
@@ -171,24 +229,10 @@ local function dsar(files, path, scratch)
             slot = {chunk = grower(262144), used = 0}
             slots[#slots + 1] = slot
         end
-        local base = k * CHUNK_RECORD
-        local packed_at, size = u64(chunks, base + 8), u32(chunks, base + 16)
-        local packed_size, compression = u32(chunks, base + 20), chunks[base + 24]
         slot.owner = nil -- a decode the job abandons at a pause leaves no slot that looks valid
         local out = slot.chunk(size)
-        if compression == 0 then
-            files.read(handle, packed_at, size, out)
-        elseif compression == 3 then
-            local packed = scratch.packed(packed_size)
-            files.read(handle, packed_at, packed_size, packed)
-            if Slim.lz4(packed, packed_size, out, size, scratch.yield) ~= size then
-                error('lz4: short chunk in ' .. path, 0)
-            end
-        else
-            error(format('compression %d in %s', compression, path), 0)
-        end
+        fill(k, out, size)
         slot.owner, slot.k, slot.data, slot.used = self, k, out, scratch.tick
-        scratch.decodes = scratch.decodes + 1
         if scratch.yield then scratch.yield() end -- a job may pause between chunks (the chunk stays decoded)
         return out
     end
@@ -204,7 +248,8 @@ local function dsar(files, path, scratch)
             if chunks[base + 24] == 0 and length > STORED_DIRECT then
                 files.read(handle, u64(chunks, base + 8) + skip, take, out + out_offset)
             else
-                ffi.copy(out + out_offset, decoded(k) + skip, take)
+                local data = decoded(k) -- held while copied: a pointer into it keeps nothing alive
+                ffi.copy(out + out_offset, data + skip, take)
             end
             at, size, out_offset = at + take, size - take, out_offset + take
         end
@@ -231,7 +276,7 @@ end
 -- each chunk is decoded, so a job can pause there (about 1 ms of work per 256 KB chunk).
 function Slim.open(files, data, yield)
     local scratch = {head = grower(128), slots = {{chunk = grower(262144), used = 0}}, packed = grower(262144), decodes = 0,
-                     tick = 0, yield = yield}
+                     tick = 0, yield = yield, small = {}, small_bytes = 0}
     local index = dsar(files, data .. 'bundles.nxa', scratch)
     local head = scratch.head(24)
     index.read(0, 24, head)

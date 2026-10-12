@@ -89,11 +89,11 @@ check('natives: the buffers the post\'s update points into outlive collections (
     for _, cb in ipairs(callbacks) do cb:free() end
 end)
 
-check('encode and decode: every mode, flag and scheme round trips; other versions and malformed values are refused',
+check('encode and decode: every mode (Helmet and Armor Match Cape included), flag and scheme round trips; other versions and malformed values are refused',
       function()
-    for mode = 1, 3 do
+    for mode = 1, 4 do
         for flags = 0, 15 do
-            for scheme = 0, 11 do
+            for scheme = 0, 12 do
                 local o = {mode = mode, keep_sets = flags % 2 == 1, recolor_hoods = math.floor(flags / 2) % 2 == 1,
                            match_materials = math.floor(flags / 4) % 2 == 1, recolor_cape = flags >= 8,
                            scheme = scheme}
@@ -104,7 +104,7 @@ check('encode and decode: every mode, flag and scheme round trips; other version
             end
         end
     end
-    for _, bad in ipairs({'2|2|3|0', '1|0|3|0', '1|4|3|0', '1|2|16|0', '1|2|3|65', '1|2|3', '1|2|3|0|9', ' 1|2|3|0',
+    for _, bad in ipairs({'2|2|3|0', '1|0|3|0', '1|5|3|0', '1|2|16|0', '1|2|3|65', '1|2|3', '1|2|3|0|9', ' 1|2|3|0',
                           '1|2|3|x', '', string.rep('1', 41), '1|-2|3|0'}) do
         assert(Sync.decode(bad) == nil, 'refused: ' .. bad)
     end
@@ -188,11 +188,11 @@ check('the calls sync adds: a lobby poll every 120 frames, one 120-byte read on 
         local extra = diff(w.frame(), twin.frame())
         local frame = w.instance.state.frame
         local expected = {}
-        if (frame - 4) % 120 == 0 then
+        if (frame - 5) % 120 == 0 then
             -- 7 for the lobby, 2 per member (key, id) and 2 for the local one's type, 1 for the other's value, 14 for
             -- the players' records; the value posted once the lobby has stayed joined for STEADY_FRAMES (first poll:
-            -- frame 4)
-            expected, polls = {members = 1, property = 1, read_into = 28, post = frame == 604 and 1 or nil}, polls + 1
+            -- frame 5, as frame 4 applies the local recolor)
+            expected, polls = {members = 1, property = 1, read_into = 28, post = frame == 605 and 1 or nil}, polls + 1
         elseif frame % Remote.WATCH_FRAMES == 0 then
             expected, watches = {read_into = 1}, watches + 1
         elseif frame % 30 == 1 then
@@ -253,6 +253,74 @@ check('its settings change: a new job with them; its Helldiver respawns: the new
     w.space.u32(remote_unit_at(0, 0), 0x201)
     w.frames(Remote.WATCH_FRAMES + 3)
     assert(w.bound(0x201)[1] == texture, 'the new unit bound to the same texture within a few frames')
+end)
+
+check('a squadmate\'s respawn with the same look rebinds its applied result without a job (the audit, rank 11); a '
+      .. 'record a transmog recomposed meanwhile gets a job', function()
+    local w = world(with_remote())
+    w.frames(8)
+    local texture, count = w.bound(0x200)[1], #requests
+    assert(texture ~= vanilla(w), 'recolored')
+    w.engine.units[0x200].alive = false -- a respawn: new piece units, the same kits
+    w.engine.unit(0x201, HELMET_LUT)
+    w.space.u32(remote_unit_at(0, 0), 0x201)
+    w.frames(Remote.WATCH_FRAMES + 1)
+    assert(w.bound(0x201)[1] == texture and #requests == count and w.instance.remote.rebinds == 1,
+           'the new unit bound to the same texture, no job')
+    helpers.records[REMOTE_HELMET] = 'record 11111111 composed with another look'
+    w.engine.units[0x201].alive = false
+    w.engine.unit(0x202, HELMET_LUT)
+    w.space.u32(remote_unit_at(0, 0), 0x202)
+    w.frames(Remote.WATCH_FRAMES + 3)
+    helpers.records[REMOTE_HELMET] = nil
+    assert(#requests == count + 1 and requests[#requests].target == 'remote', 'a recomposed record: a job')
+end)
+
+check('a squadmate whose items match their cape (Helmet and Armor Match Cape) respawns in another cape: a job, not the '
+      .. 'old result (user request 2026-10-09)', function()
+    local w = setup({lobby = {local_id = LOCAL_ID, members = with_remote('1|4|3|0')}})
+    w.space.u32(Fake.CUSTOMIZATION + 2420 + 68, 0x72492837) -- the squadmate's cape, before the first frame
+    w.frames(13)
+    local function remote_requests()
+        local out = {}
+        for _, r in ipairs(requests) do if r.target == 'remote' then out[#out + 1] = r end end
+        return out
+    end
+    local before = remote_requests()
+    local last = before[#before]
+    assert(last and last.mode == 4 and last.cape == 0x72492837, 'their settings and their cape asked for')
+    assert(w.bound(0x200)[1] ~= vanilla(w), 'recolored')
+    w.space.u32(Fake.CUSTOMIZATION + 2420 + 68, 0x03f9d46b) -- another cape, then a respawn
+    w.engine.units[0x200].alive = false
+    w.engine.unit(0x201, HELMET_LUT)
+    w.space.u32(remote_unit_at(0, 0), 0x201)
+    w.frames(Remote.WATCH_FRAMES + 3)
+    local after = remote_requests()
+    assert(#after == #before + 1 and after[#after].cape == 0x03f9d46b and w.instance.remote.rebinds == 0,
+           'the new cape: a job, no rebind')
+end)
+
+check('squadmates waiting for jobs are served in turn: one whose look keeps changing cannot keep another waiting',
+      function()
+    local stub_recolor = {controller = function()
+        return {restore = function() end, retired = {}, probes = 0, apply = function() return 0 end}
+    end}
+    local stub_avatar = {
+        players = function()
+            return {{player = 7, peer_low = 1, peer_high = 0, unit = 0x71}, {player = 8, peer_low = 2, peer_high = 0, unit = 0x72}}
+        end,
+        resolve_remote = function(_, _, player) return {helmet = player.unit, armor = 2, body = 0, cape = 0, units_at = 0} end,
+        watch = function() return {changed = function() return false end} end,
+    }
+    local r = Remote.new({Avatar = stub_avatar, Recolor = stub_recolor, Sync = Sync, note = function() end,
+                          records_same = function() return true end})
+    r.update(1, {{peer_low = 1, peer_high = 0, text = SHARED}, {peer_low = 2, peer_high = 0, text = SHARED}})
+    local first = assert(r.request())
+    r.entries[first.key].dirty = true -- its look changed again before the other was served
+    local second = assert(r.request())
+    assert(second.key ~= first.key, 'the other one first')
+    local third = assert(r.request())
+    assert(third.key == first.key and r.request() == nil, 'then the first again; nothing left')
 end)
 
 check('not joined: no post and no member read, the others restored; a new lobby gets the value again', function()

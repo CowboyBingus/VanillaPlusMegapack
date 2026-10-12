@@ -199,6 +199,33 @@ check('Recolor Hoods off: the hooded helmets\' plans equal the reference, hood r
     end
 end)
 
+-- Every armor without its measurement, as a mod's patch to its geometry leaves it (end user 2026-10-08: a patched CE-27
+-- Ground Breaker gave every helmet the pure green of a hidden debug row): no helmet's plan takes a color from a row the
+-- study never showed on 0.1% of any view (v1.3: 665 of 21,330 plans did, with Match Materials off).
+local unmeasured_plans = 0
+check('with every armor unmeasured, no helmet plan takes a source row the study never saw at a visible share', function()
+    local helmets = items_of()
+    local taken = {}
+    for id, a in pairs(analyses) do
+        if a.kit.kit_type == 'Armor' then
+            local s = Matcher.item(a.rows, true, Recolor.patterns_of(a),
+                                   {row = appearance.row, seen_share = appearance.seen_share})
+            assert(not s.measured, 'unmeasured')
+            for tid, t in pairs(helmets) do
+                if analyses[tid].kit.kit_type == 'Helmet' then
+                    unmeasured_plans = unmeasured_plans + 1
+                    for key, goal in pairs(Matcher.plan(t, s)) do
+                        local lut, r = goal.source:match('^(%x+):(%d+)$')
+                        local share = lut and appearance.seen_share(lut, tonumber(r))
+                        if share and share < 0.001 then taken[#taken + 1] = tid .. ' ' .. key .. ' <- ' .. goal.source end
+                    end
+                end
+            end
+        end
+    end
+    assert(#taken == 0, #taken .. ' rows take an unseen source row, first ' .. tostring(taken[1]))
+end)
+
 -- The rows a Match Materials plan paints: 'target row=finish source row;...' in key order.
 local function finish_text(mapping)
     local keys = {}
@@ -234,6 +261,36 @@ check('Match Materials: the rows painted equal the reference for every target (a
     for key in pairs(sums) do assert(MATERIALS[key], key .. ': paints rows the reference does not') end
 end)
 
+-- Whether c, fitted through response cal toward aim, has its paint (mean albedo) turned Transfer.FLOOR_TURN degrees or
+-- more off a colored aim under the response's floor (src/transfer.lua refit).
+local function turned_under(c, cal, aim)
+    local function chroma(a, b) return math.sqrt(a * a + b * b) end
+    if chroma(aim[2], aim[3]) < Transfer.NEUTRAL_GOAL_C or Colour.linear_to_lab(cal[4], cal[5], cal[6]) <= aim[1] then
+        return false
+    end
+    local _, pa, pb = Colour.linear_to_lab(colour.albedo(c))
+    local gap = math.abs(math.deg(math.atan2(pb, pa) - math.atan2(aim[3], aim[2]))) % 360
+    return chroma(pa, pb) >= Transfer.NEUTRAL_GOAL_C and math.min(gap, 360 - gap) >= Transfer.FLOOR_TURN
+end
+
+-- A row fitted as the job does (src/transfer.lua apply, without a source: no dark finish): an accent band's row one
+-- coat of its paint through the model, a fit through the response that misses by Transfer.RESPONSE_MISS or more, or
+-- turns its paint off a colored goal under the response's floor (Transfer.FLOOR_TURN), done again through the model, at
+-- the goal less the row's own gloss (Transfer.diffuse_goal). Returns the fitted row_values, the error and the response
+-- it went through (or nil).
+local function fit_as_job(transfer, c0, case, goal, cal)
+    local function copy() local c = {} for k = 1, #c0 do c[k] = c0[k] end return c end
+    local c, use, flat = copy(), not goal.band and cal or nil, goal.band and 'coat' or nil
+    local d = {Transfer.diffuse_goal(Colour, {L = case.L, a = case.a, b = case.b, cal = cal, band = goal.band})}
+    local aim = use and {case.L, case.a, case.b} or d
+    local _, _, _, err = transfer.fit(c, aim[1], aim[2], aim[3], use, nil, flat)
+    if use and (err >= Transfer.RESPONSE_MISS or turned_under(c, use, aim)) then
+        c, use, aim = copy(), nil, d
+        _, _, _, err = transfer.fit(c, aim[1], aim[2], aim[3], nil, nil, flat)
+    end
+    return c, err, use, aim
+end
+
 local painted_rows = 0
 check('Match Materials: painted rows take their source row\'s finish and the reference\'s fitted colors', function()
     local transfer = Transfer.new(Colour, colour)
@@ -252,8 +309,8 @@ check('Match Materials: painted rows take their source row\'s finish and the ref
                 local data = ffi.new('float[?]', spec.width * spec.height * 4)
                 ffi.copy(data, spec.values, spec.width * spec.height * 16)
                 Recolor.apply_finish(data, spec.width, tonumber(row), analyses[s], goal.finish)
-                local c = Colour.row_values(data, spec.width, tonumber(row))
-                local _, _, _, err = transfer.fit(c, case.L, case.a, case.b, goal.cal)
+                local c0 = Colour.row_values(data, spec.width, tonumber(row))
+                local c, err = fit_as_job(transfer, c0, case, goal, goal.cal)
                 close(err, case.err, 1e-6, key .. ' ' .. case.key .. ' error')
                 for k, column in ipairs(Transfer.COLUMNS) do
                     for ch = 0, 2 do
@@ -273,7 +330,7 @@ check('pattern plans equal the reference for every analysed pair, both direction
     for key in pairs(PLANS) do
         local t, s = key:sub(2, 9), key:sub(10, 17)
         if items[t] and items[s] then
-            local plan = Matcher.pattern_plan(items[t], items[s])
+            local plan = Matcher.pattern_plan(items[t], items[s], Matcher.plan(items[t], items[s]))
             local names = {}
             for name in pairs(plan) do names[#names + 1] = name end
             table.sort(names)
@@ -342,11 +399,14 @@ local REPORTED = {
       {{48, 32, 49}, {40, 59, 43}, 'accent'}}},
     {'d0ce5bc7', '8c83c789', 'Salamander <- I-92 Fire Fighter: the grey plates, never the tan padding',
      {{{34, 1, 1}, {29, 0, 0}, 'pair', {28, 40}}, {{26, 0, -1}, {29, 0, 0}, 'pair'}, {{48, 32, 49}, 'keep'}}},
+    -- (2026-10-10: the plates' paint is L 32.9, their look L 42.8 mostly their gloss; the shell takes that paint as
+    -- seen under its own reflections, L 35, its own look 34: src/matcher.lua diffuse_colors; rendered for the user)
     {'d0ce5bc7', '5096bce9', 'Salamander <- SR-64 Cinderblock: light grey like its plates, its emblem\'s orange, no lime',
-     {{{34, 1, 1}, {43, -1, -1}, 'pair', {38, 55}}, {{26, 0, -1}, {21, 1, 1}, 'pair'},
+     {{{34, 1, 1}, {43, -1, -1}, 'pair', {33, 55}}, {{26, 0, -1}, {21, 1, 1}, 'pair'},
       {{48, 32, 49}, {49, 17, 41}, 'accent'}}, false},
+    -- (2026-10-10: the Cinderblock plates' look is mostly their gloss, as above; rendered for the user)
     {'1e9444f9', '5096bce9', 'Battle Master <- SR-64 Cinderblock: light grey, no black crest, orange stripes, no lime',
-     {{{34, 0, -1}, {43, -1, -1}, 'pair', {38, 55}}, {{47, 0, 1}, {43, -1, -1}, 'pair', {38, 55}}},
+     {{{34, 0, -1}, {43, -1, -1}, 'pair', {33, 55}}, {{47, 0, 1}, {43, -1, -1}, 'pair', {33, 55}}},
      {f18dfbb5346732c1 = {49, 17, 41}}},
     -- 2026-10-06 (user, real play): the SC-34 Infiltrator colored the base of helmets completely white. 93% of it
     -- is undersuit black, which never was its identity, so its 2% light-grey trims were; the black is its paint now.
@@ -429,6 +489,56 @@ local REPORTED = {
      .. '0.3% yellow; the cream panels grey',
      {{{37, -21, 7}, {27, 1, 0}, 'pair'}, {{40, -30, 7}, {27, 1, 0}, 'pair'}, {{23, 34, 22}, {29, 0, -2}, 'pair'}},
      {['4cac10858d877485'] = {51, 0, 0}}, options = {materials = true}},
+    -- 2026-10-09 (user, Armory renders of the shirt fix): armors matched to the CPR-80 Bulwark were "way too bright for
+    -- that helmet ... mostly uniform light gray and yellow" (asked L 36-41 for every big part). A part taking a helmet's
+    -- metal aims as dark as the game's own sets paint it (its steel L 39 reads like matte L 29), and a part darker than
+    -- the lead part taking the same color keeps half of that difference.
+    -- Same renders, side views and the ship: the Bulwark's 9% yellow stripes turned the RS-40's khaki leg camo and the
+    -- DS-191 Scorpion's tan vest and leg panels solid yellow (the I-44 Salamander's orange the same): a muted part of 5%
+    -- or more takes no vivid source color but the identity.
+    {'dbc21a99', 'a5574ac2', 'RS-40 Beast of Prey <- CPR-80 Bulwark: gunmetal plates, the dark straps stay darker, the '
+     .. 'leg camo gunmetal, never yellow',
+     {{{32, -1, 9}, {39, 1, 1}, 'pair', {26, 33}}, {{20, 1, 1}, {39, 1, 1}, 'pair', {17, 25}},
+      {{34, 1, 14}, {39, 1, 1}, 'pair'}}},
+    {'72b472a7', 'a5574ac2', 'PH-9 Predator <- CPR-80 Bulwark: gunmetal, never light grey; the dark plates stay darker',
+     {{{29, -2, 11}, {39, 1, 1}, 'pair', {25, 33}}, {{23, 1, 1}, {39, 1, 1}, 'pair', {19, 27}}}},
+    {'0ade6719', 'a5574ac2', 'DS-191 Scorpion <- CPR-80 Bulwark: the tan panels gunmetal, never the stripes\' yellow',
+     {{{44, 6, 17}, {39, 1, 1}, 'pair'}}},
+    -- Gallery 2026-10-10 (user: "04's helmet failed the accent transfer (should be yellow, transferred gray)"; then,
+    -- with its red main yellow, "inverted. The yellow should be the strip, not the main"): a B-01 Tactical helmet's red
+    -- main (45%) takes the KDM-763 Pacesetter's black, its white stripe (18%) the yellow of its light strips; then
+    -- ("One helmet's stripes remained white and failed to accent"): its white dome stripes, a pattern (7%) of the jaw's
+    -- color, take that yellow too (its texel the paint); its silver bare-metal jaw badges (4%) keep the Pacesetter's grey
+    {'10707d29', '1e28f118', 'B-01 Tactical <- KDM-763 Pacesetter: the red main black, the white stripes its yellow',
+     {{{22, 32, 18}, {21, 1, 2}, 'pair', {15, 32}}, {{53, -1, 6}, {10, 0, -1}, 'pair', {40, 55}},
+      {{49, -2, 1}, {43, 0, 2}, 'pair', {20, 45}}},
+     {['4cac10858d877485'] = {43.7, -9.1, 42.3}}},
+    -- Gallery 2026-10-10 (user: "They don't match at all"): the SC-30 Trailblazer Scout's light tan plates took the AF-50
+    -- Noxious Ranger's dark while its black suit already had it; they take the helmet's olive, as the tunic does
+    {'1d60fc90', 'de575ea9', 'SC-30 Trailblazer Scout <- AF-50 Noxious Ranger: the tan plates its olive, not its dark',
+     {{{47, 5, 16}, {45, -2, 6}, 'pair'}}},
+    -- (agreed again 2026-10-10: the panels take the Salamander's shell grey, look L 34, once structure parts count in
+    -- the pairing's proportions; they took its dark grey, L 26, before)
+    {'0ade6719', 'd0ce5bc7', 'DS-191 Scorpion <- I-44 Salamander: the tan panels its shell grey, never its orange',
+     {{{44, 6, 17}, {34, 1, 1}, 'pair'}}},
+    -- Same day, the shirt-fix renders (user): the PH-202 Twigsnapper "has almost the exact same issue": its camo steel
+    -- plates showed brighter than the Bulwark's helmet and its t-shirt sleeves (undergarment, 2.4% of the front view)
+    -- yellow. Helmet metal on armor metal is shifted like matte; undergarment cloth takes no vivid stripe color.
+    {'de631a28', 'a5574ac2', 'PH-202 Twigsnapper <- CPR-80 Bulwark: darker steel plates, the t-shirt never the yellow',
+     {{{30, -1, 8}, {39, 1, 1}, 'pair', {23, 31}}, {{37, 1, 18}, {18, 0, 2}, 'pair'}}},
+    -- 2026-10-09 (image review of the final renders, full figures): the PH-56 Jaguar's tattered shin wraps kept their
+    -- own tan while everything else turned gunmetal. They are row 0 of the leg undergarment's LUT, drawn where its ID
+    -- mask is blank (71% of its texels), which coverage leaves out. Row 0 is a row now (area 0 there) and takes the
+    -- color of its group; the CM-21 Trench Paramedic's chest and shin pouches (row 0, 4.8% of its view) too, while its
+    -- black undersuit stays the structure (the pouches weigh nothing: counted, its own set asked L 34 for that black).
+    -- rows: a row's planned lightness range ('lut:row' = {low, high}); the Trench Paramedic's undersuit takes one of
+    -- the helmet's two darks by a near tie (float64 coverage), so only the lightness is pinned.
+    {'23d0e15c', 'a5574ac2', 'PH-56 Jaguar <- CPR-80 Bulwark: the shin wraps gunmetal like the rest, never their tan',
+     {{{30, 3, 15}, {39, 1, 1}, 'pair'}}, rows = {['cb472f1634d0650f:0'] = {22, 32}}},
+    {'d52bb413', 'a5574ac2', 'CM-21 Trench Paramedic <- CPR-80 Bulwark: the pouches dark like the undersuit',
+     {}, rows = {['417485d7a718bff3:0'] = {16, 28}, ['c6f5e2827a6c95bc:3'] = {10, 22}}},
+    {'d52bb413', 'bd1e5e84', 'CM-21 Trench Paramedic <- its own helmet: the black undersuit and the pouches stay dark',
+     {}, rows = {['417485d7a718bff3:0'] = {16, 28}, ['c6f5e2827a6c95bc:3'] = {10, 22}}},
 }
 
 -- The group or pattern of `item` closest to `lab` within CIEDE2000 2, or nil.
@@ -446,7 +556,8 @@ local reported = 0
 -- One reported pair against its agreed look (t, s: matcher items; materials: Match Materials on). A group's 5th
 -- field: 'finish' (its rows take the source row's finish) or 'no finish'.
 local function check_reported(case, t, s, why, materials)
-    local plan, patterns = Matcher.plan(t, s, materials), Matcher.pattern_plan(t, s)
+    local plan = Matcher.plan(t, s, materials)
+    local patterns = Matcher.pattern_plan(t, s, plan)
     for _, e in ipairs(case[4]) do
         local g = assert(near(t, e[1]), why .. ': target color ' .. table.concat(e[1], ' '))
         local m = plan[g.rows[1].key]
@@ -480,6 +591,11 @@ local function check_reported(case, t, s, why, materials)
         local got = patterns[pattern]
         assert(got and Colour.de2000(got.L, got.a, got.b, lab[1], lab[2], lab[3]) < 2,
                why .. ': pattern ' .. pattern .. ' takes ' .. table.concat(lab, ' '))
+    end
+    for key, range in pairs(case.rows or {}) do
+        local goal = plan[key]
+        assert(goal and goal.L >= range[1] and goal.L <= range[2], string.format('%s: row %s looks L %s, expected %d to %d',
+               why, key, goal and string.format('%.1f', goal.L) or 'its own color', range[1], range[2]))
     end
     reported = reported + 1
 end
@@ -576,13 +692,13 @@ check('desired and fitted colors equal the reference for a sample of plans; no f
                 for _, f in ipairs({'L', 'a', 'b'}) do close(goal[f], case[f], 1e-7, key .. ' ' .. case.key .. ' desired ' .. f) end
                 local lut, row = case.key:match('^(%x+):(%d+)$')
                 local spec = analyses[t].luts[lut]
-                local c = Colour.row_values(spec.values, spec.width, tonumber(row))
+                local c0 = Colour.row_values(spec.values, spec.width, tonumber(row))
                 local cal = case.cal and assert(appearance.row(lut, tonumber(row)), case.key .. ' measured') or nil
                 assert(cal ~= nil == (goal.cal ~= nil), key .. ' ' .. case.key .. ' calibration in the plan')
-                local oL, oa, ob
-                if cal then oL, oa, ob = colour.look(c, cal, Colour.is_soft(c)) else oL, oa, ob = colour.perceived(c) end
-                local own = Colour.de2000(oL, oa, ob, case.L, case.a, case.b)
-                local _, _, _, err = transfer.fit(c, case.L, case.a, case.b, cal)
+                local c, err, used, aim = fit_as_job(transfer, c0, case, goal, cal)
+                local oL, oa, ob = colour.perceived(c0)
+                if used then oL, oa, ob = colour.look(c0, used, Colour.is_soft(c0)) end
+                local own = Colour.de2000(oL, oa, ob, aim[1], aim[2], aim[3])
                 close(err, case.err, 1e-6, key .. ' ' .. case.key .. ' error')
                 -- a fit never ends farther from the goal than the row's own colors (126 of these rows did before v1.3)
                 assert(err <= own + 1e-9, key .. ' ' .. case.key .. string.format(' fitted %.3f, own %.3f', err, own))
@@ -737,7 +853,7 @@ check('every cape\'s rows, plans and built tints equal the reference (Recolor Ca
                 check_emblems(kit, a)
                 local t = Matcher.item(a.rows, false, Recolor.patterns_of(a), Recolor.look_of(a, appearance))
                 local function cape_plan(source)
-                    local mapping = Matcher.plan(t, source)
+                    local mapping = Matcher.plan(t, source, nil, true)
                     if a.zones then Matcher.cape_zones(mapping, t, source, a.zones, a.tint_of) end
                     return mapping
                 end
@@ -792,10 +908,12 @@ local REPORTED_CAPES = {
     -- the purple band took the helmet's 0.28% yellow (an accent of 24%); a part over ACCENT_SMALL now needs a source
     -- accent of at least 1% (src/matcher.lua ACCENT_SOURCE_BIG). The emblem (row 2, bare metal) fits through the
     -- response its cloth borrows (round 2), so it aims at the grey's look itself, no longer PAINT_REFLECTION lighter (55)
+    -- (2026-10-10: the helmet's black glossy look, L 29, is mostly its highlights; the band takes its paint as seen,
+    -- L 20, src/matcher.lua diffuse_colors)
     {'6d9b8e21', '58716e11', true, 'United in Equality <- RS-67 Null Cipher: no yellow, the band dark like the helmet, '
      .. 'the emblem grey on it',
-     {['9c385033ddbaaa60:0'] = {29, 'pair'}, ['11b6cb01f973e29e:0'] = {27, 'pair'},
-      ['11b6cb01f973e29e:2'] = {51, 'pair'}},
+     {['9c385033ddbaaa60:0'] = {20, 'pair'}, ['11b6cb01f973e29e:0'] = {27, 'pair'},
+      ['11b6cb01f973e29e:2'] = {39, 'pair'}},
      {{0, 6}}},
     -- the UF-50 Bloodhound (user report 2026-10-07, Helmet Matches Armor, Match Materials on): its red and black share
     -- a lightness (L 21.1 and 20.8), so none of its colors read by lightness against the other. The Pillars of
@@ -836,7 +954,7 @@ end
 -- One reported cape outfit against its agreed outcome (a: the cape's analysis, source: the matcher item).
 local function check_reported_cape(case, a, source, transfer)
     local t = Matcher.item(a.rows, false, Recolor.patterns_of(a), Recolor.look_of(a, appearance))
-    local plan = Matcher.plan(t, source, case[3])
+    local plan = Matcher.plan(t, source, case[3], true)
     if a.zones then Matcher.cape_zones(plan, t, source, a.zones, a.tint_of) end
     for key, want in pairs(case[5]) do check_cape_goal(case, plan, key, want) end
     local built = Recolor.build_luts(a, plan, transfer, function() end, nil) -- cloth: no finish to copy
@@ -862,7 +980,7 @@ end)
 
 table.sort(cape_stretches)
 print(string.format('PASS test_parity (%d checks; %d kits analysed (%d measured) in %.2f s, %d plans (%d with '
-    .. 'patterns, %d texels), %d with hoods kept, %d painting plans (%d rows fitted), %d reported pairs (%d by their fits) and %d '
+    .. 'patterns, %d texels), %d with the armor unmeasured, %d with hoods kept, %d painting plans (%d rows fitted), %d reported pairs (%d by their fits) and %d '
     .. 'fitted rows (%d '
     .. 'keep their own colors) in %.2f s; %d capes (%d rows, %d zone borders, %d emblems, %d recolored sheets, %d plans, '
     .. '%d tints built, %d reported '
@@ -870,7 +988,8 @@ print(string.format('PASS test_parity (%d checks; %d kits analysed (%d measured)
     .. 'ms); %d chunk decodes)',
     passed, #kit_list, measured,
     analysed - started, plans,
-    pattern_plans, texels, hood_plans, painting, painted_rows, reported, reported_fits, fitted, fits_kept, clock() - analysed,
+    pattern_plans, texels, unmeasured_plans, hood_plans, painting, painted_rows, reported, reported_fits, fitted, fits_kept,
+    clock() - analysed,
     capes_analysed,
     cape_rows, cape_zones, cape_emblems, cape_sheets,
     cape_plans, cape_tints, reported_capes, capes_analysed > 0 and cape_seconds * 1000 / capes_analysed or 0,

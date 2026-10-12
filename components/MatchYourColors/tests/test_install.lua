@@ -28,7 +28,7 @@ local HIGH = 4294967296
 -- A simulated game whose script API and engine API tables hold the expected executable addresses (or, with
 -- `changed`, one wrong address), and a get_engine_api stand-in.
 local function game(changed)
-    local space = Fake.world({players = 0})
+    local space = Fake.world({players = 0, no_manager = true}) -- the title screen: nothing is prepared ahead
     space.region(EXE + 0xa4e50, 16)
     local prefix = Engine.GET_ENGINE_API_PREFIX
     for i = 1, #prefix do space.byte(EXE + 0xa4e50 + i - 1, prefix:byte(i)) end
@@ -118,9 +118,10 @@ check('install: engine functions verified, guard on the update chain, options re
     assert(rawget(w.env, 'MatchYourColorsInstalled') == true, 're-entry guard set')
     for _, fn in ipairs(w.after) do fn() end -- the loader's after_startup event
     local mode, sets = w.menu.registered[Addon.OPTION_MODE], w.menu.registered[Addon.OPTION_SETS]
-    assert(mode and mode.type == 'choice' and #mode.choices == 3 and mode.default == 2, 'mode choice')
+    assert(mode and mode.type == 'choice' and #mode.choices == 4 and mode.default == 2, 'mode choice')
     assert(mode.mod_id == Addon.MOD_ID and type(mode.label) == 'function' and mode.choices[1] == 'Off', 'texts')
-    assert(mode.label() == 'Color Matching' and mode.choices[2]() == 'Helmet Matches Armor', 'English texts')
+    assert(mode.label() == 'Color Matching' and mode.choices[2]() == 'Helmet Matches Armor'
+           and mode.choices[4]() == 'Helmet and Armor Match Cape', 'English texts')
     assert(sets and sets.type == 'toggle' and sets.default == true, 'complete-set toggle')
     local hoods, materials = w.menu.registered[Addon.OPTION_HOODS], w.menu.registered[Addon.OPTION_MATERIALS]
     assert(hoods and hoods.type == 'toggle' and hoods.default == true and hoods.label() == 'Recolor Hoods',
@@ -128,9 +129,10 @@ check('install: engine functions verified, guard on the update chain, options re
     assert(materials and materials.type == 'toggle' and materials.default == false
            and materials.label() == 'Match Materials', 'material toggle: off by default')
     local scheme = w.menu.registered[Addon.OPTION_SCHEME]
-    assert(scheme and scheme.type == 'choice' and #scheme.choices == 12 and scheme.default == 1
+    assert(scheme and scheme.type == 'choice' and #scheme.choices == 13 and scheme.default == 1
            and scheme.choices[1] == 'Off' and scheme.choices[2]() == 'Helldiver' and scheme.choices[12]() == 'Venus'
-           and scheme.label() == 'Paint Scheme', 'paint scheme choice: Off, then the 11 schemes')
+           and scheme.choices[13]() == 'SEAF' and scheme.label() == 'Paint Scheme',
+           'paint scheme choice: Off, then the 11 weapon schemes and SEAF')
     -- Sync With Mod Users is always on (no option since 2026-10-07): nothing registered for it
     for id in pairs(w.menu.registered) do assert(not id:find('sync', 1, true), 'no sync option: ' .. id) end
     local capes = w.menu.registered[Addon.OPTION_CAPES]

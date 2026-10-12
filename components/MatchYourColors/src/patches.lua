@@ -12,26 +12,26 @@
 -- recolored vanilla ones (user report 2026-10-06, KB match-your-colors-modded-luts).
 --
 -- Patches.index runs once per session inside the first recolor job (never per frame): the data folder's patch files
--- are listed, their tables of contents read, and the entries of the resource types the mod reads indexed (a patch
--- holding none of them, such as a Lua addon, costs its list entry and two reads). Its signature is a checksum of
--- every indexed entry and of the bytes of their small parts (LUTs, materials, units), so the analysis cache is
--- discarded when the installed mods change: managers zero the files' dates, and two variants of one LUT mod differ
--- only in their pixels. Parts over SMALL enter it by offset and size only, so the analyses themselves carry the
--- full content hash of every patched resource they read (Patches.content_hash, src/recolor.lua): a cached analysis is
--- checked against the patches when first used and made again when one differs (an equal-size replacement of an ID
--- mask or a unit). Patches.over(slim, index, files) is the job's reader: slim's locate, part and part_size, with
--- patch resources first; Patches.record looks a resource up in the patches alone.
+-- are listed, their tables of contents read (two reads a patch), and the entries of the resource types the mod reads
+-- indexed. Its signature is a checksum of every indexed entry (name, type, part offsets and sizes), so the analysis
+-- cache is discarded when the installed mods change what they hold. Two variants of one mod can hold the same entries
+-- and differ only in their bytes (managers zero the files' dates; a black and a blue visor: same name, same sizes), so
+-- each analysis also carries a content hash of every byte range it read from patched resources (Patches.content_hash,
+-- src/recolor.lua): a cached analysis is checked against the patches when first used and made again when one differs.
+-- Until v1.3 the signature also read the bytes of every indexed part up to 64 KB (2,121 entries, about 4,000 reads, in
+-- a user's first job with 176 patch files) and each analysis hashed the whole of every patched resource it touched
+-- (a mod's meshes and 4K masks: 2.6 GB read in one Armory session, user report 2026-10-08). Patches.over(slim, index,
+-- files) is the job's reader: slim's locate, part and part_size, with patch resources first, noting what it reads of
+-- them (ranges); Patches.record looks a resource up in the patches alone.
 local ffi = require('ffi')
 
 local Patches = {}
 
 Patches.BOOT = '9ba626afa44a3aa3'
-Patches.SMALL = 65536 -- parts up to this size enter the signature with their bytes; larger ones with their size
 Patches.MAX_ENTRIES = 262144 -- a table of contents above this is not indexed (no mod comes near)
 local TOC_HEADER, TOC_TYPE, TOC_FILE, TOC_MAGIC = 72, 32, 80, 0xF0000011
--- A file entry's parts in a fixed order: offset field, size field, the file beside the patch.
-local PART_FIELDS = {{16, 56, ''}, {24, 60, '.stream'}, {32, 64, '.gpu_resources'}}
 local PARTS = {main = {1, ''}, stream = {3, '.stream'}, gpu = {5, '.gpu_resources'}}
+local PART_ORDER = {'main', 'stream', 'gpu'}
 local UNINDEXED = -2 -- an entry of another type (chains end with -1)
 
 local function u32(p, o) return p[o] + p[o + 1] * 256 + p[o + 2] * 65536 + p[o + 3] * 16777216 end
@@ -57,16 +57,29 @@ function Patches.order(names)
     return out
 end
 
--- A running Adler-32 over byte arrays and strings.
+-- Adler-32 over p[0 .. size - 1] from (a, b), reduced every 4,096 bytes (the sums stay exact): the hot loop of the
+-- index's signature and of a content hash, left to compile (about 1 ms per MB outside the game). Until v1.3 the
+-- signature summed bytes in an interpreted loop with two modulo steps per byte: about 3.2 ms per 64 KB part in the
+-- game's VM, in one piece.
+local function adler(p, size, a, b)
+    local i = 0
+    while i < size do
+        local stop = math.min(i + 4096, size)
+        for k = i, stop - 1 do
+            a = a + p[k]
+            b = b + a
+        end
+        a, b = a % 65521, b % 65521
+        i = stop
+    end
+    return a, b
+end
+
+-- A running Adler-32 over byte arrays (adler) and strings.
 local function checksum()
     local a, b = 1, 0
     local self = {}
-    function self.bytes(p, size)
-        for i = 0, size - 1 do
-            a = (a + p[i]) % 65521
-            b = (b + a) % 65521
-        end
-    end
+    function self.bytes(p, size) a, b = adler(p, size, a, b) end
     function self.text(s)
         for i = 1, #s do
             a = (a + s:byte(i)) % 65521
@@ -110,33 +123,17 @@ local function read_toc(files, patch, wanted, scratch, yield)
     return toc
 end
 
--- Adds an indexed patch's entries to sum: its file name, each entry's 80 bytes and the bytes of each of its parts
--- up to SMALL, in file order.
-local function sum_entries(files, patch, sum, scratch, yield)
+-- Adds an indexed patch's entries to sum: its file name and each entry's 80 bytes (name, type, part offsets and
+-- sizes), in file order, with a pause point every 64 entries (an entry is a few microseconds, interpreted).
+local function sum_entries(patch, sum, yield)
     local t = patch.toc
-    local handles = {}
-    local ok, why = pcall(function()
-        for i = 0, t.count - 1 do
-            if t.nexts[i] ~= UNINDEXED then
-                local o = t.base + TOC_FILE * i
-                sum.text(patch.file)
-                sum.bytes(t.raw + o, TOC_FILE)
-                for _, field in ipairs(PART_FIELDS) do
-                    local at, size = u64(t.raw, o + field[1]), u32(t.raw, o + field[2])
-                    if size > 0 and size <= Patches.SMALL then
-                        local name = patch.file .. field[3]
-                        handles[name] = handles[name] or files.open(name)
-                        local buffer = scratch(size)
-                        files.read(handles[name], at, size, buffer)
-                        sum.bytes(buffer, size)
-                    end
-                end
-                yield()
-            end
+    for i = 0, t.count - 1 do
+        if t.nexts[i] ~= UNINDEXED then
+            sum.text(patch.file)
+            sum.bytes(t.raw + (t.base + TOC_FILE * i), TOC_FILE)
         end
-    end)
-    for _, handle in pairs(handles) do files.close(handle) end
-    if not ok then error(why, 0) end
+        if i % 64 == 63 then yield() end
+    end
 end
 
 -- The session's patch index. files: a file adapter (src/files.lua: open, read, close, list) on the folder holding
@@ -154,11 +151,9 @@ function Patches.index(files, types, scratch, yield)
         local ok, toc = pcall(read_toc, files, patch, wanted, scratch, yield)
         if ok and toc then
             patch.toc = toc
-            ok = pcall(sum_entries, files, patch, sum, scratch, yield)
-            if ok then
-                out.patches[#out.patches + 1] = patch
-                out.entries = out.entries + toc.indexed
-            end
+            sum_entries(patch, sum, yield)
+            out.patches[#out.patches + 1] = patch
+            out.entries = out.entries + toc.indexed
         end
         if not ok then out.skipped = out.skipped + 1 end
     end
@@ -196,46 +191,81 @@ function Patches.record(index, archive, name_hex, type_hex)
     return nil
 end
 
--- Adler-32 over p[0 .. size - 1] from (a, b), reduced every 4,096 bytes (the sums stay exact): the hot loop of a
--- content hash, left to compile (about 1 ms per MB outside the game).
-local function adler(p, size, a, b)
-    local i = 0
-    while i < size do
-        local stop = math.min(i + 4096, size)
-        for k = i, stop - 1 do
-            a = a + p[k]
-            b = b + a
+Patches.CHUNK = 262144 -- bytes a content hash reads at a time (v1.3: 64 KB, four times the reads)
+
+-- Byte ranges read of one patched resource: {main = {from, to, from, to, ...}, stream = ..., gpu = ...} (offsets in
+-- the part, half-open), as Patches.over notes them; merged: sorted, overlapping and adjacent ones joined.
+local function merged(list)
+    local pairs_ = {}
+    for i = 1, #list, 2 do pairs_[#pairs_ + 1] = {list[i], list[i + 1]} end
+    table.sort(pairs_, function(x, y) return x[1] < y[1] end)
+    local out = {}
+    for _, r in ipairs(pairs_) do
+        if out[#out] and r[1] <= out[#out] then
+            out[#out] = math.max(out[#out], r[2])
+        else
+            out[#out + 1], out[#out + 2] = r[1], r[2]
         end
-        a, b = a % 65521, b % 65521
-        i = stop
     end
-    return a, b
+    return out
 end
 
-Patches.CHUNK = 65536
--- A record's parts: {offset field, size field, the file beside the patch} (record_in's layout).
-local RECORD_PARTS = {{1, 2, ''}, {3, 4, '.stream'}, {5, 6, '.gpu_resources'}}
+-- Ranges as text (the disk cache keeps them): 'main:0+116,4096+200|gpu:0+1472' (offset + length per range, parts in
+-- order), '-' for none; and back (nil when malformed).
+function Patches.ranges_text(ranges)
+    local parts = {}
+    for _, part in ipairs(PART_ORDER) do
+        local list = ranges and ranges[part] and merged(ranges[part]) or {}
+        if #list > 0 then
+            local items = {}
+            for i = 1, #list, 2 do items[#items + 1] = string.format('%.0f+%.0f', list[i], list[i + 1] - list[i]) end
+            parts[#parts + 1] = part .. ':' .. table.concat(items, ',')
+        end
+    end
+    return #parts > 0 and table.concat(parts, '|') or '-'
+end
+function Patches.parse_ranges(text)
+    if text == '-' then return {} end
+    local out = {}
+    for piece in text:gmatch('[^|]+') do
+        local part, items = piece:match('^(%a+):(.+)$')
+        if not part or not PARTS[part] or out[part] then return nil end
+        local list = {}
+        for from, length in items:gmatch('(%d+)%+(%d+)') do
+            list[#list + 1], list[#list + 2] = tonumber(from), tonumber(from) + tonumber(length)
+        end
+        if #list == 0 then return nil end
+        out[part] = list
+    end
+    return out
+end
 
--- A patch record's content hash, 'bytes:adler32' over its three parts in order, read in CHUNK pieces from the patch
--- files with yield() after each. files: the adapter on the patch folder; scratch: a grower (src/slim.lua).
-function Patches.content_hash(files, record, scratch, yield)
+-- A patch record's content hash over the byte ranges an analysis read of it (Patches.over's ranges; none: only its
+-- presence counted), 'bytes:adler32' over the ranges, parts in order and ranges in offset order, read in CHUNK pieces
+-- from the patch's files with yield() after each. files: the adapter on the patch folder; scratch: a grower
+-- (src/slim.lua). v1.3 hashed every byte of the resource: the whole mesh of a mod's unit, every mip of its masks.
+function Patches.content_hash(files, record, scratch, yield, ranges)
     local a, b, total = 1, 0, 0
-    for _, part in ipairs(RECORD_PARTS) do
-        local at, size = record[part[1]], record[part[2]]
-        if size and size > 0 then
-            local handle = files.open(record.file .. part[3])
+    for _, part in ipairs(PART_ORDER) do
+        local list = ranges and ranges[part] and merged(ranges[part]) or {}
+        local p = PARTS[part]
+        if #list > 0 then
+            if list[#list] > record[p[1] + 1] then error('content range outside ' .. record.file .. ' ' .. part, 0) end
+            local handle = files.open(record.file .. p[2])
             local ok, why = pcall(function()
-                for done = 0, size - 1, Patches.CHUNK do
-                    local n = math.min(Patches.CHUNK, size - done)
-                    local buffer = scratch(n)
-                    files.read(handle, at + done, n, buffer)
-                    a, b = adler(buffer, n, a, b)
-                    if yield then yield() end
+                for i = 1, #list, 2 do
+                    for done = list[i], list[i + 1] - 1, Patches.CHUNK do
+                        local n = math.min(Patches.CHUNK, list[i + 1] - done)
+                        local buffer = scratch(n)
+                        files.read(handle, record[p[1]] + done, n, buffer)
+                        a, b = adler(buffer, n, a, b)
+                        total = total + n
+                        if yield then yield() end
+                    end
                 end
             end)
             files.close(handle)
             if not ok then error(why, 0) end
-            total = total + size
         end
     end
     return string.format('%d:%08x', total, b * 65536 + a)
@@ -244,6 +274,8 @@ end
 -- The job's reader: slim (src/slim.lua's reader) with the patches of index first; files: the adapter on the folder
 -- holding them. locate(archive, name, type) -> a record (a patch's carries its file), part_size, part, close; base:
 -- slim itself (the archived resources, for comparing a patched LUT with its original); slim's other fields as they are.
+-- ranges: while the caller sets it to a table, every read of a patched resource is noted there ({[record] = ranges},
+-- Patches.content_hash's).
 function Patches.over(slim, index, files)
     local handles, found = {}, {}
     local self = {base = slim}
@@ -266,6 +298,14 @@ function Patches.over(slim, index, files)
         local name = record.file .. p[2]
         handles[name] = handles[name] or files.open(name)
         files.read(handles[name], record[p[1]] + at, size, out + (out_offset or 0))
+        local ranges = self.ranges
+        if ranges and size > 0 then
+            local r = ranges[record] or {}
+            ranges[record] = r
+            local list = r[part] or {}
+            r[part] = list
+            list[#list + 1], list[#list + 2] = at, at + size
+        end
     end
 
     function self.close()
@@ -281,7 +321,8 @@ end
 -- Runs inside recolor jobs only: interpreted (no traces in the LuaJIT code cache every mod shares).
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({u32, u64, Patches.order, checksum, read_toc, sum_entries, Patches.index, record_in,
-                         Patches.record, Patches.content_hash, Patches.over}) do
+                         Patches.record, merged, Patches.ranges_text, Patches.parse_ranges, Patches.content_hash,
+                         Patches.over}) do
         jit.off(fn, true)
     end
 end

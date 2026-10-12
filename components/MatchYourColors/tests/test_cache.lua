@@ -70,9 +70,11 @@ check('format 7: changed rows of a mod\'s LUT, patched geometry and the patched 
     second.finish_changed = true -- finish changed, no archived row to compare with
     a.geometry_patched = true
     a.patch_deps = {{archive = '0123456789abcdef', name = 'cccccccccccccccc', kind = 'cd4238c6a0c69e32',
-                     hash = '1536:0a1b2c3d'},
+                     hash = '1536:0a1b2c3d', ranges = 'main:0+340|gpu:0+1472'},
                     {archive = '9ba626afa44a3aa3', name = 'eeeeeeeeeeeeeeee', kind = 'e0a48d0be9a7453f',
-                     hash = '4194304:ffff0001'}}
+                     hash = '116:ffff0001', ranges = 'main:0+116,4000+52'},
+                    {archive = '9ba626afa44a3aa3', name = 'ffffffffffffffff', kind = 'cd4238c6a0c69e32',
+                     hash = '0:00000001', ranges = '-'}}
     local key = Cache.key(a.kit, 0)
     local entries = Cache.decode(Cache.encode(HEADER, {[key] = a}, {key}), HEADER)
     local b = assert(entries and entries[key], 'decoded')
@@ -80,7 +82,7 @@ check('format 7: changed rows of a mod\'s LUT, patched geometry and the patched 
     local r1, r2 = b.rows[1], b.rows[2]
     assert(r1.finish_changed == false and r2.finish_changed == true and r2.vanilla == nil, 'changed rows')
     for f, v in pairs(a.rows[1].vanilla) do assert(r1.vanilla[f] == v, 'archived ' .. f) end
-    assert(#b.patch_deps == 2, 'patched resources')
+    assert(#b.patch_deps == 3, 'patched resources, their ranges too')
     for i, d in ipairs(a.patch_deps) do
         for f, v in pairs(d) do assert(b.patch_deps[i][f] == v, 'patched resource ' .. i .. ' ' .. f) end
     end
@@ -175,6 +177,44 @@ check('the shared samples come back exactly (bytes / 255); without samples there
     assert(not Cache.decode(text:gsub(' 26 5 ', ' 26 4 ', 1), HEADER), 'sample count disagrees with the size')
 end)
 
+check('the samples block pauses after every layer both ways and is made once: a file decoded and encoded again is '
+      .. 'the same bytes, and a later save does no layer work', function()
+    local function layers(n, seed)
+        local out = {}
+        for l = 0, n - 1 do
+            local values = ffi.new('double[2048]')
+            for i = 0, 2047 do values[i] = ((i * 5 + l * 11 + seed) % 256) / 255 end
+            out[l] = values
+        end
+        return out
+    end
+    local samples = {archive = '18235e0c9ec0e636', detail = layers(26, 3), detail_layers = 26, camo = layers(5, 4),
+                     camo_layers = 5}
+    -- the block as format 9 writes it: its line, then each value's byte
+    local bytes = {}
+    for _, name in ipairs({'detail', 'camo'}) do
+        for l = 0, samples[name .. '_layers'] - 1 do
+            for i = 0, 2047 do bytes[#bytes + 1] = string.char(math.floor(samples[name][l][i] * 255 + 0.5)) end
+        end
+    end
+    local block = 'S 18235e0c9ec0e636 26 5 63488\n' .. table.concat(bytes)
+    local a = kit(9, 0)
+    local key = Cache.key(a.kit, 0)
+    local pauses = 0
+    local function pause() pauses = pauses + 1 end
+    local text = Cache.encode(HEADER, {[key] = a}, {key}, samples, pause)
+    assert(pauses == 31 + 1, 'a pause after each of the 31 layers and the entry: ' .. pauses)
+    assert(text:sub(#HEADER + 2, #HEADER + 1 + #block) == block, 'the block\'s bytes')
+    pauses = 0
+    assert(Cache.encode(HEADER, {[key] = a}, {key}, samples, pause) == text and pauses == 1, 'made once: ' .. pauses)
+    pauses = 0
+    local entries, order, got = Cache.decode(text, HEADER, pause)
+    assert(entries and got and pauses == 31 + 1, 'decoded with a pause after each layer and the entry: ' .. pauses)
+    pauses = 0
+    assert(Cache.encode(HEADER, entries, order, got, pause) == text and pauses == 1,
+           'decoded, then saved: the same bytes, the block kept from the file')
+end)
+
 check('another build, other data or a damaged file is not used', function()
     local a = kit(1, 0)
     local key = Cache.key(a.kit, 0)
@@ -222,12 +262,23 @@ check('encoding and decoding pause after each entry, inside a coroutine (the yie
     assert(#Cache.encode(HEADER, all, order) == #Cache.encode(HEADER, all, order, nil, function() end), 'same text')
 end)
 
-check('a changed piece list changes the key; the body is part of it', function()
+check('a changed piece list (its record read again: a new kit) changes the key; the body is part of it; a kit\'s sum is '
+      .. 'made once (src/kits.lua: a kit is not changed once read)', function()
     local a = kit(7, 0)
     local key = Cache.key(a.kit, 0)
     assert(Cache.key(a.kit, 1) ~= key, 'body')
-    a.kit.pieces[2].lut = 'dddddddddddddddd'
-    assert(Cache.key(a.kit, 0) ~= key, 'pieces')
+    assert(Cache.key(kit(7, 0).kit, 0) == key, 'the same record read again: the same key')
+    local changed = kit(7, 0).kit
+    changed.pieces[2].lut = 'dddddddddddddddd'
+    assert(Cache.key(changed, 0) ~= key, 'pieces')
+    assert(Cache.pieces_sum(changed) == Cache.pieces_sum_of(changed), 'its sum, made from its pieces')
+    local pieces_sum_of, calls = Cache.pieces_sum_of, 0
+    Cache.pieces_sum_of = function(k) calls = calls + 1 return pieces_sum_of(k) end
+    local fresh = kit(8, 0).kit
+    Cache.key(fresh, 0)
+    Cache.key(fresh, 1)
+    Cache.pieces_sum_of = pieces_sum_of
+    assert(calls == 1, 'made once per kit: ' .. calls)
 end)
 
 check('writes go through a temporary file; the text reads back', function()
@@ -251,6 +302,28 @@ check('a full-size file is written and read in pieces with a pause after each (a
     assert(Cache.read(path, pause) == text and pauses == 3, 'read back in three pieces: ' .. pauses)
     assert(Cache.write(path, '', pause) and Cache.read(path) == '', 'an empty file')
     os.remove(path)
+end)
+
+check('a read or write dropped between its pieces (a pause or stop): Cache.abort closes its file and removes the '
+      .. 'temporary file, and the next write (a shutdown save) replaces the file', function()
+    local path = root .. '/build/test-cache-abort.tmpfile'
+    os.remove(path)
+    assert(Cache.write(path, 'before\n'), 'a previous file')
+    local text = string.rep('x', Cache.CHUNK * 2 + 10)
+    local writing = coroutine.create(function() return Cache.write(path, text, coroutine.yield) end)
+    assert(coroutine.resume(writing) and coroutine.status(writing) == 'suspended', 'a write paused after a piece')
+    writing = nil -- the job dropped
+    Cache.abort()
+    assert(io.open(path .. '.tmp', 'rb') == nil, 'the temporary file removed')
+    assert(Cache.read(path) == 'before\n', 'the previous file kept')
+    assert(Cache.write(path, 'after\n') and Cache.read(path) == 'after\n', 'the next write replaces it')
+    assert(Cache.write(path, text))
+    local reading = coroutine.create(function() return Cache.read(path, coroutine.yield) end)
+    assert(coroutine.resume(reading) and coroutine.status(reading) == 'suspended', 'a read paused after a piece')
+    reading = nil -- the job dropped
+    Cache.abort()
+    assert(os.remove(path), 'its file closed: removable')
+    Cache.abort() -- nothing open: nothing happens
 end)
 
 print('PASS test_cache (' .. passed .. ' checks)')

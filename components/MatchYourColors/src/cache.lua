@@ -14,17 +14,21 @@
 -- lists it:
 --
 --   K <key> <kit id> <kit type> <archive> <body> <rows> <pieces> <luts> <patterns> <geometry patched> <changed rows>
---     <patched resources> <tint LUTs> <zone lines> <emblem-sheet layers (a cape's, src/capes.lua)>
+--     <patched resources> <tint LUTs> <zone lines> <emblem-sheet layers (a cape's, src/capes.lua)> <emblem lines>
+--     <weight (a cape's Capes.areas total, format 12; 0 for a helmet or an armor)>
 --   R <key> <lut> <row> <area> <under> <L> <a> <b> <metal> <camo> <mode> <full> <albedo r> <g> <b> <emissive>
 --     (numbers as %.17g: exact; format 5 added the row's mean albedo, matcher v12; format 6 its emissive intensity,
---     column 13 x, and a data signature naming the installed mods' patches, src/patches.lua)
+--     column 13 x, and a data signature naming the installed mods' patches, src/patches.lua; format 12: every
+--     material's row 0, area 0 where coverage leaves it out, src/kits.lua add_rows)
 --   V <row key> <finish changed> <has original> <L> <a> <b> <albedo r> <g> <b>: a mod's LUT row that differs from the
 --     archived one, and the archived row's model color and albedo (format 7, src/kits.lua mark_patched)
---   P <slot> <type> <body> <skin> <materials>
+--   P <slot> <type> <body> <skin> <materials> (format 11: a piece with skin tones has rows like any other; earlier
+--     formats' analyses left its rows out)
 --   T <pattern texture> <area>
 --   L <lut> <width> <height> <bytes>, a newline, then the LUT's (or pattern texture's) float32 values as raw bytes
---   D <archive> <resource> <type> <hash>: a patched resource the analysis read and its content hash (format 7,
---     src/patches.lua content_hash; the entry is made again when one differs)
+--   D <archive> <resource> <type> <hash> <ranges>: a patched resource the analysis found, the byte ranges it read of it
+--     ('-' for none) and their content hash (format 10, src/patches.lua content_hash and ranges_text; format 7-9 hashed
+--     whole resources; the entry is made again when one differs)
 --   C <cape LUT> <material LUT>: a cape's tint rows are rows of its cape LUT recoloring that material LUT's rows
 --     (format 8, src/capes.lua; its cape LUT is among the L blocks)
 --   Z <zone> <row> <cells per tint bin, Capes.ZONE_BINS numbers>: a cape zone's border cells of one row (format 8,
@@ -38,14 +42,23 @@ local ffi = require('ffi')
 local Cache = {}
 
 Cache.FILE = 'MatchYourColors.cache'
-Cache.VERSION = 9
+Cache.VERSION = 12
 Cache.MAX_ENTRIES = 64
 local NUMBER = '%.17g'
 local TEXELS = 512 -- per sample layer (Kits.shared_samples)
 local LAYER_BYTES = TEXELS * 4
 
--- A short checksum of a kit's piece list (Adler-32 of its fields), so a changed kit is analysed again.
+-- A short checksum of a kit's piece list (Adler-32 of its fields), so a changed kit is analysed again. Made once per
+-- kit (weak keys): a kit is not changed once read, and every job keys its analyses by it (src/kits.lua signature).
+local piece_sums = setmetatable({}, {__mode = 'k'})
 function Cache.pieces_sum(kit)
+    local made = piece_sums[kit]
+    if made then return made end
+    made = Cache.pieces_sum_of(kit)
+    piece_sums[kit] = made
+    return made
+end
+function Cache.pieces_sum_of(kit)
     local a, b = 1, 0
     for _, piece in ipairs(kit.pieces) do
         local text = table.concat({piece.path, piece.slot, piece.type, piece.body, piece.lut, piece.tone}, ',')
@@ -100,6 +113,15 @@ local function changed_rows(analysis)
     return changed
 end
 
+-- The D lines of an analysis's patched resources (patch_deps), in their order.
+local function dep_lines(deps)
+    local lines = {}
+    for _, d in ipairs(deps or {}) do
+        lines[#lines + 1] = string.format('D %s %s %s %s %s\n', d.archive, d.name, d.kind, d.hash, d.ranges or '-')
+    end
+    return lines
+end
+
 -- The C lines of a cape's tint LUTs ({[cape LUT] = material LUT}), in name order.
 local function tint_lines(tint_of)
     local lines = {}
@@ -147,12 +169,13 @@ local function encode_entry(parts, key, analysis)
     table.sort(luts, function(x, y) return x[1] < y[1] end)
     local kit = analysis.kit
     local patterns = analysis.patterns or {}
-    local changed, deps = changed_rows(analysis), analysis.patch_deps or {}
+    local changed, deps = changed_rows(analysis), dep_lines(analysis.patch_deps)
     local tints, zones = tint_lines(analysis.tint_of), zone_lines(analysis.zones)
     local emblems = emblem_lines(analysis.emblems)
-    parts[#parts + 1] = string.format('K %s %08x %s %s %d %d %d %d %d %d %d %d %d %d %d %d\n', key, kit.id,
+    parts[#parts + 1] = string.format('K %s %08x %s %s %d %d %d %d %d %d %d %d %d %d %d %d %.17g\n', key, kit.id,
         kit.kit_type, kit.archive, analysis.body, #analysis.rows, #analysis.pieces, #luts, #patterns,
-        analysis.geometry_patched and 1 or 0, #changed, #deps, #tints, #zones, analysis.emblem_layers or 0, #emblems)
+        analysis.geometry_patched and 1 or 0, #changed, #deps, #tints, #zones, analysis.emblem_layers or 0, #emblems,
+        analysis.weight or 0)
     encode_rows(parts, analysis.rows, changed)
     for _, entry in ipairs(analysis.pieces) do
         local p = entry.piece
@@ -168,34 +191,39 @@ local function encode_entry(parts, key, analysis)
         parts[#parts + 1] = string.format('L %s %d %d %d\n', item[1], lut.width, lut.height, size)
         parts[#parts + 1] = ffi.string(lut.values, size)
     end
-    for _, d in ipairs(deps) do
-        parts[#parts + 1] = string.format('D %s %s %s %s\n', d.archive, d.name, d.kind, d.hash)
-    end
+    for _, line in ipairs(deps) do parts[#parts + 1] = line end
     for _, line in ipairs(tints) do parts[#parts + 1] = line end
     for _, line in ipairs(zones) do parts[#parts + 1] = line end
     for _, line in ipairs(emblems) do parts[#parts + 1] = line end
 end
 
--- The samples block: values are channel bytes / 255 (src/texture.lua), so the bytes restore them exactly.
-local function encode_samples(parts, samples)
-    local bytes = ffi.new('uint8_t[?]', (samples.detail_layers + samples.camo_layers) * LAYER_BYTES)
-    local at = 0
-    for _, name in ipairs({'detail', 'camo'}) do
-        for l = 0, samples[name .. '_layers'] - 1 do
-            local values = samples[name][l]
-            for i = 0, LAYER_BYTES - 1 do bytes[at + i] = math.floor(values[i] * 255 + 0.5) end
-            at = at + LAYER_BYTES
+-- The samples block: values are channel bytes / 255 (src/texture.lua), so the bytes restore them exactly. A session's
+-- samples never change: the block is made once (or kept from the file read, decode_samples) as samples.encoded. yield
+-- (optional) after each layer: the 31 layers in one piece were the 3.7 ms longest slice of a save, and decoding them
+-- the 4.6-4.9 ms one of a session's first job (game's VM, KB match-your-colors-perf-audit-fixes).
+local function encode_samples(parts, samples, yield)
+    if not samples.encoded then
+        local bytes = ffi.new('uint8_t[?]', (samples.detail_layers + samples.camo_layers) * LAYER_BYTES)
+        local at = 0
+        for _, name in ipairs({'detail', 'camo'}) do
+            for l = 0, samples[name .. '_layers'] - 1 do
+                local values = samples[name][l]
+                for i = 0, LAYER_BYTES - 1 do bytes[at + i] = math.floor(values[i] * 255 + 0.5) end
+                at = at + LAYER_BYTES
+                if yield then yield() end
+            end
         end
+        samples.encoded = string.format('S %s %d %d %d\n', samples.archive, samples.detail_layers, samples.camo_layers,
+                                        at) .. ffi.string(bytes, at)
     end
-    parts[#parts + 1] = string.format('S %s %d %d %d\n', samples.archive, samples.detail_layers, samples.camo_layers, at)
-    parts[#parts + 1] = ffi.string(bytes, at)
+    parts[#parts + 1] = samples.encoded
 end
 
 -- The whole file for analyses {key -> analysis} (at most MAX_ENTRIES, most recently used first: order) and the
--- shared samples (none: no block). yield (optional) is called after each entry.
+-- shared samples (none: no block). yield (optional) is called after each entry and each sample layer.
 function Cache.encode(header, analyses, order, samples, yield)
     local parts = {header, '\n'}
-    if samples then encode_samples(parts, samples) end
+    if samples then encode_samples(parts, samples, yield) end
     local written = 0
     for _, key in ipairs(order) do
         if analyses[key] and written < Cache.MAX_ENTRIES then
@@ -255,8 +283,8 @@ local function decode_deps(text, at, count, analysis)
     for i = 1, count do
         local d
         d, at = line_at(text, at)
-        if d[1] ~= 'D' or #d ~= 5 then error('cache: bad patched resource', 0) end
-        analysis.patch_deps[i] = {archive = d[2], name = d[3], kind = d[4], hash = d[5]}
+        if d[1] ~= 'D' or #d ~= 6 then error('cache: bad patched resource', 0) end
+        analysis.patch_deps[i] = {archive = d[2], name = d[3], kind = d[4], hash = d[5], ranges = d[6]}
     end
     return at
 end
@@ -351,9 +379,10 @@ local function decode_luts(text, at, count, analysis, bytes)
     return at
 end
 
--- The samples block starting at `at`: the samples and the position after it.
-local function decode_samples(text, at, bytes)
-    local f
+-- The samples block starting at `at`: the samples (the block kept as their encoded form) and the position after it.
+-- yield (optional) after each layer.
+local function decode_samples(text, at, bytes, yield)
+    local block, f = at, nil
     f, at = line_at(text, at)
     if #f ~= 5 then error('cache: bad samples', 0) end
     local detail_layers, camo_layers, size = number(f[3]), number(f[4]), number(f[5])
@@ -361,13 +390,15 @@ local function decode_samples(text, at, bytes)
         or at + size - 1 > #text then
         error('cache: bad samples size', 0)
     end
-    local samples = {archive = f[2], detail = {}, camo = {}, detail_layers = detail_layers, camo_layers = camo_layers}
+    local samples = {archive = f[2], detail = {}, camo = {}, detail_layers = detail_layers, camo_layers = camo_layers,
+                     encoded = text:sub(block, at + size - 1)}
     for _, name in ipairs({'detail', 'camo'}) do
         for l = 0, samples[name .. '_layers'] - 1 do
             local values = ffi.new('double[?]', LAYER_BYTES)
             for i = 0, LAYER_BYTES - 1 do values[i] = bytes[at - 1 + i] / 255 end
             samples[name][l] = values
             at = at + LAYER_BYTES
+            if yield then yield() end
         end
     end
     return samples, at
@@ -377,10 +408,11 @@ end
 local function decode_entry(text, at, bytes)
     local f
     f, at = line_at(text, at)
-    if f[1] ~= 'K' or #f ~= 17 then error('cache: bad entry', 0) end
+    if f[1] ~= 'K' or #f ~= 18 then error('cache: bad entry', 0) end
     local analysis = {kit = {id = tonumber(f[3], 16), kit_type = f[4], archive = f[5]}, body = number(f[6]),
                       rows = {}, pieces = {}, luts = {}, patterns = {}, cached = true, geometry_patched = f[11] == '1',
                       emblem_layers = number(f[16])}
+    if f[4] == 'Cape' then analysis.weight = number(f[18]) end
     at = decode_rows(text, at, number(f[7]), analysis)
     at = decode_changes(text, at, number(f[12]), analysis)
     at = decode_pieces(text, at, number(f[8]), analysis)
@@ -395,7 +427,7 @@ end
 
 -- The analyses in a cache file's text: {key -> analysis}, their order and the shared samples (nil without the
 -- block), or nil and why (another format, build or data, or a damaged file). yield (optional) is called after each
--- entry (inside a job's coroutine; LuaJIT yields across the pcall).
+-- entry and each sample layer (inside a job's coroutine; LuaJIT yields across the pcall).
 function Cache.decode(text, header, yield)
     if type(text) ~= 'string' or text:sub(1, #header + 1) ~= header .. '\n' then
         return nil, 'built for another version, game build or data'
@@ -404,7 +436,7 @@ function Cache.decode(text, header, yield)
     local entries, order, samples = {}, {}, nil
     local ok, why = pcall(function()
         local at = #header + 2
-        if text:sub(at, at + 1) == 'S ' then samples, at = decode_samples(text, at, bytes) end
+        if text:sub(at, at + 1) == 'S ' then samples, at = decode_samples(text, at, bytes, yield) end
         while at <= #text do
             local key, analysis
             key, analysis, at = decode_entry(text, at, bytes)
@@ -432,10 +464,14 @@ end
 -- up to about 5 ms in one piece in real play v1.2).
 Cache.CHUNK = 131072
 
+-- The file a read or write has open between its pieces, and the temporary file a write makes (Cache.abort).
+local open_file, open_temp
+
 -- The file's text, or nil. yield (optional): called after each piece.
 function Cache.read(path, yield)
     local file = path and io.open(path, 'rb')
     if not file then return nil end
+    open_file = file
     local pieces = {}
     while true do
         local piece = file:read(Cache.CHUNK)
@@ -444,6 +480,7 @@ function Cache.read(path, yield)
         if yield then yield() end
     end
     file:close()
+    open_file = nil
     return table.concat(pieces)
 end
 
@@ -453,6 +490,7 @@ function Cache.write(path, text, yield)
     local temp = path .. '.tmp'
     local file, reason = io.open(temp, 'wb')
     if not file then return false, reason end
+    open_file, open_temp = file, temp
     local written, write_error = true, nil
     for at = 1, #text, Cache.CHUNK do
         written, write_error = file:write(text:sub(at, at + Cache.CHUNK - 1))
@@ -460,6 +498,7 @@ function Cache.write(path, text, yield)
         if yield then yield() end
     end
     local closed, close_error = file:close()
+    open_file, open_temp = nil, nil
     if not (written and closed) then
         os.remove(temp)
         return false, write_error or close_error
@@ -474,17 +513,26 @@ function Cache.write(path, text, yield)
     return true
 end
 
+-- A read or write dropped between its pieces (its job or save abandoned at a pause or stop): the file closed now
+-- rather than by the collector, a write's temporary file removed (a shutdown save can then write it again).
+function Cache.abort()
+    local file, temp = open_file, open_temp
+    open_file, open_temp = nil, nil
+    if file then pcall(file.close, file) end
+    if temp then os.remove(temp) end
+end
+
 -- Everything here runs inside a job, a few times per session: interpreted.
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({Cache.pieces_sum, Cache.key, Cache.header, number, encode_rows, changed_rows, tint_lines,
-                         zone_lines, emblem_lines, decode_emblems,
+    for _, fn in ipairs({Cache.pieces_sum, Cache.pieces_sum_of, Cache.key, Cache.header, number, encode_rows,
+                         changed_rows, dep_lines, tint_lines, zone_lines, emblem_lines, decode_emblems,
                          encode_entry, decode_zones,
                          encode_samples, Cache.encode,
                          line_at, decode_rows, decode_changes, decode_deps, decode_tints, decode_pieces, decode_patterns,
                          decode_luts,
                          decode_samples,
                          decode_entry, Cache.decode,
-                         Cache.path, Cache.read, Cache.write}) do
+                         Cache.path, Cache.read, Cache.write, Cache.abort}) do
         jit.off(fn, true)
     end
 end

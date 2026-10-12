@@ -5,7 +5,8 @@
 -- lighting). Parsed on demand and kept for the session; nothing here runs per frame.
 local Appearance = {}
 
--- Appearance.new(data) -> {row(lut, r), kit(id), hoods(id)}. data: the table src/appearance_data.lua returns.
+-- Appearance.new(data) -> {row(lut, r), kit(id), kit_for(luts), index_seen(yield), seen_share(lut, r), hoods(id)}.
+-- data: the table src/appearance_data.lua returns.
 -- row(lut hash, row index) -> {gr, gg, gb, sr, sg, sb} or nil (not measured).
 -- kit(kit id, 8 hex digits) -> {luts = {hash -> true}, rows = {['lut:row'] -> {px, light}}, patterns = {hash -> {px,
 -- gain}}} or nil; light: the row's pixels x mean screen luminance; gain {r, g, b} or nil (pattern seen too little to
@@ -13,6 +14,10 @@ local Appearance = {}
 -- hoods(kit id) -> {['lut:row'] -> true}: a hooded helmet's hood rows (the Recolor Hoods option), or nil.
 -- kit_for(luts) -> kit, id: the one measured kit whose LUTs are exactly luts ({hash -> true}), or nil (none, or several:
 -- a native look worn on another kit record, as a transmog's carrier, keeps its own measurement).
+-- seen_share(lut hash, row index) -> the largest share of a measured kit's screen pixels the row showed on (0: the LUT
+-- was measured and no kit showed that row, a hidden or placeholder row), or nil when the study has not the LUT (1,000
+-- LUTs measured, 6,293 rows seen; 26 rows only as slivers under 0.001%, such as the SR-64 Cinderblock's debug green on
+-- 2 of its 259,249 pixels). Built from the kits on first use.
 function Appearance.new(data)
     local self = {}
     local index = {}
@@ -80,6 +85,43 @@ function Appearance.new(data)
         local id = by_luts[table.concat(names, ',')]
         if not id then return nil end
         return self.kit(id), id
+    end
+
+    -- LUT hash -> {[row] = its best share}: over every measured kit, the row's screen pixels / the kit's (its rows'
+    -- and patterns'); built once, from the kits' text (no kit kept parsed).
+    local seen_rows
+    local function index_kit(index, text)
+        local luts_part, rows_part, patterns_part = text:match('^([^;]*);([^;]*);(.*)$')
+        local total = 0
+        for px in rows_part:gmatch('=(%d+),') do total = total + tonumber(px) end
+        for px in patterns_part:gmatch('=(%d+)') do total = total + tonumber(px) end
+        for i in luts_part:gmatch('%d+') do
+            local name = data.luts[tonumber(i)]
+            index[name] = index[name] or {}
+        end
+        for i, r, px in rows_part:gmatch('(%d+)%.(%d+)=(%d+),') do
+            local rows = index[data.luts[tonumber(i)]]
+            local row, share = tonumber(r), total > 0 and tonumber(px) / total or 0
+            if share > (rows[row] or 0) then rows[row] = share end
+        end
+    end
+    -- Makes the index once (about 3 ms outside the game for the 293 kits); yield (optional): a pause every 32 kits. The
+    -- index is kept only once whole, so a job dropped at a pause leaves none.
+    function self.index_seen(yield)
+        if seen_rows then return end
+        local index, n = {}, 0
+        for _, text in pairs(data.kits) do
+            index_kit(index, text)
+            n = n + 1
+            if yield and n % 32 == 0 then yield() end
+        end
+        seen_rows = seen_rows or index
+    end
+    function self.seen_share(lut, r)
+        if not seen_rows then self.index_seen() end
+        local rows = seen_rows[lut]
+        if not rows then return nil end
+        return rows[r] or 0
     end
 
     function self.hoods(id)

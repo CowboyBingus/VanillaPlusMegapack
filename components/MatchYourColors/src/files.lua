@@ -5,8 +5,9 @@
 -- OVERLAPPED offset). Inside a job (Files.new with wait) the handles are overlapped: a read the disk does not answer
 -- at once (a cold read: 62.5 and 141.9 ms in single reads in real play v1.2) is polled once per frame and wait()
 -- yields the job meanwhile, instead of stalling the game's frame. Its buffer stays referenced until it completes;
--- close() and Files.settle() (a job abandoned at a pause or stop) cancel it and wait it out, so the kernel never
--- writes into a buffer the job has dropped. Without wait (tests, tools) reads block as plain synchronous reads.
+-- close() and Files.abandon() (a job abandoned at a pause or stop) cancel it and wait it out, so the kernel never
+-- writes into a buffer the job has dropped; Files.abandon() then closes every handle the job left open. Without wait
+-- (tests, tools) reads block as plain synchronous reads.
 -- Every Windows function goes by a private name with an __asm__ label naming the real export, and every type name
 -- is this mod's own (ffi.cdef keeps the first declaration of a name for the whole game).
 local ffi = require('ffi')
@@ -83,12 +84,55 @@ end
 
 -- Adapters with a read in flight (kept referenced, with their buffers, until it completes or is settled).
 local in_flight = {}
+-- Job adapters (made with wait) holding open handles, kept referenced until each is closed: a job dropped while it
+-- built a reader never handed its owner the handles opened so far (Slim.open's DSAR files, a patch's table of
+-- contents, a content hash), so they are closed here (Files.abandon). 20 abandoned Slim.open calls left 20 handles
+-- open until v1.3 (KB match-your-colors-perf-pass-v13, rank 7).
+local holding = {}
 
 -- Cancels every read still in flight and waits each out (a job abandoned at a pause or stop). Blocks only then.
 function Files.settle()
     local adapters = {}
     for adapter in pairs(in_flight) do adapters[#adapters + 1] = adapter end
     for _, adapter in ipairs(adapters) do adapter.settle() end
+end
+
+-- Handles an adapter closed while closing later ({kernel, handle} each): closing the game-data reader on one frame took
+-- 0.35 ms with 3-4 archives open and 2.3 ms after cold Armory browsing (harness 2026-10-11,
+-- research/profiling/close_bench.py; KB match-your-colors-stress-test), so a reader's handles are queued
+-- (adapter.close_later) and closed a few a frame (Files.close_some).
+local later = {}
+
+-- Closes up to `count` queued handles, the oldest first; returns how many are left.
+function Files.close_some(count)
+    local n = math.min(count, #later)
+    for i = 1, n do
+        local entry = later[i]
+        entry[1].myc1_CloseHandle(entry[2])
+    end
+    if n > 0 then
+        local left = #later - n
+        for i = 1, left do later[i] = later[i + n] end
+        for i = left + 1, left + n do later[i] = nil end
+    end
+    return #later
+end
+
+-- A job dropped at a pause or stop: its reads in flight cancelled and waited out, then every handle a job adapter
+-- still holds closed, and every handle queued. Blocks only then.
+function Files.abandon()
+    Files.settle()
+    local adapters = {}
+    for adapter in pairs(holding) do adapters[#adapters + 1] = adapter end
+    for _, adapter in ipairs(adapters) do adapter.close_all() end
+    Files.close_some(#later)
+end
+
+-- How many handles job adapters hold open (tests).
+function Files.held()
+    local count = 0
+    for adapter in pairs(holding) do count = count + adapter.held() end
+    return count
 end
 
 -- A UTF-16 path array holding `prefix` (UTF-16 units, count units) followed by the UTF-8 string `name`, and
@@ -154,12 +198,16 @@ function Files.new(folder, count, clock, wait, kernel_override)
     local flags = RANDOM_ACCESS + (wait and FILE_FLAG_OVERLAPPED or 0)
     local self = {reads = 0, bytes = 0, opened = 0, longest = 0, longest_size = 0, waits = 0}
     local pending_handle, pending_buffer = nil, nil
+    local handles, held = {}, 0 -- a job adapter's open handles (the handle objects open returned)
 
     function self.open(name)
         local path = join(folder, count, name)
         local handle = k.myc1_CreateFileW(path, GENERIC_READ, SHARE_ALL, nil, OPEN_EXISTING, flags, nil)
         if ffi.cast('intptr_t', handle) == -1 then error('cannot open game file ' .. name, 0) end
         self.opened = self.opened + 1
+        if wait then
+            handles[handle], held, holding[self] = true, held + 1, true
+        end
         return handle
     end
 
@@ -209,10 +257,29 @@ function Files.new(folder, count, clock, wait, kernel_override)
         pending_handle, pending_buffer, in_flight[self] = nil, nil, nil
     end
 
+    -- close_later: set by the owner before it closes the adapter's files (a reader dropped: src/recolor.lua): the
+    -- handles are queued for Files.close_some instead of closed at once.
     function self.close(handle)
         if handle == pending_handle then self.settle() end
-        k.myc1_CloseHandle(handle)
+        if self.close_later then
+            later[#later + 1] = {k, handle}
+        else
+            k.myc1_CloseHandle(handle)
+        end
+        if handles[handle] then
+            handles[handle], held = nil, held - 1
+            if held == 0 then holding[self] = nil end
+        end
     end
+
+    -- Every handle still open closed, a read in flight settled first (Files.abandon).
+    function self.close_all()
+        self.settle()
+        for handle in pairs(handles) do k.myc1_CloseHandle(handle) end
+        handles, held, holding[self] = {}, 0, nil
+    end
+
+    function self.held() return held end
 
     -- The names of the files in the folder matching pattern (FindFirstFileW wildcards), ASCII names only; {} when
     -- none match.
@@ -235,7 +302,8 @@ end
 -- Code that runs once or rarely (jobs, startup, events) stays interpreted, sub-functions included: it must not
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({join, ascii_name, Files.settle, Files.game_data_folder, Files.new}) do
+    for _, fn in ipairs({join, ascii_name, Files.settle, Files.close_some, Files.abandon, Files.held,
+                         Files.game_data_folder, Files.new}) do
         jit.off(fn, true)
     end
 end

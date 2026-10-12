@@ -1,6 +1,8 @@
 Supports Helldivers 2 Steam build 25480438 / EXE 1.8.46015.0.
 
-Offline source, package and read-only module checks passed. v40 updates Match
+Offline source, package and read-only module checks passed. v41 updates Match
+Your Colors to v1.4, whose release build was played on this build on the ship
+and in the Armory. v40 updates Match
 Your Colors to v1.3, played on this build as its standalone release (its colors
 shared between a host and a client). v39 updates Laser
 Sentry Cooldown to v1.1, played in a mission on this build as its standalone

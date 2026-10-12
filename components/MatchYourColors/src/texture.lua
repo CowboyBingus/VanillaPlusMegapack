@@ -5,11 +5,11 @@
 -- 570 ID masks of build 25480438), else in the two parts end to end. Layers are stored one after another,
 -- each with its full mip chain (DDS order).
 --
--- Decoded here: material LUTs (23 x N, R16G16B16A16_FLOAT, mip 0) and pattern textures (3 x 1, the same
--- format), ID-mask coverage (R8G8B8A8, 1-2 layers = 4-8 soft slot weights, mip 0), pattern-mask coverage (R8 or
--- R8G8B8A8, red channel, one layer and mip, research/patterns.py), the first 512 texels of the detail tiler's mip
--- 4 per layer (BC7) and of the camo tiler's mip 2 per layer (R8G8B8A8), as research/effective.py samples them.
--- Nothing here runs per frame.
+-- Decoded here: material LUTs (23 x N, R16G16B16A16_FLOAT, mip 0; mods' may be R32G32B32A32_FLOAT) and pattern
+-- textures (3 x 1, the same formats), ID-mask coverage (R8G8B8A8, 1-2 layers = 4-8 soft slot weights, mip 0),
+-- pattern-mask coverage (R8 or R8G8B8A8, red channel, one layer and mip, research/patterns.py), the first 512 texels
+-- of the detail tiler's mip 4 per layer (BC7) and of the camo tiler's mip 2 per layer (R8G8B8A8), as
+-- research/effective.py samples them. Nothing here runs per frame.
 local ffi = require('ffi')
 local bit = require('bit')
 local band, bor, lshift, rshift = bit.band, bit.bor, bit.lshift, bit.rshift
@@ -23,6 +23,11 @@ Texture.FORMAT_RGBA16F, Texture.FORMAT_RGBA8, Texture.FORMAT_RGBA8_SRGB, Texture
 Texture.FORMAT_R8 = 61
 Texture.FORMAT_BC3 = 77 -- capes' scalar fields (src/capes.lua decodes its blocks)
 Texture.FORMAT_BC4 = 80 -- capes' gradients (src/capes.lua)
+-- Mods' LUTs: every texture the game ships the mod reads is in the formats above (the 11 paint schemes' LUTs too), but
+-- some mods write LUTs as R32G32B32A32_FLOAT; v1.3 rejected them ("unsupported texture format 2", user report
+-- 2026-10-08: every paint scheme a mod had replaced failed).
+Texture.FORMAT_RGBA32F = 2
+local TEXEL_BYTES = {[Texture.FORMAT_RGBA32F] = 16, [Texture.FORMAT_RGBA16F] = 8, [Texture.FORMAT_R8] = 1}
 
 -- Bytes of mip `m` of a w x h layer in `format`.
 local function mip_bytes(format, w, h, m)
@@ -31,8 +36,7 @@ local function mip_bytes(format, w, h, m)
         local block = format == Texture.FORMAT_BC4 and 8 or 16
         return math.max(1, rshift(mw + 3, 2)) * math.max(1, rshift(mh + 3, 2)) * block
     end
-    local per_texel = format == Texture.FORMAT_RGBA16F and 8 or (format == Texture.FORMAT_R8 and 1 or 4)
-    return mw * mh * per_texel
+    return mw * mh * (TEXEL_BYTES[format] or 4)
 end
 
 -- The DDS description in a texture's main part (uint8_t pointer, size): {width, height, mips, format, layers,
@@ -49,7 +53,7 @@ function Texture.describe(main, size)
     local f = info.format
     if f ~= Texture.FORMAT_RGBA16F and f ~= Texture.FORMAT_RGBA8 and f ~= Texture.FORMAT_RGBA8_SRGB
         and f ~= Texture.FORMAT_BC7 and f ~= Texture.FORMAT_R8 and f ~= Texture.FORMAT_BC3
-        and f ~= Texture.FORMAT_BC4 then
+        and f ~= Texture.FORMAT_BC4 and f ~= Texture.FORMAT_RGBA32F then
         error('unsupported texture format ' .. f, 0)
     end
     info.mip_offsets, info.layer_bytes = {}, 0
@@ -95,15 +99,37 @@ local function half(lo, hi)
 end
 Texture.half = half
 
+-- IEEE single to number, from its four little-endian bytes at p[o] (exact). Decoded from the bytes, never loaded
+-- through a float pointer: a NaN with a payload loaded that way can come out as no number at all in this LuaJIT
+-- (its values are NaN-tagged); every NaN here is 0 / 0.
+local function single(p, o)
+    local b2, b3 = p[o + 2], p[o + 3]
+    local sign = b3 >= 128 and -1 or 1
+    local exponent = band(b3, 127) * 2 + rshift(b2, 7)
+    local mantissa = band(b2, 127) * 65536 + p[o + 1] * 256 + p[o]
+    if exponent == 0 then return sign * math.ldexp(mantissa, -149) end
+    if exponent == 255 then return mantissa == 0 and sign * math.huge or 0 / 0 end
+    return sign * math.ldexp(8388608 + mantissa, exponent - 150)
+end
+Texture.single = single
+
 -- The 23 x N material LUT (mip 0) as a float array: value(row, column, channel) at ((row * width + column) *
--- 4 + channel). Returns the array, width and rows.
+-- 4 + channel), from R16G16B16A16_FLOAT (the game's) or R32G32B32A32_FLOAT (some mods'). Returns the array, width
+-- and rows.
 function Texture.lut(pixels, info, scratch)
-    if info.format ~= Texture.FORMAT_RGBA16F then error('material LUT is not RGBA16F', 0) end
     local count = info.width * info.height * 4
-    local raw = scratch(count * 2)
-    pixels(0, count * 2, raw, 0)
     local values = ffi.new('float[?]', count)
-    for i = 0, count - 1 do values[i] = half(raw[2 * i], raw[2 * i + 1]) end
+    if info.format == Texture.FORMAT_RGBA16F then
+        local raw = scratch(count * 2)
+        pixels(0, count * 2, raw, 0)
+        for i = 0, count - 1 do values[i] = half(raw[2 * i], raw[2 * i + 1]) end
+    elseif info.format == Texture.FORMAT_RGBA32F then
+        local raw = scratch(count * 4)
+        pixels(0, count * 4, raw, 0)
+        for i = 0, count - 1 do values[i] = single(raw, 4 * i) end
+    else
+        error('material LUT format ' .. info.format .. ' (neither RGBA16F nor RGBA32F)', 0)
+    end
     return values, info.width, info.height
 end
 
@@ -126,18 +152,27 @@ local function accumulate(data, plane, layers, first, count, sums, weights)
     return valid
 end
 
--- ID-mask coverage, mip 0: per slot (4 per layer) the mean of each texel's weight divided by the texel's
--- weight sum, over texels whose sum exceeds 0.05 (research/palettes.py). Returns a 1-based Lua array, or nil
--- and why. The mask is read in blocks of rows (every layer's rows, at most COVERAGE_BLOCK bytes: no buffer the
--- size of the mask, 2 MB for a 512 x 512 two-layer mask); texels are summed in the same order as a whole read.
--- yield() is called between rows so a job can pause.
+-- ID-mask coverage: per slot (4 per layer) the mean of each texel's weight divided by the texel's weight sum, over
+-- texels whose sum exceeds 0.05 (research/palettes.py), at mip 0, or for a mask larger than the game's at the first
+-- mip no larger than COVERAGE_SIZE on either side: the game's 180 ID masks are at most 512 x 512, and a mod's 4096 x
+-- 4096 two-layer mask is 128 MB to read at mip 0 (a user's Armory session read 2.6 GB, 2026-10-08; its mips average
+-- the same weights). Returns a 1-based Lua array, or nil and why. The mask is read in blocks of rows (every layer's
+-- rows, at most COVERAGE_BLOCK bytes: no buffer the size of the mask, 2 MB for a 512 x 512 two-layer mask); texels are
+-- summed in the same order as a whole read. yield() is called between rows so a job can pause.
 local COVERAGE_BLOCK = 131072
 Texture.COVERAGE_BLOCK = COVERAGE_BLOCK
+Texture.COVERAGE_SIZE = 512
 function Texture.coverage(pixels, info, scratch, yield)
     if info.format ~= Texture.FORMAT_RGBA8 and info.format ~= Texture.FORMAT_RGBA8_SRGB then
         return nil, 'id mask format ' .. info.format
     end
-    local w, h, layers = info.width, info.height, info.layers
+    local m = 0
+    while m + 1 < info.mips and (rshift(info.width, m) > Texture.COVERAGE_SIZE
+        or rshift(info.height, m) > Texture.COVERAGE_SIZE) do
+        m = m + 1
+    end
+    local w, h, layers = math.max(1, rshift(info.width, m)), math.max(1, rshift(info.height, m)), info.layers
+    local base = info.mip_offsets[m]
     local row_bytes = w * 4
     local rows_per_block = math.max(1, math.floor(COVERAGE_BLOCK / (row_bytes * layers)))
     local data = scratch(rows_per_block * row_bytes * layers)
@@ -147,7 +182,7 @@ function Texture.coverage(pixels, info, scratch, yield)
     for first = 0, h - 1, rows_per_block do
         local rows = math.min(rows_per_block, h - first)
         local plane = rows * row_bytes
-        for l = 0, layers - 1 do pixels(l * info.layer_bytes + first * row_bytes, plane, data, l * plane) end
+        for l = 0, layers - 1 do pixels(l * info.layer_bytes + base + first * row_bytes, plane, data, l * plane) end
         for y = 0, rows - 1 do
             valid = valid + accumulate(data, plane, layers, y * w, w, sums, weights)
             if yield then yield() end
@@ -160,24 +195,33 @@ end
 
 -- A pattern mask's coverage: the mean of the shader's mask strength clamp(100 x (red - 0.5), 0, 1) over mip `mip`
 -- (the last when the texture has fewer) of layer `layer` (modulo the layers), summed in texel order; nil when the
--- mask is neither R8 nor R8G8B8A8.
-function Texture.mask_coverage(pixels, info, layer, mip, scratch)
+-- mask is neither R8 nor R8G8B8A8. The mip is read and summed in blocks of whole rows of at most MASK_BLOCK texels with
+-- yield() (optional) after each, the sum in the same order: the game's masks are 256 x 256 with mips (mip 2: 4,096
+-- texels, one block), but a mod's mask without mips was read and summed whole (2048 x 2048: 143 ms in one piece in the
+-- game's VM; a block of 16,384 texels about 0.6 ms).
+Texture.MASK_BLOCK = 16384
+function Texture.mask_coverage(pixels, info, layer, mip, scratch, yield)
     local f = info.format
     local per = f == Texture.FORMAT_R8 and 1
         or ((f == Texture.FORMAT_RGBA8 or f == Texture.FORMAT_RGBA8_SRGB) and 4 or nil)
     if not per then return nil end
     mip = math.min(mip, info.mips - 1)
     local w, h = math.max(1, rshift(info.width, mip)), math.max(1, rshift(info.height, mip))
-    local count = w * h
-    local data = scratch(count * per)
-    pixels((layer % info.layers) * info.layer_bytes + info.mip_offsets[mip], count * per, data, 0)
+    local rows = math.max(1, math.floor(Texture.MASK_BLOCK / w))
+    local data = scratch(math.min(rows, h) * w * per)
+    local base = (layer % info.layers) * info.layer_bytes + info.mip_offsets[mip]
     local sum = 0
-    for i = 0, count - 1 do
-        local v = 100 * (data[i * per] / 255 - 0.5)
-        if v > 1 then v = 1 elseif v < 0 then v = 0 end
-        sum = sum + v
+    for first = 0, h - 1, rows do
+        local count = math.min(rows, h - first) * w
+        pixels(base + first * w * per, count * per, data, 0)
+        for i = 0, count - 1 do
+            local v = 100 * (data[i * per] / 255 - 0.5)
+            if v > 1 then v = 1 elseif v < 0 then v = 0 end
+            sum = sum + v
+        end
+        if yield then yield() end
     end
-    return sum / count
+    return sum / (w * h)
 end
 
 -- BC7 -------------------------------------------------------------------------------------------------------
@@ -415,16 +459,37 @@ local function bc7_texels(pixels, base, w, count, scratch, values, yield)
     end
 end
 
+-- The first `count` texels (row-major) of a float mip at `base` (RGBA16F or RGBA32F: a mod's tiler) into values as the
+-- 8-bit channels the game's tilers have, /255 (clamped to 0-1, rounded: what the disk cache keeps of the samples).
+local function float_texels(pixels, info, base, count, scratch, values)
+    local per = TEXEL_BYTES[info.format] / 4
+    local raw = scratch(count * 4 * per)
+    pixels(base, count * 4 * per, raw, 0)
+    for i = 0, count * 4 - 1 do
+        local v = per == 2 and half(raw[2 * i], raw[2 * i + 1]) or single(raw, 4 * i)
+        if not (v > 0) then v = 0 elseif v > 1 then v = 1 end -- NaN too
+        values[i] = math.floor(v * 255 + 0.5) / 255
+    end
+end
+
 -- The first `count` texels (row-major) of mip `mip` of every layer, channels/255 as {layer -> double array of
--- count * 4}. For BC7 the block rows those texels need are decoded; RGBA8 is read as is.
+-- count * 4}. For BC7 the block rows those texels need are decoded; RGBA8 is read as is; a float format as
+-- float_texels. Another format raises (v1.3 read any of them as RGBA8).
 function Texture.samples(pixels, info, mip, count, scratch, yield)
+    local f = info.format
+    local float = f == Texture.FORMAT_RGBA16F or f == Texture.FORMAT_RGBA32F
+    if f ~= Texture.FORMAT_BC7 and f ~= Texture.FORMAT_RGBA8 and f ~= Texture.FORMAT_RGBA8_SRGB and not float then
+        error('tiler format ' .. f, 0)
+    end
     local w = math.max(1, rshift(info.width, mip))
     local out = {}
     for l = 0, info.layers - 1 do
         local base = l * info.layer_bytes + info.mip_offsets[mip]
         local values = ffi.new('double[?]', count * 4)
-        if info.format == Texture.FORMAT_BC7 then
+        if f == Texture.FORMAT_BC7 then
             bc7_texels(pixels, base, w, count, scratch, values, yield)
+        elseif float then
+            float_texels(pixels, info, base, count, scratch, values)
         else
             local raw = scratch(count * 4)
             pixels(base, count * 4, raw, 0)
@@ -439,10 +504,11 @@ end
 -- Code that runs once or rarely (jobs, startup, events) stays interpreted, sub-functions included: it must not
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({mip_bytes, Texture.describe, Texture.pixels, half, Texture.lut, read_bits, subset_of, widen, raw_endpoints,
+    for _, fn in ipairs({mip_bytes, Texture.describe, Texture.pixels, half, single, Texture.lut, read_bits, subset_of,
+        widen, raw_endpoints,
         read_pbits, finish_endpoints, read_endpoints, read_indices, interpolate, decode_texel, parse_block,
         Texture.bc7_block,
-        place_block, bc7_texels, Texture.samples, Texture.mask_coverage}) do
+        place_block, bc7_texels, float_texels, Texture.samples, Texture.mask_coverage}) do
         jit.off(fn, true)
     end
 end

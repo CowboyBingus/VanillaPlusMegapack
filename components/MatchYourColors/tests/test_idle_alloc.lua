@@ -26,12 +26,13 @@ local function grow_stack(depth)
 end
 -- Cases: no preview slot; a preview slot; the UI preview system with nothing shown; the UI preview shown; sync on
 -- alone in the lobby; sync on with another mod user's Helldiver recolored; Recolor Cape on with the UI preview shown
--- (the cape recolored on the avatar and the preview, its kit compared on every check).
+-- (the cape recolored on the avatar and the preview, its kit compared on every check); Helmet and Armor Match Cape
+-- with the UI preview shown (the cape as the source: its kit compared on every check, both items recolored).
 local LOCAL_ID = 'C0FFEE5EED0001'
 local CASES = {{}, {previews = true}, {ui = true}, {ui = true, shown = true},
                {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}}}},
                {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}, {id = '1234', value = '1|2|3|0'}}}},
-               {ui = true, shown = true, capes = true}}
+               {ui = true, shown = true, capes = true}, {ui = true, shown = true, cape_source = true}}
 for _, case in ipairs(CASES) do
     local w = setup({previews = case.previews, ui = case.ui, lobby = case.lobby})
     if case.shown then
@@ -39,6 +40,7 @@ for _, case in ipairs(CASES) do
         Fake.show_ui(w.space, 1, {helmet = 0x0b0b0b0b, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x300})
     end
     if case.capes then w.instance.set_option('recolor_cape', true) end
+    if case.cape_source then w.instance.set_option('mode', 4) end -- src/recolor.lua Recolor.CAPE_SOURCE
     w.frames(12)
     local step, state = w.instance.step, w.instance.state
     for _ = 1, 360 do step() end -- three periodic checks and polls (the value posted): one-time growth happens here
@@ -69,4 +71,4 @@ for _, case in ipairs(CASES) do
 end
 print('PASS test_idle_alloc (' .. passed .. ' checks: 2400 idle frames each, with and without a preview slot, '
     .. 'with the UI preview hidden and shown, with sync on alone and with another mod user recolored, with Recolor '
-    .. 'Cape on)')
+    .. 'Cape on, with Helmet and Armor Match Cape)')

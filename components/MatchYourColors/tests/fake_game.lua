@@ -90,12 +90,12 @@ end
 -- avatar entities (0xe5 local, 0xe6 remote) and avatar records with unit arrays, the preview manager and the UI
 -- preview system (UI slots 1 local, 3 remote; nothing shown until Fake.show_ui).
 -- options: {local_units = {[{type, slot}] = unit}, remote_units = ..., helmet, armor, body, previews = bool,
--- ui = bool}
+-- ui = bool, players (count, default 2), no_manager = bool (no player manager: the title screen)}
 function Fake.world(options)
     local s = Fake.space()
     local g = Fake.GAME
     s.region(g + 0x3326000, 0x200000) -- the game.dll globals the mod reads
-    s.u64(g + 0x3326468, Fake.PLAYERS) s.u64(g + 0x33264F8, Fake.CUSTOMIZATION)
+    s.u64(g + 0x3326468, options.no_manager and 0 or Fake.PLAYERS) s.u64(g + 0x33264F8, Fake.CUSTOMIZATION)
     s.u64(g + 0x3326D20, Fake.AVATARS) s.u64(g + 0x346BF98, Fake.ENTITIES)
     s.u64(g + 0x346D580, options.previews and Fake.PREVIEWS or 0)
     s.u64(g + 0x347CE60, options.ui and Fake.UI or 0)

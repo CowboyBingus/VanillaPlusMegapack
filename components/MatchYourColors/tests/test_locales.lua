@@ -25,7 +25,7 @@ for key in pairs(english.strings) do
     assert(code:find("'" .. key .. "'", 1, true), 'unused text in en.lua: ' .. key)
 end
 local MENU = {['option.mod'] = 40, ['option.mode.label'] = 64, ['option.mode.helmet'] = 48,
-              ['option.mode.armor'] = 48, ['option.mode.description'] = 400, ['option.sets.label'] = 64,
+              ['option.mode.armor'] = 48, ['option.mode.cape'] = 48, ['option.mode.description'] = 400, ['option.sets.label'] = 64,
               ['option.sets.description'] = 400, ['option.hoods.label'] = 64, ['option.hoods.description'] = 400,
               ['option.materials.label'] = 64, ['option.materials.description'] = 400,
               ['option.scheme.label'] = 64, ['option.scheme.description'] = 400,

@@ -4,8 +4,9 @@
 -- UiPreviewSystem [game + 0x347CE60]: occupied-slot count +50440 and bitmask +50444 (bit s); slot records
 -- +49160 + 160 * s (s 0-3: players, by the player's UI slot; 4-7: thumbnail temporaries, never used here):
 -- +8 body unit, +12 / +52 / +92 three arrays of 10 piece unit refs (the avatar record's layout: slot 0 helmet,
--- 1-9 armor), +136 body type, +140 armor kit, +144 helmet kit, +148 cape kit shown (a hovered item included).
--- The local player's slot is u32 [player manager + 948 + 32 * index] (src/avatar.lua identity.ui_slot).
+-- 1-9 armor), +132 animation, +136 body type, +140 armor kit, +144 helmet kit, +148 cape kit shown (a hovered item
+-- included; KB ui-preview-system-armory-units). The local player's slot is u32 [player manager + 948 + 32 * index]
+-- (src/avatar.lua identity.ui_slot).
 local ffi = require('ffi')
 local band = require('bit').band
 
@@ -15,6 +16,9 @@ Preview.SYSTEM = 0x347CE60
 Preview.MAX_SLOT = 3
 Preview.RECORD_BYTES = 160
 local SLOTS, GATE, UNITS = 49160, 50440, 12
+-- The units compared: the 120 bytes of unit refs the recolor binds (src/avatar.lua Avatar.units), not the animation
+-- word after them (v1.3 compared +12 to +135: a new animation alone rebound the preview's materials).
+local UNITS_END = UNITS + 120
 local BODY, ARMOR, HELMET, CAPE, KITS_END = 136, 140, 144, 148, 152
 local MAX_OCCUPIED = 8
 
@@ -62,7 +66,7 @@ function Preview.watch(memory, where)
         local status = 'same'
         if not present or differs(BODY, KITS_END) then
             status = 'kits'
-        elseif differs(UNITS, BODY) then
+        elseif differs(UNITS, UNITS_END) then
             status = 'units'
         end
         if status ~= 'same' then ffi.copy(kept, now, Preview.RECORD_BYTES) end
@@ -73,6 +77,9 @@ function Preview.watch(memory, where)
     function self.kits()
         return u32(kept, HELMET), u32(kept, ARMOR), u32(kept, BODY), u32(kept, CAPE)
     end
+
+    -- The next poll reports 'kits' while the slot is shown, as if it had just appeared (after it went unwatched).
+    function self.reset() present = false end
     return self
 end
 

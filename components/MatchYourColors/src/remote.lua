@@ -13,10 +13,12 @@ local Remote = {}
 Remote.FAILURE_LIMIT, Remote.WATCH_FRAMES = 3, 4
 local EMPTY = {}
 
--- m: {Avatar, Recolor, Engine, Sync, memory, native, pool, game, read (Avatar.reader), note}.
+-- m: {Avatar, Recolor, Engine, Sync, memory, native, pool, game, read (Avatar.reader), note, records_same (the
+-- addon's: whether a result was made of the kit records as they read now)}.
 function Remote.new(m)
     local Avatar, Recolor, Sync = m.Avatar, m.Recolor, m.Sync
-    local self = {entries = {}, order = {}, retiring = {}, cursor = 0, jobs = 0, pending = false}
+    local self = {entries = {}, order = {}, retiring = {}, cursor = 0, served = 0, jobs = 0, rebinds = 0,
+                  pending = false}
 
     local function key_of(member) return string.format('%08x%08x', member.peer_high, member.peer_low) end
 
@@ -55,11 +57,32 @@ function Remote.new(m)
         return nil
     end
 
+    -- New units of a player whose kits and kit records are those of the applied result (a respawn): the result bound
+    -- to them at once, as the local player's are (v1.3 ran a whole job for it: the audit, rank 11). False when there
+    -- is no such result or anything differs (a job then).
+    local function rebind(e, player, frame)
+        local applied, result = e.applied, e.controller.result
+        if e.dirty or not applied or not result or not m.records_same then return false end
+        local identity = Avatar.resolve_remote(m.read, m.game, player, {})
+        -- the cape counts with Recolor Cape on, or as the source (Helmet and Armor Match Cape without a scheme)
+        local capes = applied.capes or (applied.mode == Recolor.CAPE_SOURCE and (applied.scheme or 0) == 0)
+        if not identity or identity.helmet ~= applied.helmet or identity.armor ~= applied.armor
+            or identity.body ~= applied.body or (capes and identity.cape ~= applied.cape)
+            or not m.records_same(result, identity.helmet, identity.armor, capes and identity.cape or nil) then
+            return false
+        end
+        e.identity, e.player, e.watch = identity, player, Avatar.watch(m.memory, identity, nil)
+        e.watch.changed() -- keeps the new units
+        e.controller.apply(result, identity, nil, frame)
+        self.rebinds = self.rebinds + 1
+        return true
+    end
+
     -- One member's settings into its entry (a new one when needed); its key, or nil when it has no Helldiver here
     -- (noted once until it has one: a lobby member whose peer id names no player here, the first two-player test's
     -- question, 2026-10-07).
     local unmatched = {}
-    local function take(players, member, settings)
+    local function take(players, member, settings, frame)
         local player = player_of(players, member)
         local key = key_of(member)
         if not player then
@@ -71,7 +94,8 @@ function Remote.new(m)
         end
         unmatched[key] = nil
         local e = self.entries[key] or add(key)
-        if not e.settings or not same(e.settings, settings) or e.player.unit ~= player.unit then
+        local new_settings = not e.settings or not same(e.settings, settings)
+        if new_settings or (e.player.unit ~= player.unit and not rebind(e, player, frame)) then
             e.settings, e.player, e.dirty, e.failures = settings, player, true, 0
             self.pending = true
         end
@@ -101,7 +125,7 @@ function Remote.new(m)
             local settings = settings_of(member.text)
             if settings then
                 players = players or Avatar.players(m.read, m.game)
-                local key = take(players, member, settings)
+                local key = take(players, member, settings, frame)
                 if key then seen[key] = true end
             end
         end
@@ -112,10 +136,14 @@ function Remote.new(m)
         for _, key in ipairs(gone) do drop(key, frame) end
     end
 
-    -- The next entry that needs a job, as a request, or nil (then pending is false). Its player is resolved again
-    -- first (kits, avatar).
+    -- The next entry that needs a job, as a request, or nil (then pending is false), looked for from the entry after
+    -- the last one served, so one player's repeated changes cannot keep the others waiting (v1.3 always looked from
+    -- the first). Its player is resolved again first (kits, avatar).
     function self.request()
-        for _, key in ipairs(self.order) do
+        local n = #self.order
+        for step = 1, n do
+            local i = (self.served + step - 1) % n + 1
+            local key = self.order[i]
             local e = self.entries[key]
             if e.dirty and e.failures < Remote.FAILURE_LIMIT then
                 e.dirty = false
@@ -123,6 +151,7 @@ function Remote.new(m)
                 if identity then
                     e.identity, e.watch = identity, Avatar.watch(m.memory, identity, nil)
                     e.watch.changed() -- keeps the current units
+                    self.served = i
                     local s = e.settings
                     return {target = 'remote', key = key, mode = s.mode, keep_sets = s.keep_sets,
                             keep_hoods = not s.recolor_hoods, materials = s.match_materials, scheme = s.scheme,
@@ -151,12 +180,14 @@ function Remote.new(m)
         end
         if e.dirty then return end -- its settings or units changed while the job ran: a new job follows
         local count = e.controller.apply(result, e.identity, nil, frame)
+        e.applied = request -- what its controller's result was made for (rebind)
         self.jobs = self.jobs + 1
         m.note(string.format('Sync: %s recolored, %d materials (%s).', request.key, count,
                              result.action == 'apply' and 'shared settings' or tostring(result.reason)))
     end
 
-    -- One entry's units checked (round robin; a change wants a job), retired textures collected.
+    -- One entry's units checked (round robin; a change rebinds its applied result, else wants a job), retired textures
+    -- collected.
     function self.step(frame)
         if self.retiring[1] then
             local keep = {}
@@ -170,7 +201,7 @@ function Remote.new(m)
         self.cursor = self.cursor % n + 1
         local e = self.entries[self.order[self.cursor]]
         if e.controller.retired[1] then e.controller.collect(frame) end
-        if e.watch and e.watch.changed() then
+        if e.watch and e.watch.changed() and not rebind(e, e.player, frame) then
             e.dirty = true
             self.pending = true
         end

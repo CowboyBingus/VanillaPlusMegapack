@@ -16,7 +16,7 @@ local function check(name, fn)
     passed = passed + 1
 end
 
-local SPARES = Recolor.POOL_SPARES -- free textures made beside one that must be made
+local SPARES = Engine.POOL_SPARES -- free textures made beside one that must be made
 local HELMET_LUT, ARMOR_LUT, OTHER_LUT = '962a946e964ebc40', 'a007a73e4082430e', '1111111111111111'
 local CAPE_LUT = 'd4cb1423c8d2a2c8' -- the local cape kit 72492837's (Recolor Cape)
 local CAPE_TINT = '9c385033ddbaaa60' -- its cape LUT (the tint: src/capes.lua), on the cape's materials
@@ -54,7 +54,7 @@ local function with_cape(request, result)
         result.luts[CAPE_SHEET] = {sheet = true, width = 2048, height = 2048, mips = 12, size = 5592432,
                                    data = ffi.new('uint8_t[16]')}
     end
-    result.cape_report = string.format('Cape %08x: canned report.', request.cape) -- src/recolor.lua cape_report
+    result.cape_report = string.format('Cape %08x: canned report.', request.cape) -- src/capes.lua Capes.report
     result.targets = result.targets or {result.target}
     result.targets[#result.targets + 1] = {kit = {kit_type = 'Cape'}, pieces = CAPE_PIECES}
     result.first, result.last = math.min(result.first, 1), math.max(result.last, 1)
@@ -62,21 +62,58 @@ local function with_cape(request, result)
     return result
 end
 local slow_job = false -- 28 pause points: the last slice runs over half the budget (the fake clock: 0.1 ms per call)
+local long_job = false -- 80 pause points: a job over several frames, past a UI gate frame
+-- Work ahead (src/addon.lua plan_ahead), as src/recolor.lua's job does it: a request without kits builds the pipeline
+-- alone; one with kits leaves its analyses and plans made (holder.ahead), so the next job of that request takes one
+-- pause point instead of 20.
+-- Whether the cape matters to request r: Recolor Cape on, or the cape as the source (src/addon.lua cape_counts).
+local function cape_counts(r)
+    return r.capes or (r.mode == Recolor.CAPE_SOURCE and (r.scheme or 0) == 0)
+end
+local function ahead_key(r)
+    return table.concat({r.mode, r.scheme or 0, r.helmet, r.armor, r.body, r.keep_hoods and 1 or 0,
+                         r.materials and 1 or 0, cape_counts(r) and r.cape or 0}, ':')
+end
 local function fake_job(_, holder, request, yield)
     jobs = jobs + 1
     requests[#requests + 1] = request
-    holder.pipeline = holder.pipeline or {kits = {signature = record_of}, close = function() end, reads = 0, dirty = false}
-    for _ = 1, slow_job and 28 or 20 do yield() end
+    if not holder.pipeline then -- closes counted (the game-data reader kept while the UI preview is shown)
+        local p = {kits = {signature = record_of}, reads = 0, dirty = false, closes = 0}
+        function p.close()
+            p.closes = p.closes + 1
+            if holder.running then p.closed_under_job = true end -- a job still reading through it
+        end
+        holder.pipeline = p
+    end
+    holder.ahead = holder.ahead or {}
+    holder.running = true
+    local made = request.helmet and holder.ahead[ahead_key(request)]
+    for _ = 1, made and 1 or (slow_job and 28 or (long_job and 80 or 20)) do
+        yield()
+        if request.obsolete then return {action = 'obsolete'} end -- as src/recolor.lua's job, at its stage boundaries
+    end
+    if not request.helmet then return {action = 'prepared'} end
     if request.helmet == FAIL_HELMET then error('canned failure', 0) end
+    if request.target == 'prepare' then holder.ahead[ahead_key(request)] = true end
     local scheme = (request.scheme or 0) > 0
     if request.mode == Recolor.OFF and not scheme then return {action = 'restore', reason = 'off'} end
-    if not scheme and request.keep_sets and request.helmet == SET_HELMET then
+    local cape_mode = request.mode == Recolor.CAPE_SOURCE and not scheme
+    if not scheme and not cape_mode and request.keep_sets and request.helmet == SET_HELMET then
         return {action = 'restore', reason = 'complete set'}
     end
+    if cape_mode and (request.cape or 0) == 0 then return {action = 'restore', reason = 'no cape'} end
     local key = table.concat({request.mode, request.scheme or 0, request.helmet, request.armor, request.body,
                               request.keep_hoods and 1 or 0, request.materials and 1 or 0}, ':')
     local helmet_target = {kit = {kit_type = 'Helmet'}, pieces = HELMET_PIECES}
     local armor_target = {kit = {kit_type = 'Armor'}, pieces = ARMOR_PIECES}
+    if cape_mode then -- the cape is the source (src/recolor.lua): both items, the cape as it is, signed by its record
+        local result = {action = 'apply', key = string.format('capesrc:%08x:', request.cape) .. key,
+                        luts = {[HELMET_LUT] = lut_spec(), [ARMOR_LUT] = lut_spec()}, first = 0, last = 9,
+                        target = helmet_target, targets = {helmet_target, armor_target}}
+        result.signatures = {[request.helmet] = record_of(request.helmet), [request.armor] = record_of(request.armor),
+                             [request.cape] = record_of(request.cape)}
+        return result
+    end
     if scheme then
         return with_cape(request, {action = 'apply', key = key, luts = {[HELMET_LUT] = lut_spec(),
                          [ARMOR_LUT] = lut_spec()}, first = 0, last = 9, target = helmet_target,
@@ -88,16 +125,22 @@ local function fake_job(_, holder, request, yield)
                                                                          data = ffi.new('float[12]')}} or nil,
             first = helmet and 0 or 1, last = helmet and 0 or 9, target = helmet and helmet_target or armor_target})
 end
-local TestRecolor = setmetatable({job = fake_job}, {__index = Recolor})
+local function tracked_job(deps, holder, request, yield)
+    local ok, result = pcall(fake_job, deps, holder, request, yield)
+    holder.running = false
+    if not ok then error(result, 0) end
+    return result
+end
+local TestRecolor = setmetatable({job = tracked_job}, {__index = Recolor})
 
 -- A fresh world: local helmet unit 0x100 (slot 0), armor units 0x101 (torso) and 0x102 (hips undergarment),
--- 0x103 (a skin piece, left leg); the remote player's helmet 0x200 uses the same helmet LUT. options.lobby
+-- 0x103 (a piece with skin tones, left leg); the remote player's helmet 0x200 uses the same helmet LUT. options.lobby
 -- {local_id, members} adds the squad's PlayFab lobby (Fake.lobby) and the sync modules (src/sync.lua,
 -- src/remote.lua).
 local function setup(options)
     options = options or {}
     local space = Fake.world({previews = options.previews, ui = options.ui, players = options.players,
-        helmet = options.helmet,
+        helmet = options.helmet, no_manager = options.no_manager,
         local_units = {[{0, 0}] = 0x100, [{0, 1}] = 0x106, [{0, 2}] = 0x101, [{1, 3}] = 0x102, [{0, 4}] = 0x103},
         remote_units = {[{0, 0}] = 0x200}})
     local engine = Fake.engine(space, VANILLA)
@@ -109,7 +152,7 @@ local function setup(options)
     local memory_calls, native_calls = budget.wrap(memory), budget.wrap(engine.native)
     local lines = {}
     local m = {Avatar = Avatar, Preview = Preview, Recolor = TestRecolor, Engine = Engine, Schemes = Schemes,
-               memory = memory, native = engine.native, game = Fake.GAME,
+               memory = memory, native = engine.native, game = Fake.GAME, Files = options.files,
                note = function(l) lines[#lines + 1] = l end}
     local lobby, lobby_calls = nil, {}
     if options.lobby then
@@ -183,18 +226,229 @@ local function classify(w, count, idle, check)
     return n
 end
 
-check('no local Helldiver: nothing between resolves, one resolve every 15 frames', function()
-    local w = setup({players = 0})
+check('no player manager (title screen): nothing between resolves, one resolve every 15 frames, nothing prepared',
+      function()
+    local w = setup({no_manager = true})
     local first = w.frame()
-    assert(first.read_into and first.read_into <= 3, 'resolve stops at the player count: ' .. budget.describe(first))
+    assert(first.read_into == 1, 'resolve stops at the player manager: ' .. budget.describe(first))
     for i = 2, 15 do expect(w.frame(), {}, 'frame ' .. i) end
     assert(w.frame().read_into, 'frame 16 resolves again')
-    assert(#w.engine.created == 0 and jobs == 0, 'nothing applied')
+    assert(#w.engine.created == 0 and jobs == 0, 'nothing applied, nothing prepared')
+end)
+
+local function logged(w, text)
+    for _, line in ipairs(w.lines) do if line:find(text, 1, true) then return line end end
+    return nil
+end
+
+-- The local avatar's entity record (Fake.world: entity 194) as an avatar, or (made false) another entity: the
+-- player's kits read while its Helldiver is not made yet, as on a loading screen ('not an avatar entity').
+local function avatar_made(w, made)
+    local at = Fake.ENTITIES + 0xF32F18 + 24 * 194
+    w.space.u32(at, made and Fake.AVATAR[1] or 0)
+    w.space.u32(at + 4, made and Fake.AVATAR[2] or 0)
+end
+
+check('a world loading (a player manager, no players): the pipeline is prepared once, from the frame after the '
+      .. 'resolve; the resolves read what they read before, every 15 frames', function()
+    local w = setup({players = 0})
+    local count = jobs
+    local first = w.frame()
+    assert(first.read_into and first.read_into <= 3, 'resolve stops at the player count: ' .. budget.describe(first))
+    -- frames 2-15: the work ahead from frame 2 (the pipeline reads files: no memory read, only its budget's clock)
+    for i = 2, 15 do
+        for k in pairs(w.frame()) do assert(k == 'time', 'frame ' .. i .. ': ' .. k) end
+    end
+    local r = requests[#requests]
+    assert(jobs == count + 1 and r.target == 'prepare' and r.helmet == nil, 'the pipeline alone')
+    assert(w.frame().read_into <= 3, 'frame 16 resolves again')
+    w.frames(45)
+    assert(jobs == count + 1 and #w.engine.created == 0, 'prepared once, nothing applied')
+    assert(logged(w, 'Prepared ahead of the Helldiver: analysis cache and game data'), 'logged')
+end)
+
+check('kits known before the Helldiver (loading): their plans are prepared on the next frame, once, and their '
+      .. 'textures made then (POOL_STOCK per LUT: the first apply on the ship made 20 in a 7.8 ms frame, KB '
+      .. 'match-your-colors-stress-test); the Helldiver is recolored on the frame after it was found, by a job of one '
+      .. 'short slice (under APPLY_ALONE: applied at once), making no texture', function()
+    local w = setup()
+    avatar_made(w, false)
+    local count = jobs
+    w.frames(2) -- the resolve reads the kits, the next frame starts the work ahead
+    local r = requests[#requests]
+    assert(jobs == count + 1 and r.target == 'prepare' and r.helmet == 0xa5574ac2 and r.armor == 0x0ade6719
+           and r.mode == Recolor.HELMET_FROM_ARMOR, 'the kits worn, with the options')
+    w.frames(29) -- frames 3-31: the job ends, its textures made; frames 16 and 31 resolve again, still no Helldiver
+    -- its one LUT's size POOL_STOCK times, every other LUT size of the game POOL_SPARES + 1 times
+    local stock = Engine.POOL_STOCK + (#Engine.POOL_SIZES - 1) * (Engine.POOL_SPARES + 1)
+    assert(jobs == count + 1 and #w.engine.created == stock and w.instance.pool.free() == stock,
+           'prepared once, its sizes stocked: ' .. #w.engine.created)
+    avatar_made(w, true)
+    w.frames(15) -- frame 46 finds the Helldiver
+    assert(w.instance.state.identity and not w.instance.state.job, 'found, no job yet')
+    local f = w.frame()
+    assert(jobs == count + 2 and requests[#requests].target == 'avatar' and not w.instance.state.job,
+           'its job ended in its first slice')
+    assert(not f.create and #w.engine.created == stock, 'no texture made on the Helldiver\'s frames')
+    local ours = {}
+    for _, texture in ipairs(w.engine.created) do ours[texture.object] = true end
+    for _, object in ipairs(w.bound(0x100)) do assert(ours[object], 'recolored on that frame, with a stocked texture') end
+    assert(logged(w, '1 frame after the Helldiver was found'), 'logged: ' .. tostring(logged(w, 'Recolored')))
+    assert(logged(w, 'Prepared ahead of the Helldiver: plans of helmet a5574ac2, armor 0ade6719')
+           and logged(w, stock .. ' textures made ahead'), 'logged ahead')
+end)
+
+check('work ahead: nothing while nothing local is recolored; kits that change before the Helldiver is made get a '
+      .. 'job of their own; a failure is noted, not counted, not repeated', function()
+    local w = setup({players = 0})
+    w.instance.set_option('mode', Recolor.OFF)
+    local count = jobs
+    w.frames(31)
+    assert(jobs == count, 'Color Matching off, no paint scheme: no pipeline ahead')
+    w = setup()
+    avatar_made(w, false)
+    count = jobs
+    w.frames(16)
+    w.space.u32(Fake.CUSTOMIZATION + 2416, 0x0b0b0b0b) -- the game applies a loadout: another helmet
+    avatar_made(w, true)
+    w.frames(16) -- frame 31 finds the Helldiver in the new helmet, frame 32 starts its job
+    assert(requests[#requests].target == 'avatar' and requests[#requests].helmet == 0x0b0b0b0b
+           and w.instance.state.job, 'not prepared: a full job')
+    w = setup({helmet = FAIL_HELMET})
+    avatar_made(w, false)
+    count = jobs
+    w.frames(46)
+    assert(jobs == count + 1 and logged(w, 'Preparing ahead of the Helldiver failed: canned failure'), 'noted once')
+    assert(next(w.instance.state.failures) == nil, 'not counted')
+end)
+
+check('stand-in kits while loading (0xffffffff; live 2026-10-08: the helmet real first, the armor some frames later) '
+      .. 'are not prepared; the real ones are once the record shows them, and the Helldiver is recolored at once',
+      function()
+    local w = setup()
+    w.instance.set_option('recolor_cape', true)
+    avatar_made(w, false)
+    w.space.u32(Fake.CUSTOMIZATION + 2424, 0xffffffff) -- the armor still a stand-in
+    local count = #requests
+    w.frames(16) -- frames 1 and 16 resolve: stand-ins; the pipeline alone is prepared (a world is loading)
+    for i = count + 1, #requests do assert(requests[i].helmet == nil, 'no kits prepared: ' .. tostring(requests[i].armor)) end
+    w.space.u32(Fake.CUSTOMIZATION + 2424, 0x0ade6719)
+    w.space.u32(Fake.CUSTOMIZATION + 2420, 0xffffffff) -- now the cape (Recolor Cape on)
+    w.frames(16) -- frame 31 resolves: still a stand-in; frame 32 would start work for it
+    assert(requests[#requests].helmet == nil, 'a stand-in cape counts with Recolor Cape on')
+    w.space.u32(Fake.CUSTOMIZATION + 2420, 0x72492837)
+    w.frames(15) -- frame 46 resolves: the real kits, prepared from frame 47
+    local r = requests[#requests]
+    assert(r.target == 'prepare' and r.armor == 0x0ade6719 and r.cape == 0x72492837, 'the real kits prepared')
+    assert(not logged(w, 'Preparing ahead of the Helldiver failed'), 'nothing failed on the stand-ins')
+    avatar_made(w, true)
+    w.frames(14) -- frame 61 finds the Helldiver
+    w.frames(2) -- its job of one slice (the cape's part too: over APPLY_ALONE), then its apply on a frame of its own
+    assert(logged(w, '2 frames after the Helldiver was found'), 'recolored two frames later')
+end)
+
+check('work ahead starts on the frame after its resolve even when another resolve is due then (it waits for the job)',
+      function()
+    local cadence = Addon.RESOLVE_FRAMES
+    Addon.RESOLVE_FRAMES = 1
+    local w = setup()
+    avatar_made(w, false)
+    local count = jobs
+    w.frames(2)
+    Addon.RESOLVE_FRAMES = cadence
+    assert(jobs == count + 1 and requests[#requests].target == 'prepare', 'started on frame 2')
+end)
+
+check('the game-data reader stays open between preview jobs while the preview is shown (the next item read the '
+      .. "index and the archives' chunk tables again: about 25 of a new armor's 62 frames waited on the disk, live "
+      .. '2026-10-08); it closes when the preview closes, after KEEP_FRAMES frames without a job, when the Helldiver is '
+      .. 'lost, and after a job while the preview is hidden: on the next binding check without a job, not on the frame '
+      .. 'of the apply (0.35 ms in game with 3-4 archives open; KB match-your-colors-stress-test)', function()
+    local w = setup({ui = true})
+    w.frames(4) -- the avatar's job and its apply, the preview hidden
+    local s, p = w.instance.state, w.instance.state.holder.pipeline
+    local closes = p.closes
+    assert(s.reader_kept, 'not closed on the frame of the apply: due')
+    w.instance.set_option('match_materials', true) -- a job before the binding check takes the reader as it is
+    w.frames(4)
+    assert(p.closes == closes and s.reader_kept and not s.job, 'the next job took it open; due again after it')
+    w.frames(Addon.CHECK_FRAMES)
+    assert(p.closes == closes + 1 and not s.reader_kept, 'closed by the next binding check without a job')
+    closes = p.closes
+    w.engine.unit(0x300, HELMET_LUT)
+    Fake.show_ui(w.space, 1, {helmet = 0x0b0b0b0b, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x300})
+    w.frames(7)
+    assert(p.closes == closes and s.reader_kept, 'kept after the preview job')
+    w.frames(Addon.CHECK_FRAMES + 1)
+    assert(p.closes == closes and s.reader_kept, 'kept past a binding check while the preview is shown')
+    Fake.show_ui(w.space, 1, {helmet = 0x0c0c0c0c, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x300})
+    w.frames(7)
+    assert(p.closes == closes and s.reader_kept, "still kept after the next item's job")
+    Fake.show_ui(w.space, 1, nil)
+    w.frames(2)
+    assert(p.closes == closes + 1 and not s.reader_kept, 'closed with the preview')
+    Fake.show_ui(w.space, 1, {helmet = 0x0d0d0d0d, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x300})
+    w.frames(7)
+    assert(p.closes == closes + 1 and s.reader_kept, 'kept again')
+    w.frames(Addon.KEEP_FRAMES + Addon.CHECK_FRAMES)
+    assert(p.closes == closes + 2 and not s.reader_kept, 'closed after KEEP_FRAMES frames without a job')
+    Fake.show_ui(w.space, 1, {helmet = 0x0e0e0e0e, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x300})
+    w.frames(7)
+    assert(p.closes == closes + 2 and s.reader_kept, 'kept for the next item')
+    -- the preview closes while a job for a new item runs: the job keeps its reader until it ends, then it is due
+    long_job = true -- running past the next UI gate frame, where the closed preview is seen
+    Fake.show_ui(w.space, 1, {helmet = 0x0f0f0f1f, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x300})
+    while not s.job do w.frame() end
+    Fake.show_ui(w.space, 1, nil)
+    w.frames(8 + Addon.CHECK_FRAMES)
+    long_job = false
+    assert(not p.closed_under_job and p.closes == closes + 3 and not s.reader_kept, 'closed after its job ended')
+    Fake.show_ui(w.space, 1, {helmet = 0x0e0e0e0e, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x300})
+    w.frames(7)
+    assert(s.reader_kept, 'kept again')
+    avatar_made(w, false) -- the Helldiver lost (the chain check every 120 frames)
+    w.frames(Addon.VERIFY_FRAMES + 1)
+    assert(p.closes == closes + 4 and not s.reader_kept and not s.identity, 'closed when the Helldiver is lost')
+end)
+
+check('a closed reader\'s file handles are closed CLOSES_PER_CHECK at a time on binding checks, not on the frame it '
+      .. 'closes (in game 2.3 ms after cold Armory browsing; KB match-your-colors-stress-test)', function()
+    local queued, drains = 0, {}
+    local files = {abandon = function() queued = 0 end}
+    function files.close_some(count)
+        local closed = math.min(count, queued)
+        queued = queued - closed
+        drains[#drains + 1] = closed
+        return queued
+    end
+    local w = setup({files = files})
+    w.frames(4) -- resolve, the job, its apply: its reader due
+    local s, p = w.instance.state, w.instance.state.holder.pipeline
+    local close = p.close
+    p.close = function() queued = 10 close() end -- ten archives open
+    while not s.closing do w.frame() end -- the next binding check closes the reader: its handles queued
+    assert(#drains == 1 and drains[1] == Addon.CLOSES_PER_CHECK and queued == 10 - Addon.CLOSES_PER_CHECK,
+           'the first few on the same check: ' .. table.concat(drains, ','))
+    w.frames(Addon.CHECK_FRAMES - 1)
+    assert(#drains == 1, 'none between checks')
+    w.frames(2 * Addon.CHECK_FRAMES)
+    assert(queued == 0 and not s.closing and #drains == 3, 'all closed over three checks: ' .. table.concat(drains, ','))
+    w.frames(Addon.CHECK_FRAMES)
+    assert(#drains == 3, 'nothing asked once all are closed')
+end)
+
+check('a respawn: kits already applied are not prepared again while the Helldiver is not made', function()
+    local w = setup()
+    w.frames(4) -- the job, then its apply
+    local count = jobs
+    avatar_made(w, false) -- the dead Helldiver's avatar gone, the player's unit not cleared yet
+    w.frames(Addon.VERIFY_FRAMES + 31)
+    assert(w.instance.state.identity == nil and jobs == count, 'lost, nothing prepared')
 end)
 
 check('the local helmet takes the plan; the remote player and the armor keep theirs', function()
     local w = setup()
-    w.frames(3) -- resolve, then the job over two frames, applied on the second
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local texture = w.engine.created[1]
     assert(texture and texture.alive, 'one texture')
     for _, object in ipairs(w.bound(0x100)) do assert(object == texture.object, 'local helmet recolored') end
@@ -231,7 +485,7 @@ end)
 
 check('the game putting the original LUT back is noticed within 30 frames and recolored again', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local texture = w.engine.created[1]
     local material = w.engine.units[0x100].materials[1].material
     w.space.u64(material + 0x48, VANILLA[HELMET_LUT]) -- as the game's own set_texture would
@@ -244,7 +498,7 @@ end)
 
 check('re-equip: the new helmet unit is recolored with the same texture, the old one retired never', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local texture = w.engine.created[1]
     w.engine.units[0x100].alive = false
     w.engine.unit(0x104, HELMET_LUT)
@@ -254,9 +508,10 @@ check('re-equip: the new helmet unit is recolored with the same texture, the old
     assert(#w.engine.created == 1 + SPARES and texture.alive, 'same texture kept')
 end)
 
-check('a job whose last slice used over half the budget is applied on the next frame, on its own', function()
+check('a job is applied on the frame after its last slice, on its own, the last slice long or short (APPLY_ALONE; '
+      .. 'before v1.4\'s performance pass a slice under half the budget was applied at once)', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     slow_job = true
     w.instance.set_option('match_materials', true)
     local first, last, apply = w.frame(), w.frame(), w.frame()
@@ -265,15 +520,43 @@ check('a job whose last slice used over half the budget is applied on the next f
            'the apply alone on the frame after the job ended: ' .. budget.describe(last) .. ' / '
            .. budget.describe(apply))
     w.instance.set_option('match_materials', false)
-    local short = w.frame()
-    local ended = w.frame()
-    assert(not short.set_resource and ended.set_resource, 'a short last slice applies on its own frame')
+    local slice, short, ended = w.frame(), w.frame(), w.frame()
+    assert(not slice.set_resource and not short.set_resource and ended.set_resource,
+           'a short last slice too: ' .. budget.describe(short) .. ' / ' .. budget.describe(ended))
+end)
+
+check('a new plan binds its textures over the plan before\'s instead of putting the vanilla ones back first, and '
+      .. 'reads each material\'s bindings once: a paint scheme over both kits applies with 39 reads, 8 binds and 4 '
+      .. 'commits (before v1.4\'s performance pass, the job\'s last slice in the same frame: 51 reads, 14 binds, '
+      .. '7 commits; KB match-your-colors-stress-test); what the plan does not bind is put back', function()
+    local w = setup()
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
+    w.instance.set_option('match_materials', true)
+    w.frames(6)
+    w.instance.set_option('mode', Recolor.ARMOR_FROM_HELMET)
+    w.frames(6)
+    for _, object in ipairs(w.bound(0x100)) do assert(object == VANILLA[HELMET_LUT], 'the helmet put back') end
+    local restored = w.instance.controller.restored
+    w.instance.set_option('scheme', 3)
+    local f, n = nil, 0
+    repeat f, n = w.frame(), n + 1 until f.set_resource or n == 12
+    expect(f, {alive = 8, can_get = 2, commit = 4, get = 2, material = 8, materials = 4, mesh = 4, meshes = 4,
+               read_into = 39, set_resource = 8, time = 5, update = 2}, 'the apply frame')
+    assert(n == 3, 'applied on the frame after the job\'s last: frame ' .. n)
+    local ours = {}
+    for _, texture in pairs(w.instance.controller.textures) do ours[texture.object] = true end
+    for _, unit in ipairs({0x100, 0x101, 0x102}) do
+        for _, object in ipairs(w.bound(unit)) do assert(ours[object], 'every material on the new plan\'s texture') end
+    end
+    assert(#w.instance.controller.bindings == 8 and w.instance.controller.restored == restored,
+           'its 8 bindings, none put back: ' .. #w.instance.controller.bindings .. ', '
+           .. (w.instance.controller.restored - restored))
 end)
 
 check('a respawn (new units, same kits and options) is rebound at once with the applied result: no job, no '
       .. 'resolve beyond the chain check; dead units\' bindings dropped', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local texture, count = w.engine.created[1], #requests
     w.engine.units[0x100].alive = false
     w.engine.unit(0x104, HELMET_LUT)
@@ -292,7 +575,7 @@ end)
 check('one heavy periodic check per frame: a chain check (here after a unit change) moves the binding check to the '
       .. 'next frame', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local s = w.instance.state
     while s.next_check ~= s.frame + 1 do w.frame() end -- the next frame is a binding check's
     local due = s.next_check
@@ -311,7 +594,7 @@ check('another mod\'s texture on a material (a transmog\'s own LUT) is never bou
     local w = setup({ui = false})
     local material = w.engine.units[0x100].materials[1].material
     w.space.u64(material + 0x48, FOREIGN) -- the other mod's texture, before the first recolor
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local other = w.engine.units[0x100].materials[2].material
     assert(w.engine.binding(material) == FOREIGN, 'its material keeps the other mod\'s texture')
     assert(w.engine.binding(other) ~= VANILLA[HELMET_LUT], 'the other material is recolored')
@@ -319,6 +602,10 @@ check('another mod\'s texture on a material (a transmog\'s own LUT) is never bou
     w.space.u64(other + 0x48, FOREIGN + 0x100) -- the other mod binds its texture after the recolor
     w.frames(65) -- two binding checks
     assert(w.engine.binding(other) == FOREIGN + 0x100 and recolored ~= FOREIGN + 0x100, 'not reasserted')
+    w.instance.set_option('match_materials', true) -- a new plan binds over the plan before's textures only
+    w.frames(6)
+    assert(w.engine.binding(other) == FOREIGN + 0x100 and w.engine.binding(material) == FOREIGN,
+           'a new plan does not take over a slot holding another texture than the plan before\'s')
     w.instance.set_option('mode', Recolor.OFF)
     w.frames(3)
     assert(w.engine.binding(material) == FOREIGN and w.engine.binding(other) == FOREIGN + 0x100,
@@ -328,7 +615,7 @@ end)
 check('a transmog recomposes the worn record (same id, other pieces): a respawn then gets a job, not the old '
       .. 'result', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local count = #requests
     RECORDS[0x0ade6719] = 'record 0ade6719 composed with another look'
     w.engine.units[0x100].alive = false
@@ -341,7 +628,7 @@ end)
 
 check('a binding check costs one probe (two reads) whatever the number of textures (a paint scheme: two)', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     w.instance.set_option('scheme', 3)
     w.frames(4)
     assert(w.instance.controller.probes == 2, 'helmet and armor textures tracked: ' .. w.instance.controller.probes)
@@ -353,7 +640,7 @@ end)
 check('the UI preview showing new units of the same kits is rebound at once, without a job', function()
     local shown = {helmet = 0x0b0b0b0b, armor = 0x0ade6719, body = 0} -- a hovered helmet (HOVERED is declared below)
     local w = setup({ui = true})
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     w.engine.unit(0x300, HELMET_LUT)
     Fake.show_ui(w.space, 1, shown, {[{0, 0}] = 0x300})
     w.frames(7)
@@ -368,7 +655,7 @@ end)
 
 check('preview entries of the local player are recolored, the remote player\'s are not', function()
     local w = setup({previews = true})
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     w.engine.unit(0x105, HELMET_LUT)
     w.engine.unit(0x205, HELMET_LUT)
     w.space.u32(Fake.preview_entry_at(1, 0) + 12, 0x105) -- local slot, entry 0, helmet
@@ -393,7 +680,7 @@ end)
 
 check('Off puts the vanilla LUT back; the texture is free four frames later and the next plan refills it', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local texture = w.engine.created[1]
     w.instance.set_option('mode', Recolor.OFF)
     w.frames(3) -- the job spans two frames, restore on the second
@@ -409,21 +696,22 @@ check('Off puts the vanilla LUT back; the texture is free four frames later and 
     assert(object ~= VANILLA[HELMET_LUT] and #w.engine.created == 1 + SPARES, 'recolored with a pooled texture')
 end)
 
-check('armor matches helmet: armor units recolored, skin pieces and the helmet untouched', function()
+check('armor matches helmet: armor units recolored, a piece with skin tones too (user ticket 2026-10-09: the PH-9 '
+      .. 'Predator\'s shirt and the RS-40 Beast of Prey\'s sleeves kept their colors), the helmet untouched', function()
     local w = setup()
     w.instance.set_option('mode', Recolor.ARMOR_FROM_HELMET)
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local texture = w.engine.created[1]
     for _, unit in ipairs({0x101, 0x102}) do
         for _, object in ipairs(w.bound(unit)) do assert(object == texture.object, 'armor unit recolored') end
     end
-    for _, object in ipairs(w.bound(0x103)) do assert(object == VANILLA[ARMOR_LUT], 'skin piece untouched') end
+    for _, object in ipairs(w.bound(0x103)) do assert(object == texture.object, 'the piece with skin tones recolored') end
     for _, object in ipairs(w.bound(0x100)) do assert(object == VANILLA[HELMET_LUT], 'helmet untouched') end
 end)
 
 check('switching direction restores the old target before recoloring the new one', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local first = w.engine.created[1]
     w.instance.set_option('mode', Recolor.ARMOR_FROM_HELMET)
     w.frames(3)
@@ -438,7 +726,7 @@ end)
 
 check('complete sets stay vanilla while the option is on', function()
     local w = setup({helmet = SET_HELMET})
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     assert(#w.engine.created == 0, 'no texture for a complete set')
     w.instance.set_option('keep_sets', false)
     w.frames(3)
@@ -447,7 +735,7 @@ end)
 
 check('the hood and material toggles reach the job: each change re-plans once, refilling a pooled texture', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local last = requests[#requests]
     assert(last.keep_hoods == false and last.materials == false, 'defaults: hoods recolored, materials kept')
     local texture = w.bound(0x100)[1]
@@ -489,7 +777,7 @@ end)
 
 check('the UI preview\'s job carries the hood and material options too', function()
     local w = setup({ui = true})
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     w.instance.set_option('recolor_hoods', false)
     w.instance.set_option('match_materials', true)
     w.frames(3)
@@ -503,7 +791,7 @@ end)
 
 check('a pause restores at once; the next frames start over', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     w.instance.pause('test')
     for _, object in ipairs(w.bound(0x100)) do assert(object == VANILLA[HELMET_LUT], 'vanilla during the pause') end
     w.frames(10)
@@ -527,7 +815,7 @@ local HOVERED = {helmet = 0x0b0b0b0b, armor = 0x0ade6719, body = 0}
 
 check("the local UI preview takes its own plan (a hovered helmet); the remote player's preview stays", function()
     local w = setup({ui = true})
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local avatar_texture = w.engine.created[1]
     w.engine.unit(0x300, HELMET_LUT) -- the local preview's helmet
     w.engine.unit(0x301, HELMET_LUT) -- the remote player's preview helmet
@@ -542,17 +830,149 @@ check("the local UI preview takes its own plan (a hovered helmet); the remote pl
     for _, object in ipairs(w.bound(0x100)) do assert(object == avatar_texture.object, 'the avatar keeps its own') end
     local seen = false
     for _, line in ipairs(w.lines) do
-        if line:find('Preview recolored: 2 materials (helmet 0b0b0b0b', 1, true) and line:find('0 new textures)', 1, true)
-        then
+        if line:find('Preview recolored: 2 materials (helmet 0b0b0b0b', 1, true) and line:find('0 new textures;', 1, true)
+            and line:find('longest frame %d+%.%d ms%)%.$') then
             seen = true
         end
     end
-    assert(seen, 'logged, with the apply time and no new texture')
+    assert(seen, 'logged, with the apply time, no new texture and the longest frame')
+end)
+
+-- Runs frames until no job is running (at most limit).
+local function settle(w, limit)
+    local n = 0
+    repeat
+        w.frame()
+        n = n + 1
+        assert(n < (limit or 200), 'a job did not end')
+    until not w.instance.state.job
+    return n
+end
+
+check('a preview job whose preview moved on is never applied (the audit, rank 4): a hover change ends it at its next '
+      .. 'pause point, one job follows for what is shown; a closed preview gets none', function()
+    local budget = Addon.BUDGET
+    Addon.BUDGET = 0 -- one pause point a frame: the canned job spans 21 frames, as a new item's analysis spans dozens
+    local w = setup({ui = true})
+    settle(w)
+    w.engine.unit(0x300, HELMET_LUT)
+    Fake.show_ui(w.space, 1, HOVERED, {[{0, 0}] = 0x300})
+    while not (w.instance.state.request and w.instance.state.request.target == 'ui') do w.frame() end
+    local first, count = w.instance.state.request, #requests
+    w.frames(2)
+    Fake.show_ui(w.space, 1, {helmet = 0x0c0c0c0c, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x300}) -- hovered on
+    local frames = settle(w)
+    assert(first.obsolete and frames <= Addon.UI_GATE_FRAMES + 2, 'ended within a gate period: ' .. frames .. ' frames')
+    assert(w.instance.ui_controller.applied == 0, 'the pair left behind never applied')
+    settle(w) -- the job for what is shown now
+    local last = requests[#requests]
+    assert(#requests == count + 1 and last.target == 'ui' and last.helmet == 0x0c0c0c0c, 'one job, for the shown pair')
+    assert(w.bound(0x300)[1] ~= VANILLA[HELMET_LUT] and w.instance.state.ui.applied == last, 'the shown pair applied')
+    -- the preview closed while a job for it runs: nothing applied, no job follows
+    Fake.show_ui(w.space, 1, {helmet = 0x0d0d0d0d, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x300})
+    while not (w.instance.state.request and w.instance.state.request.helmet == 0x0d0d0d0d) do w.frame() end
+    count = #requests
+    Fake.show_ui(w.space, 1, nil)
+    settle(w)
+    w.frames(10)
+    assert(#requests == count and w.instance.state.ui.applied.helmet == 0x0c0c0c0c, 'closed: nothing more')
+    Addon.BUDGET = budget
+end)
+
+check('a pair the player left in the frames before its preview job ended is not applied: the preview is read again '
+      .. 'first (the audit\'s scheduler proof: two stale bindings, then a second job)', function()
+    local w = setup({ui = true})
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
+    w.engine.unit(0x300, HELMET_LUT)
+    Fake.show_ui(w.space, 1, HOVERED, {[{0, 0}] = 0x300})
+    while not (w.instance.state.request and w.instance.state.request.target == 'ui') do w.frame() end
+    Fake.show_ui(w.space, 1, {helmet = 0x0c0c0c0c, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x300})
+    settle(w)
+    assert(w.instance.ui_controller.applied == 0 and w.bound(0x300)[1] == VANILLA[HELMET_LUT], 'nothing stale bound')
+    settle(w)
+    local last = requests[#requests]
+    assert(last.helmet == 0x0c0c0c0c and w.bound(0x300)[1] ~= VANILLA[HELMET_LUT], 'then the shown pair')
+end)
+
+check('an option set to the value it has starts no job and logs nothing (a menu re-sending it); a change does', function()
+    local w = setup({ui = true})
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
+    local count, lines = #requests, #w.lines
+    for _, o in ipairs({{'mode', Recolor.HELMET_FROM_ARMOR}, {'scheme', 0}, {'keep_sets', true}, {'recolor_cape', false}}) do
+        w.instance.set_option(o[1], o[2])
+    end
+    w.frames(4)
+    assert(#requests == count and #w.lines == lines, 'nothing: ' .. (#requests - count) .. ' jobs')
+    w.instance.set_option('keep_sets', false)
+    w.frames(3)
+    assert(#requests == count + 1 and w.lines[lines + 1] == 'Option keep_sets = false.', 'a change: one job, logged')
+end)
+
+check('a new animation of the preview alone (its word after the unit refs) rebinds nothing (the audit, rank 13)',
+      function()
+    local w = setup({ui = true})
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
+    w.engine.unit(0x300, HELMET_LUT)
+    Fake.show_ui(w.space, 1, HOVERED, {[{0, 0}] = 0x300})
+    w.frames(10)
+    local count = #requests
+    local animation = Fake.UI + 49160 + 160 + 132
+    w.space.u32(animation, w.space.get32(animation) + 1)
+    expect(w.frame(), {read_into = 2}, 'the frame after an animation change: avatar units and the preview record')
+    assert(#requests == count, 'no job')
+    w.engine.units[0x300].alive = false
+    w.engine.unit(0x303, HELMET_LUT)
+    Fake.show_ui(w.space, 1, HOVERED, {[{0, 0}] = 0x303}) -- a real new unit still rebinds at once
+    w.frame()
+    assert(w.bound(0x303)[1] ~= VANILLA[HELMET_LUT] and #requests == count, 'new units rebound without a job')
+end)
+
+check('Color Matching off with no paint scheme: idle frames read the units only (no body-copy slot, no UI preview), a '
+      .. 'respawn starts no job; turning it on again recolors the preview shown meanwhile', function()
+    local w = setup({ui = true, previews = true})
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
+    w.engine.unit(0x300, HELMET_LUT)
+    Fake.show_ui(w.space, 1, HOVERED, {[{0, 0}] = 0x300})
+    w.frames(8)
+    w.instance.set_option('mode', Recolor.OFF)
+    settle(w)
+    w.frames(4)
+    assert(w.bound(0x100)[1] == VANILLA[HELMET_LUT] and w.bound(0x300)[1] == VANILLA[HELMET_LUT], 'both restored')
+    local n = classify(w, 240, {read_into = 1}, {read_into = 1})
+    assert(n.other == 2 and n.idle == 238, string.format('one read a frame but the two chain checks: %d other', n.other))
+    local count = #requests
+    w.engine.units[0x100].alive = false
+    w.engine.unit(0x104, HELMET_LUT)
+    w.space.u32(Fake.local_unit_at(0, 0), 0x104)
+    w.frames(5)
+    assert(#requests == count, 'a respawn with nothing to recolor: no job')
+    w.engine.units[0x300].alive = false
+    w.engine.unit(0x305, HELMET_LUT)
+    Fake.show_ui(w.space, 1, {helmet = 0x0e0e0e0e, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x305}) -- unwatched
+    w.frames(10)
+    assert(#requests == count and w.bound(0x305)[1] == VANILLA[HELMET_LUT], 'nothing while off')
+    w.instance.set_option('mode', Recolor.HELMET_FROM_ARMOR)
+    settle(w)
+    w.frames(Addon.UI_GATE_FRAMES)
+    settle(w)
+    assert(w.bound(0x104)[1] ~= VANILLA[HELMET_LUT], 'the avatar recolored again')
+    assert(w.bound(0x305)[1] ~= VANILLA[HELMET_LUT] and requests[#requests].helmet == 0x0e0e0e0e,
+           'the preview shown meanwhile recolored')
+    -- off and on again with the preview unchanged: it was given back its colors, so it is recolored again
+    w.instance.set_option('mode', Recolor.OFF)
+    settle(w)
+    w.frames(4)
+    assert(w.bound(0x305)[1] == VANILLA[HELMET_LUT], 'off: the preview restored')
+    w.instance.set_option('mode', Recolor.HELMET_FROM_ARMOR)
+    settle(w)
+    w.frames(Addon.UI_GATE_FRAMES)
+    settle(w)
+    assert(w.bound(0x305)[1] ~= VANILLA[HELMET_LUT], 'on again: the same preview recolored')
 end)
 
 check("a hover change re-plans the preview from the pool; closing it frees only the preview's textures", function()
     local w = setup({ui = true})
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     w.engine.unit(0x300, HELMET_LUT)
     Fake.show_ui(w.space, 1, HOVERED, {[{0, 0}] = 0x300})
     w.frames(7)
@@ -578,7 +998,7 @@ end)
 check('the pool refills a free texture of the same size, makes spares in the frame it must make one, and keeps '
       .. 'at most POOL_MAX_FREE free per size', function()
     local w = setup()
-    local pool = Recolor.pool({Engine = Engine, native = w.engine.native, memory = w.memory})
+    local pool = Engine.pool({native = w.engine.native, memory = w.memory})
     local function spec(width, height) return {width = width, height = height,
                                                data = ffi.new('float[?]', width * height * 4)} end
     local lut = spec(23, 8)
@@ -592,12 +1012,92 @@ check('the pool refills a free texture of the same size, makes spares in the fra
     local pattern = assert(pool.take(spec(3, 1)))
     assert(pattern.width == 3 and pool.made == 2 * (1 + SPARES), 'another size is never refilled from 23 x 8')
     local taken = {}
-    for i = 1, Recolor.POOL_MAX_FREE + 3 do taken[i] = assert(pool.take(spec(23, 8))) end
+    for i = 1, Engine.POOL_MAX_FREE + 3 do taken[i] = assert(pool.take(spec(23, 8))) end
     local free = pool.free()
     for _, texture in ipairs(taken) do pool.give(texture) end
-    local per_size = math.min(Recolor.POOL_MAX_FREE, free - SPARES + #taken)
+    local per_size = math.min(Engine.POOL_MAX_FREE, free - SPARES + #taken)
     assert(pool.free() == per_size + SPARES and pool.destroyed == free - SPARES + #taken - per_size,
            string.format('free %d, destroyed %d', pool.free(), pool.destroyed))
+end)
+
+check('a prepared plan\'s sizes are stocked ahead (pool.stock): POOL_STOCK free per LUT of a size, at most '
+      .. 'POOL_MAX_FREE, a decal sheet copy only its count, every other LUT size of the game POOL_SPARES + 1; free ones '
+      .. 'count, nothing made twice', function()
+    local w = setup()
+    local pool = Engine.pool({native = w.engine.native, memory = w.memory})
+    local function spec(width, height)
+        return {width = width, height = height, data = ffi.new('float[?]', width * height * 4)}
+    end
+    local luts, patterns = {}, {}
+    for i = 1, 9 do luts['lut' .. i] = spec(23, 8) end -- an armor's nine
+    luts.sheet = {sheet = true, width = 2048, height = 2048, mips = 12, size = 5592432, data = ffi.new('uint8_t[16]')}
+    for i = 1, 2 do patterns['pattern' .. i] = spec(3, 1) end
+    local made = pool.stock({luts = luts, patterns = patterns})
+    local stock, others = Engine.POOL_STOCK, (#Engine.POOL_SIZES - 2) * (Engine.POOL_SPARES + 1)
+    assert(made == Engine.POOL_MAX_FREE + 1 + 2 * stock + others and pool.made == made,
+           string.format('9 x 23 x 8 capped at %d, one sheet, 2 x 3 x 1 times %d, %d of the other sizes: %d',
+                         Engine.POOL_MAX_FREE, stock, others, made))
+    for _, size in ipairs(Engine.POOL_SIZES) do
+        local texture = assert(pool.take(spec(size[1], size[2])), 'a stocked ' .. size[1] .. ' x ' .. size[2])
+        pool.give(texture)
+    end
+    assert(pool.made == made, 'every size of the game taken from the stock')
+    assert(pool.stock({luts = luts, patterns = patterns}) == 0, 'stocked: nothing made again')
+    local taken = assert(pool.take(luts.lut1))
+    assert(taken and pool.made == made, 'taken from the stock')
+    assert(pool.stock({luts = {one = spec(23, 8)}}) == 0, 'a smaller plan of a stocked size makes none')
+end)
+
+check('a plan that must grow the pool makes room for the next plan of its shape in the same frame: two 9-LUT armor plans '
+      .. 'in a row grow once (v1.3: twice, a second 5-7 ms frame in the Armory); a helmet\'s plan makes 1 + 2 as before',
+      function()
+    local names, vanilla, units = {}, {}, {}
+    for i = 1, 9 do
+        names[i] = string.format('%016x', 0xa1000 + i)
+        vanilla[names[i]] = 0x190100000 + i * 0x1000
+        units[{i == 9 and 1 or 0, i == 9 and 2 or i + 1}] = 0x400 + i -- slots 2-9, and the undergarment of slot 2
+    end
+    local space = Fake.world({local_units = units})
+    local engine = Fake.engine(space, vanilla)
+    for i = 1, 9 do engine.unit(0x400 + i, names[i], 1) end
+    local memory = Fake.memory(space)
+    local pool = Engine.pool({native = engine.native, memory = memory})
+    local controller = Recolor.controller({Engine = Engine, Avatar = Avatar, memory = memory, native = engine.native,
+                                           pool = pool})
+    local identity = assert(Avatar.resolve(memory, Fake.GAME))
+    local pieces = {}
+    for key in pairs(units) do
+        pieces[#pieces + 1] = {piece = {type = key[1], slot = key[2], body = 0}, materials = {{}}, skin = false}
+    end
+    local target = {kit = {kit_type = 'Armor'}, pieces = pieces}
+    local function plan(key)
+        local luts = {}
+        for i = 1, 9 do luts[names[i]] = lut_spec() end
+        return {action = 'apply', key = key, luts = luts, patterns = {}, first = 1, last = 9, target = target}
+    end
+    assert(controller.apply(plan('armor A'), identity, nil, 1) == 9, 'nine materials bound')
+    assert(pool.made == 18 and pool.free() == 9, string.format('made %d, free %d', pool.made, pool.free()))
+    local made, created, refilled = pool.made, #engine.created, pool.refilled
+    assert(controller.apply(plan('armor B'), identity, nil, 2) == 9, 'the next plan bound')
+    assert(pool.made == made and #engine.created == created and pool.refilled - refilled == 9,
+           'no texture made: nine refilled')
+    for i = 1, 9 do
+        assert(engine.binding(engine.units[0x400 + i].materials[1].material) ~= vanilla[names[i]], 'recolored ' .. i)
+    end
+    -- the retired plan's textures come back after the delay: free again for a third plan
+    controller.collect(2 + Recolor.RETIRE_FRAMES)
+    assert(pool.free() == 9, 'the first plan\'s nine free again: ' .. pool.free())
+    -- a helmet's plan, one texture of its size: the needed one and POOL_SPARES spares, the first made bound
+    local helmet_pool = Engine.pool({native = engine.native, memory = memory})
+    local first = #engine.created
+    local texture = helmet_pool.take(lut_spec()) -- without reserve, as v1.3
+    assert(helmet_pool.made == 1 + SPARES and texture.handle == first + 1, 'take alone: as v1.3')
+    local reserved = Engine.pool({native = engine.native, memory = memory})
+    local spec = lut_spec()
+    reserved.reserve(spec, 1)
+    local taken = reserved.take(spec)
+    assert(reserved.made == 1 + SPARES and taken.handle == first + 1 + SPARES + 1 and reserved.refilled == 0,
+           'reserve then take: 1 + spares made, the first made taken with its own data, no refill')
 end)
 
 check('new analyses are saved by a sliced job after the last recolor and while the preview is closed, never on '
@@ -615,8 +1115,8 @@ check('new analyses are saved by a sliced job after the last recolor and while t
         return true
     end
     w.instance.state.holder.pipeline = reader
-    w.frames(3) -- the avatar's job ends and is applied on frame 3
-    assert(saves == 0 and w.instance.state.save_at == 3 + Addon.SAVE_DELAY_FRAMES, 'due later, not now')
+    w.frames(4) -- the avatar's job ends on frame 3 and is applied on frame 4
+    assert(saves == 0 and w.instance.state.save_at == 4 + Addon.SAVE_DELAY_FRAMES, 'due later, not now')
     w.frames(Addon.SAVE_DELAY_FRAMES - 10)
     assert(saves == 0 and not next(frames_saving), 'nothing before the delay')
     w.engine.unit(0x300, HELMET_LUT)
@@ -658,10 +1158,22 @@ check('UI preview cost: +1 read on 1 frame in 4 while it is not shown, +1 read p
     assert(shown >= 18, 'avatar units, and the preview record and gate together, on ' .. shown .. ' of 20 frames')
 end)
 
+check('the apply reads a material\'s bindings once for all the slots the plan changes on it (the helmet\'s LUT and '
+      .. 'pattern; before v1.4\'s performance pass they were read again for each slot: KB '
+      .. 'match-your-colors-stress-test)', function()
+    with_patterns = true
+    local w = setup({patterns = true})
+    local f, n = nil, 0
+    repeat f, n = w.frame(), n + 1 until f.set_resource or n == 12
+    with_patterns = false
+    expect(f, {alive = 2, can_get = 2, commit = 1, create = 6, get = 2, material = 2, materials = 1, mesh = 1,
+               meshes = 1, read_into = 33, resource = 6, set_resource = 4, time = 5}, 'the apply frame ' .. n)
+end)
+
 check('a planned pattern takes its own texture on the pattern slot, is checked every 30 frames and put back', function()
     with_patterns = true
     local w = setup({patterns = true})
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     assert(#w.engine.created == 2 * (1 + SPARES), 'LUT and pattern textures and their spares, got ' .. #w.engine.created)
     local material = w.engine.units[0x100].materials[1].material
     local lut, pattern = w.engine.binding(material), w.engine.binding(material, Fake.PATTERN_SLOT)
@@ -686,7 +1198,7 @@ end)
 
 check("the paint scheme reaches the avatar's and the preview's jobs; values out of range change nothing", function()
     local w = setup({ui = true})
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     assert(requests[#requests].scheme == 0, 'no scheme by default')
     local texture = w.bound(0x100)[1]
     w.instance.set_option('scheme', 3)
@@ -716,7 +1228,7 @@ end)
 check('Recolor Cape: the cape takes the plan only with the option on, its tint (cape LUT slot) too; its kit is in the '
       .. 'request', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local function tints(unit)
         local out = {}
         for _, m in ipairs(w.engine.units[unit].materials) do
@@ -756,7 +1268,7 @@ check('Recolor Cape: a recolored emblem\'s sheet (a BC3 copy with its mips) is b
     local w = setup()
     -- the helmet's unit (slot 0, recolored with the cape) given a decal slot holding the sheet: never bound there
     local helmet = w.engine.unit(0x100, HELMET_LUT, nil, nil, nil, CAPE_SHEET)
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local function sheets(unit)
         local out = {}
         for _, m in ipairs(w.engine.units[unit].materials) do
@@ -783,7 +1295,7 @@ end)
 
 check('another cape in the loadout: no job while Recolor Cape is off, the option then recolors the cape worn', function()
     local w = setup()
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     local count = #requests
     w.space.u32(Fake.CUSTOMIZATION + 2420, 0x03f9d46b) -- the Cover of Darkness
     w.frames(Addon.VERIFY_FRAMES + 1)
@@ -796,9 +1308,49 @@ check('another cape in the loadout: no job while Recolor Cape is off, the option
     assert(#requests == count + 2 and requests[#requests].cape == 0x72492837, 'on: another cape is a new job')
 end)
 
+check('Helmet and Armor Match Cape: another cape is a new job with Recolor Cape off, both items are recolored and the '
+      .. 'cape keeps its colors; no cape gives the items back; the preview\'s cape counts too (user request 2026-10-09)',
+      function()
+    local w = setup({ui = true})
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
+    w.instance.set_option('mode', Recolor.CAPE_SOURCE)
+    w.frames(3)
+    local last = requests[#requests]
+    assert(last.target == 'avatar' and last.mode == Recolor.CAPE_SOURCE and not last.capes and last.cape == 0x72492837,
+           'the cape worn asked for, Recolor Cape off')
+    assert(w.bound(0x100)[1] ~= VANILLA[HELMET_LUT] and w.bound(0x101)[1] ~= VANILLA[ARMOR_LUT], 'both items recolored')
+    for _, object in ipairs(w.bound(0x106)) do assert(object == VANILLA[CAPE_LUT], 'the cape keeps its colors') end
+    -- per frame as a paint scheme (a world without the UI preview): idle frames read the units once, a check frame
+    -- one probe; the cape adds no call
+    local plain = setup()
+    plain.frames(3)
+    plain.instance.set_option('mode', Recolor.CAPE_SOURCE)
+    plain.frames(4)
+    assert(plain.instance.controller.probes == 2, 'helmet and armor textures tracked')
+    local n = classify(plain, 120, IDLE, CHECK)
+    assert(n.check >= 3 and n.idle + n.check + n.other == 120, string.format('idle %d, check %d, other %d', n.idle,
+           n.check, n.other))
+    local count = #requests
+    w.space.u32(Fake.CUSTOMIZATION + 2420, 0x03f9d46b) -- the Cover of Darkness
+    w.frames(Addon.VERIFY_FRAMES + 1)
+    assert(#requests == count + 1 and requests[#requests].cape == 0x03f9d46b, 'another cape: a new job')
+    w.space.u32(Fake.CUSTOMIZATION + 2420, 0)
+    w.frames(Addon.VERIFY_FRAMES + 1)
+    assert(requests[#requests].cape == 0 and w.bound(0x100)[1] == VANILLA[HELMET_LUT]
+           and w.bound(0x101)[1] == VANILLA[ARMOR_LUT], 'no cape: the items given back')
+    w.engine.unit(0x300, HELMET_LUT)
+    Fake.show_ui(w.space, 1, {helmet = 0x0b0b0b0b, armor = 0x0ade6719, body = 0, cape = 0x72492837}, {[{0, 0}] = 0x300})
+    w.frames(7)
+    count = #requests
+    Fake.show_ui(w.space, 1, {helmet = 0x0b0b0b0b, armor = 0x0ade6719, body = 0, cape = 0x03f9d46b}, {[{0, 0}] = 0x300})
+    w.frames(7)
+    assert(#requests > count and requests[#requests].target == 'ui' and requests[#requests].cape == 0x03f9d46b,
+           'another cape on the preview: a new preview job')
+end)
+
 check("the preview's cape counts only with Recolor Cape on", function()
     local w = setup({ui = true})
-    w.frames(3)
+    w.frames(4) -- resolve, the job over two frames, its apply on the next
     w.engine.unit(0x300, HELMET_LUT)
     Fake.show_ui(w.space, 1, {helmet = 0x0b0b0b0b, armor = 0x0ade6719, body = 0, cape = 0x72492837}, {[{0, 0}] = 0x300})
     w.frames(7)
@@ -816,5 +1368,5 @@ check("the preview's cape counts only with Recolor Cape on", function()
     assert(#requests > count and requests[#requests].cape == 0x72492837, 'on: another cape is a new job')
 end)
 
-if rawget(_G, 'MYC_TEST_SETUP_ONLY') then return setup, requests, {same = same, classify = classify} end
+if rawget(_G, 'MYC_TEST_SETUP_ONLY') then return setup, requests, {same = same, classify = classify, records = RECORDS} end
 print('PASS test_addon (' .. passed .. ' checks)')

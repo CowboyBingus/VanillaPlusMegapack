@@ -15,7 +15,7 @@
 -- column 3 of a copy of the cape LUT). Its other columns place the emblem-sheet layers (their colors are the sheet's).
 --
 -- The areas come from a GRID x GRID sample of the fields and of the gradient (the nearest texel of the smallest mip
--- with both sides at least GRID; RGBA8, RGBA16F, BC7, BC3 or BC4): a cell counts when it is inside the outline and its
+-- with both sides at least GRID; RGBA8, RGBA16F, RGBA32F, BC7, BC3 or BC4): a cell counts when it is inside the outline and its
 -- A is set; the outside weighs W_OUT and the inside W_IN (the back shows the whole outside, the front part of the
 -- inside), split between the row's base (1 - t) and its tint (t, in 1 / TINT_STEPS steps: integer sums). Area =
 -- weight / the weight of every counted cell of a row the LUT has. research/capes.py is the reference
@@ -166,10 +166,15 @@ local function choose_mip(info)
 end
 
 -- Sampling state, reused by every analysis (nothing allocated per block or cell): the texel column and row of each
--- grid cell, the block row each block column holds in `decoded` (64 bytes per block), and one decoded block.
+-- grid cell, the block row each block column holds in `decoded` (64 bytes per block), and one decoded block. Texels
+-- are copied as 32-bit words (out32, raw32, decoded32: views of the same bytes): this runs interpreted, and a cape's
+-- analysis spent a quarter of its time copying bytes one by one (research/profiling/analyse_loop.lua, 2026-10-11).
+local U32P = ffi.typeof('uint32_t *')
 local XS, YS, HELD = {}, {}, {}
-local decoded, decoded_size = nil, 0
+local decoded, decoded32, decoded_size = nil, nil, 0
+local out32, raw32 = nil, nil -- the cells' and the mip's bytes as words, set per Capes.cells
 local one_block = ffi.new('uint8_t[64]')
+local one_block32 = ffi.cast(U32P, one_block)
 
 -- Cell i from texel (x, y) of an uncompressed mip w texels wide: RGBA8 as is, RGBA16F clamped and rounded to bytes.
 local function plain_cell(half16, raw, w, x, y, out, i)
@@ -186,21 +191,37 @@ local function plain_cell(half16, raw, w, x, y, out, i)
     end
 end
 
+-- Capes.cells' RGBA8 cell: one word (out32 and raw32 are set by Capes.cells for its loop; sheet_texel, which reads
+-- one texel of a sheet outside it, keeps plain_cell).
+local function word_cell(_, _, w, x, y, _, i)
+    out32[i] = raw32[y * w + x]
+end
+
+-- Cell i from texel (x, y) of an RGBA32F mip w texels wide (a mod's texture; single: Texture.single), clamped and
+-- rounded to bytes as plain_cell does RGBA16F.
+local function float32_cell(single, raw, w, x, y, out, i)
+    local s = (y * w + x) * 16
+    for c = 0, 3 do
+        local v = single(raw, s + 4 * c)
+        if v ~= v or v < 0 then v = 0 elseif v > 1 then v = 1 end
+        out[i * 4 + c] = math.floor(v * 255 + 0.5)
+    end
+end
+
 -- Bytes per block of each block decoder (Texture.bc7_block's is set when read_mip picks it).
 local BLOCK_BYTES = {[Capes.bc3_block] = 16, [Capes.bc4_block] = 8}
 
 -- Cell i from texel (x, y) of a block-compressed mip `wide` blocks wide (decode: Texture.bc7_block,
 -- Capes.bc3_block or Capes.bc4_block): each block is decoded once, when the first cell inside the outline needs it.
-local function block_cell(decode, raw, wide, x, y, out, i)
+local function block_cell(decode, raw, wide, x, y, _, i)
     local bx, by = rshift(x, 2), rshift(y, 2)
-    local base = bx * 64
+    local base = bx * 16
     if HELD[bx] ~= by then
         decode(raw, one_block, (by * wide + bx) * BLOCK_BYTES[decode])
-        for k = 0, 63 do decoded[base + k] = one_block[k] end
+        for k = 0, 15 do decoded32[base + k] = one_block32[k] end
         HELD[bx] = by
     end
-    local s = base + (band(y, 3) * 4 + band(x, 3)) * 4
-    out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3] = decoded[s], decoded[s + 1], decoded[s + 2], decoded[s + 3]
+    out32[i] = decoded32[base + band(y, 3) * 4 + band(x, 3)]
 end
 
 -- The mip's bytes and the cell function for its format: the raw bytes, the width, and the decoder or half reader.
@@ -212,6 +233,7 @@ local function read_mip(Texture, pixels, info, m, scratch)
     local f = info.format
     if f == Texture.FORMAT_RGBA8 or f == Texture.FORMAT_RGBA8_SRGB then return raw, plain_cell, false end
     if f == Texture.FORMAT_RGBA16F then return raw, plain_cell, Texture.half end
+    if f == Texture.FORMAT_RGBA32F then return raw, float32_cell, Texture.single end
     if f == Texture.FORMAT_BC7 then
         BLOCK_BYTES[Texture.bc7_block] = 16
         return raw, block_cell, Texture.bc7_block
@@ -234,7 +256,10 @@ end
 
 -- The block cache made ready for a mip `wide` blocks wide: room for one block row, nothing decoded yet.
 local function reset_blocks(wide)
-    if wide * 64 > decoded_size then decoded, decoded_size = ffi.new('uint8_t[?]', wide * 64), wide * 64 end
+    if wide * 64 > decoded_size then
+        decoded, decoded_size = ffi.new('uint8_t[?]', wide * 64), wide * 64
+        decoded32 = ffi.cast(U32P, decoded)
+    end
     for k = 0, wide - 1 do HELD[k] = -1 end
 end
 
@@ -248,7 +273,9 @@ function Capes.cells(Texture, pixels, info, scratch, out, yield)
         width = math.max(1, rshift(w + 3, 2))
         reset_blocks(width)
     end
+    if cell == plain_cell and not codec then cell = word_cell end -- RGBA8: a word per cell
     local g, shape = Capes.GRID, Capes.outline()
+    out32, raw32 = ffi.cast(U32P, out), ffi.cast(U32P, raw)
     for gy = 0, g - 1 do
         local y = YS[gy]
         for gx = 0, g - 1 do
@@ -257,6 +284,7 @@ function Capes.cells(Texture, pixels, info, scratch, out, yield)
         end
         if yield then yield() end
     end
+    out32, raw32 = nil, nil -- views keep nothing alive: none outlives its buffers
     return out
 end
 
@@ -316,18 +344,19 @@ local function count_rows(cells, height, tint, grad, yield)
     return acc.base, acc.tinted, acc.total
 end
 
--- ({row -> area} of the rows' base colors, {row -> area} of their tints) for a material LUT of `height` rows from
--- the fields' cells, by the model above; tint: the cape LUT ({values, width, height}) and grad: the gradient's cells
--- (both, or no tint); yield (optional) as count_rows.
+-- ({row -> area} of the rows' base colors, {row -> area} of their tints, the total weight the areas divide: every
+-- counted side's weight x TINT_STEPS) for a material LUT of `height` rows from the fields' cells, by the model above;
+-- tint: the cape LUT ({values, width, height}) and grad: the gradient's cells (both, or no tint); yield (optional) as
+-- count_rows.
 function Capes.areas(cells, height, yield, tint, grad)
     local base, tinted, total = count_rows(cells, height, grad and tint or nil, tint and grad or nil, yield)
     local rows, tints = {}, {}
-    if total == 0 then return rows, tints end
+    if total == 0 then return rows, tints, 0 end
     for r = 0, math.min(height, 5) - 1 do
         if base[r] > 0 then rows[r] = base[r] / total end
         if tinted[r] > 0 then tints[r] = tinted[r] / total end
     end
-    return rows, tints
+    return rows, tints, total
 end
 
 -- The outside row of every grid cell that counts (0-3), -1 for the others; reused by every analysis.
@@ -502,6 +531,7 @@ local function sheet_texel(s, x, y)
     end
     return one_texel
 end
+Capes.sheet_texel, Capes.read_mip = sheet_texel, read_mip -- for tests/test_units.lua
 
 -- One layer over the grid (ROWS: the outside rows, Capes.zones's): its emblem {row, layer, L, a, b (its own color:
 -- the blend-weighted mean of its sheet texels, display-linear), around ({[row] = bins}: the cloth under its cells,
@@ -628,8 +658,9 @@ end
 -- A cape kit's analysis, as Kits.analyse gives one for a helmet or an armor: {kit, body, pieces (the cape piece,
 -- slot 1), luts (its material LUT, and its cape LUT when a tint shows), rows (the material rows in row order, then the
 -- tint rows, with area), tint_of ({[cape LUT] = material LUT} when a tint shows), zones (Capes.zones, or nil),
--- emblems (emblems_of), patterns = {}, tint_note (why no tint was modelled, or nil)}; nil and why when its material
--- LUT is not in the searched archives. deps: Kits.analyse's (textures, find, colour, scratch, yield) and Texture,
+-- emblems (emblems_of), patterns = {}, tint_note (why no tint was modelled, or nil), weight (Capes.areas's total: an
+-- emblem's share as a source color is its cells x W_OUT x TINT_STEPS / weight, src/recolor.lua)}; nil and why when
+-- its material LUT is not in the searched archives. deps: Kits.analyse's (textures, find, colour, scratch, yield) and Texture,
 -- Kits, Colour (the module: the emblems' color math).
 local cells_buffer, grad_buffer -- GRID x GRID x 4 bytes each, reused by every analysis (jobs run one at a time)
 
@@ -729,7 +760,7 @@ function Capes.analyse(kit, body, deps)
     end
     deps.yield()
     local tint, grad, note = tint_inputs(piece, deps)
-    local areas, tints = Capes.areas(cells, lut.height, deps.yield, tint, grad)
+    local areas, tints, weight = Capes.areas(cells, lut.height, deps.yield, tint, grad)
     local rows = material_rows(deps, piece, lut, areas)
     local luts, tint_of = {[piece.lut] = lut}, nil
     if tint and grad and add_tint_rows(deps, rows, piece, lut, tint, tints) then
@@ -741,14 +772,170 @@ function Capes.analyse(kit, body, deps)
                    weight = 1.0, materials = {{material = 'cape', lut = piece.lut}}, skin = false}
     return {kit = kit, body = body, pieces = {entry}, luts = luts, rows = rows, patterns = {}, dropped = 0,
             tint_of = tint_of, zones = zones, emblems = emblems, tint_note = note,
-            emblem_layers = tint and emblem_layers(tint, areas, tints) or 0}
+            emblem_layers = tint and emblem_layers(tint, areas, tints) or 0, weight = weight}
+end
+
+-- The development log line of a cape's plan (cape: its kit id; c: its analysis; made: its plan, with zones and fits,
+-- src/recolor.lua planned): its tint's share, what the zone rule did, the emblem-sheet layers left in their colors and
+-- the fits' largest error (reviewer, 2026-10-07: report unhandled layers and remaining error).
+function Capes.report(cape, c, made)
+    local tint = 0
+    for _, row in ipairs(c.rows) do
+        if c.tint_of and c.tint_of[row.lut] then tint = tint + row.area end
+    end
+    local z, fits = made.zones or {picked = 0, kept = 0, lost = 0}, made.fits or {rows = 0, err = 0}
+    local e = made.emblems or {picked = 0, lost = 0}
+    local kept = #(c.emblems or {}) - e.picked - e.lost
+    return string.format('Cape %08x: tint %.0f%% of it%s; design zones: %d recolored to stay readable, %d kept their '
+        .. 'colors, %d unreadable; emblems: %d recolored to stay readable%s, %d unreadable, %d in their own colors; %d '
+        .. 'rows fitted (largest error dE %.1f).', cape, tint * 100,
+        c.tint_note and (' (no tint modelled: ' .. c.tint_note .. ')') or '', z.picked, z.kept, z.lost, e.picked,
+        made.sheet_note and (' (sheet not recolored: ' .. made.sheet_note .. ')') or '', e.lost, kept, fits.rows,
+        fits.err)
+end
+
+-- A material row and its tint row blended into one (blend in linear light by their areas; Colour: src/colour.lua).
+local function blend_row(row, tint, Colour)
+    local w = row.area + tint.area
+    local p, q = row.area / w, tint.area / w
+    local out = {}
+    for k, v in pairs(row) do out[k] = v end
+    out.area, out.under = w, 0
+    out.ar, out.ag, out.ab = p * row.ar + q * tint.ar, p * row.ag + q * tint.ag, p * row.ab + q * tint.ab
+    local r1, g1, b1 = Colour.lab_to_linear(row.L, row.a, row.b)
+    local r2, g2, b2 = Colour.lab_to_linear(tint.L, tint.a, tint.b)
+    out.L, out.a, out.b = Colour.linear_to_lab(math.max(p * r1 + q * r2, 0), math.max(p * g1 + q * g2, 0),
+                                               math.max(p * b1 + q * b2, 0))
+    return out
+end
+
+-- A cape's rows as source colors (Helmet and Armor Match Cape, src/recolor.lua): a material row and its tint row blend
+-- on screen into one color (the tint covers part of the row's cells, by the gradient), so they are one source color:
+-- the two areas, their colors (mean albedo, model) mixed by area in linear light. Taken apart, a tint was a color of
+-- its own at full strength: United in Equality's purple tint (24% of it) painted an armor neon violet, and the Light of
+-- Eternal Liberty's lemon base (its brown tint aside) a helmet lemon and a camo lime, where the cape itself reads
+-- muted (renders 2026-10-09). A tint row whose material row shows no base of its own stays as it is. Without a tint,
+-- the rows as they are; in material row order, then such tint rows.
+-- Each row's outside: its area on the cape's outside (row INSIDE_ROW is the lining alone, cell_rows; row 1 counts
+-- both sides), which the matcher's identity of a cape goes by (src/matcher.lua identity_of: the outside first).
+Capes.INSIDE_ROW = 4
+local function with_outside(row)
+    local out = {}
+    for k, v in pairs(row) do out[k] = v end
+    out.outside = row.row == Capes.INSIDE_ROW and 0 or row.area
+    return out
+end
+function Capes.source_rows(cape, Colour)
+    local tints, out = {}, {}
+    for _, row in ipairs(cape.rows) do
+        if cape.tint_of and cape.tint_of[row.lut] then tints[row.row] = row end
+    end
+    for _, row in ipairs(cape.rows) do
+        if not (cape.tint_of and cape.tint_of[row.lut]) then
+            local tint = tints[row.row]
+            out[#out + 1] = with_outside(tint and blend_row(row, tint, Colour) or row)
+            tints[row.row] = nil
+        end
+    end
+    for _, row in ipairs(cape.rows) do
+        if tints[row.row] == row then out[#out + 1] = with_outside(row) end
+    end
+    return out
+end
+
+-- Helmet and Armor Match Cape: a cape source's guard on the matcher's allowed pairs (src/matcher.lua pair_groups,
+-- source.part_guard): a dark muted target part (model L under DARK_PART_L, chroma under accent_c: gloves, boots,
+-- straps) never takes a light cape color (look L LIGHT_COLOR_L or more) it does not already match; left with none, it
+-- takes the cape's darkest. To keep the light and dark structure the matcher's search handed a cape's small cream to
+-- the smallest part, often the gloves and boots (the RS-40 Beast of Prey's brown gloves and boots white under the
+-- yellow-emblem cape, the B-01 Tactical's under the Drape of Glory; independent image reviews 2026-10-09).
+-- allowed[i][j]: target group i may take palette color j; t: the target groups; s: the palette; keep_ok[i][j]: i
+-- already matches j.
+Capes.DARK_PART_L, Capes.LIGHT_COLOR_L = 30.0, 60.0
+-- One dark part's allowed row (keep_row: its matches; darkest: the palette's darkest color).
+local function guard_dark_part(row, s, keep_row, darkest)
+    local any = false
+    for j = 1, #s do
+        if s[j].L >= Capes.LIGHT_COLOR_L and not keep_row[j] then row[j] = false end
+        any = any or row[j]
+    end
+    if not any then row[darkest] = true end
+end
+
+-- A tinted cape color (model chroma LINING_TINT_C or more: src/matcher.lua NEUTRAL_TINT_C) that shows only on its lining
+-- (under LINING_OUTSIDE of its rows' area outside, as source_rows counts it) paints no target part larger than an
+-- accent (share LINING_PART_SHARE or more: src/matcher.lua ACCENT_SMALL) it does not already match; left with none, the
+-- part takes the palette's most outside color. The outside decides the outfit (the user chose "outside first",
+-- 2026-10-11): the EX-00 Prototype X's grey dome (61%) took Standard of Safe Distance's taupe lining, a color its
+-- outside never shows, beside the armor's yellow and charcoal (independent review 2026-10-11, case 70); it takes the
+-- cape's sage panel. A grey or black lining stays a neutral shade the outfit may wear: guarded, the UF-16 Inspector's
+-- grey trousers and gloves under the Light of Eternal Liberty turned its yellow, one yellow suit (live 2026-10-11). A
+-- color mostly on the lining that the outside shows too stays (the Thundering Hooves of Loyalty's red, 36% outside: by
+-- half, the SR-64 Cinderblock's agreed red with gold plates turned gold with red plates). 686 of 30,303 cape plans
+-- change (research/scratch/dark-band/cape_diff.lua).
+Capes.LINING_OUTSIDE, Capes.LINING_PART_SHARE, Capes.LINING_TINT_C = 0.10, 0.10, 5.0
+local function outside_share(g)
+    local area, outside = 0, 0
+    for _, row in ipairs(g.rows) do area, outside = area + row.area, outside + (row.outside or 0) end
+    return area > 0 and outside / area or 1
+end
+-- The palette's tinted colors shown only on the lining (lining[j]) and its most outside color (outside share x share).
+local function lining_colors(s)
+    local lining, most, best = {}, 1, -1
+    for j = 1, #s do
+        local o = outside_share(s[j])
+        lining[j] = o < Capes.LINING_OUTSIDE and math.sqrt(s[j].ma ^ 2 + s[j].mb ^ 2) >= Capes.LINING_TINT_C
+        if o * s[j].share > best then most, best = j, o * s[j].share end
+    end
+    return lining, most
+end
+-- One large part's allowed row (keep_row: its matches).
+local function guard_lining_part(row, lining, keep_row, most)
+    local any = false
+    for j = 1, #lining do
+        if lining[j] and not keep_row[j] then row[j] = false end
+        any = any or row[j]
+    end
+    if not any then row[most] = true end
+end
+
+function Capes.dark_parts_guard(allowed, t, s, keep_ok, accent_c)
+    local darkest = 1
+    for j = 2, #s do if s[j].L < s[darkest].L then darkest = j end end
+    local lining, most = lining_colors(s)
+    for i = 1, #t do
+        local g = t[i]
+        if g.mL < Capes.DARK_PART_L and math.sqrt(g.ma * g.ma + g.mb * g.mb) < accent_c then
+            guard_dark_part(allowed[i], s, keep_ok[i], darkest)
+        end
+        if g.share >= Capes.LINING_PART_SHARE then guard_lining_part(allowed[i], lining, keep_ok[i], most) end
+    end
+end
+
+-- A cape's readable emblems as pattern-like source colors for the matcher (Helmet and Armor Match Cape,
+-- src/recolor.lua): {{pattern = 'emblem:<row>:<layer>', area (its cells at the outside's weight over the cape's total,
+-- the rows' denominator; the emblem lies on cloth its rows count too), r, g, b (its own color, sRGB)}, ...}. Colour:
+-- the src/colour.lua module.
+function Capes.emblem_patterns(cape, Colour)
+    local out = {}
+    local weight = cape.weight or 0
+    if weight <= 0 then return out end
+    for _, e in ipairs(cape.emblems or {}) do
+        local r, g, b = Colour.lab_to_srgb(e.L, e.a, e.b)
+        out[#out + 1] = {pattern = string.format('emblem:%d:%d', e.row, e.layer),
+                         area = e.cells * Capes.W_OUT * Capes.TINT_STEPS / weight, r = r, g = g, b = b}
+    end
+    return out
 end
 
 -- Runs inside recolor jobs only: interpreted (no traces in the LuaJIT code cache every mod shares).
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({Capes.outline, expand565, alpha_palette, Capes.bc4_block, Capes.bc3_block, choose_mip,
-                         plain_cell, block_cell, read_mip, grid_positions, reset_blocks, Capes.cells, tint_steps,
+                         plain_cell, word_cell, float32_cell, block_cell, read_mip, grid_positions, reset_blocks,
+                         Capes.cells, tint_steps,
                          cell_rows, add_side, count_cell, count_rows, Capes.areas, outside_rows, zero_bins,
+                         Capes.report, blend_row, with_outside, Capes.source_rows, guard_dark_part, outside_share,
+                         lining_colors, guard_lining_part, Capes.dark_parts_guard, Capes.emblem_patterns,
                          border_cell, count_border, zone_row, Capes.zones, layer_of, layer_point, sheet_rect,
                          texture_info, sheet_mip, sheet_texel, emblem_cell, emblem_of, emblems_of, endpoint_rgb, to565,
                          recolor_endpoint, recolor_blocks, Capes.recolor_sheet, sample, tint_inputs, emblem_layers,

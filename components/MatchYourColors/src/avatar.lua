@@ -97,9 +97,11 @@ function Avatar.lookup(read, address, key)
     return nil
 end
 
--- The player owned by this machine: its entity id, peer and Helldiver unit into out; true or nil and why.
+-- The player owned by this machine: its entity id, peer and Helldiver unit into out (out.players: the player
+-- manager, once found); true or nil and why.
 local function local_player(read, game, out)
     local players = pointer(read, game + Avatar.PLAYERS)
+    out.players = players
     if not players then return nil, 'no player manager' end
     local count = word(read, players + P_COUNT)
     if not count or count == 0 or count > MAX_PLAYERS then return nil, 'no players' end
@@ -154,15 +156,24 @@ end
 
 local STEPS = {local_player, applied_kits, avatar_record}
 
+-- How far a resolve that found no Helldiver got (its third value): no player manager (the title screen, between
+-- worlds), a player manager but not the local player's kits (a world loading, the player dead), or the local
+-- player's applied kits in out but no Helldiver yet (loading: the avatar is made later; the kits can still be
+-- stand-ins, 0xffffffff, and the unit a stand-in too, 0x7fff, live 2026-10-08).
+Avatar.FOUND_NOTHING, Avatar.FOUND_PLAYERS, Avatar.FOUND_KITS = 0, 1, 2
+
 -- The local player: {player, unit, peer, record and applied kits, avatar id and index, the avatar record's
--- unit address, the preview manager} or nil and why. One call is about 20 reads. out: a table to fill
--- (reused; default new).
+-- unit address, the preview manager} or nil, why and how far it got (above). One call is about 20 reads. out: a
+-- table to fill (reused; default new).
 function Avatar.resolve(memory, game, read, out)
     read = read or Avatar.reader(memory)
     out = out or {}
-    for _, step in ipairs(STEPS) do
+    for i, step in ipairs(STEPS) do
         local ok, why = step(read, game, out)
-        if not ok then return nil, why end
+        if not ok then
+            local found = out.players and Avatar.FOUND_PLAYERS or Avatar.FOUND_NOTHING
+            return nil, why, i == 3 and Avatar.FOUND_KITS or found
+        end
     end
     out.previews = pointer(read, game + Avatar.PREVIEWS)
     return out
