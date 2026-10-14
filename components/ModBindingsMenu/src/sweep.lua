@@ -17,12 +17,18 @@
 --   again: the game restored it (Revert, a config re-parse, a saved settings
 --   file of an older version). After a binding page closes, an action changed
 --   into one mapping a capture can make is the player's choice even then,
---   unless other actions were restored with it: a Revert restores them all.
+--   unless other actions were restored with it, indicating a wholesale restore.
 -- - An action handed over from an expired binding is cleared entirely.
 -- - RepeatInterval button mappings become Press: the page has no selector for
 --   RepeatInterval, which repeats while held.
--- Per sweep: one read per action a binding uses, in place; while nothing
--- changed, nothing else (no allocation, no write).
+-- - Native Revert copies only the current page's devices from DEFAULTS_MAP.
+--   Keep that map free of developer defaults too, retaining the untouched
+--   records privately so old saved lists can still be recognized and cleaned.
+-- Per two-second sweep: two reads per registered action (live and defaults),
+-- no allocation or write when unchanged. The extra defaults read detects a
+-- native re-parse; while a binding page is open, defaults alone are checked
+-- each frame so Revert always reads the sanitized source. This additional cost
+-- is unmeasured in game; gameplay idle/poll frames add no reads.
 local mbm = ...
 local ffi, bit = require('ffi'), require('bit')
 local state, note, load_assignments = mbm.state, mbm.note, mbm.load_assignments
@@ -45,6 +51,7 @@ local FNV_BASIS = bit.tobit(2166136261)
 -- unset), trigger, combine, threshold.
 local live, shipped = ffi.new('MBM_u8[?]', RECORD_SIZE), ffi.new('MBM_u8[?]', RECORD_SIZE)
 local live_words, shipped_words = ffi.cast('MBM_u32 *', live), ffi.cast('MBM_u32 *', shipped)
+local originals = {}
 local function at(index) return 2 + index * 5 end
 
 -- Reads code's record from a binding map into buffer, whole: its cached address
@@ -135,21 +142,50 @@ local function compact(bucket, code, clean)
     return count - kept
 end
 
+-- Native defaults are not player settings. Capture them before sanitizing,
+-- then keep that copy while the game holds our sanitized record. A re-parse
+-- supplies a fresh original. Scratch buffers are reused; only the first read
+-- of each registered action allocates its private record.
+local function prepare_defaults(code)
+    local bucket = read_record(DEFAULTS_MAP, state.default_buckets, code, live, live_words)
+    if not bucket then return false end
+    local found, saved = fingerprint(live_words), originals[code]
+    if saved and found == saved.cleaned then return true end
+    if not saved then
+        saved = {bytes = ffi.new('MBM_u8[?]', RECORD_SIZE)}
+        originals[code] = saved
+    end
+    ffi.copy(saved.bytes, live, RECORD_SIZE)
+    saved.fingerprint = found
+    ffi.copy(shipped, live, RECORD_SIZE)
+    compact(bucket, code, true)
+    saved.cleaned = fingerprint(live_words)
+    return true
+end
+
+-- Safe while a binding page is open: only its reset source changes, never the
+-- live mappings being captured or the sweep's page/provenance bookkeeping.
+local function sanitize_defaults()
+    state.defaults_pending = false
+    local ready = true
+    for _, record in ipairs(state.order) do
+        record.defaults_ready = prepare_defaults(record.code)
+        ready = record.defaults_ready and ready
+    end
+    return ready
+end
+
 -- What the sweep does with an action this time: nothing (the list is as the
 -- sweep left it), clear it, clean it the first time, a restored list, or a
 -- list the player changed.
 local CLEAR, FIRST, RESTORED, CHANGED = 1, 2, 3, 4
 
-local function shipped_fingerprint(code)
-    return read_record(DEFAULTS_MAP, state.default_buckets, code, shipped, shipped_words)
-        and fingerprint(shipped_words)
-end
-
 -- The plan for a binding's action, and for a restored list whether a single
 -- capture could have made it (one mapping, not RepeatInterval).
 local function plan(book, record)
     local code = record.code
-    if not read_record(BINDING_MAP, state.buckets, code, live, live_words) then return nil end
+    if not record.defaults_ready then return nil, nil, false end
+    if not read_record(BINDING_MAP, state.buckets, code, live, live_words) then return nil, nil, false end
     local action = book.actions[code]
     if not action then return FIRST end
     if action.clear then return CLEAR end
@@ -158,7 +194,7 @@ local function plan(book, record)
         state.swept_counts[code] = live_words[1]
         return nil
     end
-    if list == action.found or list == shipped_fingerprint(code) then
+    if list == action.found or list == originals[code].fingerprint then
         return RESTORED, live_words[1] == 1 and live_words[at(0) + 2] ~= REPEAT_INTERVAL
     end
     return CHANGED
@@ -181,16 +217,14 @@ end
 local function apply(book, record, wholesale)
     local code, step = record.code, record.plan
     local bucket = read_record(BINDING_MAP, state.buckets, code, live, live_words)
-    if not bucket then return 0 end
+    if not bucket then return nil end
     local found, removed = fingerprint(live_words), 0
     if step == CLEAR then
         removed = live_words[1]
         write_record(bucket, 0)
     else
         local clean = step == FIRST or step == RESTORED and wholesale
-        if clean and not read_record(DEFAULTS_MAP, state.default_buckets, code, shipped, shipped_words) then
-            return 0
-        end
+        if clean then ffi.copy(shipped, originals[code].bytes, RECORD_SIZE) end
         if step == RESTORED and not wholesale then
             note('Kept the single mapping chosen for ' .. record.id .. ' on a binding page, although it ' ..
                  'equals a developer default.')
@@ -206,24 +240,33 @@ end
 -- this file). Restored lists are restores unless a binding page closed since
 -- the last sweep and the only restored list is one a single capture can make.
 local function sweep_bindings()
+    -- A failed read cannot consume the binding-page visit: it still explains
+    -- a deliberate single-key capture when the next sweep can read its data.
+    if not sanitize_defaults() then return end
     local book = load_assignments()
     local restored, wholesale = 0, not state.page_visited
     for _, record in ipairs(state.order) do
-        local step, single = plan(book, record)
+        local step, single, readable = plan(book, record)
+        if readable == false then return end
         record.plan = step
         if step == RESTORED then
             restored = restored + 1
             wholesale = wholesale or not single
         end
     end
-    state.page_visited = false
     wholesale = wholesale or restored > 1
-    local removed = 0
+    local removed, complete = 0, true
     for _, record in ipairs(state.order) do
-        if record.plan then removed = removed + apply(book, record, wholesale) end
+        if record.plan then
+            local count = apply(book, record, wholesale)
+            complete = count ~= nil and complete
+            removed = removed + (count or 0)
+        end
         record.plan = nil
     end
+    if complete then state.page_visited = false end
     if removed > 0 then note('Removed ' .. removed .. ' inherited developer mappings.') end
 end
 
 mbm.sweep_bindings = sweep_bindings
+mbm.sanitize_defaults = sanitize_defaults

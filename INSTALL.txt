@@ -20,6 +20,12 @@ Menu Hotkey before v29; confirm it is still checked after updating. Mod
 Bindings Menu ships its own content/input.config override; another mod that
 replaces that resource must be merged with it.
 
+Updating preserves your existing custom bindings. If mission selection still
+immediately deselects with Ship Station Hotkeys after updating, open the MODS
+tab on the affected device's binding page (Mouse & Keyboard or Controller)
+and choose Revert. This restores clean defaults and also resets custom
+bindings on that tab for that device; set any custom bindings again afterward.
+
 Enable the Mod Options Menu option to set Shallow Water Diving's maximum dive
 depth and Better Lobby Management's options on the MODS tab of the escape menu.
 
@@ -63,7 +69,11 @@ Included revisions:
 An unchecked option cannot disable a separately enabled standalone copy.
 Remove older startup-replacing packages when migrating.
 
-Offline regression, package and option-selection checks passed. Checked in game:
+This is the refreshed v42 pre-release. Offline regression, package and
+option-selection checks passed. Live validation of the Mod Bindings Menu
+reset fix and measurement of its added binding-page and periodic checks are
+pending. Its ordinary gameplay idle checks and binding polling are unchanged.
+Previous releases were checked in game:
 a clean run to the ship with every option, and the four new mods in joined
 missions of real play as their standalone releases.
 Logs: %LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs

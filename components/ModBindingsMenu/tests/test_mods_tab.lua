@@ -236,7 +236,7 @@ print('Native MODS tab relabel, per-mod sections, label pool and rebuild OK')
 -- they must never fire a mod binding. Slot 1 ships its own keyboard default
 -- (Tab) next to the developer mouse and pad mappings.
 local sweep = internal(step, 'sweep_bindings')
-local KEYBOARD, MOUSE, PAD = 3, 2, 5
+local KEYBOARD, MOUSE, PAD = 3, 4, 2
 local tab, left_click, pad_a = mapping(KEYBOARD, 76), mapping(MOUSE, 1), mapping(PAD, 9)
 set_mappings(record(default_map, 12, 1), {pad_a, tab, left_click})
 -- The user rebound Open Map to F2 in v1; the saved action kept the extras,
@@ -791,6 +791,9 @@ do
     _G.ModBindingsMenu, _G.BingusTranslations, _G.BingusRuntime = nil, nil, nil
     Text.registry().steam_language = 'en'
     _G.update = function() end
+    -- A fresh process reparses input.config. Earlier instances now sanitize
+    -- this shared fixture's defaults, so restore the raw reset source first.
+    set_mappings(record(default_map, 12, 1), {pad_a, tab, left_click})
     dofile(source)
     local menu, wrapper = ModBindingsMenu, update
     local st = upvalue(menu.register_binding, 'state')
@@ -865,10 +868,11 @@ do
     -- pointers are read together, so is the screen stack, and the MODS title
     -- slot is read only when the title changes).
     for index = 1, 3 do frame('idle frame ' .. index, {ReadProcessMemory = 2}) end
-    -- Every 2 seconds the sweep reads the record of each action a binding
-    -- uses, once and whole; nothing changed, so nothing more (was 156: every
-    -- dormant action's mappings, a read per mapping).
-    frame('sweep frame', {ReadProcessMemory = 8}, 2)
+    -- Every 2 seconds each registered action's live and default records are
+    -- checked. Six extra reads prevent a config reload from restoring unsafe
+    -- reset defaults; idle and input-poll frames are unchanged. In-game cost
+    -- of the added sweep work has not been measured.
+    frame('sweep frame', {ReadProcessMemory = 14}, 2)
     frame('idle frame after a sweep', {ReadProcessMemory = 2})
     -- is_down: the cached record's code and mapping count in one read, the
     -- input owner and the action's state byte (was 4 reads).
@@ -899,23 +903,25 @@ do
     assert(call('poll before native input is ready', {}, menu.poll, ship_ids, polled) and polled.down[1] == nil)
     st.build_rows = build_rows
 
-    -- A binding page: the first frame refreshes the texts and adds the MODS tab;
-    -- later frames check the page (3 reads), the tab bar and the selected tab,
-    -- which is read once per frame (was twice: 12, 6 and 31 below were one more).
+    -- A binding page: every frame checks six registered actions' reset sources
+    -- so a device/config reload cannot leave hidden defaults until the next
+    -- two-second sweep. The first frame also refreshes text and adds the tab.
+    -- This extra work is restricted to the binding pages, unmeasured in game.
     -- The MODS tab's first frame claims its text slots and builds the rows; the
     -- next checks every row (the count and 8 row fields; was every frame, 15
     -- reads); later frames re-read only the row count, and every row again
     -- each 0.5 s.
     put32(bar + 57448, 3); put32(bar + 57452, 1); put32(screen + 8, 0)
     page(true)
-    frame('binding page opens on a native tab', {ReadProcessMemory = 11, VirtualQuery = 1, set_tab_labels = 1})
-    for index = 1, 2 do frame('binding page on a native tab ' .. index, {ReadProcessMemory = 5}) end
+    -- Check the six reset sources before the user can revert this page.
+    frame('binding page opens on a native tab', {ReadProcessMemory = 17, VirtualQuery = 1, set_tab_labels = 1})
+    for index = 1, 2 do frame('binding page on a native tab ' .. index, {ReadProcessMemory = 11}) end
     put32(screen + 8, 3)
-    frame('MODS tab, first frame', {ReadProcessMemory = 30, VirtualQuery = 7, build_rows = 1, reset_list = 1})
-    frame('MODS tab, rows checked', {ReadProcessMemory = 14})
-    for index = 1, 2 do frame('MODS tab ' .. index, {ReadProcessMemory = 6}) end
-    frame('MODS tab, rows checked again after 0.5 s', {ReadProcessMemory = 14}, 0.5)
-    frame('MODS tab 3', {ReadProcessMemory = 6})
+    frame('MODS tab, first frame', {ReadProcessMemory = 36, VirtualQuery = 7, build_rows = 1, reset_list = 1})
+    frame('MODS tab, rows checked', {ReadProcessMemory = 20})
+    for index = 1, 2 do frame('MODS tab ' .. index, {ReadProcessMemory = 12}) end
+    frame('MODS tab, rows checked again after 0.5 s', {ReadProcessMemory = 20}, 0.5)
+    frame('MODS tab 3', {ReadProcessMemory = 12})
     -- Page frames allocate nothing, interpreted: the page check, the tab bar,
     -- the selected tab and the row checks decode in place (each read allocated
     -- a buffer, a size cell and a string before, about 0.3-1 KB per frame).
@@ -940,30 +946,32 @@ do
     assert(page_bytes == 0, string.format('MODS tab frames checking every row allocated %d bytes', page_bytes))
     -- The frame that sees another tab logs it once (a new string); later ones are measured.
     put32(screen + 8, 0)
-    frame('native tab selected', {ReadProcessMemory = 5})
+    frame('native tab selected', {ReadProcessMemory = 11})
     page_bytes = page_garbage(100, 0.016)
     assert(page_bytes == 0, string.format('native tab frames allocated %d bytes', page_bytes))
     put32(screen + 8, 3)
-    frame('MODS tab selected again: rows checked', {ReadProcessMemory = 14})
+    frame('MODS tab selected again: rows checked', {ReadProcessMemory = 20})
     st.sweep_timer = sweep_timer
     assert(call('six is_down, binding page open', {ReadProcessMemory = 18}, ship_frame) == 0)
     assert(call('poll of the six, binding page open', {ReadProcessMemory = 8}, menu.poll, ship_ids, polled))
-    -- Closing the page returns the title, the claimed slots and the row labels.
+    -- Closing the page immediately records the captured bindings (12 reads)
+    -- before a later config reload can obscure the page visit, and returns
+    -- the title, claimed slots and row labels.
     page(false)
-    frame('binding page closes', {ReadProcessMemory = 8, VirtualQuery = 6})
+    frame('binding page closes', {ReadProcessMemory = 20, VirtualQuery = 6})
     for index = 1, 2 do frame('idle frame after the page ' .. index, {ReadProcessMemory = 2}) end
 
     -- A config re-parse restores the shipped defaults: is_down sweeps first and
     -- reports this frame as not down.
     set_mappings(record(live_map, 12, 1), {pad_a, tab, left_click})
-    -- (was 158)
-    assert(call('is_down after a re-parse', {ReadProcessMemory = 12}, menu.is_down, SHIP[1][1]) == false)
+    -- Includes all six reset sources; the original mappings are cached.
+    assert(call('is_down after a re-parse', {ReadProcessMemory = 16}, menu.is_down, SHIP[1][1]) == false)
     assert(#get_mappings(record(live_map, 12, 1)) == 1)
     assert(call('is_down after the sweep', {ReadProcessMemory = 3}, menu.is_down, SHIP[1][1]) == false)
-    -- poll sweeps on the same terms (the 12 reads above), then reads the other
-    -- five headers, the input owner and the states (six is_down: 12 + 5 x 3).
+    -- poll sweeps on the same terms (the 16 reads above), then reads the other
+    -- five headers, the input owner and the states (six is_down: 16 + 5 x 3).
     set_mappings(record(live_map, 12, 1), {pad_a, tab, left_click})
-    assert(call('poll after a re-parse', {ReadProcessMemory = 19}, menu.poll, ship_ids, polled))
+    assert(call('poll after a re-parse', {ReadProcessMemory = 23}, menu.poll, ship_ids, polled))
     assert(polled.down[1] == false and #get_mappings(record(live_map, 12, 1)) == 1)
     -- A cached record that no longer holds the action (a rebuilt map) is found
     -- again: the same answer, and the cache points at the action's record.

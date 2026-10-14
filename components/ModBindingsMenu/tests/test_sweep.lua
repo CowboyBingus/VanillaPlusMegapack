@@ -98,7 +98,8 @@ local function mapping(device, key, trigger, padding)
     ffi.cast('uint32_t *', cell + 8)[0] = trigger
     return ffi.string(cell, 20)
 end
-local KEYBOARD, MOUSE, XBOX, DUALSHOCK = 3, 2, 5, 6
+-- Native device_type translator (game.dll+0xab9d50, build 25480438).
+local KEYBOARD, MOUSE, XBOX, DUALSHOCK = 3, 4, 2, 1
 -- Shipped defaults like input.config's (Mod Bindings Menu's own Tab on slot 1).
 local tab, left_click = mapping(KEYBOARD, 76), mapping(MOUSE, 1)
 local cross, xbox_a = mapping(DUALSHOCK, 9), mapping(XBOX, 9)
@@ -138,6 +139,12 @@ local function upvalue(fn, wanted)
     error('missing upvalue ' .. wanted)
 end
 local function session()
+    -- A new process reparses the native defaults. Keep the live map as the
+    -- user's saved settings, but do not carry the previous process's sanitized
+    -- reset source into this one.
+    for code in pairs(position) do
+        set_mappings(record(default_map, math.floor(code / 65536), code % 65536), DEFAULTS[code] or {})
+    end
     _G.ModBindingsMenu, _G.BingusTranslations = nil, nil
     Text.registry().steam_language = 'en'
     _G.mbm_text = {module = Text, locales = {en = dofile(root .. '/locales/en.lua'), bundled = {}}}
@@ -159,6 +166,27 @@ local function logged(text, from)
 end
 local function live(group, action) return get_mappings(record(live_map, group, action)) end
 local function set_live(group, action, list) set_mappings(record(live_map, group, action), list) end
+local function defaults(group, action) return get_mappings(record(default_map, group, action)) end
+-- Native per-page Revert (build 25480438, game.dll+0x1813A40): replace/remove the first mapping
+-- of each page device, or insert its default if missing; other devices stay.
+local function revert(group, action, devices)
+    local current, shipped = live(group, action), defaults(group, action)
+    for _, device in ipairs(devices) do
+        local found, replacement
+        for index, blob in ipairs(current) do
+            if blob:byte(1) % 16 == device then found = index; break end
+        end
+        for _, blob in ipairs(shipped) do
+            if blob:byte(1) % 16 == device then replacement = blob; break end
+        end
+        if found then
+            if replacement then current[found] = replacement else table.remove(current, found) end
+        elseif replacement then
+            table.insert(current, math.min(device - 1, #current) + 1, replacement)
+        end
+    end
+    set_live(group, action, current)
+end
 local SWEEP = 2 -- a frame time that makes the sweep due
 
 remove_files()
@@ -184,7 +212,21 @@ end
 -- free-cam mod may read them), as does slot 2 with nothing registered on it.
 assert(same(live(9, 0), DEFAULTS[9 * 65536]) and same(live(12, 0), DEFAULTS[12 * 65536]))
 assert(not saved:find('action 9:0', 1, true) and not saved:find('action 12:0', 1, true))
+assert(same(defaults(12, 1), {tab}) and #defaults(10, 0) == 0 and #defaults(10, 2) == 0)
+assert(same(defaults(9, 0), DEFAULTS[9 * 65536]) and same(defaults(12, 0), DEFAULTS[12 * 65536]))
 print('First use: inherited developer defaults cleared once, provenance saved, unused actions untouched OK')
+
+-- Reproduced route: Revert restores just keyboard/mouse, not the original
+-- four-device list. Its sanitized reset source must never restore left click.
+page(true)
+frame(0.016)
+revert(12, 1, {MOUSE, KEYBOARD})
+assert(same(live(12, 1), {tab}))
+revert(12, 1, {DUALSHOCK, XBOX})
+assert(same(live(12, 1), {tab}), 'controller Revert cannot restore inherited map buttons either')
+page(false)
+frame(SWEEP)
+print('Per-page keyboard/mouse and controller Revert leave only Tab OK')
 
 -- The audit's reproduction (2026-10-03): a keyboard mapping equal to the
 -- action's shipped default, chosen on a binding page, was deleted. Now the
@@ -236,7 +278,18 @@ assert(#live(10, 0) == 0 and same(live(10, 3), DEFAULTS[10 * 65536 + 3]) and sam
 assert(st2.assignments.session == 2)
 print('Next session: the lists the sweep left are remembered; returning defaults are cleaned again OK')
 
--- A Revert on a binding page restores every action's shipped defaults at once:
+-- A legacy release could remember the leaked {Tab, left click} as a player's
+-- list. Preserve that provenance until the player explicitly chooses Revert;
+-- one keyboard/mouse Revert now repairs it using the sanitized reset source.
+page(true)
+frame2(0.016)
+revert(12, 1, {MOUSE, KEYBOARD})
+assert(same(live(12, 1), {tab}))
+page(false)
+frame2(SWEEP)
+print('One explicit Revert repairs a remembered legacy mouse binding OK')
+
+-- A raw config reload on a binding page restores full shipped lists at once:
 -- they are cleaned again, Tab stays. auto.3 is back at numpad 1, its default
 -- and the list the player chose: unchanged, so it stays.
 page(true)
@@ -317,4 +370,85 @@ assert(menu8.ready() and menu8.revision == revision + 1)
 frame8(0)
 assert(menu8.revision == revision + 1, 'once')
 print('revision grows when native input becomes ready OK')
+
+-- A page can open before the next periodic sweep, or stay open during native
+-- default re-parsing. Prepare its Revert source without changing live custom
+-- mappings. A late registration gets the same protection on its next update.
+remove_files()
+set_live(12, 1, DEFAULTS[12 * 65536 + 1])
+local menu9, st9, frame9 = session()
+assert(menu9.register_binding('map', 0xb46c8096, 1))
+frame9(SWEEP)
+set_live(12, 1, {tab, left_click})
+frame9(SWEEP)
+set_mappings(record(default_map, 12, 1), DEFAULTS[12 * 65536 + 1])
+page(true)
+frame9(0)
+assert(same(defaults(12, 1), {tab}) and same(live(12, 1), {tab, left_click}))
+assert(menu9.register_binding('late.slot', 0x3ef7f7ad, 2))
+frame9(0)
+assert(#defaults(12, 0) == 0 and same(live(12, 0), DEFAULTS[12 * 65536]))
+set_mappings(record(default_map, 12, 1), DEFAULTS[12 * 65536 + 1])
+frame9(0)
+assert(same(defaults(12, 1), {tab}) and same(live(12, 1), {tab, left_click}))
+revert(12, 1, {MOUSE, KEYBOARD})
+assert(same(live(12, 1), {tab}))
+page(false)
+frame9(0)
+-- A raw full list restored later still matches the private original snapshot.
+set_live(12, 1, DEFAULTS[12 * 65536 + 1])
+assert(menu9.is_down('map') == false and same(live(12, 1), {tab}))
+print('Page entry, an open-page re-parse and late registration prepare only native reset defaults OK')
+
+-- A transient defaults read failure must leave both maps and the single-key
+-- capture's page provenance alone. Recovery retries and preserves the capture
+-- even though it equals an original developer default.
+assert(menu9.register_binding('capture', 'Capture'))
+local capture = st9.registry.capture
+assert(capture.code == 10 * 65536)
+frame9(SWEEP)
+local capture_key = mapping(KEYBOARD, 81, HOLD)
+-- Make the found list a single native default: it is a valid capture too.
+local original_capture = {capture_key}
+set_mappings(record(default_map, 10, 0), original_capture)
+set_live(10, 0, original_capture)
+frame9(SWEEP)
+assert(#live(10, 0) == 0)
+page(true)
+frame9(0)
+set_live(10, 0, original_capture)
+local prepare = upvalue(upvalue(upvalue(frame9, 'step'), 'sanitize_defaults'), 'prepare_defaults')
+local read_record = upvalue(prepare, 'read_record')
+local real_read, read_index
+for index = 1, 80 do
+    local name, value = debug.getupvalue(read_record, index)
+    if name == 'read_into' then real_read, read_index = value, index; break end
+end
+assert(real_read)
+local failed_bucket = record(default_map, 10, 0)
+debug.setupvalue(read_record, read_index, function(address, ...)
+    if address == failed_bucket then return false end
+    return real_read(address, ...)
+end)
+page(false)
+frame9(0)
+assert(st9.page_visited and same(live(10, 0), original_capture))
+debug.setupvalue(read_record, read_index, real_read)
+frame9(SWEEP)
+assert(not st9.page_visited and same(live(10, 0), original_capture))
+-- A failed page-entry read also recovers while the page stays open.
+set_mappings(record(default_map, 10, 0), original_capture)
+debug.setupvalue(read_record, read_index, function(address, ...)
+    if address == failed_bucket then return false end
+    return real_read(address, ...)
+end)
+page(true)
+frame9(0)
+assert(same(defaults(10, 0), original_capture) and same(live(10, 0), original_capture))
+debug.setupvalue(read_record, read_index, real_read)
+frame9(0)
+assert(#defaults(10, 0) == 0 and same(live(10, 0), original_capture))
+page(false)
+frame9(0)
+print('Failed defaults reads leave live bindings/provenance intact and retry safely OK')
 remove_files()

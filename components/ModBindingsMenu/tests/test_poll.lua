@@ -53,7 +53,7 @@ end
 -- 20-byte mappings: flags (device, Button, any slot, trigger), key, two unset
 -- bytes, the trigger again, combine, threshold.
 local PRESS, HOLD, REPEAT = 0, 2, 8
-local KEYBOARD, MOUSE, XBOX, DUALSHOCK = 3, 2, 5, 6
+local KEYBOARD, MOUSE, XBOX, DUALSHOCK = 3, 4, 2, 1
 local function mapping(device, key, trigger)
     trigger = trigger or PRESS
     local cell = ffi.new('uint8_t[20]')

@@ -1,6 +1,9 @@
+- Mod Bindings Menu v2.2.1: prevent Revert from restoring hidden developer mouse and controller inputs that could make mission-selection clicks reopen the Galactic Map with Ship Station Hotkeys.
+- Existing custom bindings are preserved when updating. If mission selection is still affected after updating, open the MODS tab on the affected device's binding page (Mouse & Keyboard or Controller) and choose Revert. This restores clean defaults and also resets custom bindings on that tab for that device; set any custom bindings again afterward.
 - Mod Bindings Menu v2.2.1: the MODS tab's first section header is no longer blank in game languages other than English, Japanese and Simplified Chinese.
 - Mod Bindings Menu v2.2.1: every game text ID it borrows now exists in all of the game's languages; up to 59 different texts show on the MODS tab at once, down from 65.
-- Mod Bindings Menu v2.2.1: per-frame work is unchanged from v2.2, measured there at 0.008 ms per frame in missions.
+- Mod Bindings Menu v2.2.1: ordinary gameplay idle checks and binding polling are unchanged. The fix adds checks while a binding page is open and during the periodic binding sweep; their cost has not been measured in game.
+- This remains a pre-release. Offline regression and package checks passed; live validation of the binding reset fix is pending.
 - Mod Bindings Menu v2.2.1: not yet checked in game in a language other than English.
 - The other twenty mods are unchanged from v41.
 - Twenty-one independent options; use one copy of each mod: its standalone package or the pack option.

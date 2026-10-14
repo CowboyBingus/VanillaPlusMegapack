@@ -309,7 +309,7 @@ mbm.read_into, mbm.map_bucket = read_into, map_bucket
 mbm.BINDING_MAP, mbm.DEFAULTS_MAP, mbm.RECORD_SIZE = BINDING_MAP, DEFAULTS_MAP, RECORD_SIZE
 mbm.MAPPINGS_OFFSET, mbm.MAPPING_SIZE, mbm.MAX_MAPPINGS = MAPPINGS_OFFSET, MAPPING_SIZE, MAX_MAPPINGS
 mbm_files.sweep(mbm)
-local sweep_bindings = mbm.sweep_bindings
+local sweep_bindings, sanitize_defaults = mbm.sweep_bindings, mbm.sanitize_defaults
 
 local function log_input_probe()
     if state.input_logged then return end
@@ -569,6 +569,7 @@ function api.register_binding(id, label, slot, options)
     state.registry[id] = record
     state.order[#state.order + 1] = record
     state.used[code] = record
+    state.defaults_pending = true
     table.sort(state.order, function(a, b)
         return state.code_order[a.code] < state.code_order[b.code]
     end)
@@ -866,8 +867,11 @@ end
 -- is open, so the page's rows are left alone), and whatever the page borrowed
 -- goes back.
 local function away_frame()
-    if state.page_open then state.page_open, state.page_visited = false, true end
-    if state.sweep_timer <= 0 then
+    if state.page_open then
+        state.page_open, state.page_visited = false, true
+        state.sweep_timer = 0
+    end
+    if state.sweep_timer <= 0 or state.defaults_pending then
         state.sweep_timer = SWEEP_INTERVAL
         sweep_bindings()
     end
@@ -887,13 +891,23 @@ local function step(dt)
     activate_actions()
     if not state.build_rows then return end
     local screen = active_screen()
+    state.sweep_timer = state.sweep_timer - seconds
+    -- Revert reads native defaults while the page is open. Prepare them before
+    -- its rows are used, also when a binding registers on an already open page.
+    -- This never changes a live binding being captured. Check each page frame
+    -- so a native re-parse cannot leave a two-second window for Revert. Six
+    -- bindings add six reads (~6-12 us using the usual read cost; unmeasured
+    -- here in game), no allocation after warmup and no extra gameplay reads.
+    if screen then
+        sanitize_defaults()
+        state.sweep_timer = SWEEP_INTERVAL
+    end
     if screen and not state.page_open then
         -- A binding page just opened: the game's Text Language may have changed
         -- since the last one, so the texts are refreshed here, once.
         state.page_open = true
         translation.refresh()
     end
-    state.sweep_timer = state.sweep_timer - seconds
     if screen then page_frame(screen, seconds) else away_frame() end
 end
 
