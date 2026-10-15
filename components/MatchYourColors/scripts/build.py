@@ -75,6 +75,7 @@ SOURCES = [('T', 'bingus_text.lua'), ('runtime', 'bingus_runtime.lua'), ('runtim
            ('WeaponData', 'weapon_data.lua'), ('Weapons', 'weapons.lua'),
            ('Cache', 'cache.lua'), ('Capes', 'capes.lua'), ('Engine', 'engine.lua'), ('Avatar', 'avatar.lua'),
            ('Preview', 'preview.lua'), ('Recolor', 'recolor.lua'), ('Bindings', 'bindings.lua'), ('Loadout', 'loadout.lua'), ('Sheets', 'sheets.lua'), ('Sync', 'sync.lua'), ('Remote', 'remote.lua'),
+           ('Lineup', 'lineup.lua'),
            ('Addon', 'addon.lua')]
 VENDORED = ('bingus_text.lua', 'bingus_runtime.lua', 'bingus_memory.lua')
 # Names the mod's own sources must never contain: code or thread creation, page protection, library loading,
@@ -120,7 +121,8 @@ def assemble(test: bool = False) -> bytes:
                  'Sheets = Sheets, Bindings = Bindings, '
                  'Cache = Cache, Appearance = Appearance, AppearanceData = AppearanceData, Schemes = Schemes, '
                  'Capes = Capes, '
-                 'Sync = Sync, Remote = Remote, Weapons = Weapons, Loadout = Loadout, WeaponData = WeaponData})')
+                 'Sync = Sync, Remote = Remote, Lineup = Lineup, Weapons = Weapons, Loadout = Loadout, '
+                 'WeaponData = WeaponData})')
     if test:
         lines.append("rawset(_G, 'MatchYourColorsTest', instance) -- lint-ok: R8 live test build only, never published")
     text = '\n'.join(lines) + '\n'

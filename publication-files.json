@@ -383,6 +383,7 @@
   "components/MatchYourColors/src/engine.lua",
   "components/MatchYourColors/src/files.lua",
   "components/MatchYourColors/src/kits.lua",
+  "components/MatchYourColors/src/lineup.lua",
   "components/MatchYourColors/src/loadout.lua",
   "components/MatchYourColors/src/matcher.lua",
   "components/MatchYourColors/src/patches.lua",

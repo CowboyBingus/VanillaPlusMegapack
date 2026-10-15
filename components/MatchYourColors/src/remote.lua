@@ -19,7 +19,8 @@ local EMPTY = {}
 
 -- m: {Avatar, Recolor, Engine, Sync, memory, native, pool, game, read (Avatar.reader), note, records_same (the
 -- addon's: whether a result was made of the kit records as they read now), Loadout and Weapons (optional: their
--- weapons, v1.5)}.
+-- weapons, v1.5)}. src/lineup.lua sets session_text (the session's peers, for the note on a member that names no
+-- player here).
 -- Recolor Weapons (v1.5): a player whose settings carry it (cbmyc2 flag 16, or Recolor Squadmates' own settings) gets
 -- their weapons recolored too, a src/loadout.lua of their own: on their watch turn (1 frame in WATCH_FRAMES, round
 -- robin) their weapon in hand's LUT binding and inventory row are read (2 reads), so a reload of theirs shows their
@@ -118,7 +119,22 @@ function Remote.new(m)
     -- Squadmates); its key, or nil when it has no Helldiver here and no entry yet (noted once until it has one: a lobby
     -- member whose peer id names no player here, the first two-player test's question, 2026-10-07). An entry whose
     -- player has none now (dead) is kept, absent.
-    local unmatched = {}
+    -- missing: a member whose peer id names none of the players here while other players' Helldivers are (the first
+    -- real squad, 2026-10-15: three squadmates, none recolored in the mission), noted with the players' peer ids once
+    -- per member and player count.
+    local unmatched, missing = {}, {}
+    local function not_found(key, players, mine)
+        if not unmatched[key] then
+            unmatched[key] = true
+            m.note('Sync: ' .. key .. (mine and ' takes your settings' or ' shares settings')
+                   .. '; no Helldiver of theirs found here yet.')
+        end
+        if #players > 1 and missing[key] ~= #players then
+            missing[key] = #players
+            m.note('Sync: ' .. key .. ' is none of the players here: ' .. Avatar.players_text(m.read, m.game)
+                   .. (self.session_text and '; session: ' .. self.session_text(m.read, m.game) or '') .. '.')
+        end
+    end
     local function take(players, member, settings, frame, mine)
         local player = player_of(players, member)
         local key = key_of(member)
@@ -128,14 +144,9 @@ function Remote.new(m)
                 e.absent = true
                 return key
             end
-            if not unmatched[key] then
-                unmatched[key] = true
-                m.note('Sync: ' .. key .. (mine and ' takes your settings' or ' shares settings')
-                       .. '; no Helldiver of theirs found here yet.')
-            end
-            return nil
+            return not_found(key, players, mine)
         end
-        unmatched[key] = nil
+        unmatched[key], missing[key] = nil, nil
         e = e or add(key)
         e.mine, e.absent = mine, nil
         local new_settings = not e.settings or not same(e.settings, settings)
@@ -171,6 +182,18 @@ function Remote.new(m)
         if mine and (everyone or not own) then return mine end
         return own
     end
+    -- The squad cards (src/lineup.lua): wanted, every member's settings at the last poll by key (with or without a
+    -- Helldiver here; a member whose value could not be read keeps what it had), mine (this player's for squadmates)
+    -- and local_key (the local member's, for the test build's loopback). The two tables swap at each poll.
+    self.wanted, self.same = {}, same
+    local spare = {}
+    local function want(member, mine, everyone)
+        local key = key_of(member)
+        if member['local'] then self.local_key = key end
+        local settings = settings_for(member, mine, everyone)
+        if member.failed and self.wanted[key] ~= nil then settings = self.wanted[key] end
+        spare[key] = settings or nil
+    end
     local function visit(member, frame, mine, everyone)
         if member.failed and self.entries[key_of(member)] then return key_of(member) end
         local settings = settings_for(member, mine, everyone)
@@ -179,13 +202,16 @@ function Remote.new(m)
         return take(poll.players, member, settings, frame, settings == mine)
     end
     function self.update(frame, members, mine, everyone)
-        self.frame = frame
+        self.frame, self.mine = frame, mine
         poll.players = nil
         for key in pairs(seen) do seen[key] = nil end
+        for key in pairs(spare) do spare[key] = nil end
         for _, member in ipairs(members or EMPTY) do
+            want(member, mine, everyone)
             local key = visit(member, frame, mine, everyone)
             if key then seen[key] = true end
         end
+        self.wanted, spare = spare, self.wanted
         for i = #gone, 1, -1 do gone[i] = nil end
         for key in pairs(self.entries) do
             if not seen[key] then gone[#gone + 1] = key end
@@ -317,6 +343,7 @@ function Remote.new(m)
         local keys = {}
         for key in pairs(self.entries) do keys[#keys + 1] = key end
         for _, key in ipairs(keys) do drop(key, frame) end
+        for key in pairs(self.wanted) do self.wanted[key] = nil end
         self.pending = false
     end
     return self

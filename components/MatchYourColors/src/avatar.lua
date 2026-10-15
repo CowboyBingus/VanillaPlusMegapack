@@ -14,7 +14,8 @@
 -- +64, 132-byte entries from +68 with the same arrays at +12/+52/+92).
 --
 -- The local player's records drive the recolor; other players' records are read only for Sync With Mod Users
--- (Avatar.players, Avatar.resolve_remote; src/remote.lua). Other players' preview slots are never touched.
+-- (Avatar.players, Avatar.resolve_remote, Avatar.players_text; src/remote.lua) and the squad cards
+-- (Avatar.others_desired; src/lineup.lua). Other players' preview slots here (Previews) are never touched.
 -- Maps are open-addressing u32 tables {data +0, capacity +8, empty key +12, multiplier +16} probed at
 -- (capacity - 1) & (key * multiplier + i), as the game probes them.
 local ffi = require('ffi')
@@ -24,7 +25,7 @@ local Avatar = {}
 Avatar.PLAYERS, Avatar.CUSTOMIZATION, Avatar.ENTITIES, Avatar.AVATARS, Avatar.PREVIEWS =
     0x3326468, 0x33264F8, 0x346BF98, 0x3326D20, 0x346D580
 local P_COUNT, P_ENTITIES, P_MAP, P_PEERS, P_UNITS, P_UI_SLOT = 132, 232, 208, 712, 936, 948
-local C_MAP, C_APPLIED, C_APPLIED_SIZE = 2352, 2412, 68
+local C_MAP, C_APPLIED, C_APPLIED_SIZE, C_DESIRED, C_DESIRED_SIZE = 2352, 2412, 68, 2684, 64
 local E_MAP, E_RECORDS = 0xF22EC8, 0xF32F18
 local A_MAP, A_COUNT, A_RECORDS, A_RECORD_SIZE, A_UNITS = 248, 0x6c, 5532272, 440, 220
 local V_SLOTS, V_SLOT_SIZE, V_SLOT_COUNT, V_COUNT, V_ENTRIES, V_ENTRY_SIZE, V_UNITS = 2080, 2184, 5, 64, 68, 132, 12
@@ -225,6 +226,65 @@ function Avatar.resolve_remote(read, game, player, out)
     return out
 end
 
+-- A player's desired kits, the loadout the squad cards show (the card widget 0x18a17d0 reads them so): helmet, armor
+-- and cape of customization record +2684 + 64 * r (+4, +12, +8), or nil. About 5 reads.
+function Avatar.desired_kits(read, game, player)
+    local customization = pointer(read, game + Avatar.CUSTOMIZATION)
+    local record = customization and Avatar.lookup(read, customization + C_MAP, player)
+    local b = record and read(customization + C_DESIRED + C_DESIRED_SIZE * record, 16)
+    if not b then return nil end
+    return u32(b, 4), u32(b, 12), u32(b, 8)
+end
+
+-- The desired kits of every player not owned by this machine (with or without a Helldiver here) into out (reused):
+-- out[i] = {helmet, armor, cape}; returns their count. About 8 reads a player. The squad cards (src/lineup.lua) compare
+-- a card's kits with them: a player's peer id here (+712) is set once, when the player is added, from its connection
+-- (0 when that is not known yet: game.dll 0x6054f0), so it is not used to find the card's player.
+function Avatar.others_desired(read, game, out)
+    local players = pointer(read, game + Avatar.PLAYERS)
+    local count = players and word(read, players + P_COUNT)
+    if not count or count > MAX_PLAYERS then return 0 end
+    local n = 0
+    for i = 0, count - 1 do
+        local entity = pointer(read, players + P_ENTITIES + 8 * i)
+        local b = entity and read(entity, 24)
+        if b and b[20] % 2 == 0 then
+            local helmet, armor, cape = Avatar.desired_kits(read, game, u32(b, 8))
+            if helmet then
+                n = n + 1
+                local kits = out[n] or {}
+                kits[1], kits[2], kits[3], out[n] = helmet, armor, cape, kits
+            end
+        end
+    end
+    return n
+end
+
+-- Every player as the player manager holds it, for the log ('index 0 peer 00c0ffee5eed0001 unit 97 slot 1 (this
+-- machine's)'): when a lobby member names no player here (src/remote.lua), the line shows what the peer ids are.
+local function player_text(read, players, i)
+    local entity = pointer(read, players + P_ENTITIES + 8 * i)
+    local b = entity and read(entity, 24)
+    if not b then return nil end
+    local id, owned = u32(b, 8), b[20] % 2 == 1
+    local index = Avatar.lookup(read, players + P_MAP, id)
+    if not index or index >= MAX_PLAYERS then return nil end
+    local peer = read(players + P_PEERS + 56 * index, 8)
+    local low, high = peer and u32(peer, 0) or 0, peer and u32(peer, 4) or 0
+    return string.format('index %d peer %08x%08x unit %x slot %d%s', index, high, low,
+        word(read, players + P_UNITS + 32 * index) or 0, word(read, players + P_UI_SLOT + 32 * index) or -1,
+        owned and " (this machine's)" or '')
+end
+
+function Avatar.players_text(read, game)
+    local players = pointer(read, game + Avatar.PLAYERS)
+    local count = players and word(read, players + P_COUNT)
+    if not count or count > MAX_PLAYERS then return 'no player manager' end
+    local parts = {}
+    for i = 0, count - 1 do parts[#parts + 1] = player_text(read, players, i) end
+    return #parts > 0 and table.concat(parts, ', ') or 'no players'
+end
+
 -- A copy of an identity (resolve may refill the table it was given).
 function Avatar.copy(identity)
     local out = {}
@@ -327,8 +387,8 @@ end
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({low32_product, Avatar.reader, pointer, word, Avatar.lookup, local_player, applied_kits, avatar_record,
-        Avatar.resolve, player_at, Avatar.players, Avatar.resolve_remote, Avatar.copy, Avatar.preview_slot,
-        Avatar.units}) do
+        Avatar.resolve, player_at, Avatar.players, Avatar.resolve_remote, Avatar.desired_kits, Avatar.others_desired,
+        player_text, Avatar.players_text, Avatar.copy, Avatar.preview_slot, Avatar.units}) do
         jit.off(fn, true)
     end
 end

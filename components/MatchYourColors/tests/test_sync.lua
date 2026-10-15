@@ -461,6 +461,15 @@ check('the local member never drives a recolor without the loopback; unreadable 
         end
     end
     assert(count == 1, 'the stranger noted once: ' .. count)
+    -- other players' Helldivers are here: the players and their peer ids noted once too (the first real squad,
+    -- 2026-10-15: three squadmates, none recolored; a player's peer id can be 0, game.dll 0x6054f0)
+    local players = {}
+    for _, line in ipairs(w.lines) do
+        if line:find('Sync: 0000000000abcdef is none of the players here: ', 1, true) then players[#players + 1] = line end
+    end
+    assert(#players == 1 and players[1]:find("index 0 peer 00c0ffee5eed0001 unit 96 slot 1 (this machine's), "
+           .. 'index 1 peer 0000000000001234 unit 97 slot 3; session: no session.', 1, true),
+           'the players and the session noted once: ' .. tostring(players[1]))
 end)
 
 check('a failing job for another player is tried FAILURE_LIMIT times, then left until its settings change', function()
@@ -670,6 +679,239 @@ check('Recolor Squadmates: the calls a squadmate without the mod adds are a shar
                .. budget.describe(expected))
     end
     assert(polls == 5, polls .. ' polls')
+end)
+
+-- The squad cards (src/lineup.lua; user 2026-10-15, joining a mission in progress: "The squad preview window is
+-- broken. None of the squad matching appears there."). The Armory's slot (pm + 948: 1 here) held a squadmate's card,
+-- which v1.5 took for this player's preview and recolored with this player's options; this player's own card (session
+-- slot 2) and every other card kept their colors. Agreed outcome: each card shows its player's settings.
+local ARMOR_LUT = 'a007a73e4082430e'
+local LOCAL_PEER, REMOTE_PEER = {0x5eed0001, 0x00c0ffee}, {0x1234, 0}
+local LOCAL_KITS = {helmet = 0xa5574ac2, armor = 0x0ade6719, body = 0, cape = 0x72492837}
+local REMOTE_KITS = {helmet = REMOTE_HELMET, armor = REMOTE_ARMOR, body = 0, cape = 0x72492837}
+-- The loadout screen's world: the session lists the squadmate in card_slot and this player in own_slot; card units
+-- 0x400 (helmet) and 0x401 (armor) for the squadmate's card, 0x410 for this player's, 0x420 for a stranger's.
+local function squad_screen(members, card_slot, own_slot)
+    local w = setup({ui = true, lobby = {local_id = LOCAL_ID, members = members}})
+    Fake.session(w.space, LOCAL_PEER, {{REMOTE_PEER[1], REMOTE_PEER[2], card_slot},
+                                       {LOCAL_PEER[1], LOCAL_PEER[2], own_slot}})
+    Fake.desired(w.space, 0, LOCAL_KITS)
+    Fake.desired(w.space, 1, REMOTE_KITS)
+    w.engine.unit(0x400, HELMET_LUT) w.engine.unit(0x401, ARMOR_LUT)
+    w.engine.unit(0x410, HELMET_LUT) w.engine.unit(0x420, HELMET_LUT)
+    w.frames(5)
+    return w
+end
+local function show_card(w, slot, kits, unit)
+    Fake.show_ui(w.space, slot, kits, {[{0, 0}] = unit, [{0, 2}] = unit == 0x400 and 0x401 or nil})
+end
+local function card_requests(w, from)
+    local out = {}
+    for i = from + 1, #requests do
+        local r = requests[i]
+        if r.target == 'card' or r.target == 'ui' then out[#out + 1] = r end
+    end
+    return out
+end
+
+check('the squad cards (reported 2026-10-15): the Armory\'s slot held a squadmate\'s card; it takes their settings '
+      .. '(yours with Everyone), your own card in its session slot takes your options, the log names the owners; Off '
+      .. 'gives their card its colors back, a closed screen drops the cards', function()
+    local w = squad_screen(without_mod(), 1, 2)
+    w.instance.set_option('squad', EVERYONE)
+    local count = #requests
+    show_card(w, 1, REMOTE_KITS, 0x400)
+    show_card(w, 2, LOCAL_KITS, 0x410)
+    w.frames(20)
+    local card, own, wrong
+    for _, r in ipairs(card_requests(w, count)) do
+        if r.target == 'card' then card = r end
+        if r.target == 'ui' and r.helmet == LOCAL_KITS.helmet then own = r end
+        if r.target == 'ui' and r.helmet == REMOTE_HELMET then wrong = r end
+    end
+    assert(card and card.key == REMOTE_KEY and card.slot == 1 and card.helmet == REMOTE_HELMET
+           and card.mode == Recolor.HELMET_FROM_ARMOR, 'their card: a job of its own, with your settings')
+    assert(own, 'your card: your preview\'s job, for your kits')
+    assert(not wrong, 'their card never takes your preview\'s job (v1.5 did)')
+    assert(w.bound(0x400)[1] ~= vanilla(w), 'their card recolored')
+    assert(w.bound(0x410)[1] ~= vanilla(w), 'your card recolored')
+    assert(w.instance.state.ui.where.slot == 2, 'your preview watched in your session slot')
+    assert(logged(w, 'Squad cards: slot 1 ' .. REMOTE_KEY .. ' (your settings), slot 2 you.'), 'owners logged')
+    assert(logged(w, 'Squad card ' .. REMOTE_KEY .. ' (slot 1): '), 'the card logged')
+    w.instance.set_option('squad', 1) -- they share nothing: their card in its own colors after the next poll
+    w.frames(4)
+    for _, object in ipairs(w.bound(0x400)) do assert(object == vanilla(w), 'off: their card in its own colors') end
+    assert(w.bound(0x410)[1] ~= vanilla(w), 'your card still recolored')
+    w.instance.set_option('squad', EVERYONE)
+    w.frames(12)
+    assert(w.bound(0x400)[1] ~= vanilla(w), 'on again')
+    Fake.show_ui(w.space, 1, nil)
+    Fake.show_ui(w.space, 2, nil)
+    w.frames(4)
+    assert(not next(w.instance.lineup.cards), 'the cards dropped')
+    for _, object in ipairs(w.bound(0x400)) do assert(object == vanilla(w), 'their card given back') end
+end)
+
+check('a squad card of a squadmate who shares takes their own settings with Recolor Squadmates off; a shown slot '
+      .. 'listed for nobody (not the Armory\'s) is left as it is', function()
+    local w = squad_screen(with_remote('v=1;m=3;f=3;s=0;'), 3, 2) -- they chose Armor Matches Helmet
+    local count = #requests
+    show_card(w, 3, REMOTE_KITS, 0x400)
+    show_card(w, 2, LOCAL_KITS, 0x410)
+    show_card(w, 0, {helmet = 0x33333333, armor = 0x44444444, body = 0}, 0x420)
+    w.frames(20)
+    local card
+    for _, r in ipairs(card_requests(w, count)) do
+        if r.target == 'card' then card = r end
+        assert(r.helmet ~= 0x33333333, 'nothing planned for the stranger\'s slot')
+    end
+    assert(card and card.slot == 3 and card.mode == Recolor.ARMOR_FROM_HELMET, 'their own mode')
+    assert(w.bound(0x401)[1] ~= w.engine.vanilla[ARMOR_LUT], 'their card\'s armor recolored')
+    for _, object in ipairs(w.bound(0x420)) do assert(object == vanilla(w), 'the stranger\'s slot as it is') end
+    assert(logged(w, 'Squad cards: slot 2 you, slot 3 ' .. REMOTE_KEY .. ' (shared settings).'), 'owners logged')
+    -- their value fails to read: the card keeps their settings (no flip to yours and back)
+    local before = #requests
+    w.instance.set_option('squad', EVERYONE)
+    w.frames(12)
+    local yours
+    for _, r in ipairs(card_requests(w, before)) do if r.target == 'card' then yours = r end end
+    assert(yours and yours.mode == Recolor.HELMET_FROM_ARMOR, 'Everyone: their card in yours')
+    w.instance.set_option('squad', 1)
+    w.frames(12)
+    local count = #requests
+    w.lobby.members[2].fail = true
+    w.frames(240)
+    for _, r in ipairs(card_requests(w, count)) do assert(r.target ~= 'card', 'no card job while the read fails') end
+    assert(w.instance.lineup.cards[3].settings.mode == Recolor.ARMOR_FROM_HELMET, 'their own settings kept')
+end)
+
+check('a squadmate\'s card shown alone in the Armory\'s slot (your own card not spawned yet) is theirs: your preview '
+      .. 'leaves it to its card', function()
+    local w = squad_screen(without_mod(), 1, 2)
+    w.instance.set_option('squad', EVERYONE)
+    local count = #requests
+    show_card(w, 1, REMOTE_KITS, 0x400)
+    w.frames(12)
+    local card
+    for _, r in ipairs(card_requests(w, count)) do
+        assert(r.target ~= 'ui' or r.helmet ~= REMOTE_HELMET, 'no preview job for their card')
+        if r.target == 'card' then card = r end
+    end
+    assert(card and card.slot == 1, 'their card\'s job')
+    assert(not w.instance.state.ui.shown, 'your preview not shown')
+end)
+
+check('a squad card\'s new units with the same kits and settings are bound to its plan without a job; a card that '
+      .. 'changes while its job runs gets the plan of what it shows, not the one the job made', function()
+    local w = squad_screen(without_mod(), 1, 2)
+    w.instance.set_option('squad', EVERYONE)
+    show_card(w, 1, REMOTE_KITS, 0x400)
+    w.frames(12)
+    local texture, count = w.bound(0x400)[1], #requests
+    assert(texture ~= vanilla(w), 'recolored')
+    w.engine.unit(0x402, HELMET_LUT)
+    w.engine.units[0x400].alive, w.engine.units[0x401].alive = false, false
+    Fake.show_ui(w.space, 1, REMOTE_KITS, {[{0, 0}] = 0x402}) -- the card spawned again (its old units gone)
+    w.frames(4)
+    assert(w.bound(0x402)[1] == texture, 'the new unit bound to the same plan')
+    for _, r in ipairs(card_requests(w, count)) do assert(r.target ~= 'card', 'no job: rebound') end
+    -- the game puts the original texture back: the next binding check finds it and the card is recolored again
+    for _, m in ipairs(w.engine.units[0x402].materials) do w.space.u64(w.engine.entry(m.material) + 8, vanilla(w)) end
+    w.frames(40)
+    assert(w.bound(0x402)[1] ~= vanilla(w), 'recolored again after a binding check')
+    -- another outfit while its job runs: the result is not applied to what it no longer shows
+    local other = {helmet = 0x0b0b0b0b, armor = REMOTE_ARMOR, body = 0, cape = 0x72492837}
+    Fake.desired(w.space, 1, other)
+    w.engine.unit(0x403, HELMET_LUT)
+    Fake.show_ui(w.space, 1, other, {[{0, 0}] = 0x403})
+    while not (w.instance.state.request and w.instance.state.request.target == 'card') do w.frame() end
+    local third = {helmet = 0x0c0c0c0c, armor = REMOTE_ARMOR, body = 0, cape = 0x72492837}
+    Fake.desired(w.space, 1, third)
+    w.engine.unit(0x404, HELMET_LUT)
+    Fake.show_ui(w.space, 1, third, {[{0, 0}] = 0x404})
+    local lines = #w.lines
+    w.frames(12)
+    local applied = 0
+    for i = lines + 1, #w.lines do
+        if w.lines[i]:find('Squad card ' .. REMOTE_KEY .. ' (slot 1): ', 1, true) then applied = applied + 1 end
+    end
+    assert(applied == 1 and requests[#requests].helmet == third.helmet, 'one apply, for the outfit shown: ' .. applied)
+end)
+
+check('a slot the session gives a squadmate but showing other kits than theirs, in the Armory\'s slot, is the '
+      .. 'player\'s own preview (the Armory there)', function()
+    local w = squad_screen(without_mod(), 1, 2)
+    w.instance.set_option('squad', EVERYONE)
+    local count = #requests
+    local armory = {helmet = 0x0b0b0b0b, armor = 0x0ade6719, body = 0, cape = 0x72492837}
+    show_card(w, 1, armory, 0x410)
+    w.frames(12)
+    local own
+    for _, r in ipairs(card_requests(w, count)) do
+        assert(r.target ~= 'card', 'no card job')
+        if r.target == 'ui' and r.helmet == armory.helmet then own = r end
+    end
+    assert(own and w.instance.state.ui.where.slot == 1, 'your preview, in the Armory\'s slot')
+end)
+
+check('the squad cards\' calls: the frame the cards appear reads the owners (the session, the squadmate\'s player and '
+      .. 'desired kits: 9 reads more than the own card alone); settled, every frame makes the own card\'s calls but the '
+      .. 'binding checks, which read one probe of the card (2 reads)', function()
+    local function frames(cards)
+        local w = squad_screen(without_mod(), 1, 2)
+        w.instance.set_option('squad', EVERYONE)
+        w.frames(200)
+        while w.instance.state.frame % 4 ~= 3 do w.frame() end -- the next frame is a UI gate frame
+        if cards then show_card(w, 1, REMOTE_KITS, 0x400) end
+        show_card(w, 2, LOCAL_KITS, 0x410)
+        local first = w.frame()
+        w.frames(60)
+        local kinds, probes = {}, 0
+        for _ = 1, 600 do
+            local f = w.frame()
+            if cards and (f.read_into == 8 or f.read_into == 9) then
+                f.read_into, probes = f.read_into - 2, probes + 1
+            end
+            local text = budget.describe(f)
+            kinds[text] = (kinds[text] or 0) + 1
+        end
+        return first, kinds, probes
+    end
+    local own_first, own = frames(false)
+    local first, all, probes = frames(true)
+    assert(probes == 20, 'the card probed on every binding check: ' .. probes)
+    assert(first.read_into == own_first.read_into + 9, 'the owners: ' .. budget.describe(first) .. ' against '
+           .. budget.describe(own_first))
+    for text, n in pairs(all) do assert(own[text] == n, text .. ': ' .. n .. ' frames, ' .. tostring(own[text])) end
+    for text, n in pairs(own) do assert(all[text] == n, text .. ': ' .. n .. ' frames alone') end
+    assert(own['read_into=6'] == 10 and own['read_into=7'] == 10, 'the binding checks of 600 frames')
+end)
+
+check('loopback (test build): the own preview goes through the squad-card path with the own shared value', function()
+    local w = setup({ui = true, lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}}}})
+    w.engine.unit(0x410, HELMET_LUT)
+    w.frames(5)
+    w.instance.set_loopback(true)
+    w.frames(Sync.STEADY_FRAMES + 2 * Sync.POLL_FRAMES)
+    local count = #requests
+    show_card(w, 1, LOCAL_KITS, 0x410)
+    w.frames(16)
+    local card
+    for _, r in ipairs(card_requests(w, count)) do
+        assert(r.target ~= 'ui' or r.mode == Recolor.OFF, 'no preview job of its own')
+        if r.target == 'card' then card = r end
+    end
+    assert(card and card.key == LOCAL_KEY and card.slot == 1, 'the card path, keyed by the local member')
+    assert(w.bound(0x410)[1] ~= vanilla(w), 'recolored')
+    -- loopback off: the preview's own path recolors it again (live 2026-10-15: it stayed in its own colors, the
+    -- preview's path hidden while the card had the slot and nothing on screen changing after)
+    count = #requests
+    w.instance.set_loopback(false)
+    w.frames(Sync.POLL_FRAMES + 12)
+    local own
+    for _, r in ipairs(card_requests(w, count)) do if r.target == 'ui' and r.mode ~= Recolor.OFF then own = r end end
+    assert(own and not next(w.instance.lineup.cards), 'the preview\'s own job, no card')
+    assert(w.bound(0x410)[1] ~= vanilla(w) and #w.instance.ui_controller.bindings > 0, 'recolored by the preview')
 end)
 
 print('PASS test_sync (' .. passed .. ' checks)')

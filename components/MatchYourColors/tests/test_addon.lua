@@ -10,7 +10,7 @@ local Avatar, Engine, Recolor, Addon = require('avatar'), require('engine'), req
 require('sheets').attach(Recolor)
 require('bindings').attach(Recolor)
 local Preview, Schemes, Sync, Remote = require('preview'), require('schemes'), require('sync'), require('remote')
-local Weapons, Loadout = require('weapons'), require('loadout')
+local Weapons, Loadout, Lineup = require('weapons'), require('loadout'), require('lineup')
 local Fake = dofile(root .. '/tests/fake_game.lua')
 local budget = dofile(root .. '/tests/frame_budget.lua')
 local passed = 0
@@ -201,7 +201,7 @@ local function setup(options)
     if options.lobby then
         lobby = Fake.lobby(space, options.lobby.local_id, options.lobby.members)
         lobby_calls = budget.wrap(lobby.api)
-        m.Sync, m.Remote, m.natives = Sync, Remote, options.lobby.natives or lobby.natives
+        m.Sync, m.Remote, m.Lineup, m.natives = Sync, Remote, Lineup, options.lobby.natives or lobby.natives
     end
     local instance = Addon.new(m)
     local world = {space = space, engine = engine, memory = memory, instance = instance, lines = lines, lobby = lobby,

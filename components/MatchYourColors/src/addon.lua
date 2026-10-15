@@ -135,6 +135,12 @@ function Addon.new(m)
                                              memory = memory, native = m.native, pool = pool, game = m.game,
                                              read = Avatar.reader(memory), note = note, records_same = records_same,
                                              Loadout = m.Weapons and m.Loadout, Weapons = m.Weapons})
+    -- The squad cards of the loadout screen, each in its player's settings, and the slot of the player's own preview
+    -- among them (src/lineup.lua).
+    local lineup = remote and m.Lineup and m.Lineup.new({Avatar = Avatar, Recolor = Recolor, Engine = m.Engine,
+        memory = memory, native = m.native, pool = pool, game = m.game, read = Avatar.reader(memory), note = note,
+        remote = remote, records_same = records_same})
+    local queues = {remote = remote, card = lineup} -- the targets whose requests and results their module keeps
     state.syncing = session ~= nil
     state.sync_text = session and m.Sync.encode(state.options) or nil
     -- Recolor Weapons: the local Helldiver's weapons, a target of their own (src/loadout.lua).
@@ -142,7 +148,7 @@ function Addon.new(m)
         Avatar = Avatar, memory = memory, native = m.native, pool = pool, game = m.game, read = Avatar.reader(memory),
         note = note})
     local self = {state = state, controller = controller, ui_controller = ui_controller, pool = pool, remote = remote,
-                  session = session, loadout = loadout}
+                  session = session, loadout = loadout, lineup = lineup}
 
     -- Whether the weapons are recolored: Recolor Weapons on while something local is (not in the test build's loopback,
     -- where the sync path recolors the avatar).
@@ -167,12 +173,16 @@ function Addon.new(m)
                             recolor_weapons = o.recolor_weapons, scheme = o.scheme}
     end
 
-    -- The local player's UI preview, located with the identity; kept while it is the same slot record.
+    -- The local player's UI preview, located with the identity; kept while it is the same slot record (with the squad
+    -- cards, the same preview system: src/lineup.lua names the player's slot).
     local function locate_ui(identity, frame)
         local where = Preview and Preview.locate(read, m.game, identity.ui_slot)
         local ui = state.ui
-        if ui and where and ui.where.record == where.record then return end
+        if ui and where and (ui.where.record == where.record or (lineup and ui.where.system == where.system)) then
+            return
+        end
         if ui then ui_controller.restore(frame) end
+        if ui and lineup then lineup.clear(frame) end
         state.ui = where and {where = where, watch = Preview.watch(memory, where), shown = false, dirty = false} or nil
     end
 
@@ -212,6 +222,7 @@ function Addon.new(m)
         if loadout then loadout.clear(frame) end
         if state.ui then
             ui_controller.restore(frame)
+            if lineup then lineup.clear(frame) end
             state.ui = nil
         end
         close_kept()
@@ -520,9 +531,11 @@ function Addon.new(m)
         note('Recolor failed (' .. state.failures[key] .. '/' .. Addon.FAILURE_LIMIT .. '): ' .. tostring(result))
     end
 
-    -- Another mod user's Helldiver (or weapons): its entry counts its own failures.
+    -- Another mod user's Helldiver (or weapons), or a squad card (the preview polled first: a card that changed
+    -- meanwhile wants a new job): its entry or card counts its own failures.
     local function finish_remote(ok, result, request, frame, reader)
-        remote.finish(ok, result, request, frame)
+        if request.target == 'card' and state.ui then poll_ui(frame) end
+        queues[request.target].finish(ok, result, request, frame)
         note_sheets()
         if ok and reader then note_cache(reader, frame) end
     end
@@ -552,7 +565,7 @@ function Addon.new(m)
         state.last_job = {seconds = time() - state.job_started, frames = frame - state.job_frame + 1,
                           work = state.job_work, longest = state.job_slice, longest_stage = state.job_slice_stage,
                           heap_kb = gcinfo() - state.job_heap}
-        if request.target == 'remote' then return finish_remote(ok, result, request, frame, reader) end
+        if queues[request.target] then return finish_remote(ok, result, request, frame, reader) end
         if request.weapons then return finish_weapons(ok, result, request, frame, reader) end
         if request.target == 'prepare' then return finish_ahead(ok, result, request, frame, reader) end
         if not ok then return job_failed(request, result) end
@@ -604,7 +617,7 @@ function Addon.new(m)
     -- The request for a target ('avatar', 'ui' or 'remote'), or nil (a preview not showing two kits yet, no other
     -- mod user's Helldiver waiting).
     local function request_for(target)
-        if target == 'remote' then return remote.request() end
+        if queues[target] then return queues[target].request() end
         if target == 'weapons' or target == 'ui_weapon' then
             local w = target == 'weapons' and loadout.request() or (target == 'ui_weapon' and loadout.preview_request())
             if not w or not state.identity then return nil end
@@ -647,7 +660,7 @@ function Addon.new(m)
     local function start_job(frame, target, request)
         request = request or request_for(target)
         if not request then return end
-        local own = target ~= 'remote'
+        local own = not queues[target]
         local key = own and (request.weapons and request.key or (request.helmet and request_key(request)))
         if key and (state.failures[key] or 0) >= Addon.FAILURE_LIMIT then return end
         state.request = request
@@ -702,6 +715,7 @@ function Addon.new(m)
             note('The game put an original color texture back on a recolored material; applying again.')
         end
         if state.ui and ui_controller.probes > 0 and not ui_controller.check() then state.ui.dirty = true end
+        if lineup and next(lineup.cards) then lineup.check() end
         if weapons_on() then loadout.check(frame) end
         if state.reader_kept and frame - state.reader_kept >= Addon.KEEP_FRAMES then close_kept() end
         if state.closing and m.Files then state.closing = m.Files.close_some(Addon.CLOSES_PER_CHECK) > 0 end
@@ -741,11 +755,30 @@ function Addon.new(m)
         end
     end
 
+    -- The squad cards when a slot changed or after a lobby poll (src/lineup.lua), then the preview's status as the
+    -- player's own: moved to the shown slot that is the player's (the slot it leaves given back first; nil: nothing more
+    -- this poll), 'absent' when none is, 'kits' for a slot given back to it (a card before: live 2026-10-15).
+    local function own_status(ui, status, frame)
+        if ui.watch.changes > 0 or lineup.stale or lineup.remap then
+            lineup.own = lineup.observe(frame, ui.watch, state.identity.ui_slot, state.loopback)
+        end
+        local own = lineup.own
+        if own and own ~= ui.where.slot then
+            ui_hidden(ui, frame)
+            Preview.retarget(ui.where, own)
+            return ui.watch.reset()
+        end
+        if not own then return 'absent' end
+        return (not ui.shown and status ~= 'absent') and 'kits' or status
+    end
+
     poll_ui = function(frame)
         local ui = state.ui
         local status = ui.watch.poll()
         -- the Armory's weapon preview: its ring head, in the same read (src/preview.lua ring_moved)
         if loadout and ui.watch.ring_moved() and weapons_on() then loadout.preview_changed(frame) end
+        if lineup then status = own_status(ui, status, frame) end
+        if not status then return end
         if status == 'absent' then return ui_hidden(ui, frame) end
         ui.shown = true
         if status == 'kits' then
@@ -764,6 +797,8 @@ function Addon.new(m)
             start_job(frame, 'avatar')
         elseif state.ui and state.ui.dirty then
             start_job(frame, 'ui')
+        elseif lineup and lineup.pending then
+            start_job(frame, 'card')
         elseif loadout and loadout.dirty and weapons_on() then
             start_job(frame, 'weapons')
         elseif loadout and loadout.preview_dirty and weapons_on() then
@@ -777,6 +812,7 @@ function Addon.new(m)
         state.next_sync = frame + m.Sync.POLL_FRAMES
         remote.update(frame, session.poll(frame, state.sync_text, state.loopback), state.squad_mine,
                       state.options.squad == Addon.SQUAD_EVERYONE)
+        if lineup then lineup.stale = true end -- the cards look at their players' settings again
     end
 
     -- Sync With Mod Users, on a frame with no recolor job and no cache save: a second check this frame, of other
@@ -878,6 +914,7 @@ function Addon.new(m)
         if loadout and loadout.controller.retired[1] then loadout.collect(frame) end
         if controller.pending then settle(controller, frame, 'Helldiver') end
         if ui_controller.pending then settle(ui_controller, frame, 'Preview') end
+        if lineup and lineup.busy then lineup.step(frame, settle) end
         if state.job then
             local request = state.request
             if frame % Addon.UI_GATE_FRAMES == 0 and not state.ended and request and request.target == 'ui'
@@ -988,6 +1025,7 @@ function Addon.new(m)
         controller.restore(state.frame)
         ui_controller.restore(state.frame)
         if loadout then loadout.clear(state.frame) end
+        if lineup then lineup.clear(state.frame) end
         if remote then -- the next lobby poll after a resume finds the other players again
             remote.clear(state.frame)
             state.next_sync = 0
@@ -1030,7 +1068,8 @@ function Addon.new(m)
         local ok, problem = pcall(controller.restore, state.frame)
         local ui_ok, ui_problem = pcall(ui_controller.restore, state.frame)
         if ok and not ui_ok then ok, problem = false, ui_problem end
-        for _, clear in ipairs({remote and remote.clear or false, loadout and loadout.clear or false}) do
+        for _, clear in ipairs({remote and remote.clear or false, loadout and loadout.clear or false,
+                                lineup and lineup.clear or false}) do
             local cleared, why = true, nil
             if clear then cleared, why = pcall(clear, state.frame) end
             if not cleared then ok, problem = false, why end
@@ -1210,7 +1249,7 @@ function Addon.install(m)
                           Texture = m.Texture, Colour = m.Colour, Transfer = m.Transfer, Matcher = m.Matcher,
                           Kits = m.Kits, Schemes = m.Schemes, Capes = m.Capes, Patches = m.Patches, Sync = m.Sync,
                           Remote = m.Remote, Albedo = m.Albedo, Weapons = m.Weapons, Loadout = m.Loadout,
-                          WeaponData = m.WeaponData,
+                          WeaponData = m.WeaponData, Lineup = m.Lineup,
                           memory = memory,
                           Appearance = m.Appearance and m.AppearanceData and m.Appearance.new(m.AppearanceData),
                           native = native, game = memory.address(game), note = note, Cache = m.Cache,

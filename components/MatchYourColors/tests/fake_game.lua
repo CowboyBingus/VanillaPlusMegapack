@@ -172,6 +172,26 @@ function Fake.show_ui(space, slot, kits, units)
     for key, unit in pairs(units or {}) do space.u32(record + 12 + 40 * key[1] + 4 * key[2], unit) end
 end
 
+-- The squad session (src/lineup.lua; after Fake.lobby, which places the network context): the local peer {low, high}
+-- and the session peers {{low, high, UI slot}, ...}.
+function Fake.session(space, local_peer, entries)
+    space.region(Fake.CONTEXT + 0xB398, 8)
+    space.region(Fake.CONTEXT + 0x16390, 136)
+    space.u32(Fake.CONTEXT + 0xB398, local_peer[1]) space.u32(Fake.CONTEXT + 0xB39C, local_peer[2])
+    space.u32(Fake.CONTEXT + 0x16390, #entries)
+    for i, e in ipairs(entries) do
+        local at = Fake.CONTEXT + 0x16398 + 32 * (i - 1)
+        space.u32(at, e[1]) space.u32(at + 4, e[2]) space.u32(at + 20, e[3])
+    end
+end
+
+-- A player's desired kits (customization record r: 0 the local player's, 1 the remote's), the ones a squad card shows:
+-- {helmet, armor, cape}.
+function Fake.desired(space, r, kits)
+    local at = Fake.CUSTOMIZATION + 2684 + 64 * r
+    space.u32(at + 4, kits.helmet) space.u32(at + 8, kits.cape or 0x72492837) space.u32(at + 12, kits.armor)
+end
+
 -- Address of the local avatar's unit (type, slot), and of a preview entry's.
 function Fake.local_unit_at(t, slot) return Fake.AVATARS + 5532272 + 220 + 40 * t + 4 * slot end
 function Fake.preview_entry_at(slot_index, n) return Fake.PREVIEWS + 2080 + 2184 * slot_index + 68 + 132 * n end
