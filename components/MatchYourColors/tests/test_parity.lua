@@ -454,6 +454,17 @@ local REPORTED = {
      {{{34, -4, 6}, {34, 43, 44}, 'pair'}}, options = {materials = true}},
     {'cb7e9736', 'fd428984', 'B-22 Model Citizen <- I-92 Fire Fighter: the chrome the helmet\'s orange',
      {{{42, -2, -1}, {44, 35, 53}, 'pair'}}, options = {materials = true}},
+    -- comparison 19 (user 2026-10-15): the rule above made the I-44 Salamander red on 43% of its paint from the PH-9
+    -- Predator's beret ("places red on almost everything as a dominant color"); the build the user passed had the red
+    -- on a shoulder pad only. The beret's red (42%) is bigger than the identity (olive, 29%): it stays an accent.
+    {'223a3b4b', '1b2fde48', 'I-44 Salamander <- PH-9 Predator: the plates the helmet\'s black and olive, the red on '
+     .. 'its accent only', {{{31, 1, 1}, {18, 1, 1}, 'pair'}, {{30, 4, 16}, {23, -3, 6}, 'pair'},
+     {{52, 37, 54}, {34, 46, 28}, 'accent'}}, options = {materials = true}},
+    -- the same beret on the CPG-48 SAPPER (user 2026-10-15, fix sheet outfit 5: "the boots and gloves aren't even
+    -- accented"; only its yellow shoulder pads are): its brown leather gloves, boots and waist panel (16%, chroma 27)
+    -- took the red as a main color. A colored part that is not vivid is guarded like a muted one.
+    {'5f075dc5', '1b2fde48', 'CPG-48 SAPPER <- PH-9 Predator: the brown leather the helmet\'s olive, the yellow pads red',
+     {{{29, 9, 26}, {23, -3, 6}, 'pair'}, {{49, -7, 45}, {34, 46, 28}, 'accent'}}, options = {materials = true}},
     -- 2026-10-06 (user, screenshot 2): metal helmets stay bronze or gold on a white or green armor. Match Materials:
     -- a big metal part taking paint becomes that paint ('finish'); paint stays paint ('no finish').
     {'ec49526f', '4a545f06', 'B-22 Model Citizen <- DS-42 Federation\'s Blade, materials: the chrome shell takes the paint',

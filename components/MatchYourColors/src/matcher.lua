@@ -624,13 +624,32 @@ end
 -- A vivid color covering VIVID_PART_SHARE of a helmet or armor source is no minority either: it may take muted parts
 -- that are not undergarment cloth (the user's version comparisons 2026-10-15: the FS-05 Marksman's red, 27%, and the
 -- I-92 Fire Fighter's orange, 22%, never reached the FS-37 Ravager's plates or the B-22 Model Citizen's chrome, "the
--- red failed to transfer"; the CPR-80 Bulwark's 9% yellow stays guarded; the same 10% as a secondary's floor).
+-- red failed to transfer"; the CPR-80 Bulwark's 9% yellow stays guarded; the same 10% as a secondary's floor), as long
+-- as it covers no more of the source than the identity: a vivid color bigger than the identity is one the identity
+-- passed over (helmet_main: the PH-9 Predator's red beret, 42% over its olive's 29%, may not lead an armor) and stays
+-- an accent (user 2026-10-15: the I-44 Salamander turned red on 43% of its paint, "places red on almost everything as a
+-- dominant color"; its red shoulder pad was fine).
+-- A part of PAINT_SHARE or more in an earth tone that is not vivid (model chroma ACCENT_C to ACCENT_VIVID, model hue
+-- EARTH_HUE_MIN to EARTH_HUE_MAX degrees: brown leather, tan, khaki, olive drab: a material, no accent) is guarded as a
+-- muted part that is not undergarment cloth: the CPG-48 SAPPER's brown gloves, boots and waist panel (16%, chroma 27,
+-- hue 74) took the PH-9 Predator's beret red as a main color (user 2026-10-15: "the boots and gloves aren't even
+-- accented"; only its yellow shoulder pads are), the CW-4 Arctic Ranger's leather (14%, hue 66) the CPR-80 Bulwark's 9%
+-- yellow. Colored parts of other hues are the item's accents and keep taking accent colors: the CM-14 Physician's
+-- green trims and gloves (hue 164-169), the B-24 Enforcer's red-brown pads (hue 25).
 local VIVID_PART_SHARE = 0.10
+local EARTH_HUE_MIN, EARTH_HUE_MAX = 45.0, 110.0
+local function earth_tone(g)
+    local c = chroma(g.ma, g.mb)
+    if c < ACCENT_C or c >= ACCENT_VIVID then return false end
+    local hue = math.deg(math.atan2(g.mb, g.ma)) % 360.0
+    return hue >= EARTH_HUE_MIN and hue <= EARTH_HUE_MAX
+end
 local function guard_part(row, s, keep_row, j_main, under, pair_only, least)
     local any = false
     for j = 1, #s do
+        local part = s[j].share >= least and s[j].share <= s[j_main].share
         local second = not under and (s[j].share >= SECOND_MAIN_SHARE and s[j].L >= s[j_main].L + LIGHTER_MAIN_L
-            or pair_only and s[j].share >= TWO_TONE_SHARE or s[j].share >= least)
+            or pair_only and s[j].share >= TWO_TONE_SHARE or part)
         if j ~= j_main and chroma(s[j].ma, s[j].mb) >= ACCENT_VIVID and not keep_row[j] and not second then
             row[j] = false
         end
@@ -643,8 +662,10 @@ local function vivid_minor_guard(allowed, t, s, keep_ok, j_main, cape)
     local pair_only = cape and two_tone_of(s, j_main, MAIN_COLOR, ACCENT_VIVID) -- src/colour.lua Colour.two_tone
     local least = cape and math.huge or VIVID_PART_SHARE
     for i = 1, #t do
-        local under = t[i].under >= 0.5 * t[i].area -- undergarment cloth: the Helldiver's base clothing, any size
-        if (t[i].share >= PAINT_SHARE or under) and chroma(t[i].ma, t[i].mb) < ACCENT_C then
+        local muted = chroma(t[i].ma, t[i].mb) < ACCENT_C
+        -- undergarment cloth: the Helldiver's base clothing, any size (a muted one)
+        local under = t[i].under >= 0.5 * t[i].area and muted
+        if (t[i].share >= PAINT_SHARE or under) and (muted or earth_tone(t[i])) then
             guard_part(allowed[i], s, keep_ok[i], j_main, under, pair_only, least)
         end
     end
@@ -1334,7 +1355,7 @@ if type(jit) == 'table' and type(jit.off) == 'function' then
         lighter_main, salience, fallback_accent, flat, cost, improve, search, seen_look, group_looks, balanced,
         big_spread, palette_of, helmet_main, identity_of, Matcher.identity, structure_pairs,
         initial_assign, largest_paint,
-        may_take, allowed_matrix, guard_part, vivid_minor_guard,
+        may_take, allowed_matrix, earth_tone, guard_part, vivid_minor_guard,
         keep_matrix, anchor_of, closest_main, keep_matches, needs_flat_check, Matcher.pair_groups, source_accent,
         hue_gap, family_share, is_accent, matches_source, kept_match, metal_echo, speck_across, choice, source_tint,
         reflected, painted, metallized, metal_shift, groups_by_source, lead_of, tonal_offsets, row_lightness,

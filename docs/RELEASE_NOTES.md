@@ -5,7 +5,8 @@
 - Match Your Colors v1.5: Match Materials now also turns a painted hard part into the metal it takes, such as the B-22 Model Citizen's chrome or the Eye of Liberty cape's gold; cloth never turns into metal.
 - Match Your Colors v1.5: with Helmet and Armor Match Cape your gear matches the cape as it looks in the game, so the default black capes give a black armor, not a grey one.
 - Match Your Colors v1.5: an armor that would turn one solid color, such as the SA-25 Steel Trooper, takes the helmet's or cape's own second, dark and accent colors on its clothing, straps and trims.
-- Match Your Colors v1.5: a vivid helmet or armor color covering a tenth of it or more reaches the other item's parts, and clothing never takes a colored metal's flat paint.
+- Match Your Colors v1.5: a vivid helmet or armor color covering a tenth of it or more, but less than its main color, reaches the other item's parts, and clothing never takes a colored metal's flat paint.
+- Match Your Colors v1.5: brown leather, tan and khaki parts no longer turn into a helmet's accent color, such as bright red gloves and boots from the PH-9 Predator's beret.
 - Match Your Colors v1.5: modded gear that paints its colors into its texture instead of the game's color table, such as the Cowboy Hat mod, now gives its colors and takes yours.
 - Match Your Colors v1.5: cape designs drawn light on dark keep a readable contrast on their new colors (Proof of Faultless Virtue, Botslayer), and a recolored design sheet is only reused for one of the same layout.
 - New option: Stratagem Hero Expanded v1.0: the ship's Stratagem Hero arcade draws from all 96 loadout stratagems and 12 common mission stratagems (108) instead of its 27 launch-era ones; themed rounds stay.

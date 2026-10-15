@@ -1306,6 +1306,24 @@ check('a cape of one dark color and vivid ones shows each of 15% or more on a mu
     assert(n >= 1, 'black 70%, red 30% (L 34), not a cape: a muted part takes the red (' .. n .. ' parts)')
     n = reds({{'bbbbbbbbbbbbbbbb:0', 92, 22.4, 0, 0}, {'bbbbbbbbbbbbbbbb:1', 8, red[1], red[2], red[3]}}, true)
     assert(n == 0, 'black 92%, red 8%, not a cape: the red a minority, guarded (' .. n .. ' parts)')
+    -- but not one bigger than the identity, which the identity passed over (the PH-9 Predator's red beret, 42% over its
+    -- olive's 29%: the I-44 Salamander turned red on 43% of its paint, user 2026-10-15 "places red on almost everything
+    -- as a dominant color")
+    n = reds({{'bbbbbbbbbbbbbbbb:0', 29, 23, -3, 6}, {'bbbbbbbbbbbbbbbb:1', 42, red[1], red[2], red[3]},
+              {'bbbbbbbbbbbbbbbb:2', 29, 18, 1, 1}}, true)
+    assert(n == 0, 'olive 29% (the identity), red 42%, black 29%, not a cape: the red guarded (' .. n .. ' parts)')
+    -- nor does a colored part that is not vivid itself take such a color (brown leather, model chroma 27, 16%: the
+    -- CPG-48 SAPPER's gloves and boots took the PH-9 Predator's beret red, user 2026-10-15 "the boots and gloves aren't
+    -- even accented"); its 4% yellow accent still takes the red
+    local sapper = {{'aaaaaaaaaaaaaaaa:0', 50, 31, -1, 20}, {'aaaaaaaaaaaaaaaa:1', 30, 33, 2, 3},
+                    {'aaaaaaaaaaaaaaaa:2', 16, 29, 9, 26}, {'aaaaaaaaaaaaaaaa:3', 4, 49, -7, 45}}
+    local beret = item({{'bbbbbbbbbbbbbbbb:0', 29, 23, -3, 6}, {'bbbbbbbbbbbbbbbb:1', 42, red[1], red[2], red[3]},
+                        {'bbbbbbbbbbbbbbbb:2', 29, 18, 1, 1}}, false)
+    local leather = Matcher.plan(item(sapper, true), beret)
+    assert(leather['aaaaaaaaaaaaaaaa:2'] and leather['aaaaaaaaaaaaaaaa:2'].source ~= 'bbbbbbbbbbbbbbbb:1',
+           'brown leather 16% (chroma 27): no beret red')
+    assert(leather['aaaaaaaaaaaaaaaa:3'] and leather['aaaaaaaaaaaaaaaa:3'].source == 'bbbbbbbbbbbbbbbb:1',
+           'the yellow accent takes the red')
     -- and makes its identity the dark one for the anchor: a red identity (L 36, not dark) under a lighter gold landed
     -- on the light plates and the dark main took the red too (the Thundering Hooves on the SR-64 Cinderblock, user
     -- 2026-10-10; a cape now goes by its outside, so a helmet or armor source keeps the case)
