@@ -19,11 +19,12 @@
 -- per frame.
 local Variety = {}
 
-local de2000, palette_of, source_accent, identity, is_structure, ACCENT_C, MAIN_COLOR
+local de2000, palette_of, source_accent, identity, is_structure, ACCENT_C, MAIN_COLOR, pattern_plan
 -- Set once with the matcher's functions and constants (src/addon.lua and the tests, after Matcher.use).
 function Variety.attach(Matcher, colour)
     de2000 = colour.de2000
     palette_of, source_accent, identity = Matcher.palette_of, Matcher.source_accent, Matcher.identity
+    pattern_plan = Matcher.pattern_plan
     is_structure, ACCENT_C, MAIN_COLOR = Matcher.is_structure, Matcher.ACCENT_C, Matcher.MAIN_COLOR
     Matcher.balance = Variety.balance
 end
@@ -58,11 +59,13 @@ local function color_of(g) return {L = g.gL or g.L, a = g.ga or g.a, b = g.gb or
 local function muted(g) return chroma(g.ma, g.mb) < ACCENT_C end
 
 -- The plan's colors over what shows, by row in group then row order: {row, group, key (its source, a tone of it by
--- role, or its group's index when kept), L, a, b, share}.
+-- role, or its group's index when kept), L, a, b, share}. A band's row is keyed by the source color whose paint it
+-- shows (src/matcher.lua tint_bands, m.shows): the SA-04 Combat Technician's band took the CE-35 Trench Engineer's
+-- orange, its main color, while paired with its grey.
 local function cell_of(plan, g, gi, row, paint_area)
     local m, share = plan[row.key], row.area / paint_area
     if not m then return {row = row, group = g, key = gi, L = row.L, a = row.a, b = row.b, share = share} end
-    local key = m.tone and m.source .. '/' .. m.tone or m.source
+    local key = m.shows or m.tone and m.source .. '/' .. m.tone or m.source
     return {row = row, group = g, key = key, L = m.L, a = m.a, b = m.b, share = share}
 end
 function Variety.cells(plan, t)
@@ -82,10 +85,28 @@ local function distinct_of(cells, mean)
     return distinct
 end
 
--- The dominant design color of cells: its key, share and mean color (by share), and the share apart from it; nil when
--- nothing shows.
-function Variety.dominance(cells)
-    local by, order = {}, {}
+-- The target's patterns the pattern plan leaves in their own color (Matcher.pattern_plan): parts the armor shows as
+-- they are.
+function Variety.kept_patterns(plan, t, s)
+    local kept, planned = {}, pattern_plan(t, s, plan)
+    for _, p in ipairs(t.patterns or {}) do
+        if not planned[p.pattern] and p.share > 0 then kept[#kept + 1] = p end
+    end
+    return kept
+end
+
+-- The dominant design color of cells: its key, share and mean color (by share), and the share apart from it, both
+-- shares of the paint the cells cover plus the kept patterns (Variety.kept_patterns) that read apart from that color;
+-- nil when nothing shows. Patterns the plan recolors and kept ones close to the color stay out. The SA-04 Combat
+-- Technician's cells cover 85% of its paint (its pattern takes the helmet's colors): the CE-35 Trench Engineer's
+-- orange on 83% of it (its 68% and its band, cell_of) never reached DOMINANT_SHARE and the armor read one solid orange
+-- (user 2026-10-15: "still bugged ... sorely stuck out"). The I-09 Heatseeker's own black pattern, 22.5% of it, keeps
+-- it apart from the CW-36 Winter Warrior's white (user: its published look "was better"). Colors close to each other
+-- but of different keys stay apart: counting every cell within APART as the dominant color balanced 680 more plans and
+-- split two greys of one helmet by a shade it does not have (the SC-15 Drone Master's jumpsuit near-white from the
+-- SR-64 Cinderblock; user: "clearly being dominated by a non-dominant color").
+function Variety.dominance(cells, kept)
+    local by, order, total = {}, {}, 0.0
     for _, c in ipairs(cells) do
         local d = by[c.key]
         if not d then
@@ -93,12 +114,16 @@ function Variety.dominance(cells)
             by[c.key], order[#order + 1] = d, d
         end
         d.share, d.L, d.a, d.b = d.share + c.share, d.L + c.share * c.L, d.a + c.share * c.a, d.b + c.share * c.b
+        total = total + c.share
     end
     local top
     for _, d in ipairs(order) do if not top or d.share > top.share then top = d end end
     if not top or top.share <= 0 then return nil end
     local mean = {L = top.L / top.share, a = top.a / top.share, b = top.b / top.share}
-    return top.key, top.share, mean, distinct_of(cells, mean)
+    local apart_kept = 0.0
+    for _, p in ipairs(kept or {}) do if apart(p, mean) then apart_kept = apart_kept + p.share end end
+    local all = total + apart_kept
+    return top.key, top.share / all, mean, (distinct_of(cells, mean) + apart_kept) / all
 end
 
 -- A tone of color c: dL lighter (darker when negative; the other way when that leaves 12 to 90), chroma times k.
@@ -246,9 +271,9 @@ end
 
 -- Still dominated by a role color (the B-01 Tactical is mostly clothing: its secondary covered 86% with the O-2 Heavy
 -- Operator): the darkest cells of that color take the first of `colors` reading apart from it, else a tone of it.
-local function settle(plan, t, colors, main_key)
+local function settle(plan, t, colors, main_key, kept)
     local cells = Variety.cells(plan, t)
-    local key, share, mean, distinct = Variety.dominance(cells)
+    local key, share, mean, distinct = Variety.dominance(cells, kept)
     if not dominated(key, share, distinct) then return end
     local pick = tone(mean, mean.L >= 45 and -18 or 15, 0.5)
     for i = #colors, 1, -1 do
@@ -262,17 +287,17 @@ local function settle(plan, t, colors, main_key)
 end
 
 -- The dominant color of armor t's plan, as given (a prosthetic counts as the color it was given) and as the prosthetic
--- rule leaves it: its cells, key and mean, or nil when the plan is not dominated.
+-- rule leaves it: its cells, key, mean and kept patterns (Variety.kept_patterns), or nil when the plan is not dominated.
 local function dominant(plan, t, s)
-    local cells = Variety.cells(plan, t)
-    local key, share, mean, distinct = Variety.dominance(cells)
+    local cells, kept = Variety.cells(plan, t), Variety.kept_patterns(plan, t, s)
+    local key, share, mean, distinct = Variety.dominance(cells, kept)
     prosthetics(plan, cells, s)
     if not dominated(key, share, distinct) then
         cells = Variety.cells(plan, t)
-        key, share, mean, distinct = Variety.dominance(cells)
+        key, share, mean, distinct = Variety.dominance(cells, kept)
         if not dominated(key, share, distinct) then return nil end
     end
-    return cells, key, mean
+    return cells, key, mean, kept
 end
 
 -- Whether one row shows on more than ROW_MAX of the armor (it cannot be split: a dark armor of one row).
@@ -304,15 +329,64 @@ local function accent_cell(plan, c, k, s)
     assign(plan, c, tone(k.main, k.second.L > k.main.L and -25 or 25, 1.0), 'accent', k.main_key, 'accent')
 end
 
--- One cell of the dominant color in its role (role_of; k: role_colors); returns the role.
-local function play_role(plan, c, coats, k, s)
-    local role = role_of(c, coats)
+-- One cell of the dominant color in its role (role_of; k: role_colors).
+local function play_role(plan, c, role, k, s)
     if role == 'second' or role == 'dark' then
         assign(plan, c, k[role], 'pair', k.main_key, role)
     elseif role == 'accent' then
         accent_cell(plan, c, k, s)
     end
-    return role
+end
+
+-- The shares of the main, second and dark roles (cells in order).
+local function role_shares(cells, roles)
+    local share = {main = 0.0, second = 0.0, dark = 0.0}
+    for i, c in ipairs(cells) do
+        local role = roles[i]
+        if share[role] then share[role] = share[role] + c.share end
+    end
+    return share
+end
+
+-- How far the main, second and dark shares of a split are from the source's (summed absolute difference of the
+-- normalized shares).
+local function deviation(m, s2, s3, src)
+    local total, stotal = m + s2 + s3, src[1] + src[2] + src[3]
+    if total <= 0 or stotal <= 0 then return 0.0 end
+    return math.abs(m / total - src[1] / stotal) + math.abs(s2 / total - src[2] / stotal)
+        + math.abs(s3 / total - src[3] / stotal)
+end
+
+-- The roles of the dominant color's cells (role_of). A secondary lighter than the main color does not take the
+-- clothing when the main color keeping it brings the armor's proportions of main, second and dark closer to the
+-- source's: a light minor color of the source read as the armor's main (user 2026-10-15: "clearly being dominated by a
+-- non-dominant color"; the FS-23 Battle Master's 20% light grey took the DP-00 Tactical's coat, 64% of it). A darker
+-- secondary keeps the clothing, as dark undersuits do (the SA-25 Steel Trooper's dark suit under the TR-40 Gold
+-- Eagle's yellow, passed by the user). The dark role (gloves, straps) stays dark; it counts as the secondary when the
+-- source has one dark color.
+local function group_share(g) return g and g.share or 0.0 end
+-- Whether the clothing keeping the main color brings the role shares closer to the source's main, second and dark.
+local function main_keeps_clothing(share, k)
+    local same = k.dark.g ~= nil and k.dark.g == k.second.g
+    local src = {group_share(k.main.g), group_share(k.second.g), 0.0}
+    local with_second, dark = 0.0, share.dark
+    if same then
+        with_second, dark = share.dark, 0.0
+    else
+        src[3] = group_share(k.dark.g)
+    end
+    local kept = deviation(share.main, share.second + with_second, dark, src)
+    return deviation(share.main + share.second, with_second, dark, src) < kept
+end
+local function roles_of(cells, key, coats, k)
+    local roles = {}
+    for i, c in ipairs(cells) do
+        if c.key == key and not Variety.PROSTHETIC_LUTS[c.row.lut] then roles[i] = role_of(c, coats) end
+    end
+    if k.second.L > k.main.L and main_keeps_clothing(role_shares(cells, roles), k) then
+        for i, role in pairs(roles) do if role == 'second' then roles[i] = 'main' end end
+    end
+    return roles
 end
 
 -- Too little apart after the roles: the darkest main parts take the darker of secondary and dark reading apart from
@@ -331,24 +405,25 @@ end
 -- own, as in v1.4 (a v1.4 analysis of the Cowboy Hat had no rows and its plan failed here, review renders 2026-10-14).
 function Variety.balance(plan, t, s)
     if not (s.groups and s.groups[1]) then return plan, false end
-    local cells, key, mean = dominant(plan, t, s)
+    local cells, key, mean, kept = dominant(plan, t, s)
     if not cells then return plan, false end
     if one_row(cells) then return plan, true end
     local k = role_colors(s, key, mean)
     if not k then return plan, true end -- no color of the source to balance with: as made
-    local coats, roles = coats_of(cells), {}
+    local roles = roles_of(cells, key, coats_of(cells), k)
     for i, c in ipairs(cells) do
-        if c.key == key and not Variety.PROSTHETIC_LUTS[c.row.lut] then roles[i] = play_role(plan, c, coats, k, s) end
+        if roles[i] then play_role(plan, c, roles[i], k, s) end
     end
     if distinct_of(cells, mean) < Variety.SECOND_MIN then shade(plan, cells, roles, k) end
-    for _ = 1, 2 do settle(plan, t, {k.dark, k.main, k.second}, k.main_key) end -- a second color may take the lead once
+    for _ = 1, 2 do settle(plan, t, {k.dark, k.main, k.second}, k.main_key, kept) end -- a second color may lead once
     return plan, true
 end
 
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({Variety.attach, chroma, apart, color_of, muted, cell_of, Variety.cells, distinct_of,
-        Variety.dominance, tone, second_share, palette_second_dark, second_and_dark, accent_of, matches_palette, coats_of, role_of,
-        assign, prosthetics, darken, dominated, settle, dominant, one_row, role_colors, accent_cell, play_role, shade,
+        Variety.kept_patterns, Variety.dominance, tone, second_share, palette_second_dark, second_and_dark, accent_of, matches_palette, coats_of, role_of,
+        assign, prosthetics, darken, dominated, settle, dominant, one_row, role_colors, accent_cell, play_role, role_shares, deviation, group_share, main_keeps_clothing, roles_of,
+        shade,
         Variety.balance}) do
         jit.off(fn, true)
     end

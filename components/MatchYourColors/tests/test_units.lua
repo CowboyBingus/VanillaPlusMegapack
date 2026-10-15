@@ -2690,6 +2690,47 @@ check('an armor in one color against a source with no colors (a mod\'s helmet wi
     assert(dominated == false, 'not balanced: nothing to balance with')
 end)
 
+-- User 2026-10-15 (the CE-35 Trench Engineer on the SA-04 Combat Technician, "still bugged ... sorely stuck out"): its
+-- orange covered 68% by its own key and 15% more as a band that took the helmet's accent (its orange) while paired with
+-- its grey, over cells that cover 85% of the paint; it never reached 85% and the armor stayed one solid orange.
+check('an armor\'s dominant color counts a band under the color it shows, over the paint its parts cover; two '
+      .. 'close greys of other keys stay apart', function()
+    local Variety = require('variety')
+    local armor = measured_with({{'aaaaaaaaaaaaaaaa:0', 0.68, 23, 0, 0, 6800}, {'aaaaaaaaaaaaaaaa:1', 0.15, 11, 0, -5, 1500},
+                                 {'aaaaaaaaaaaaaaaa:2', 0.02, 69, -1, 2, 200}}, true)
+    armor.paint_area = armor.paint_area / 0.85 -- lights and lenses outside the cells: 15% of the paint
+    local plan = {['aaaaaaaaaaaaaaaa:0'] = {source = 'orange', kind = 'pair', L = 42, a = 34, b = 51},
+                  ['aaaaaaaaaaaaaaaa:1'] = {source = 'grey', kind = 'pair', L = 51, a = 38, b = 59, band = true,
+                                            shows = 'orange'},
+                  ['aaaaaaaaaaaaaaaa:2'] = {source = 'grey', kind = 'pair', L = 26, a = 0, b = 1}}
+    local cells = Variety.cells(plan, armor)
+    local by, total = {}, 0.0
+    for _, c in ipairs(cells) do by[c.row.key], total = c, total + c.share end
+    assert(by['aaaaaaaaaaaaaaaa:1'].key == 'orange', 'the band counts as the orange it shows')
+    assert(total < 0.9, string.format('the cells cover %.3f of the paint', total))
+    local key, share, _, distinct = Variety.dominance(cells)
+    local orange = by['aaaaaaaaaaaaaaaa:0'].share + by['aaaaaaaaaaaaaaaa:1'].share
+    assert(key == 'orange' and math.abs(share - orange / total) < 1e-9
+           and math.abs(distinct - by['aaaaaaaaaaaaaaaa:2'].share / total) < 1e-9,
+           string.format('%s: %.4f of the covered paint, %.4f apart', tostring(key), share, distinct))
+    assert(share >= Variety.DOMINANT_SHARE and distinct < Variety.SECOND_MIN, 'one color')
+    -- the SR-64 Cinderblock's two greys (L 19, L 39) on the SC-15 Drone Master (suit L 21, vest L 31): within APART of
+    -- each other but two colors of the helmet, no one color to split by an invented shade (user: "clearly being
+    -- dominated by a non-dominant color")
+    local greys = {{key = 'dark', share = 0.70, L = 21, a = 0, b = 0}, {key = 'grey', share = 0.30, L = 31, a = 0, b = 0}}
+    key, share = Variety.dominance(greys)
+    assert(key == 'dark' and share < Variety.DOMINANT_SHARE, string.format('two greys: %.2f', share))
+    -- a pattern the plan keeps in its own color counts when it reads apart (the I-09 Heatseeker's black pattern, 22.5%,
+    -- under the CW-36 Winter Warrior's white; user: its published look "was better"), not when it is close
+    local white = {{key = 'white', share = 0.704, L = 58, a = 0, b = 6}, {key = 'white', share = 0.071, L = 50, a = 0, b = 6}}
+    local kept_black, kept_light = {{share = 0.225, L = 13, a = 1, b = 0}}, {{share = 0.225, L = 61, a = -3, b = 5}}
+    key, share, _, distinct = Variety.dominance(white, kept_black)
+    assert(math.abs(share - 0.775) < 1e-9 and distinct >= Variety.SECOND_MIN,
+           string.format('a black pattern of its own: %.3f, %.3f apart', share, distinct))
+    key, share = Variety.dominance(white, kept_light)
+    assert(math.abs(share - 1.0) < 1e-9, string.format('a light pattern of its own: %.3f', share))
+end)
+
 check('Match Materials from a cape as the source: a tint row (its cape LUT, 16 columns) gives its material row\'s '
       .. 'finish, never columns of the cape LUT (Helmet and Armor Match Cape)', function()
     local mat, cape = ffi.new('float[?]', 23 * 3 * 4), ffi.new('float[?]', 16 * 3 * 4)

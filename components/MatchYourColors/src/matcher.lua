@@ -1207,7 +1207,8 @@ local function tint_bands(mapping, choices, source, accent, armor)
         for _, row in ipairs(band_pair(c, largest) and of_bands(c[1], bands) and c[1].rows or {}) do
             local m = mapping[row.key] -- the pair's source and finish stay; the paint, a flat coat (src/transfer.lua)
             if m then
-                m.L, m.a, m.b, m.band = accent.mL, accent.ma, accent.mb, true
+                -- shows: the source color whose paint it takes (src/variety.lua counts the row as that color)
+                m.L, m.a, m.b, m.band, m.shows = accent.mL, accent.ma, accent.mb, true, accent.rep and accent.rep.key
                 if m.coat then m.coat, m.finish = nil, nil end -- a band stays paint (Match Materials' metal: metallized)
             end
         end

@@ -465,6 +465,30 @@ local REPORTED = {
     -- took the red as a main color. A colored part that is not vivid is guarded like a muted one.
     {'5f075dc5', '1b2fde48', 'CPG-48 SAPPER <- PH-9 Predator: the brown leather the helmet\'s olive, the yellow pads red',
      {{{29, 9, 26}, {23, -3, 6}, 'pair'}, {{49, -7, 45}, {34, 46, 28}, 'accent'}}, options = {materials = true}},
+    -- user 2026-10-15 (Armor Matches Helmet, "still bugged ... sorely stuck out"): the CE-35 Trench Engineer turned the
+    -- SA-04 Combat Technician one solid orange: its 68% suit-and-plates group took the orange and its 15% navy band the
+    -- helmet's accent, the same orange, so no single source color reached 85%. Dominance goes by the color that shows:
+    -- the plates keep the orange, the suit takes the helmet's dark grey.
+    {balanced = true, 'c9d2ad39', 'affb955b', 'SA-04 Combat Technician <- CE-35 Trench Engineer: orange plates, a '
+     .. 'dark grey suit, not one solid orange', {{{23, 0, 0}, {42, 34, 51}, 'pair'}},
+     rows = {['cda7f75d60b9a5c7:0'] = {16, 32}, ['d8d851b716fcc7d8:0'] = {16, 32}}, options = {materials = true}},
+    {balanced = true, 'c9d2ad39', 'affb955b', 'SA-04 Combat Technician <- CE-35 Trench Engineer, Match Materials off',
+     {{{23, 0, 0}, {42, 34, 51}, 'pair'}}, rows = {['cda7f75d60b9a5c7:0'] = {16, 32}}},
+    -- the user on a balanced SC-15 Drone Master with a near-white jumpsuit (2026-10-15): "clearly being dominated by a
+    -- non-dominant color". A secondary lighter than the main color leaves the clothing to the main color when that
+    -- keeps the helmet's proportions: the FS-23 Battle Master's 20% light grey took the DP-00 Tactical's coat (64% of
+    -- it), which now keeps the helmet's grey; a darker secondary keeps the clothing, as dark undersuits do (the CW-36
+    -- Winter Warrior's dark on the SA-04 Combat Technician's suit, its white on the plates).
+    {balanced = true, '3f1bec1a', '1e9444f9', 'DP-00 Tactical <- FS-23 Battle Master: the coat the helmet\'s grey, not its '
+     .. 'light grey', {}, rows = {['921a7d503f1aba4b:1'] = {20, 36}, ['3a72a997fd7a9355:1'] = {20, 36}},
+     options = {materials = true}},
+    {balanced = true, 'c9d2ad39', 'cd3d20dc', 'SA-04 Combat Technician <- CW-36 Winter Warrior: a dark suit, white plates',
+     {}, rows = {['cda7f75d60b9a5c7:0'] = {15, 32}, ['b6f4e0f7bf9d9661:0'] = {48, 72}}, options = {materials = true}},
+    -- user 2026-10-15 on the same helmet's I-09 Heatseeker: its published look (the armor's own black pattern, 22.5%
+    -- of it, left as it is, the rest white) "was better" than a balanced one with a dark suit; a kept pattern that reads
+    -- apart counts against one color, so the suit stays white
+    {'2d1dd830', 'cd3d20dc', 'I-09 Heatseeker <- CW-36 Winter Warrior: white with its own black pattern, no dark suit',
+     {}, rows = {['60e19a6589ca67f9:0'] = {48, 70}, ['60e19a6589ca67f9:4'] = {48, 70}}, options = {materials = true}},
     -- 2026-10-06 (user, screenshot 2): metal helmets stay bronze or gold on a white or green armor. Match Materials:
     -- a big metal part taking paint becomes that paint ('finish'); paint stays paint ('no finish').
     {'ec49526f', '4a545f06', 'B-22 Model Citizen <- DS-42 Federation\'s Blade, materials: the chrome shell takes the paint',

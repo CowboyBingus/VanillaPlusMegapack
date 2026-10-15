@@ -9,6 +9,8 @@
 - Match Your Colors v1.5: an armor that would turn one solid color, such as the SA-25 Steel Trooper, takes the helmet's or cape's own second, dark and accent colors on its clothing, straps and trims.
 - Match Your Colors v1.5: a vivid helmet or armor color covering a tenth of it or more, but less than its main color, reaches the other item's parts, and clothing never takes a colored metal's flat paint.
 - Match Your Colors v1.5: brown leather, tan and khaki parts no longer turn into a helmet's accent color, such as bright red gloves and boots from the PH-9 Predator's beret.
+- Match Your Colors v1.5: an armor no longer stays one solid color when a band of its plates takes the helmet's main color, such as the SA-04 Combat Technician with the CE-35 Trench Engineer.
+- Match Your Colors v1.5: a helmet's lighter minor color no longer covers most of an armor's clothing.
 - Match Your Colors v1.5: modded gear that paints its colors into its texture instead of the game's color table, such as the Cowboy Hat mod, now gives its colors and takes yours.
 - Match Your Colors v1.5: cape designs drawn light on dark keep a readable contrast on their new colors (Proof of Faultless Virtue, Botslayer), and a recolored design sheet is only reused for one of the same layout.
 - Match Your Colors v1.5: new Recolor Weapons option (Off by default): your primary, sidearm and support weapon take your colors the way the game's weapon paint schemes repaint a weapon; with one of those schemes picked as Paint Scheme they wear it exactly as the game paints it.
