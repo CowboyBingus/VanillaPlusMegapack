@@ -23,6 +23,7 @@ local Kits = {}
 Kits.TYPE_UNIT, Kits.TYPE_MATERIAL, Kits.TYPE_TEXTURE = 'e0a48d0be9a7453f', 'eac0b497876adedf', 'cd4238c6a0c69e32'
 Kits.SLOT_LUT, Kits.SLOT_MASK = 0x7e662968, 0xb281e5f2
 Kits.SLOT_PATTERN, Kits.SLOT_PATTERN_MASK = 0x81d4c49d, 0x05a27dd5
+Kits.SLOT_DECAL = 0x632a8b80 -- decal_sheet (src/engine.lua DECAL_SLOT)
 Kits.PATTERN_MIP = 2
 Kits.DETAIL_TILER, Kits.CAMO_TILER = '5015467d918378bf', 'f8b2508e99fb9f28'
 -- Archives searched for the shared resources, in order (the first holding the detail tiler is used).
@@ -30,6 +31,12 @@ Kits.SHARED_ARCHIVES = {'18235e0c9ec0e636', 'ee6b1ba7e22d71ed'}
 Kits.NO_LUT = '0000000000000000'
 
 Kits.HELMET, Kits.ARMOR = 'Helmet', 'Armor'
+-- A weapon is no kit of the catalogue: src/weapons.lua makes one of its units (Recolor Weapons, v1.5). Its pieces'
+-- slots are the units' roles (Kits.WEAPON_ROLES), body BODY_ANY, and its materials take the LUT and pattern the
+-- weapon's own paint (the game's MaterialOverride, per material slot) binds: piece.overrides {[slot key] = {lut,
+-- pattern}} (src/weapons.lua).
+Kits.WEAPON = 'Weapon'
+Kits.WEAPON_ROLES = {[0] = 'weapon', 'optic', 'magazine', 'muzzle', 'underbarrel'}
 Kits.SLOTS = {[0] = 'helmet', 'cape', 'torso', 'hips', 'left_leg', 'right_leg', 'left_arm', 'right_arm',
               'left_shoulder', 'right_shoulder'}
 Kits.UNDERGARMENT = 1
@@ -40,6 +47,10 @@ Kits.BODY_ANY = 3
 local HELMET_WEIGHT = {['0:0'] = 1.0, ['0:2'] = 0.3}
 local ARMOR_SLOT_WEIGHT = {[0] = 0.0, 0.0, 0.30, 0.12, 0.10, 0.10, 0.06, 0.06, 0.05, 0.05}
 local ARMOR_TYPE_WEIGHT = {[0] = 1.0, 0.5, 0.4}
+-- Weapon pieces by role (Kits.WEAPON_ROLES): the weapon's own unit, then its separate attachment units, smaller than
+-- it (offline catalogue 2026-10-15: the AR-23 Liberator's optic 2,838, magazine 1,496 and muzzle 480 LOD0 triangles
+-- against its 12,627).
+local WEAPON_WEIGHT = {[0] = 1.0, 0.2, 0.12, 0.05, 0.1}
 
 local HIGH = 4294967296
 local u32 = function(p, o) return p[o] + p[o + 1] * 256 + p[o + 2] * 65536 + p[o + 3] * 16777216 end
@@ -48,12 +59,13 @@ local function hex64(p, o) return string.format('%08x%08x', u32(p, o + 4), u32(p
 -- The weight of a piece in the color model; 0 leaves it out. body: the avatar's body type (0 stocky, 1 slim).
 function Kits.weight(kit_type, piece, body)
     if kit_type == Kits.HELMET then return HELMET_WEIGHT[piece.slot .. ':' .. piece.type] or 0.0 end
+    if kit_type == Kits.WEAPON then return WEAPON_WEIGHT[piece.slot] or 0.0 end
     if piece.body ~= body and piece.body ~= Kits.BODY_ANY then return 0.0 end
     return (ARMOR_SLOT_WEIGHT[piece.slot] or 0.0) * (ARMOR_TYPE_WEIGHT[piece.type] or 0.0)
 end
 
--- The material slots of a unit's main part in file order: {material hash, ...} (a repeated slot key keeps its
--- first position and its last value, as a Python dict does).
+-- The material slots of a unit's main part in file order: {material hash, ...} and their slot keys (a repeated slot
+-- key keeps its first position and its last value, as a Python dict does).
 local function unit_materials(slim, archive, record, scratch)
     local head = scratch(116)
     slim.part(archive, record, 'main', 0, 116, head, 0)
@@ -73,7 +85,7 @@ local function unit_materials(slim, archive, record, scratch)
     end
     local out = {}
     for i, key in ipairs(order) do out[i] = by_key[key] end
-    return out
+    return out, order
 end
 
 -- A material's texture slots: {slot number -> texture hash}, and its parent (its shader template's hash, +24).
@@ -199,10 +211,12 @@ function Kits.shared_samples(slim, Texture, scratch, yield)
     return nil
 end
 
--- entry.pattern: the kit piece's pattern texture, else the material's default (slot SLOT_PATTERN), when found;
--- entry.pattern_mask: the material's pattern mask (slot SLOT_PATTERN_MASK), when found too.
-local function add_pattern_textures(entry, deps, piece, textures)
-    local pattern = piece.pattern and piece.pattern ~= Kits.NO_LUT and piece.pattern or textures[Kits.SLOT_PATTERN]
+-- entry.pattern: the kit piece's pattern texture (a weapon's: its paint's for the material's slot, override), else
+-- the material's default (slot SLOT_PATTERN), when found; entry.pattern_mask: the material's pattern mask (slot
+-- SLOT_PATTERN_MASK), when found too.
+local function add_pattern_textures(entry, deps, piece, textures, override)
+    local own = override and override.pattern ~= Kits.NO_LUT and override.pattern or piece.pattern
+    local pattern = own and own ~= Kits.NO_LUT and own or textures[Kits.SLOT_PATTERN]
     if not pattern or pattern == Kits.NO_LUT or not deps.find(pattern, Kits.TYPE_TEXTURE) then return end
     entry.pattern = pattern
     local mask = textures[Kits.SLOT_PATTERN_MASK]
@@ -211,19 +225,38 @@ end
 
 -- A material's entry: with a material LUT, {material, lut, mask, pattern, pattern_mask}; without one, a mod's material
 -- of gear whose albedo holds its colors (src/albedo.lua, v1.5: the Cowboy Hat), {material, albedo, mra}; else nil,
--- and why when it is a mod's material src/albedo.lua cannot read.
-local function material_entry(deps, piece, material, record, textures, parent)
-    local default = textures[Kits.SLOT_LUT]
-    if not default then
-        if not deps.Albedo then return nil end
-        local entry, why = deps.Albedo.eligible(record, parent, textures, deps.textures.describe)
-        if entry then entry.material = material end
-        return entry, record.file and why or nil
-    end
+-- and why when it is a mod's material src/albedo.lua cannot read. override: a weapon's paint for the material's slot
+-- ({lut, pattern}: the LUT the game binds there instead of the material's own), or nil.
+-- A material without a LUT: its albedo entry (src/albedo.lua) or nil, and why a mod's material is left unread.
+local function albedo_entry(deps, material, record, textures, parent)
+    if not deps.Albedo then return nil end
+    local entry, why = deps.Albedo.eligible(record, parent, textures, deps.textures.describe)
+    if entry then entry.material = material end
+    return entry, record.file and why or nil
+end
+
+-- The LUT a material is analysed through (the override's, the piece's, else its own: default) and, for a weapon's
+-- material analysed through a scheme's LUT (src/weapons.lua template), the LUT the game binds there (or nil).
+local function entry_luts(piece, default, override)
     local lut = piece.lut ~= Kits.NO_LUT and piece.lut or default
+    if not override then return lut, nil end
+    if override.lut ~= Kits.NO_LUT then lut = override.lut end
+    local bound = override.bound and (override.bound ~= Kits.NO_LUT and override.bound or default)
+    return lut, bound ~= lut and bound or nil
+end
+
+local function material_entry(deps, piece, material, record, textures, parent, override)
+    local default = textures[Kits.SLOT_LUT]
+    if not default then return albedo_entry(deps, material, record, textures, parent) end
+    local lut, bound = entry_luts(piece, default, override)
     if not deps.find(lut, Kits.TYPE_TEXTURE) then return nil end
-    local entry = {material = material, lut = lut, mask = textures[Kits.SLOT_MASK]}
-    add_pattern_textures(entry, deps, piece, textures)
+    local entry = {material = material, lut = lut, mask = textures[Kits.SLOT_MASK], bound = bound}
+    -- a weapon scheme's decal sheet for the class (src/weapon_data.lua decals: NIGHT's blank sheet) over its own
+    local own_decal = textures[Kits.SLOT_DECAL]
+    if override and override.decal and own_decal and own_decal ~= override.decal then
+        entry.decal = {from = own_decal, to = override.decal}
+    end
+    add_pattern_textures(entry, deps, piece, textures, override)
     return entry
 end
 
@@ -235,11 +268,17 @@ local function piece_materials(deps, piece)
     local archive, record = deps.find(piece.path, Kits.TYPE_UNIT)
     if not archive then return nil end
     local out, unread = {}, nil
-    for _, material in ipairs(unit_materials(deps.slim, archive, record, deps.scratch)) do
+    local materials, keys = unit_materials(deps.slim, archive, record, deps.scratch)
+    for i, material in ipairs(materials) do
         local m_archive, m_record = deps.find(material, Kits.TYPE_MATERIAL)
         if m_archive then
             local textures, parent = material_textures(deps.slim, m_archive, m_record, deps.scratch)
-            local entry, why = material_entry(deps, piece, material, m_record, textures, parent)
+            local override = piece.overrides and keys and piece.overrides[keys[i]]
+            local entry, why = material_entry(deps, piece, material, m_record, textures, parent, override)
+            if entry and entry.mask then -- from a mod's patch: its drawn rows may differ (weapon_cover)
+                local _, mask_record = deps.find(entry.mask, Kits.TYPE_TEXTURE)
+                entry.patched = m_record.file ~= nil or (mask_record ~= nil and mask_record.file ~= nil)
+            end
             out[#out + 1] = entry
             if why then
                 unread = unread or {}
@@ -248,7 +287,7 @@ local function piece_materials(deps, piece)
         end
         deps.yield()
     end
-    return out, unread
+    return out, unread, record.file ~= nil
 end
 
 -- Adds one material's pattern area to the accumulators (weight x mask coverage / materials) when its pattern is
@@ -323,32 +362,96 @@ local function note_unread(out, unread)
     end
 end
 
+-- The weapons' row table (src/weapon_data.lua): rows(unit, material) -> LOD0 triangles and the share of each row
+-- ({[r + 1] = share}, 8 rows), or nil when the table has no such material. A unit's text is parsed on first use.
+function Kits.weapon_rows(data)
+    local parsed = {}
+    return function(unit, material)
+        local text = data and data.units and data.units[unit]
+        if not text then return nil end
+        local by = parsed[unit]
+        if not by then
+            by = {}
+            for m, triangles, cells in text:gmatch('(%x+):(%d+):([^|]*)') do
+                local shares = {0, 0, 0, 0, 0, 0, 0, 0}
+                for r, s in cells:gmatch('(%d+)=([%d%.]+)') do shares[tonumber(r) + 1] = tonumber(s) end
+                by[m] = {tonumber(triangles), shares}
+            end
+            parsed[unit] = by
+        end
+        local e = by[material]
+        if e then return e[1], e[2] end
+        return nil
+    end
+end
+
+-- A weapon piece's materials as the game draws them (deps.weapon_rows, src/weapon_data.lua): per material its share
+-- of the piece (LOD0 triangles) and its rows' shares of the texels its meshes draw, by the shader's row rule. ID masks
+-- of weapons are atlases several units share (124 of 441 unit materials more than 10% off with the whole mask) and the
+-- shared rail draws mostly blank texels, row 0 (the mask rule counted its placeholder blue row). nil when the table
+-- lacks one of them, or the unit or a material came from a mod's patch (its geometry may differ): the piece then
+-- falls back to the ID masks.
+local function weapon_cover(deps, piece, materials)
+    if not deps.weapon_rows then return nil end
+    local list, total = {}, 0
+    for i, m in ipairs(materials) do
+        if m.albedo or m.patched then return nil end
+        local triangles, shares = deps.weapon_rows(piece.path, m.material)
+        if not triangles then return nil end
+        list[i] = {triangles = triangles, shares = shares}
+        total = total + triangles
+    end
+    if total <= 0 then return nil end
+    for _, e in ipairs(list) do e.fraction = e.triangles / total end
+    return list
+end
+
+-- One LUT material of a weighted piece (p: {acc, out, deps, piece, weight, count: its materials}): its LUT, rows and
+-- pattern. d: its share of the piece as the game draws it (a weapon's, weapon_cover) or nil (its ID mask's coverage).
+local function add_lut_material(p, material, d)
+    local deps = p.deps
+    local lut = deps.textures.lut(material.lut)
+    p.out.luts[material.lut] = lut
+    if d then
+        add_rows(p.acc, p.piece, p.weight * d.fraction, 1, material, lut, d.shares)
+    else
+        local coverage = material.mask and deps.find(material.mask, Kits.TYPE_TEXTURE)
+            and deps.textures.coverage(material.mask) or nil
+        add_rows(p.acc, p.piece, p.weight, p.count, material, lut, coverage)
+    end
+    add_pattern(p.acc, p.out, deps, p.weight, p.count, material)
+end
+
+-- A piece's materials when it is spawned for this body (pieces of the other body type never are for this avatar:
+-- not read at all), and whether a mod's patch changed them; counts the unread and dropped ones into out.
+local function spawned_materials(out, kit, piece, body, deps)
+    if not (piece.body == body or piece.body == Kits.BODY_ANY or kit.kit_type == Kits.HELMET) then return nil end
+    local materials, unread, patched = piece_materials(deps, piece)
+    note_unread(out, unread)
+    if not materials then out.dropped = out.dropped + 1 end
+    return materials, patched
+end
+
 -- One piece: its materials (when spawned for this body) and, for a weighted piece, its rows. skin: the piece has
 -- skin tones (kept for the cache and logs; it no longer leaves the piece out).
 local function add_piece(acc, out, kit, piece, body, deps)
     local weight = Kits.weight(kit.kit_type, piece, body)
-    -- Pieces of the other body type are never spawned for this avatar: not read at all.
-    local spawned = piece.body == body or piece.body == Kits.BODY_ANY or kit.kit_type == Kits.HELMET
-    local materials, unread
-    if spawned then materials, unread = piece_materials(deps, piece) end
-    note_unread(out, unread)
-    if spawned and not materials then out.dropped = out.dropped + 1 end
+    local materials, patched = spawned_materials(out, kit, piece, body, deps)
     local entry = {piece = piece, weight = weight, materials = materials or {}, skin = piece.tone > 0}
     out.pieces[#out.pieces + 1] = entry
     if weight <= 0 or not materials then return end
-    for _, material in ipairs(materials) do
+    -- a weapon's pieces as the game draws them (src/weapon_data.lua), else as the ID masks give them
+    local drawn = kit.kit_type == Kits.WEAPON and not patched and weapon_cover(deps, piece, materials) or nil
+    local p = {acc = acc, out = out, deps = deps, piece = piece, weight = weight, count = #materials}
+    for i, material in ipairs(materials) do
         if material.albedo then
             add_albedo(acc, out, deps, piece, weight, #materials, material)
         else
-            local lut = deps.textures.lut(material.lut)
-            out.luts[material.lut] = lut
-            local coverage = material.mask and deps.find(material.mask, Kits.TYPE_TEXTURE)
-                and deps.textures.coverage(material.mask) or nil
-            add_rows(acc, piece, weight, #materials, material, lut, coverage)
-            add_pattern(acc, out, deps, weight, #materials, material)
+            add_lut_material(p, material, drawn and drawn[i])
         end
         deps.yield()
     end
+    if drawn then out.drawn = (out.drawn or 0) + 1 end
 end
 
 -- A row's emissive intensity (column 13 x): above 0 a paint row glows (the game's light strips; glowing visors of
@@ -360,11 +463,22 @@ end
 
 -- A LUT row's colors and flags (the color model's row_info), and an albedo cluster's (src/albedo.lua: its look, its
 -- mean albedo, metal over half its texels; paint, mode 0, no camo).
-local function lut_row(lut, r, deps)
-    local L, a, b, metal, camo, mode, full, ar, ag, ab = deps.colour.row_info(lut.values, lut.width, r)
+-- weapon: a weapon's row whose metallic (column 6 w) is a bias over WEAPON_BIAS reads as its paint: on weapons that
+-- column runs from -3.0 to 4.21 (offline catalogue 2026-10-15: the camo schemes' row 1, the Liberator Carbine's camo)
+-- and only shows worn metal on edges; the bare-metal rows hold 1.0.
+Kits.WEAPON_BIAS = 1.5
+local function lut_row(lut, r, deps, weapon)
+    local values, row = lut.values, r
+    if weapon and lut.values[(r * lut.width + 6) * 4 + 3] > Kits.WEAPON_BIAS then
+        values, row = ffi.new('float[?]', lut.width * 4), 0
+        ffi.copy(values, lut.values + r * lut.width * 4, lut.width * 16)
+        values[6 * 4 + 3] = 0
+    end
+    local L, a, b, metal, camo, mode, full, ar, ag, ab = deps.colour.row_info(values, lut.width, row)
     return {L = L, a = a, b = b, metal = metal, camo = camo, mode = mode, full = full, ar = ar, ag = ag, ab = ab,
             emissive = Kits.emissive(lut, r)}
 end
+Kits.lut_row = lut_row -- tests/test_units.lua
 local function albedo_row(albedo, r)
     local c = albedo.clusters[r + 1]
     return {L = c.seen[1], a = c.seen[2], b = c.seen[3], metal = c.metal > 0.5, camo = false, mode = 0,
@@ -384,7 +498,8 @@ function Kits.analyse(kit, body, deps)
     out.rows = {}
     for _, key in ipairs(acc.order) do
         local lut_name, r = acc.row_of[key][1], acc.row_of[key][2]
-        local row = out.luts[lut_name] and lut_row(out.luts[lut_name], r, deps) or albedo_row(out.albedos[lut_name], r)
+        local row = out.luts[lut_name] and lut_row(out.luts[lut_name], r, deps, kit.kit_type == Kits.WEAPON)
+            or albedo_row(out.albedos[lut_name], r)
         row.key, row.lut, row.row, row.area, row.under = key, lut_name, r, acc.area[key], acc.under[key]
         out.rows[#out.rows + 1] = row
         deps.yield()
@@ -477,6 +592,7 @@ function Kits.signature(kit)
         parts[#parts + 1] = table.concat({p.path, p.slot, p.type, p.body, p.lut, p.pattern or '', p.tone, p.fields or ''},
                                          ',') .. (p.cape_lut and (',' .. p.cape_lut .. ',' .. (p.gradient or '') .. ','
                                                     .. (p.decal or '')) or '')
+            .. (p.overrides_text and (',' .. p.overrides_text) or '') -- a weapon's paint (src/weapons.lua)
     end
     made = table.concat(parts, ';')
     signatures[kit] = made
@@ -619,7 +735,8 @@ end
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({hex64, Kits.weight, unit_materials, material_textures, texture_error, Kits.textures,
         Kits.shared_samples,
-        add_pattern_textures, material_entry, piece_materials, add_pattern, add_rows, add_albedo, note_unread,
+        add_pattern_textures, albedo_entry, entry_luts, material_entry, piece_materials, add_pattern, add_rows,
+        add_albedo, add_lut_material, note_unread, spawned_materials,
         add_piece,
         Kits.emissive, lut_row, albedo_row, Kits.analyse,
         row_change, piece_patched, mark_row, Kits.mark_patched, Kits.signature, piece_of, read_record, kit_of,

@@ -178,6 +178,21 @@ function Engine.binding_in(big, count, slot)
     return nil
 end
 
+-- The address of the texture object field of a material's binding of `slot` (the 8 bytes a reader compares with the
+-- texture it bound: src/weapons.lua watches one so a weapon's reload, which binds the paint's LUT again, is seen the
+-- next frame), or nil. Arguments as Engine.bindings.
+function Engine.binding_entry(read, material, slot, buffer, big)
+    local count = Engine.bindings(read, material, buffer, big)
+    if not count then return nil end
+    local array = (buffer[8] + buffer[9] * 256 + buffer[10] * 65536 + buffer[11] * 16777216)
+        + (buffer[12] + buffer[13] * 256) * HIGH
+    for i = 0, count - 1 do
+        local o = i * 16
+        if big[o] + big[o + 1] * 256 + big[o + 2] * 65536 + big[o + 3] * 16777216 == slot then return array + o + 8 end
+    end
+    return nil
+end
+
 -- The texture object bound to a material's texture slot (Engine.LUT_SLOT, Engine.PATTERN_SLOT,
 -- Engine.CAPE_LUT_SLOT), or nil. Arguments as Engine.bindings.
 function Engine.binding(read, material, slot, buffer, big)
@@ -424,7 +439,7 @@ end
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({Engine.open, Engine.name64, Engine.texture_object, Engine.unit_materials, Engine.bindings,
-        Engine.binding_in, Engine.binding, Engine.pool, Engine.pool_key, sheet_note,
+        Engine.binding_in, Engine.binding_entry, Engine.binding, Engine.pool, Engine.pool_key, sheet_note,
         Engine.create_texture, Engine.update_texture, Engine.bind}) do
         jit.off(fn, true)
     end

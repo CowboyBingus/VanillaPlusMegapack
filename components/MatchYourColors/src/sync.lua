@@ -9,8 +9,16 @@
 -- are peer ids in hex without zero padding (KB lobby-manager-session-research). PlayFab's exports come from
 -- PlayFabMultiplayerWin.dll (GetModuleHandleA, GetProcAddress once per session).
 --
--- Value: '<version>|<mode>|<flags>|<scheme>' (flags: complete sets 1, hoods recolored 2, materials matched 4, cape
--- recolored 8).
+-- Values, two member properties posted together (v1.5, user request 2026-10-15: no new key per new option):
+--   * KEY2 'cbmyc2': fields 'name=value;' in any order: v the format level a reader must know (LEVEL), m the mode, f
+--     the flags (complete sets 1, hoods recolored 2, materials matched 4, cape recolored 8, weapons recolored 16), s
+--     the paint scheme. A reader takes the fields and flag bits it knows and ignores the others, so a new option is a
+--     new bit or field that older copies skip; v rises only when an existing field changes its meaning (older copies
+--     then refuse the value, as they must).
+--   * KEY 'cbmyc' (v1.3-v1.4's): '<version>|<mode>|<flags>|<scheme>' with flags under 16. Those copies refuse any
+--     other value whole and read no other key; it is posted alongside until they are rare, then dropped.
+-- A member's value is read from KEY2 first and from KEY only when KEY2 is missing (an older copy): a copy that read
+-- KEY first would miss a later version that posts KEY2 alone.
 -- Posts are rare: once per lobby and after an options change has settled for POST_DELAY_FRAMES; never while not
 -- joined (a failed post can set the game's lobby session state 4), and only once the lobby has stayed joined under
 -- one handle for STEADY_FRAMES. A post names the local user by PlayFab's own key of the local member (from its member
@@ -18,13 +26,15 @@
 -- read a bad string pointer through it and the game crashed (user, 2026-10-07; dump at
 -- PlayFabMultiplayerWin+0x5fde4). Reads run on the caller's poll (every POLL_FRAMES): 7 memory reads for the lobby,
 -- one member list, then per member 2 reads (the local member's 4) and, for the others while this player shares, one
--- member property and 1 read. All game memory is read through bingus_memory's read_into
+-- member property and 1 read (two properties for a member without KEY2: an older copy, or a player without the mod). All game memory is read through bingus_memory's read_into
 -- (pointer objects kept per address); PlayFab's strings are copied the same way. The poll's tables are reused.
 local ffi = require('ffi')
 
 local Sync = {}
 
-Sync.KEY, Sync.VERSION, Sync.DLL = 'cbmyc', 1, 'PlayFabMultiplayerWin.dll'
+Sync.KEY, Sync.KEY2, Sync.VERSION, Sync.LEVEL = 'cbmyc', 'cbmyc2', 1, 1
+Sync.DLL = 'PlayFabMultiplayerWin.dll'
+Sync.TEXT_MAX = 127 -- the longest value read or posted
 Sync.POLL_FRAMES, Sync.POST_DELAY_FRAMES, Sync.RETRY_FRAMES, Sync.STEADY_FRAMES = 120, 300, 1800, 600
 Sync.CONTEXT, Sync.LOBBY, Sync.PLAYFAB = 0x347CEF0, 0x1D470, 0x10
 Sync.PL_MEMBERS, Sync.PL_STATE, Sync.PL_HANDLE, Sync.PL_USER = 0x100, 0x118, 0x120, 0x130
@@ -32,22 +42,64 @@ Sync.JOINED, Sync.MAX_MEMBERS = 3, 16
 local HIGH = 4294967296
 local U64 = ffi.typeof('uint64_t')
 
--- The value for options {mode, keep_sets, recolor_hoods, match_materials, recolor_cape, scheme}.
-function Sync.encode(o)
-    local flags = (o.keep_sets and 1 or 0) + (o.recolor_hoods and 2 or 0) + (o.match_materials and 4 or 0)
-        + (o.recolor_cape and 8 or 0)
-    return string.format('%d|%d|%d|%d', Sync.VERSION, o.mode, flags, o.scheme or 0)
+-- The options each flag bit carries; KEY's value holds the bits under LEGACY_FLAGS + 1 only.
+Sync.FLAGS = {{'keep_sets', 1}, {'recolor_hoods', 2}, {'match_materials', 4}, {'recolor_cape', 8},
+              {'recolor_weapons', 16}}
+local LEGACY_FLAGS = 15
+local MODES, SCHEMES = 4, 64
+
+local function flags_of(o)
+    local flags = 0
+    for _, flag in ipairs(Sync.FLAGS) do
+        if o[flag[1]] then flags = flags + flag[2] end
+    end
+    return flags
 end
 
--- The options a value carries, or nil (another version, or anything malformed).
+-- Options from a mode, flags and scheme, or nil when a copy cannot show them (a mode or scheme it does not have).
+local function options_of(mode, flags, scheme)
+    if not (mode and flags and scheme) or mode < 1 or mode > MODES or mode % 1 ~= 0 or scheme > SCHEMES
+        or scheme % 1 ~= 0 then
+        return nil
+    end
+    local o = {mode = mode, scheme = scheme}
+    for _, flag in ipairs(Sync.FLAGS) do o[flag[1]] = math.floor(flags / flag[2]) % 2 == 1 end
+    return o
+end
+
+-- KEY2's value for options {mode, scheme and the FLAGS options}.
+function Sync.encode(o)
+    return string.format('v=%d;m=%d;f=%d;s=%d;', Sync.LEVEL, o.mode, flags_of(o), o.scheme or 0)
+end
+
+-- KEY's value (v1.3-v1.4's format) for the same options: the flags they know.
+function Sync.legacy(o)
+    return string.format('%d|%d|%d|%d', Sync.VERSION, o.mode, flags_of(o) % (LEGACY_FLAGS + 1), o.scheme or 0)
+end
+
+-- A KEY2 value's fields {name = text}, or nil when it is not a list of 'name=value;' (a value cut short included).
+local function fields_of(text)
+    if text:gsub('[%a_][%w_]*=[^;=]*;', '') ~= '' then return nil end
+    local fields = {}
+    for name, value in text:gmatch('([%a_][%w_]*)=([^;=]*);') do fields[name] = value end
+    return fields
+end
+
+-- The options a value of either key carries, or nil (a level or mode this copy does not know, anything malformed).
+-- Unknown KEY2 fields and flag bits are ignored. Options this version knows but the value does not carry are false.
 function Sync.decode(text)
-    if type(text) ~= 'string' or #text > 40 then return nil end
+    if type(text) ~= 'string' or #text == 0 or #text > Sync.TEXT_MAX then return nil end
     local version, mode, flags, scheme = text:match('^(%d+)|(%d+)|(%d+)|(%d+)$')
-    version, mode, flags, scheme = tonumber(version), tonumber(mode), tonumber(flags), tonumber(scheme)
-    if version ~= Sync.VERSION or not mode or mode < 1 or mode > 4 or flags > 15 or scheme > 64 then return nil end
-    return {mode = mode, keep_sets = flags % 2 == 1, recolor_hoods = math.floor(flags / 2) % 2 == 1,
-            match_materials = math.floor(flags / 4) % 2 == 1, recolor_cape = math.floor(flags / 8) % 2 == 1,
-            scheme = scheme}
+    if version then
+        if tonumber(version) ~= Sync.VERSION or tonumber(flags) > LEGACY_FLAGS then return nil end
+        return options_of(tonumber(mode), tonumber(flags), tonumber(scheme))
+    end
+    local fields = fields_of(text)
+    local level = fields and tonumber(fields.v)
+    if not level or level > Sync.LEVEL then return nil end
+    local f = tonumber(fields.f or '0')
+    if not f or f < 0 or f % 1 ~= 0 or f >= 2 ^ 31 then return nil end
+    return options_of(tonumber(fields.m), f, tonumber(fields.s or '0'))
 end
 
 -- The peer id of an entity id: up to 16 hex digits (the engine prints peer ids with %llX, no zero padding, and
@@ -77,11 +129,11 @@ typedef int32_t (*MycGetMemberProperty)(uint64_t lobby, const MycEntityKey *memb
 ]])
 end
 
--- PlayFab's lobby calls as {post(handle, key address (PlayFab's own key of the local member), text or nil),
--- members(handle) -> count, array address or nil,
--- hresult, property(handle, member address) -> value address or nil, hresult}, or nil and why. Every buffer is made
--- here once; a call allocates only its pointer and result boxes. lookup(name, ctype): an export as ctype or nil
--- (default: PlayFabMultiplayerWin.dll's; tests give their own).
+-- PlayFab's lobby calls as {post(handle, key address (PlayFab's own key of the local member), text or nil (KEY2's
+-- value), legacy or nil (KEY's): both keys in one update, nil removes a key), members(handle) -> count, array address
+-- or nil, hresult, property(handle, member address, legacy) -> value address or nil, hresult (KEY2's, or KEY's with
+-- legacy)}, or nil and why. Every buffer is made here once; a call allocates only its pointer and result boxes.
+-- lookup(name, ctype): an export as ctype or nil (default: PlayFabMultiplayerWin.dll's; tests give their own).
 function Sync.natives(lookup)
     declare()
     if not lookup then
@@ -99,24 +151,30 @@ function Sync.natives(lookup)
     local property = lookup('PFLobbyGetMemberProperty', 'MycGetMemberProperty')
     if not (post and members and property) then return nil, 'PlayFab lobby exports missing' end
     local KEY_PTR = ffi.typeof('const MycEntityKey *')
-    local key, value = ffi.new('char[8]', Sync.KEY), ffi.new('char[48]')
-    local keys, values = ffi.new('const char *[1]'), ffi.new('const char *[1]')
-    keys[0] = key
+    local key, key2 = ffi.new('char[8]', Sync.KEY), ffi.new('char[8]', Sync.KEY2)
+    local value, value2 = ffi.new('char[?]', Sync.TEXT_MAX + 1), ffi.new('char[?]', Sync.TEXT_MAX + 1)
+    local keys, values = ffi.new('const char *[2]'), ffi.new('const char *[2]')
+    keys[0], keys[1] = key2, key
     local update = ffi.new('MycMemberUpdate')
-    update.count, update.keys, update.values = 1, keys, values
+    update.count, update.keys, update.values = 2, keys, values
     local count, list, out = ffi.new('uint32_t[1]'), ffi.new('const MycEntityKey *[1]'), ffi.new('const char *[1]')
     -- Every buffer the update points into stays referenced for the session: a pointer stored in a struct field keeps
     -- no cdata alive. The keys array, referenced by nothing else, was collected after this function returned and its
     -- memory reused; PFLobbyPostUpdate then read a garbage key pointer through it and the game crashed (user,
     -- 2026-10-07; dump at PlayFabMultiplayerWin+0x5fde4 reading keys[0] = 0x13FE3012E).
-    local api = {keep = {key, value, keys, values, update, count, list, out}}
-    function api.post(handle, user, text)
+    local api = {keep = {key, key2, value, value2, keys, values, update, count, list, out}}
+    -- values[i]: text copied into buffer, or nil (removes the key).
+    local function set(i, buffer, text)
         if text then
-            ffi.copy(value, text:sub(1, 47))
-            values[0] = value
+            ffi.copy(buffer, text:sub(1, Sync.TEXT_MAX))
+            values[i] = buffer
         else
-            values[0] = nil -- removes the key
+            values[i] = nil
         end
+    end
+    function api.post(handle, user, text, legacy)
+        set(0, value2, text)
+        set(1, value, legacy)
         return post(handle, ffi.cast(KEY_PTR, user), nil, update, nil)
     end
     function api.members(handle)
@@ -124,9 +182,9 @@ function Sync.natives(lookup)
         if result ~= 0 then return nil, nil, result end
         return count[0], tonumber(ffi.cast(U64, list[0])), 0
     end
-    function api.property(handle, member)
+    function api.property(handle, member, legacy)
         out[0] = nil
-        local result = property(handle, ffi.cast(KEY_PTR, member), key, out)
+        local result = property(handle, ffi.cast(KEY_PTR, member), legacy and key or key2, out)
         if result ~= 0 then return nil, result end
         if out[0] == nil then return nil, 0 end
         return tonumber(ffi.cast(U64, out[0])), 0
@@ -135,12 +193,14 @@ function Sync.natives(lookup)
 end
 
 -- Safe reads for the session into one buffer: u32 and u64 (an address as a number) or nil, halves (a 64-bit value's
--- low and high 32 bits) or nil, text (a C string up to 47 bytes) or nil. One pointer object per address is kept
--- (the lobby's addresses are stable; the cache starts over at 256). memory: bingus_memory.
-local TEXT_SIZES = {47, 24, 16, 8}
+-- low and high 32 bits) or nil, text (a C string up to TEXT_MAX bytes; nil when it does not end within the bytes
+-- read, so a value is never taken cut short) or nil. Shorter reads are tried when a long one fails (a string near the
+-- end of readable memory). One pointer object per address is kept (the lobby's addresses are stable; the cache starts
+-- over at 256). memory: bingus_memory.
+local TEXT_SIZES = {Sync.TEXT_MAX + 1, 64, 48, 24, 16, 8}
 local function reader(memory)
     local U8P = ffi.typeof('const uint8_t *')
-    local bytes = ffi.new('uint8_t[64]')
+    local bytes = ffi.new('uint8_t[?]', Sync.TEXT_MAX + 1)
     local pointers, cached = {}, 0
     local self = {}
     local function read(address, size)
@@ -173,6 +233,7 @@ local function reader(memory)
             if b then
                 local n = 0
                 while n < size and b[n] ~= 0 do n = n + 1 end
+                if n == size then return nil end
                 return ffi.string(b, n)
             end
         end
@@ -234,7 +295,8 @@ function Sync.session(deps)
             return
         end
         if not l.own or frame - l.since < Sync.STEADY_FRAMES then return end
-        local result = api.post(l.handle, l.own, text)
+        local options = text and Sync.decode(text)
+        local result = api.post(l.handle, l.own, text, options and Sync.legacy(options) or nil)
         self.next_post = frame + Sync.POST_DELAY_FRAMES
         if result == 0 then
             self.posted_low, self.posted_high, self.posted_text = l.low, l.high, text
@@ -244,6 +306,19 @@ function Sync.session(deps)
             self.failures, self.next_post = self.failures + 1, frame + Sync.RETRY_FRAMES
             deps.note(string.format('Sync: post failed (0x%08X); retrying later.', result % HIGH))
         end
+    end
+
+    -- One member's value into the next record of list: KEY2's, else (no KEY2: an older copy) KEY's.
+    local function add_member(l, key_at, low, high, own)
+        local value_at, result = api.property(l.handle, key_at, false)
+        if not value_at and result == 0 then value_at, result = api.property(l.handle, key_at, true) end
+        local n = #list + 1
+        local r = records[n] or {}
+        records[n] = r
+        r.peer_low, r.peer_high, r['local'] = low, high, own
+        r.text = value_at and read.text(value_at) or nil
+        r.failed = result ~= nil and result ~= 0 -- a failed read, not a missing value (src/remote.lua update)
+        list[n] = r
     end
 
     -- The members' values (the local member's only with include_local) into list (reused); l.own: PlayFab's own key
@@ -259,16 +334,7 @@ function Sync.session(deps)
             local low, high = Sync.peer_of(id)
             local own = id ~= nil and id == l.id
             if own and read.text(read.u64(key_at + 8)) then l.own = key_at end
-            if low and (include_local or not own) then
-                local value_at, result = api.property(l.handle, key_at)
-                local n = #list + 1
-                local r = records[n] or {}
-                records[n] = r
-                r.peer_low, r.peer_high, r['local'] = low, high, own
-                r.text = value_at and read.text(value_at) or nil
-                r.failed = result ~= nil and result ~= 0 -- a failed read, not a missing value (src/remote.lua update)
-                list[n] = r
-            end
+            if low and (include_local or not own) then add_member(l, key_at, low, high, own) end
         end
         return list
     end
@@ -292,8 +358,8 @@ end
 -- Runs on the sync poll and at startup, never per frame: interpreted (no traces in the LuaJIT code cache every mod
 -- shares).
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({Sync.encode, Sync.decode, Sync.peer_of, declare, Sync.natives, reader, lobby,
-                         Sync.session}) do
+    for _, fn in ipairs({flags_of, options_of, Sync.encode, Sync.legacy, fields_of, Sync.decode, Sync.peer_of, declare,
+                         Sync.natives, reader, lobby, Sync.session}) do
         jit.off(fn, true)
     end
 end

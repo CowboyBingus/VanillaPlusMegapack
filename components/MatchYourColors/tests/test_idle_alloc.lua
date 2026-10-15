@@ -8,7 +8,7 @@
 jit.off() -- lint-ok: R5 test process only, never in the game
 local root = assert(arg and arg[1], 'usage: test_idle_alloc.lua <repository root>')
 rawset(_G, 'MYC_TEST_SETUP_ONLY', true) -- lint-ok: R8 test process only
-local setup = dofile(root .. '/tests/test_addon.lua')
+local setup, _, helpers = dofile(root .. '/tests/test_addon.lua')
 rawset(_G, 'MYC_TEST_SETUP_ONLY', nil) -- lint-ok: R8 test process only
 local Fake = dofile(root .. '/tests/fake_game.lua')
 local passed = 0
@@ -28,15 +28,24 @@ end
 -- alone in the lobby; sync on with another mod user's Helldiver recolored; Recolor Cape on with the UI preview shown
 -- (the cape recolored on the avatar and the preview, its kit compared on every check); Helmet and Armor Match Cape
 -- with the UI preview shown (the cape as the source: its kit compared on every check, both items recolored); Recolor
--- Squadmates (v1.5) with a squadmate without the mod recolored with this player's settings.
+-- Squadmates (v1.5) with a squadmate without the mod recolored with this player's settings; Recolor Weapons (v1.5) with
+-- a weapon in hand (its binding read every frame, the inventory row on 1 frame in 4).
 local LOCAL_ID = 'C0FFEE5EED0001'
 local CASES = {{}, {previews = true}, {ui = true}, {ui = true, shown = true},
                {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}}}},
-               {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}, {id = '1234', value = '1|2|3|0'}}}},
+               {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}, {id = '1234', value = 'v=1;m=2;f=3;s=0;'}}}},
                {ui = true, shown = true, capes = true}, {ui = true, shown = true, cape_source = true},
-               {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}, {id = '1234'}}}, squad = 2}}
+               {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}, {id = '1234'}}}, squad = 2},
+               {weapons = true}}
 for _, case in ipairs(CASES) do
-    local w = setup({previews = case.previews, ui = case.ui, lobby = case.lobby})
+    local w = setup({previews = case.previews, ui = case.ui, lobby = case.lobby, weapons = case.weapons})
+    if case.weapons then -- Recolor Weapons (v1.5): a weapon in hand, its binding read every frame
+        helpers.weapon_luts['968211c0033dce64'] = {'962a946e964ebc40'} -- the canned job plans this LUT
+        w.engine.unit(0x400, '962a946e964ebc40')
+        w.weapons.set(1, {id = 0x301, name = '968211c0033dce64', unit = 0x400, units = {}, attachments = {}})
+        w.weapons.hold(1)
+        w.instance.set_option('recolor_weapons', true)
+    end
     if case.shown then
         w.engine.unit(0x300, '962a946e964ebc40')
         Fake.show_ui(w.space, 1, {helmet = 0x0b0b0b0b, armor = 0x0ade6719, body = 0}, {[{0, 0}] = 0x300})
@@ -66,6 +75,7 @@ for _, case in ipairs(CASES) do
     assert(grown == 0, string.format('2400 idle frames (case %d) allocated %.0f bytes', passed + 1, grown))
     assert(polls == (case.lobby and 20 or 0) and poll_bytes <= POLL_BYTES,
            string.format('case %d: %d polls, at most %.0f bytes each', passed + 1, polls, poll_bytes))
+    if case.weapons then assert(w.instance.loadout.entry, 'the weapon in hand watched') end
     if case.lobby then
         assert(not case.lobby.members[2] or w.instance.remote.order[1], 'the other mod user is recolored')
         print(string.format('  sync case %d: a lobby poll allocated at most %.0f bytes', passed + 1, poll_bytes))
@@ -74,4 +84,4 @@ for _, case in ipairs(CASES) do
 end
 print('PASS test_idle_alloc (' .. passed .. ' checks: 2400 idle frames each, with and without a preview slot, '
     .. 'with the UI preview hidden and shown, with sync on alone and with another mod user recolored, with Recolor '
-    .. 'Cape on, with Helmet and Armor Match Cape, with Recolor Squadmates)')
+    .. 'Cape on, with Helmet and Armor Match Cape, with Recolor Squadmates, with Recolor Weapons and a weapon in hand)')

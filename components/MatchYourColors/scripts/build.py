@@ -72,8 +72,9 @@ SOURCES = [('T', 'bingus_text.lua'), ('runtime', 'bingus_runtime.lua'), ('runtim
            ('Colour', 'colour.lua'),
            ('Transfer', 'transfer.lua'), ('Matcher', 'matcher.lua'), ('Zones', 'zones.lua'), ('Variety', 'variety.lua'), ('Schemes', 'schemes.lua'),
            ('Appearance', 'appearance.lua'), ('AppearanceData', 'appearance_data.lua'), ('Kits', 'kits.lua'),
+           ('WeaponData', 'weapon_data.lua'), ('Weapons', 'weapons.lua'),
            ('Cache', 'cache.lua'), ('Capes', 'capes.lua'), ('Engine', 'engine.lua'), ('Avatar', 'avatar.lua'),
-           ('Preview', 'preview.lua'), ('Recolor', 'recolor.lua'), ('Sheets', 'sheets.lua'), ('Sync', 'sync.lua'), ('Remote', 'remote.lua'),
+           ('Preview', 'preview.lua'), ('Recolor', 'recolor.lua'), ('Bindings', 'bindings.lua'), ('Loadout', 'loadout.lua'), ('Sheets', 'sheets.lua'), ('Sync', 'sync.lua'), ('Remote', 'remote.lua'),
            ('Addon', 'addon.lua')]
 VENDORED = ('bingus_text.lua', 'bingus_runtime.lua', 'bingus_memory.lua')
 # Names the mod's own sources must never contain: code or thread creation, page protection, library loading,
@@ -82,7 +83,7 @@ VENDORED = ('bingus_text.lua', 'bingus_runtime.lua', 'bingus_memory.lua')
 FORBIDDEN = ('VirtualAlloc', 'VirtualProtect', 'FlushInstructionCache', 'CreateRemoteThread', 'LoadLibrary',
              'Network.', 'RPC.', 'jit.flush', 'jit.attach', 'jit.opt', 'WriteProcessMemory', 'collectgarbage')
 TESTS = ['test_units.lua', 'test_addon.lua', 'test_install.lua', 'test_idle_alloc.lua', 'test_bingus_text.lua',
-         'test_locales.lua', 'test_cache.lua', 'test_job.lua', 'test_sync.lua', 'test_patches.lua']
+         'test_locales.lua', 'test_cache.lua', 'test_job.lua', 'test_sync.lua', 'test_patches.lua', 'test_weapons.lua']
 
 
 def read_lua(path: Path) -> str:
@@ -116,10 +117,10 @@ def assemble(test: bool = False) -> bytes:
                  'locales = locales, Avatar = Avatar, Preview = Preview, Recolor = Recolor, Engine = Engine, '
                  'Files = Files, Slim = Slim, Patches = Patches, Albedo = Albedo, '
                  'Texture = Texture, Colour = Colour, Transfer = Transfer, Matcher = Matcher, Zones = Zones, Variety = Variety, Kits = Kits, '
-                 'Sheets = Sheets, '
+                 'Sheets = Sheets, Bindings = Bindings, '
                  'Cache = Cache, Appearance = Appearance, AppearanceData = AppearanceData, Schemes = Schemes, '
                  'Capes = Capes, '
-                 'Sync = Sync, Remote = Remote})')
+                 'Sync = Sync, Remote = Remote, Weapons = Weapons, Loadout = Loadout, WeaponData = WeaponData})')
     if test:
         lines.append("rawset(_G, 'MatchYourColorsTest', instance) -- lint-ok: R8 live test build only, never published")
     text = '\n'.join(lines) + '\n'

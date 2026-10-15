@@ -19,6 +19,8 @@
 --     binding check without a job (release_reader);
 --   * new analyses go to the disk cache in a save job of its own (BUDGET per frame) once no recolor job runs and
 --     the UI preview has been closed for SAVE_DELAY_FRAMES frames, at shutdown at the latest;
+--   * Recolor Weapons (src/loadout.lua, v1.5): while on, one 8-byte read per frame of the weapon in hand's LUT
+--     binding (a reload binds its own paint again) and the inventory row on 1 frame in 4; the weapons a job of their own;
 --   * Sync With Mod Users (src/sync.lua, src/remote.lua; always on, no option since 2026-10-07): every
 --     Sync.POLL_FRAMES frames the squad's PlayFab lobby is read (and this player's settings posted when due); while
 --     other mod users' Helldivers are recolored, one of them has its units checked per frame (round robin) and one
@@ -36,6 +38,7 @@ Addon.OPTION_HOODS = 'cowboybingus.match_your_colors.recolor_hoods'
 Addon.OPTION_MATERIALS = 'cowboybingus.match_your_colors.match_materials'
 Addon.OPTION_CAPES = 'cowboybingus.match_your_colors.recolor_cape'
 Addon.OPTION_SQUAD = 'cowboybingus.match_your_colors.recolor_squadmates'
+Addon.OPTION_WEAPONS = 'cowboybingus.match_your_colors.recolor_weapons'
 -- Recolor Squadmates' values (the menu's choice index): off, squadmates without the mod take this player's settings,
 -- every squadmate takes them (v1.5; never shared: other players' sync values stay v1.4's)
 Addon.SQUAD_OFF, Addon.SQUAD_MISSING, Addon.SQUAD_EVERYONE = 1, 2, 3
@@ -89,7 +92,8 @@ function Addon.new(m)
     local state = {frame = 0, next_resolve = 0, next_verify = 0, next_check = 0, identity = nil, watch = nil, slot = nil,
                    dirty = false, job = nil, request = nil, failures = {}, why = nil, budget_end = 0,
                    options = {mode = Recolor.HELMET_FROM_ARMOR, keep_sets = true, recolor_hoods = true,
-                              match_materials = false, recolor_cape = false, scheme = 0, squad = Addon.SQUAD_OFF},
+                              match_materials = false, recolor_cape = false, recolor_weapons = false, scheme = 0,
+                              squad = Addon.SQUAD_OFF},
                    next_sync = 0, loopback = false, holder = {}, status = 'starting', active = true}
     local pool = m.Engine.pool({native = m.native, memory = memory})
     local controller = Recolor.controller({Engine = m.Engine, Avatar = Avatar, memory = memory, native = m.native,
@@ -102,7 +106,7 @@ function Addon.new(m)
     local probe = {} -- the identity table every check refills; adopted identities are copies
     -- wait: a game-data read the disk has not answered yet lets the job sit out a frame (src/files.lua).
     local job_deps = {Files = m.Files, Slim = m.Slim, Patches = m.Patches, Texture = m.Texture, Colour = m.Colour,
-                      Albedo = m.Albedo,
+                      Albedo = m.Albedo, Weapons = m.Weapons, WeaponData = m.WeaponData, Avatar = Avatar,
                       Transfer = m.Transfer, Matcher = m.Matcher, Kits = m.Kits, Schemes = m.Schemes, Capes = m.Capes,
                       memory = memory, wait = coroutine.yield,
                       game = m.game,
@@ -129,11 +133,22 @@ function Addon.new(m)
                                                             natives = m.natives or m.Sync.natives})
     local remote = session and m.Remote.new({Avatar = Avatar, Recolor = Recolor, Engine = m.Engine, Sync = m.Sync,
                                              memory = memory, native = m.native, pool = pool, game = m.game,
-                                             read = Avatar.reader(memory), note = note, records_same = records_same})
+                                             read = Avatar.reader(memory), note = note, records_same = records_same,
+                                             Loadout = m.Weapons and m.Loadout, Weapons = m.Weapons})
     state.syncing = session ~= nil
     state.sync_text = session and m.Sync.encode(state.options) or nil
+    -- Recolor Weapons: the local Helldiver's weapons, a target of their own (src/loadout.lua).
+    local loadout = m.Weapons and m.Loadout and m.Loadout.new({Weapons = m.Weapons, Recolor = Recolor, Engine = m.Engine,
+        Avatar = Avatar, memory = memory, native = m.native, pool = pool, game = m.game, read = Avatar.reader(memory),
+        note = note})
     local self = {state = state, controller = controller, ui_controller = ui_controller, pool = pool, remote = remote,
-                  session = session}
+                  session = session, loadout = loadout}
+
+    -- Whether the weapons are recolored: Recolor Weapons on while something local is (not in the test build's loopback,
+    -- where the sync path recolors the avatar).
+    local function weapons_on()
+        return loadout ~= nil and state.options.recolor_weapons and state.active and not state.loopback
+    end
 
     local function maybe_yield()
         if time() >= state.budget_end then coroutine.yield() end
@@ -148,7 +163,8 @@ function Addon.new(m)
             return
         end
         state.squad_mine = {mode = o.mode, keep_sets = o.keep_sets, recolor_hoods = o.recolor_hoods,
-                            match_materials = o.match_materials, recolor_cape = o.recolor_cape, scheme = o.scheme}
+                            match_materials = o.match_materials, recolor_cape = o.recolor_cape,
+                            recolor_weapons = o.recolor_weapons, scheme = o.scheme}
     end
 
     -- The local player's UI preview, located with the identity; kept while it is the same slot record.
@@ -167,6 +183,10 @@ function Addon.new(m)
         state.watch.changed(true) -- keeps the current units and copies: later frames report only later changes
         state.next_verify, state.dirty, state.found_at = frame + Addon.VERIFY_FRAMES, true, frame
         locate_ui(identity, frame)
+        if weapons_on() then -- another Helldiver (a new mission) or other kits: its weapons, planned for them
+            loadout.adopt(identity)
+            loadout.replan()
+        end
         note(string.format('Local Helldiver: avatar %d, helmet %08x, armor %08x, body %d%s%s.', identity.avatar_index,
             identity.helmet, identity.armor, identity.body, state.slot and ', preview slot found' or '',
             state.ui and (', UI preview slot ' .. state.ui.where.slot) or ''))
@@ -189,6 +209,7 @@ function Addon.new(m)
         state.identity, state.watch, state.slot, state.found_at = nil, nil, nil, nil
         state.next_resolve = frame + Addon.RESOLVE_FRAMES
         controller.prune()
+        if loadout then loadout.clear(frame) end
         if state.ui then
             ui_controller.restore(frame)
             state.ui = nil
@@ -285,6 +306,7 @@ function Addon.new(m)
             adopt(identity, frame)
         elseif state.active and options_cape_counts('avatar') and identity.cape ~= state.identity.cape then
             state.dirty = true
+            if weapons_on() then loadout.replan() end -- the cape may be the weapons' source
         elseif changed and state.active then
             rebound = rebind(frame)
             state.dirty = state.dirty or not rebound
@@ -454,29 +476,59 @@ function Addon.new(m)
         end
     end
 
-    local function finish(ok, result, frame)
-        local request = state.request
-        state.job, state.request = nil, nil
-        local reader = state.holder.pipeline
-        if reader then release_reader(frame) end
-        state.last_job = {seconds = time() - state.job_started, frames = frame - state.job_frame + 1,
-                          work = state.job_work, longest = state.job_slice, longest_stage = state.job_slice_stage,
-                          heap_kb = gcinfo() - state.job_heap}
-        if request.target == 'remote' then -- another mod user's Helldiver: its entry counts its own failures
-            remote.finish(ok, result, request, frame)
-            note_sheets()
-            if ok and reader then note_cache(reader, frame) end
-            return
-        end
-        if request.target == 'prepare' then return finish_ahead(ok, result, request, frame, reader) end
-        local key = request_key(request)
+    -- A weapons job's result (src/loadout.lua): applied while the Helldiver, its kits and the options are the ones it
+    -- was planned for and it holds the same weapons, else a new job follows.
+    -- Whether a weapons result is no longer wanted (the option off, other options or kits, or obsolete); a wanted
+    -- weapons plan is asked for again (preview: the Armory's preview weapon's).
+    local function weapons_stale(request, result, preview, frame)
+        local id = state.identity
+        local stale = not id or options_changed(request) or kits_changed(request, id.helmet, id.armor, id.body, id.cape)
+        if weapons_on() and not stale and result.action ~= 'obsolete' then return false end
+        if weapons_on() and preview then loadout.preview_changed(frame) elseif weapons_on() then loadout.replan() end
+        return true
+    end
+
+    local function finish_weapons(ok, result, request, frame, reader)
         if not ok then
-            state.failures[key] = (state.failures[key] or 0) + 1
-            state.status = 'failed: ' .. tostring(result)
-            note('Recolor failed (' .. state.failures[key] .. '/' .. Addon.FAILURE_LIMIT .. '): ' .. tostring(result))
+            state.failures[request.key] = (state.failures[request.key] or 0) + 1
+            note('Weapons recolor failed (' .. state.failures[request.key] .. '/' .. Addon.FAILURE_LIMIT .. '): '
+                 .. tostring(result))
             return
         end
-        if request.target == 'ui' then return finish_ui(result, request, frame, reader) end
+        if reader then note_cache(reader, frame) end
+        local preview = request.target == 'ui_weapon'
+        if weapons_stale(request, result, preview, frame) then return end
+        local started, made = time(), pool.made
+        local count = preview and loadout.finish_preview(result, request, frame) or loadout.finish(result, request, frame)
+        local job = state.last_job
+        if result.action == 'apply' then
+            note(string.format('%s: %d materials (%d weapons, %d LUTs; job %.1f ms of work over %d frames, longest '
+                .. 'slice %.1f ms; applied in %.2f ms, %d new textures).', preview and 'Weapon preview recolored'
+                or 'Weapons recolored', count, #result.targets, Addon.count(result.luts), job.work * 1000, job.frames,
+                job.longest * 1000, (time() - started) * 1000, pool.made - made))
+        elseif result.reason ~= state.weapons_reason then
+            note('Weapons keep their colors (' .. tostring(result.reason) .. ').')
+        end
+        state.weapons_reason = result.reason
+    end
+
+    -- A failed job of the local Helldiver: counted per request (Addon.FAILURE_LIMIT) and noted.
+    local function job_failed(request, result)
+        local key = request_key(request)
+        state.failures[key] = (state.failures[key] or 0) + 1
+        state.status = 'failed: ' .. tostring(result)
+        note('Recolor failed (' .. state.failures[key] .. '/' .. Addon.FAILURE_LIMIT .. '): ' .. tostring(result))
+    end
+
+    -- Another mod user's Helldiver (or weapons): its entry counts its own failures.
+    local function finish_remote(ok, result, request, frame, reader)
+        remote.finish(ok, result, request, frame)
+        note_sheets()
+        if ok and reader then note_cache(reader, frame) end
+    end
+
+    -- The local Helldiver's plan, applied while its request is still current, and logged.
+    local function finish_local(result, request, frame, reader)
         local now = still_current(request, frame)
         if not now then return end
         local count, ms, made, refilled = timed_apply(controller, result, now, Avatar.preview_slot(memory, now, read),
@@ -490,6 +542,22 @@ function Addon.new(m)
         log_result(result, request, count, reader, {ms = ms, made = made, refilled = refilled, after = after,
                                                     frame = math.max(state.job_slice, time() - state.frame_started)})
         state.last_reason = result.reason
+    end
+
+    local function finish(ok, result, frame)
+        local request = state.request
+        state.job, state.request = nil, nil
+        local reader = state.holder.pipeline
+        if reader then release_reader(frame) end
+        state.last_job = {seconds = time() - state.job_started, frames = frame - state.job_frame + 1,
+                          work = state.job_work, longest = state.job_slice, longest_stage = state.job_slice_stage,
+                          heap_kb = gcinfo() - state.job_heap}
+        if request.target == 'remote' then return finish_remote(ok, result, request, frame, reader) end
+        if request.weapons then return finish_weapons(ok, result, request, frame, reader) end
+        if request.target == 'prepare' then return finish_ahead(ok, result, request, frame, reader) end
+        if not ok then return job_failed(request, result) end
+        if request.target == 'ui' then return finish_ui(result, request, frame, reader) end
+        return finish_local(result, request, frame, reader)
     end
 
     -- One slice of the running job. A job whose last slice took more than APPLY_ALONE (all but one that did next to
@@ -537,6 +605,14 @@ function Addon.new(m)
     -- mod user's Helldiver waiting).
     local function request_for(target)
         if target == 'remote' then return remote.request() end
+        if target == 'weapons' or target == 'ui_weapon' then
+            local w = target == 'weapons' and loadout.request() or (target == 'ui_weapon' and loadout.preview_request())
+            if not w or not state.identity then return nil end
+            local request = with_kits(options_request(target), state.identity)
+            request.weapons, request.sig = w.weapons, w.sig
+            request.key = target .. ':' .. request_key(request) .. ':' .. w.sig
+            return request
+        end
         if target == 'ui' then
             local ui = state.ui
             ui.dirty = false
@@ -571,13 +647,15 @@ function Addon.new(m)
     local function start_job(frame, target, request)
         request = request or request_for(target)
         if not request then return end
-        local key = target ~= 'remote' and request.helmet and request_key(request)
+        local own = target ~= 'remote'
+        local key = own and (request.weapons and request.key or (request.helmet and request_key(request)))
         if key and (state.failures[key] or 0) >= Addon.FAILURE_LIMIT then return end
         state.request = request
         state.job_started, state.job_frame, state.job_work, state.job_slice = time(), frame, 0, 0
         state.job_heap = gcinfo() -- the Lua heap in KB (read only)
+        local job = request.weapons and Recolor.weapons_job or Recolor.job
         state.job = coroutine.create(function()
-            return Recolor.job(job_deps, state.holder, request, maybe_yield)
+            return job(job_deps, state.holder, request, maybe_yield)
         end)
         run_job(frame)
     end
@@ -624,44 +702,56 @@ function Addon.new(m)
             note('The game put an original color texture back on a recolored material; applying again.')
         end
         if state.ui and ui_controller.probes > 0 and not ui_controller.check() then state.ui.dirty = true end
+        if weapons_on() then loadout.check(frame) end
         if state.reader_kept and frame - state.reader_kept >= Addon.KEEP_FRAMES then close_kept() end
         if state.closing and m.Files then state.closing = m.Files.close_some(Addon.CLOSES_PER_CHECK) > 0 end
     end
 
     -- The UI preview's check: a second check this frame, of other memory than the avatar's (the preview's own
     -- units and kits); on 1 frame in UI_GATE_FRAMES while it is not shown, every frame while it is.
+    -- The preview hidden: its plan's bindings put back (shown again: a job for its new units).
+    local function ui_hidden(ui, frame)
+        if not ui.shown then return end
+        ui.shown, ui.dirty = false, false
+        ui.helmet, ui.armor, ui.body, ui.cape = nil, nil, nil, nil
+        ui_controller.restore(frame)
+        close_kept()
+    end
+
+    -- Other kits shown: a new job only for kits that matter (a cape shown counts only when cape_counts).
+    local function ui_kits(ui)
+        local helmet, armor, body, cape = ui.watch.kits()
+        if helmet ~= ui.helmet or armor ~= ui.armor or body ~= ui.body
+            or (options_cape_counts('ui') and cape ~= ui.cape) then
+            ui.dirty = true
+        end
+        ui.helmet, ui.armor, ui.body, ui.cape = helmet, armor, body, cape
+    end
+
+    -- New units shown: the same plan binds them at once when it is applied for these kits and options, else a job.
+    local function ui_units(ui, frame)
+        local r = ui.applied
+        if ui.dirty or not ui_controller.result or not r or options_changed(r)
+            or kits_changed(r, ui.helmet, ui.armor, ui.body, ui.cape)
+            or not records_same(ui_controller.result, ui.helmet, ui.armor,
+                                cape_counts(r.mode, r.scheme, r.capes) and ui.cape or nil) then
+            ui.dirty = true
+        else
+            ui_controller.apply(ui_controller.result, {units_at = ui.where.units_at, body = r.body}, nil, frame)
+        end
+    end
+
     poll_ui = function(frame)
         local ui = state.ui
         local status = ui.watch.poll()
-        if status == 'absent' then
-            if ui.shown then
-                ui.shown, ui.dirty = false, false
-                ui.helmet, ui.armor, ui.body, ui.cape = nil, nil, nil, nil -- shown again: a job for its new units
-                ui_controller.restore(frame)
-                close_kept()
-            end
-            return
-        end
+        -- the Armory's weapon preview: its ring head, in the same read (src/preview.lua ring_moved)
+        if loadout and ui.watch.ring_moved() and weapons_on() then loadout.preview_changed(frame) end
+        if status == 'absent' then return ui_hidden(ui, frame) end
         ui.shown = true
         if status == 'kits' then
-            local helmet, armor, body, cape = ui.watch.kits()
-            -- a new job only for kits that matter (a cape shown counts only when cape_counts)
-            if helmet ~= ui.helmet or armor ~= ui.armor or body ~= ui.body
-                or (options_cape_counts('ui') and cape ~= ui.cape) then
-                ui.dirty = true
-            end
-            ui.helmet, ui.armor, ui.body, ui.cape = helmet, armor, body, cape
+            ui_kits(ui)
         elseif status == 'units' then
-            -- the same plan binds the new units: at once when it is applied for these kits and options, else a job
-            local r = ui.applied
-            if ui.dirty or not ui_controller.result or not r or options_changed(r)
-                or kits_changed(r, ui.helmet, ui.armor, ui.body, ui.cape)
-                or not records_same(ui_controller.result, ui.helmet, ui.armor,
-                                    cape_counts(r.mode, r.scheme, r.capes) and ui.cape or nil) then
-                ui.dirty = true
-            else
-                ui_controller.apply(ui_controller.result, {units_at = ui.where.units_at, body = r.body}, nil, frame)
-            end
+            ui_units(ui, frame)
         end
     end
 
@@ -674,6 +764,10 @@ function Addon.new(m)
             start_job(frame, 'avatar')
         elseif state.ui and state.ui.dirty then
             start_job(frame, 'ui')
+        elseif loadout and loadout.dirty and weapons_on() then
+            start_job(frame, 'weapons')
+        elseif loadout and loadout.preview_dirty and weapons_on() then
+            start_job(frame, 'ui_weapon')
         end
     end
 
@@ -730,6 +824,10 @@ function Addon.new(m)
         elseif frame >= state.next_check then
             check_bindings(frame)
         end
+        -- Recolor Weapons: a second check this frame, of other memory than the avatar's (the weapon in hand's binding,
+        -- which the game's reload binds again; the inventory row on 1 frame in 4); a resolve waits for a frame without
+        -- a chain check (src/loadout.lua)
+        if state.identity and weapons_on() then loadout.step(frame, verified) end
         preview_and_jobs(frame)
         if state.job_frame == frame then return true end -- a recolor job started (and maybe ended) this frame
         -- A second piece of work this frame only when the cache save is due and neither a recolor job nor a chain
@@ -777,6 +875,7 @@ function Addon.new(m)
         state.frame = frame
         if controller.retired[1] then controller.collect(frame) end
         if ui_controller.retired[1] then ui_controller.collect(frame) end
+        if loadout and loadout.controller.retired[1] then loadout.collect(frame) end
         if controller.pending then settle(controller, frame, 'Helldiver') end
         if ui_controller.pending then settle(ui_controller, frame, 'Preview') end
         if state.job then
@@ -793,9 +892,24 @@ function Addon.new(m)
         sync_step(frame)
     end
 
+    -- Recolor Weapons after an option changed: the weapons found and planned when they are to be recolored (a job of
+    -- their own), else their own colors back. Recolor Hoods changes no weapon.
+    local function weapons_option(name)
+        if not loadout then return end
+        if not weapons_on() then
+            loadout.clear(state.frame)
+        elseif state.identity and name ~= 'recolor_hoods' then
+            if not loadout.watch then loadout.adopt(state.identity) end
+            loadout.replan()
+            -- a weapon preview already shown (turned on in the Armory): read it now, not at its next change
+            if not loadout.preview then loadout.preview_changed(state.frame) end
+        end
+    end
+
     -- An option from Mod Options Menu (or its default): mode (1-4), scheme (0 none, 1 to the schemes' count) or one
     -- of the toggles.
-    local TOGGLES = {keep_sets = true, recolor_hoods = true, match_materials = true, recolor_cape = true}
+    local TOGGLES = {keep_sets = true, recolor_hoods = true, match_materials = true, recolor_cape = true,
+                     recolor_weapons = true}
     local SCHEMES = m.Schemes and #m.Schemes.LIST or 0
     local function valid(name, value)
         if name == 'mode' then return value == 1 or value == 2 or value == 3 or value == 4 end
@@ -819,9 +933,11 @@ function Addon.new(m)
         if name == 'squad' or o.squad ~= Addon.SQUAD_OFF then state.next_sync = state.frame + 1 end
         if name == 'squad' then return end
         if session then state.sync_text = m.Sync.encode(o) end -- posted once it has settled (src/sync.lua)
-        state.dirty = true
         local was_active = state.active
         state.active = o.mode ~= Recolor.OFF or o.scheme ~= 0
+        weapons_option(name)
+        if name == 'recolor_weapons' then return end -- the weapons' own target alone (src/loadout.lua)
+        state.dirty = true
         local ui = state.ui
         if not ui then return end
         if state.active and not was_active then
@@ -836,8 +952,9 @@ function Addon.new(m)
     function self.options_text()
         local o = state.options
         return string.format('mode %d, paint scheme %d, keep sets %s, recolor hoods %s, match materials %s, recolor '
-            .. 'cape %s, recolor squadmates %d', o.mode, o.scheme, tostring(o.keep_sets), tostring(o.recolor_hoods),
-            tostring(o.match_materials), tostring(o.recolor_cape), o.squad)
+            .. 'cape %s, recolor weapons %s, recolor squadmates %d', o.mode, o.scheme, tostring(o.keep_sets),
+            tostring(o.recolor_hoods), tostring(o.match_materials), tostring(o.recolor_cape),
+            tostring(o.recolor_weapons), o.squad)
     end
 
     -- Test builds only (reached through their global): the local player's own shared value drives the sync path
@@ -870,6 +987,7 @@ function Addon.new(m)
         release_files()
         controller.restore(state.frame)
         ui_controller.restore(state.frame)
+        if loadout then loadout.clear(state.frame) end
         if remote then -- the next lobby poll after a resume finds the other players again
             remote.clear(state.frame)
             state.next_sync = 0
@@ -895,28 +1013,42 @@ function Addon.new(m)
     end
 
     -- The guard's stop: original colors back, except at shutdown (the game is closing).
+    -- The shutdown line: the session's counts.
+    local function note_shutdown()
+        note('Shutdown: ' .. state.status .. string.format(' (applied %d, restored %d; textures made %d, '
+            .. 'refilled %d, destroyed %d; cape sheets made %d, refilled %d', controller.applied,
+            controller.restored, pool.made, pool.refilled, pool.destroyed, pool.sheets.made, pool.sheets.refilled)
+            .. (session and string.format('; sync: %d posts, %d failed, other players recolored '
+            .. '%d times', session.posts, session.failures, remote.jobs) or '')
+            .. (loadout and loadout.jobs > 0 and string.format('; weapons: %d jobs, bound again %d times (%d '
+            .. 'reloads)', loadout.jobs, loadout.rebinds, loadout.reloads) or '') .. ').')
+    end
+
+    -- Every recolor put back (the local Helldiver's, the preview's, the other players', the weapons'): true, or false
+    -- and the last problem.
+    local function restore_all()
+        local ok, problem = pcall(controller.restore, state.frame)
+        local ui_ok, ui_problem = pcall(ui_controller.restore, state.frame)
+        if ok and not ui_ok then ok, problem = false, ui_problem end
+        for _, clear in ipairs({remote and remote.clear or false, loadout and loadout.clear or false}) do
+            local cleared, why = true, nil
+            if clear then cleared, why = pcall(clear, state.frame) end
+            if not cleared then ok, problem = false, why end
+        end
+        return ok, problem
+    end
+
     function self.stopped(reason)
         if reason == 'shutdown' then
             save_at_shutdown()
-            note('Shutdown: ' .. state.status .. string.format(' (applied %d, restored %d; textures made %d, '
-                .. 'refilled %d, destroyed %d; cape sheets made %d, refilled %d', controller.applied,
-                controller.restored, pool.made, pool.refilled, pool.destroyed, pool.sheets.made, pool.sheets.refilled)
-                .. (session and string.format('; sync: %d posts, %d failed, other players recolored '
-                .. '%d times', session.posts, session.failures, remote.jobs) or '') .. ').')
-            return
+            return note_shutdown()
         end
         state.job, state.ended, state.ended_result = nil, false, nil
         if state.holder.pipeline then pcall(state.holder.pipeline.close) end
         state.reader_kept = nil
         pcall(release_files)
-        local ok, problem = pcall(controller.restore, state.frame)
-        local ui_ok, ui_problem = pcall(ui_controller.restore, state.frame)
-        if ok and not ui_ok then problem = ui_problem end
-        if remote then
-            local remote_ok, remote_problem = pcall(remote.clear, state.frame)
-            if not remote_ok then ok, problem = false, remote_problem end
-        end
-        note('Stopped (' .. tostring(reason) .. ')' .. ((ok and ui_ok) and '' or ('; ' .. tostring(problem))))
+        local ok, problem = restore_all()
+        note('Stopped (' .. tostring(reason) .. ')' .. (ok and '' or ('; ' .. tostring(problem))))
     end
 
     -- Everything but the frame step (with the UI preview's and sync's per-frame gates), the idle check and the
@@ -927,11 +1059,12 @@ function Addon.new(m)
                              mode_of, options_changed, kits_changed,
                              note_cache, timed_apply, note_sheets, note_albedo, note_cape, log_result, finish_ui,
                              still_current, finish_ahead,
-                             release_reader, finish, run_job,
+                             release_reader, job_failed, finish_remote, finish_local, finish, run_job,
                              options_request, with_kits, request_for, plan_ahead, start_job, start_ahead, save_step,
-                             check_bindings, poll_sync, valid, watch_ui_job, squad_settings, settle,
+                             check_bindings, poll_sync, valid, watch_ui_job, squad_settings, settle, weapons_on,
+                             weapons_stale, finish_weapons, weapons_option,
                              self.set_option, self.options_text, self.set_loopback, release_files, self.pause,
-                             save_at_shutdown, self.stopped}) do
+                             save_at_shutdown, note_shutdown, restore_all, self.stopped}) do
             jit.off(fn, true)
         end
     end
@@ -944,7 +1077,15 @@ Addon.TOGGLES = {
     {Addon.OPTION_HOODS, 'recolor_hoods', 'option.hoods.label', 'option.hoods.description', true},
     {Addon.OPTION_MATERIALS, 'match_materials', 'option.materials.label', 'option.materials.description', false},
     {Addon.OPTION_CAPES, 'recolor_cape', 'option.capes.label', 'option.capes.description', false},
+    {Addon.OPTION_WEAPONS, 'recolor_weapons', 'option.weapons.label', 'option.weapons.description', false},
 }
+
+-- How many entries a table holds (a result's LUTs, for the log).
+function Addon.count(t)
+    local n = 0
+    for _ in pairs(t or {}) do n = n + 1 end
+    return n
+end
 
 -- The scheme of a Paint Scheme menu value (1 Off, 2-12 the schemes), or nil.
 local function scheme_of(value)
@@ -1062,12 +1203,14 @@ function Addon.install(m)
         m.Matcher.use(m.Colour)
         m.Zones.attach(m.Matcher, m.Colour) -- a cape's design zones and emblems (src/zones.lua)
         m.Sheets.attach(m.Recolor) -- the emblem-sheet copies (src/sheets.lua)
+        m.Bindings.attach(m.Recolor) -- the bindings controller (src/bindings.lua)
         m.Variety.attach(m.Matcher, m.Colour) -- an armor never left in one color (src/variety.lua)
         return Addon.new({Avatar = m.Avatar, Preview = m.Preview, Recolor = m.Recolor, Engine = m.Engine,
                           Files = m.Files, Slim = m.Slim,
                           Texture = m.Texture, Colour = m.Colour, Transfer = m.Transfer, Matcher = m.Matcher,
                           Kits = m.Kits, Schemes = m.Schemes, Capes = m.Capes, Patches = m.Patches, Sync = m.Sync,
-                          Remote = m.Remote, Albedo = m.Albedo,
+                          Remote = m.Remote, Albedo = m.Albedo, Weapons = m.Weapons, Loadout = m.Loadout,
+                          WeaponData = m.WeaponData,
                           memory = memory,
                           Appearance = m.Appearance and m.AppearanceData and m.Appearance.new(m.AppearanceData),
                           native = native, game = memory.address(game), note = note, Cache = m.Cache,
@@ -1099,7 +1242,7 @@ end
 -- Startup and option registration run once: interpreted, sub-functions included.
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({same_identity, real_kits, after_text, scheme_of, Addon.options, Addon.loader_ok,
-                         Addon.install}) do
+                         Addon.install, Addon.count}) do
         jit.off(fn, true)
     end
 end

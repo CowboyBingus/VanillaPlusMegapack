@@ -38,17 +38,21 @@ function Preview.locate(read, game, ui_slot)
             bit = 2 ^ ui_slot}
 end
 
--- The watch over the slot: poll() reads the slot's record (160 bytes) and the occupied count and mask (8 bytes) in
--- one read: the records (slots 0-7) end where the count begins, so the span from the slot's record to the mask is
--- contiguous (1,288 bytes for slot 0). It returns 'absent' (slot free or unreadable), 'kits' (the kits shown
+-- The watch over the slot: poll() reads the slot's record (160 bytes), the occupied count and mask and the weapon
+-- preview ring's head and tail (16 bytes) in one read: the records (slots 0-7) end where the count begins, so the span
+-- from the slot's record to the ring's tail is contiguous (1,296 bytes for slot 0; v1.5 read up to the mask, Recolor
+-- Weapons added the ring: no read added). It returns 'absent' (slot free or unreadable), 'kits' (the kits shown
 -- changed, or the slot appeared), 'units' (only its units changed) or 'same'. kits() gives the helmet, armor, body
--- and cape shown at the last poll. No allocation per call.
+-- and cape shown at the last poll; ring_moved() whether the weapon ring's head moved since the poll before (the game
+-- spawned or updated a preview weapon: src/weapons.lua Weapons.preview), whatever the slot shows. No allocation per
+-- call.
 function Preview.watch(memory, where)
     local record_at = at(where.record)
     local gate_offset = GATE - SLOTS - Preview.RECORD_BYTES * where.slot
-    local span = gate_offset + 8
+    local span = gate_offset + 16
     local now, kept = ffi.new('uint8_t[?]', span), ffi.new('uint8_t[?]', Preview.RECORD_BYTES)
     local present = false
+    local head, moved = -1, false
     local self = {reads = 0}
 
     local function differs(first, last)
@@ -58,8 +62,13 @@ function Preview.watch(memory, where)
 
     function self.poll()
         self.reads = self.reads + 1
-        if not memory.read_into(record_at, span, now) or u32(now, gate_offset) > MAX_OCCUPIED
-            or band(u32(now, gate_offset + 4), where.bit) == 0 then
+        if not memory.read_into(record_at, span, now) then
+            present, moved = false, false
+            return 'absent'
+        end
+        local ring = u32(now, gate_offset + 8)
+        moved, head = head >= 0 and ring ~= head, ring
+        if u32(now, gate_offset) > MAX_OCCUPIED or band(u32(now, gate_offset + 4), where.bit) == 0 then
             present = false
             return 'absent'
         end
@@ -77,6 +86,8 @@ function Preview.watch(memory, where)
     function self.kits()
         return u32(kept, HELMET), u32(kept, ARMOR), u32(kept, BODY), u32(kept, CAPE)
     end
+
+    function self.ring_moved() return moved end
 
     -- The next poll reports 'kits' while the slot is shown, as if it had just appeared (after it went unwatched).
     function self.reset() present = false end

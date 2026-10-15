@@ -4,15 +4,8 @@
 -- analyses them from the game's files (src/kits.lua; kept for the session), plans the match
 -- (src/matcher.lua) and builds the new LUT data: each planned row keeps its material and takes fitted colors
 -- (src/transfer.lua); a planned pattern (v11.4) is a copy of the pattern texture with texel 0's color replaced.
--- The step then applies it in one frame: runtime textures (RenderBufferApi), bound to the target units'
--- materials whose LUT (or pattern) is one the plan changes, meshes committed. Bindings are tracked {unit, mesh,
--- material, slot, vanilla texture object} so they can be put back.
---
--- Texture lifetime: a plan's textures live until the plan changes (another kit, direction or Off) or the
--- addon pauses or stops: then the vanilla textures go back on every live tracked material, and the textures
--- go back to the pool RETIRE_FRAMES frames later (the render thread may still draw a frame that used them). The
--- pool refills a free texture for the next plan instead of making a new one: making a texture waits for the
--- render thread (about one frame, src/engine.lua), refilling one does not.
+-- The step then applies it in one frame through the bindings controller (Recolor.controller: src/bindings.lua,
+-- attached to Recolor by Bindings.attach before any plan is applied).
 local ffi = require('ffi')
 
 local Recolor = {}
@@ -182,7 +175,8 @@ local function measured_kit_of(analysis, appearance)
 end
 
 function Recolor.look_of(analysis, appearance, yield)
-    if not appearance then return nil end
+    -- a weapon's LUTs are in no measurement (the study measured helmets and armors): its rows keep their drawn shares
+    if not appearance or analysis.kit.kit_type == 'Weapon' then return nil end
     if analysis.kit.kit_type == 'Cape' then
         -- not measured (the study hid the cape): its rows fit through the response their cloth borrows, a tint row
         -- through its material row's (tint_of: its cape LUT -> material LUT; src/matcher.lua borrow_rows)
@@ -346,12 +340,18 @@ local function pipeline(deps, yield, state)
     -- Writes the cache when jobs made new analyses: true, or false and why. yield (optional): pauses between
     -- entries while the text is built (src/addon.lua runs the save as its own sliced job); the use order is copied
     -- first, as recolor jobs may run while the save is paused.
+    -- A weapon's analysis is neither saved nor read back (analyser): the cache keeps a piece's material count, not
+    -- its materials, and a weapon's binding names each material's LUTs (weapon_luts). A weapon is analysed again each
+    -- session (a job of about 10-20 ms of work). The first test build cached them, and its next session failed every
+    -- weapons job ("attempt to index local 'm' (a boolean value)", harness trial 2026-10-15).
     function self.save(yield)
         if not self.dirty or not self.header then return true end
         local all, order = {}, {}
-        for k, v in pairs(self.cached) do all[k] = v end
+        for k, v in pairs(self.cached) do
+            if v.kit.kit_type ~= 'Weapon' then all[k] = v end
+        end
         for k, v in pairs(self.analyses) do
-            if v then all[k] = v end -- false: a cape that could not be analysed
+            if v and v.kit.kit_type ~= 'Weapon' then all[k] = v end -- false: a cape that could not be analysed
         end
         for i, key in ipairs(self.order) do order[i] = key end
         self.dirty = false
@@ -375,7 +375,8 @@ local function pipeline(deps, yield, state)
         end
         if not self.deps then
             self.deps = {yield = yield, textures = Kits.textures(job), colour = self.model(), Kits = Kits,
-                         Texture = Texture, Colour = Colour, Albedo = deps.Albedo}
+                         Texture = Texture, Colour = Colour, Albedo = deps.Albedo,
+                         weapon_rows = deps.WeaponData and Kits.weapon_rows(deps.WeaponData) or nil}
         end
         self.deps.slim, self.deps.scratch, self.deps.big_scratch = job.slim, job.scratch, job.big_scratch
     end
@@ -466,8 +467,11 @@ local function pipeline(deps, yield, state)
     -- find searches the current kit's archive, then the shared one (set per analysis).
     -- find searches the current kit's archive, then the shared one (set per analysis); a patched resource it serves
     -- (its record names a patch file) is noted in self.touched while an analysis runs.
-    function self.find_in(archive)
+    -- extra: a further archive searched last (a weapon's template scheme, src/weapons.lua Weapons.kit).
+    -- extra: one more archive, or a list (a weapon's: its template's and its attachments', src/weapon_data.lua).
+    function self.find_in(archive, extra)
         local archives, slim = {archive, self.samples.archive}, job.slim
+        for _, more in ipairs(type(extra) == 'table' and extra or {extra}) do archives[#archives + 1] = more end
         self.searched = archives
         local function find(name, kind)
             for _, candidate in ipairs(archives) do
@@ -586,6 +590,37 @@ local function source_item(ctx, yield)
     return ctx.s, ctx.source_luts
 end
 
+-- A weapon's rows the plan paints: its paint, not its bare metal (metallic over 0.5, src/kits.lua lut_row), which keeps
+-- its own color and finish as the game's paint schemes keep a weapon's gunmetal rows. Planned whole, a weapon is mostly
+-- metal by its drawn shares (the AR-23 Liberator's rail, magazine, muzzle and steel: about half), its metal took the
+-- source's identity (tinted steel) and its grey body a darker grey (offline plans 2026-10-15).
+function Recolor.weapon_paint(rows)
+    local out = {}
+    for _, row in ipairs(rows) do
+        if not row.metal then out[#out + 1] = row end
+    end
+    return out
+end
+
+-- A weapon's camo template: its camo rows take the source's camo group (camo), colors and pattern.
+local function camo_copies(plan, rows, camo)
+    for _, row in ipairs(rows) do
+        if row.camo then plan[row.key] = {source = camo, kind = 'pair', copy = camo.rep.key} end
+    end
+end
+
+-- A cape's design zones and emblem-sheet layers, when readable, into the plan (their sheet cells recolored: made.sheet).
+local function cape_parts(Matcher, plan, t, s, target, made)
+    if target.zones then
+        local _, outcomes = Matcher.cape_zones(plan, t, s, target.zones, target.tint_of)
+        made.zones = outcomes
+    end
+    if target.emblems and #target.emblems > 0 then
+        local picks, outcomes = Matcher.cape_emblems(plan, t, s, target.emblems, target.tint_of)
+        made.emblems, made.sheet = outcomes, Recolor.sheet_recipe(target, picks)
+    end
+end
+
 -- A target's LUTs and patterns planned against the job's source item, into made.
 local function plan_target(ctx, target, made, yield)
     local deps, request = ctx.deps, ctx.request
@@ -593,21 +628,18 @@ local function plan_target(ctx, target, made, yield)
     yield() -- the analyses just made leave garbage: a collector step may land here
     local s, source = source_item(ctx, yield)
     yield() -- building a matcher item is up to about 0.15 ms outside the game, a plan about 0.1 ms
-    local t = Matcher.item(target.rows, target.kit.kit_type == deps.Kits.ARMOR, Recolor.patterns_of(target),
+    local weapon = target.kit.kit_type == 'Weapon'
+    local rows = weapon and Recolor.weapon_paint(target.rows) or target.rows
+    local t = Matcher.item(rows, target.kit.kit_type == deps.Kits.ARMOR, Recolor.patterns_of(target),
                            Recolor.look_of(target, deps.Appearance, yield), request.keep_hoods)
+    t.weapon = weapon -- src/matcher.lua pair_groups: the identity on its largest painted part
     yield()
     ctx.state.stage = 'color transfer'
     local _, transfer = ctx.p.model()
     local plan = deps.Schemes and deps.Schemes.plan(Matcher, ctx.scheme, t, s, request.materials,
         target.kit.kit_type == 'Cape') or Matcher.plan(t, s, request.materials, target.kit.kit_type == 'Cape')
-    if target.zones then -- a cape's design zones readable
-        local _, outcomes = Matcher.cape_zones(plan, t, s, target.zones, target.tint_of)
-        made.zones = outcomes
-    end
-    if target.emblems and #target.emblems > 0 then -- its emblem-sheet layers readable (their sheet cells recolored)
-        local picks, outcomes = Matcher.cape_emblems(plan, t, s, target.emblems, target.tint_of)
-        made.emblems, made.sheet = outcomes, Recolor.sheet_recipe(target, picks)
-    end
+    if weapon and ctx.camo then camo_copies(plan, rows, ctx.camo) end
+    cape_parts(Matcher, plan, t, s, target, made)
     yield()
     made.fits = made.fits or {rows = 0, err = 0}
     for name, spec in pairs(Recolor.build_luts(target, plan, transfer, yield, source, made.fits)) do
@@ -759,25 +791,28 @@ local function analyse_new(deps, state, p, kit, body)
     p.open()
     state.stage = string.format('analysing kit %08x', kit.id)
     p.begin_analysis()
-    p.find_in(kit.archive)
+    p.find_in(kit.archive, kit.extra_archive)
     local made = kit.kit_type == 'Cape' and deps.Capes.analyse(kit, body, p.deps)
         or (kit.kit_type ~= 'Cape' and deps.Kits.analyse(kit, body, p.deps))
     return p.after_analysis(made)
 end
 
+-- The kit's analysis under key: the cache's while it still holds (never a weapon's: the pipeline's save), else a new
+-- one (false when it cannot be made), marking the cache to save.
+local function analysis_of(deps, state, p, kit, key, body)
+    local cached = p.cached[key]
+    if cached and kit.kit_type ~= 'Weapon' and p.current(key, cached) then return cached end
+    local made = analyse_new(deps, state, p, kit, body)
+    if made and kit.kit_type ~= 'Weapon' then p.dirty = true end -- a weapon's is not saved
+    return made or false
+end
+
 local function analyser(deps, state, request)
     local p = state.pipeline
     return function(kit)
-        local key = deps.Cache and deps.Cache.key(kit, request.body) or (kit.id .. ':' .. request.body)
-        if p.analyses[key] == nil then
-            if p.cached[key] and p.current(key, p.cached[key]) then
-                p.analyses[key] = p.cached[key]
-            else
-                local made = analyse_new(deps, state, p, kit, request.body)
-                p.analyses[key] = made or false
-                p.dirty = p.dirty or made ~= nil and made ~= false
-            end
-        end
+        local key = deps.Cache and deps.Cache.key(kit, request.body)
+            or (kit.id .. ':' .. request.body .. ':' .. (kit.template or '')) -- a weapon's template (src/weapons.lua)
+        if p.analyses[key] == nil then p.analyses[key] = analysis_of(deps, state, p, kit, key, request.body) end
         if deps.Cache and p.analyses[key] then p.touch(key) end
         return p.analyses[key] or nil
     end
@@ -893,390 +928,184 @@ function Recolor.job(deps, state, request, yield)
     return signed(ctx, with_cape(ctx, items, yield))
 end
 
--- The target pieces by unit position: {['type:slot'] = entry} for spawned pieces with materials, over every target
--- analysis (a paint scheme has two: helmet and armor). Pieces with skin tones are bound too: their LUT materials are
--- clothing (until 2026-10-09 they were left out, and a shirt such as the PH-9 Predator's kept its colors).
-local function piece_index(targets, body)
-    local out = {}
-    for _, target in ipairs(targets) do
-        for _, entry in ipairs(target.pieces) do
-            local piece = entry.piece
-            local spawned = piece.body == body or piece.body == 3 or target.kit.kit_type == 'Helmet'
-            local key = piece.type .. ':' .. piece.slot
-            if spawned and #entry.materials > 0 and not out[key] then out[key] = entry end
-        end
+-- Recolor Weapons (v1.5, src/weapons.lua): the weapons' source, as the cape's (with_cape): the paint scheme, the cape
+-- (Helmet and Armor Match Cape) or the mode's source item (the armor for Helmet Matches Armor, the helmet for Armor
+-- Matches Helmet; a complete set left alone still gives the weapons its colors). Its key part for the plans' keys, or
+-- nil and why when it is missing (no cape, or no analysis of it: the weapons keep their colors).
+local function weapons_source(ctx, analysis)
+    local request, Kits = ctx.request, ctx.deps.Kits
+    if ctx.scheme then return 'scheme:' .. ctx.scheme.id end
+    if request.mode == Recolor.CAPE_SOURCE then
+        if cape_source_of(ctx, analysis) then return ctx.cape_source_key end
+        return nil, 'no cape'
     end
-    return out
+    local id = request.mode == Recolor.ARMOR_FROM_HELMET and request.helmet or request.armor
+    local kit = ctx.p.kits.find(id)
+    ctx.source_kit = kit
+    ctx.source = not request.obsolete and analysis(kit) or nil
+    if not ctx.source then return nil, 'no source' end
+    return string.format('%d:%08x:%s', request.mode, kit.id, records_sum(Kits, kit))
 end
 
--- The bindings controller. deps: {Engine, Avatar, memory, native, pool (Engine.pool)}.
-function Recolor.controller(deps)
-    local Engine, Avatar, memory, native, pool = deps.Engine, deps.Avatar, deps.memory, deps.native, deps.pool
-    local small, big = ffi.new('uint8_t[16]'), ffi.new('uint8_t[1024]')
-    local self = {bindings = {}, textures = {}, retired = {}, key = nil, applied = 0, restored = 0, released = 0,
-                  probes = 0}
+-- The Armory's preview weapon: its customization composed as the game does (w.ids) into w; false when it cannot be.
+local function composed(ctx, w)
+    local deps, p = ctx.deps, ctx.p
+    if not w.ids or w.copy then return true end
+    p.compose_buffer = p.compose_buffer or ffi.new('uint8_t[?]', deps.Weapons.COPY_SPAN)
+    local function read_into(address, size, out)
+        return deps.memory.read_into(ffi.cast('const uint8_t *', address), size, out)
+    end
+    return deps.Weapons.compose(deps.Avatar.reader(deps.memory), read_into, deps.game, w, w.ids, p.compose_buffer)
+        and true or false
+end
 
-    -- Reads at address numbers; one pointer object per address is made once and kept (bounded), so the
-    -- periodic check allocates nothing.
-    local POINTER = ffi.typeof('const uint8_t *')
-    local pointers, cached = {}, 0
-    local function read(address, size, out)
-        local p = pointers[address]
-        if not p then
-            if cached >= 1024 then pointers, cached = {}, 0 end
-            p = ffi.cast(POINTER, address)
-            pointers[address], cached = p, cached + 1
+-- A weapon's package, the weapon catalogue's (read once per weapon and session), or false.
+local function weapon_package(ctx, w)
+    local deps, p = ctx.deps, ctx.p
+    p.weapon_packages = p.weapon_packages or {}
+    if p.weapon_packages[w.name] == nil then
+        p.catalogue_buffer = p.catalogue_buffer or ffi.new('uint8_t[?]', 17280)
+        local read = deps.Avatar.reader(deps.memory)
+        p.weapon_packages[w.name] = deps.Weapons.package(deps.memory, read, deps.game, w.name, p.catalogue_buffer)
+            or false
+    end
+    return p.weapon_packages[w.name]
+end
+
+-- The archives searched beside the package: the template's, and each attachment's (a non-default one is not in the
+-- weapon's package: the AR-61 Tenderizer's Reflex Sight kept its colors in the control check, 2026-10-15).
+local function kit_archives(data, w, template)
+    local extra, archives = {template and template.archive or nil}, data.attachment_archive or {}
+    for role = 1, 4 do
+        local archive = w.attachments[role] and archives[w.attachments[role]]
+        if archive then extra[#extra + 1] = archive end
+    end
+    return extra
+end
+
+-- A weapon's kit (src/weapons.lua Weapons.kit) in its package; nil when the catalogue has no package for it.
+local function weapon_kit(ctx, w, template)
+    local data = ctx.deps.WeaponData or {}
+    local package = composed(ctx, w) and weapon_package(ctx, w)
+    if not package then return nil end
+    local unit = data.unit_of and data.unit_of[w.name]
+    return ctx.deps.Weapons.kit(w, package, template, unit, kit_archives(data, w, template))
+end
+
+-- The weapons job: from a request {mode, scheme, keep_hoods, materials, helmet, armor, body, cape, weapons = {weapon
+-- of src/weapons.lua, ...}} to {action = 'restore' | 'apply', key, luts, patterns, targets (the weapons' analyses),
+-- kits}. One plan per weapon against the source (weapons_source), kept as an item's plan is; LUTs two weapons share
+-- (the rail of 77 weapons, attachments of one caliber) take the last weapon's plan. Runs inside a coroutine as
+-- Recolor.job; a request whose weapons the player no longer holds (request.obsolete) ends at a stage boundary.
+-- A weapon is recolored as a paint scheme of its own (user 2026-10-15: "Look at the different camo / color schemes of
+-- the weapons ... they completely change the weapons' patterning. These barely change at all"): its material classes
+-- are analysed through a scheme's LUTs, as the game paints a weapon with a scheme (its ID masks then draw the scheme's
+-- rows), and those rows are planned against the source: the template. A weapon paint scheme as the source (Paint Scheme
+-- 1-11) is that scheme itself, the game's own look (native, unplanned); else DESERT's rows (r0-r1 body, r2 cloth, r3 a
+-- lighter and r4 a darker detail, r5 and r7 paint, r6 the one metal: the colored schemes paint the steel the default
+-- and HELLDIVER keep, the Liberator's rows 5 and 7, 18% of its body), or DESERT CAMO's when the source's colors include a
+-- camo of WEAPON_CAMO_SHARE (its camo row and rail then copy the source's camo row: colors and pattern). Recolored only
+-- through its own rows (the first build) the Liberator's grey body took a near grey with most outfits, and through
+-- HELLDIVER's (the default's twin) one color all over. Every weapon takes it, sidearms and support weapons too (the game
+-- offers schemes for primaries only); a material of no scheme class keeps its own rows.
+Recolor.WEAPON_TEMPLATE, Recolor.WEAPON_CAMO_TEMPLATE, Recolor.WEAPON_CAMO_SHARE = 'desert', 'desert_camo', 0.15
+-- The source's largest camo group of WEAPON_CAMO_SHARE or more (s: a matcher item), or nil.
+local function source_camo(s)
+    local camo = nil
+    for _, g in ipairs(s and s.groups or {}) do
+        if g.camo and g.share >= Recolor.WEAPON_CAMO_SHARE and (not camo or g.share > camo.share) then camo = g end
+    end
+    return camo
+end
+
+local function weapon_template(ctx, s)
+    local deps = ctx.deps
+    local data, Schemes = deps.WeaponData, deps.Schemes
+    if not (data and data.schemes and Schemes) then return nil end
+    local id, native, camo = Recolor.WEAPON_TEMPLATE, false, nil
+    if ctx.scheme and data.schemes[ctx.scheme.id] then
+        id, native = ctx.scheme.id, true
+    else
+        camo = source_camo(s)
+        if camo then id = Recolor.WEAPON_CAMO_TEMPLATE end
+    end
+    for _, scheme in ipairs(Schemes.LIST) do
+        if scheme.id == id then
+            return {id = id, classes = data.schemes[id], decals = data.decals and data.decals[id],
+                    archive = scheme.archive, native = native, camo = camo}
         end
-        return memory.read_into(p, size, out)
     end
+    return nil
+end
 
-    -- One tracked binding per runtime texture, checked by check().
-    local probes = {}
-    local function rebuild_probes()
-        probes = {}
-        local seen = {}
-        for _, b in ipairs(self.bindings) do
-            if not seen[b.texture] then
-                seen[b.texture] = true
-                probes[#probes + 1] = b
-            end
+-- The LUTs a weapon's analysis binds: each material's planned LUT (or, analysed through a template, its template LUT
+-- as planned or as it is) under the name of the LUT the game binds there now (entry.bound, else its own), an
+-- attachment's with ATTACHMENT appended: 13 weapons' muzzles (the AR-61 Tenderizer's, the SG-8 Punisher's) bind the
+-- weapon's own LUT, which a scheme replaces with its weapon class's LUT on the weapon and m_attachments' on the muzzle
+-- (keyed by name alone, the muzzle's plan took the weapon too: HELLDIVER's blue light row on the Tenderizer's trigger
+-- guard). The controller binds an ATTACHMENT key on attachment units only (Weapons.units).
+-- A scheme's decal sheet (material entry.decal: NIGHT's blank sheet) is bound as it is, a game texture, under the
+-- name of the material's own sheet ({decal = true, direct = name}: src/bindings.lua binds it, no pooled copy).
+Recolor.ATTACHMENT = '|a'
+local function template_copy(lut)
+    local spec = {width = lut.width, height = lut.height, data = ffi.new('float[?]', lut.width * lut.height * 4)}
+    ffi.copy(spec.data, lut.values, lut.width * lut.height * 16)
+    return spec
+end
+-- One piece's materials into luts (a: its analysis; made: the plan or nil).
+local function piece_luts(a, entry, made, luts)
+    local suffix = entry.piece.slot == 0 and '' or Recolor.ATTACHMENT
+    for _, m in ipairs(entry.materials) do
+        local spec = made and made.luts[m.lut]
+        if not spec and m.bound and a.luts[m.lut] then spec = template_copy(a.luts[m.lut]) end
+        if spec and m.lut then luts[(m.bound or m.lut) .. suffix] = spec end
+        if m.decal then luts[m.decal.from .. suffix] = {decal = true, direct = m.decal.to} end
+    end
+end
+local function weapon_luts(a, made, luts)
+    for _, entry in ipairs(a.pieces) do piece_luts(a, entry, made, luts) end
+end
+
+-- One weapon of a weapons job: its kit (with the template when the game paints it), analysis and plan into the
+-- job's luts and patterns; the analysis and kit, or nil.
+local function weapon_plan(ctx, w, source, template, out, yield)
+    local kit = weapon_kit(ctx, w, template)
+    local a = kit and ctx.analysis(kit)
+    if not a then return nil end
+    local made
+    if not (kit.template and template.native) then
+        ctx.camo = kit.template and template.camo or nil -- plan_target: the template's camo rows copy it
+        made = planned(ctx, item_key(ctx, 'weapon:' .. source, kit), {a}, yield)
+        ctx.camo = nil
+        for name, spec in pairs(made.patterns) do out.patterns[name] = spec end
+    end
+    weapon_luts(a, made, out.luts)
+    return a, kit
+end
+
+function Recolor.weapons_job(deps, state, request, yield)
+    local scheme = deps.Schemes and deps.Schemes.get(request.scheme or 0)
+    if request.mode == Recolor.OFF and not scheme then return {action = 'restore', reason = 'off'} end
+    local p = pipeline_of(deps, state, yield)
+    state.stage = 'kit catalogue'
+    local analysis = analyser(deps, state, request)
+    local ctx = {deps = deps, p = p, state = state, request = request, scheme = scheme, analysis = analysis}
+    local source, why = weapons_source(ctx, analysis)
+    if not source then return {action = request.obsolete and 'obsolete' or 'restore', reason = why} end
+    local template = weapon_template(ctx, (source_item(ctx, yield)))
+    local out, targets, keys, kits = {luts = {}, patterns = {}}, {}, {}, {}
+    for _, w in ipairs(request.weapons or {}) do
+        local a, kit = nil, nil
+        if not request.obsolete then a, kit = weapon_plan(ctx, w, source, template, out, yield) end
+        if a then
+            targets[#targets + 1], kits[#kits + 1] = a, kit
+            keys[#keys + 1] = w.name .. '/' .. records_sum(deps.Kits, kit)
         end
-        self.probes = #probes
     end
-
-    -- False when the game put a material's original LUT (or pattern) back while its unit lives (the caller applies
-    -- again): one probe per call, in turn (two reads; alive() only on such a mismatch), so a check costs the same
-    -- whatever the number of runtime textures; each texture is checked every #probes calls.
-    local turn = 0
-    function self.check()
-        local count = #probes
-        if count == 0 then return true end
-        turn = turn % count + 1
-        local b = probes[turn]
-        local bound = Engine.binding(read, b.material, b.slot, small, big)
-        return not (bound == b.vanilla and native.alive(b.unit) ~= 0)
-    end
-
-    local function commit(meshes)
-        for mesh in pairs(meshes) do native.commit(mesh) end
-    end
-
-    -- Puts the vanilla texture back on each of `bindings` not taken over by a new plan (bind_slot) whose material, on a
-    -- live unit, still holds its texture.
-    local function put_back(bindings)
-        local meshes = {}
-        for _, b in ipairs(bindings) do
-            if not b.taken and native.alive(b.unit) ~= 0
-                and Engine.binding(read, b.material, b.slot, small, big) == b.texture then
-                Engine.bind(native, b.material, b.slot, b.vanilla)
-                meshes[b.mesh] = true
-                self.restored = self.restored + 1
-            end
-        end
-        commit(meshes)
-    end
-
-    -- Forgets all bindings and retires every current texture; returns the bindings it forgot.
-    local function retire(frame)
-        local bindings = self.bindings
-        for _, texture in pairs(self.textures) do
-            texture.retired_at = frame
-            self.retired[#self.retired + 1] = texture
-        end
-        self.bindings, self.textures, self.key, self.result = {}, {}, nil, nil
-        rebuild_probes()
-        return bindings
-    end
-
-    -- Puts the vanilla texture back on every tracked material of a live unit; forgets all bindings and
-    -- retires every current texture.
-    function self.restore(frame)
-        put_back(retire(frame))
-    end
-
-    -- The bindings of the plan before, while a new plan's apply binds (self.apply): {[material] = {[slot] = binding}}.
-    local before = nil
-    local function index_of(bindings)
-        local out = {}
-        for _, b in ipairs(bindings) do
-            local slots = out[b.material]
-            if not slots then
-                slots = {}
-                out[b.material] = slots
-            end
-            slots[b.slot] = b
-        end
-        return out
-    end
-
-    -- Gives retired textures back to the pool RETIRE_FRAMES frames after they were retired. Returns how many remain.
-    function self.collect(frame)
-        local keep = {}
-        for _, texture in ipairs(self.retired) do
-            if frame - texture.retired_at >= Recolor.RETIRE_FRAMES then
-                pool.give(texture)
-                self.released = self.released + 1
-            else
-                keep[#keep + 1] = texture
-            end
-        end
-        self.retired = keep
-        return #keep
-    end
-
-    -- Drops the bindings of dead units (alive() once per unit). The current plan's textures stay until the plan
-    -- changes (a respawn binds the new units to them). Called after an apply and after a unit change.
-    function self.prune()
-        local live, dead = {}, false
-        for _, b in ipairs(self.bindings) do
-            if live[b.unit] == nil then
-                live[b.unit] = native.alive(b.unit) ~= 0
-                dead = dead or not live[b.unit]
-            end
-        end
-        if not dead then return end
-        local keep = {}
-        for _, b in ipairs(self.bindings) do
-            if live[b.unit] then keep[#keep + 1] = b end
-        end
-        self.bindings = keep
-        rebuild_probes()
-    end
-
-    -- The runtime texture for one planned LUT or pattern (specs: result.luts or result.patterns), taken from the
-    -- pool on first use.
-    local function texture_for(specs, name)
-        local texture = self.textures[name]
-        if texture then return texture end
-        local made, why = pool.take(specs[name])
-        if not made then error('texture for ' .. name .. ': ' .. why, 0) end
-        self.textures[name] = made
-        return made
-    end
-
-    -- {vanilla texture object -> name} for the planned LUTs or patterns.
-    local function vanilla_objects(specs)
-        local out = {}
-        for name in pairs(specs or {}) do
-            local object = Engine.texture_object(native, name)
-            if object then out[object] = name end
-        end
-        return out
-    end
-
-    -- Binds the planned texture to slot `slot` of material m (held: its bindings, read into big by Engine.bindings)
-    -- when its vanilla texture is one the plan changes; true when it bound. A slot holding the plan before's texture
-    -- (before) counts as holding that binding's vanilla texture, and the binding is taken over: bound over at once,
-    -- not put back first (v1.3 restored every binding of the plan before, two reads and a bind each, then read each
-    -- slot again).
-    -- Whether object is one of this controller's textures (bound now, or retired and not given back yet).
-    local function owned(object)
-        for _, texture in pairs(self.textures) do if texture.object == object then return true end end
-        for _, texture in ipairs(self.retired) do if texture.object == object then return true end end
-        return false
-    end
-
-    -- waiting: a slot that holds a texture neither the plan changes nor ours is added to it (the game may not have
-    -- given the material its own texture yet: settle).
-    local function bind_slot(u, m, held, slot, specs, vanilla, waiting)
-        local bound = Engine.binding_in(big, held, slot)
-        local slots = bound and before and before[m.material]
-        local old = slots and slots[slot]
-        if old and old.texture ~= bound then old = nil end
-        local original = old and old.vanilla or bound
-        local name = original and vanilla[original]
-        if not name then
-            if bound and waiting and not owned(bound) then
-                waiting[#waiting + 1] = {unit = u.unit, mesh = m.mesh, material = m.material, slot = slot, specs = specs,
-                                         vanilla = vanilla}
-            end
-            return false
-        end
-        local texture = texture_for(specs, name)
-        Engine.bind(native, m.material, slot, texture.object)
-        if old then old.taken = true end
-        self.bindings[#self.bindings + 1] = {unit = u.unit, mesh = m.mesh, material = m.material, slot = slot,
-                                             vanilla = original, texture = texture.object}
-        return true
-    end
-
-    -- Binds unit u's material m in each of slots ({slot, specs, vanilla objects}) the plan changes, its bindings read
-    -- once for all of them (v1.3 read them again for each slot); marks its mesh to commit. Returns how many it bound.
-    local function bind_material(u, m, slots, meshes, waiting)
-        local held = Engine.bindings(read, m.material, small, big)
-        if not held then return 0 end
-        local count = 0
-        for _, s in ipairs(slots) do
-            if bind_slot(u, m, held, s[1], s[2], s[3], waiting) then
-                meshes[m.mesh], count = true, count + 1
-            end
-        end
-        return count
-    end
-
-    -- Binds the planned textures to every target unit's materials whose LUT (or pattern) the plan changes. A
-    -- unit already bound keeps its binding. Returns how many bindings were made now.
-    -- Binds one unit's materials (vanilla: {luts, patterns} objects by name; the pattern slot is read only when
-    -- the plan changes a pattern, the cape LUT slot only on the cape's unit (slot 1) when the plan changes its tint);
-    -- marks the meshes to commit. Returns how many bindings were made.
-    local function bind_unit(result, u, vanilla, meshes, waiting)
-        local slots = {{Engine.LUT_SLOT, result.luts, vanilla.luts}}
-        if vanilla.any_pattern then slots[#slots + 1] = {Engine.PATTERN_SLOT, result.patterns, vanilla.patterns} end
-        if u.slot == 1 then -- the cape's unit: its tint and its emblems' sheet
-            if vanilla.any_tint then slots[#slots + 1] = {Engine.CAPE_LUT_SLOT, result.luts, vanilla.luts} end
-            if vanilla.any_sheet then slots[#slots + 1] = {Engine.DECAL_SLOT, result.luts, vanilla.luts} end
-        end
-        if vanilla.any_albedo then slots[#slots + 1] = {Engine.ALBEDO_SLOT, result.luts, vanilla.luts} end
-        local count, materials = 0, Engine.unit_materials(native, u.unit)
-        for _, m in ipairs(materials) do count = count + bind_material(u, m, slots, meshes, waiting) end
-        return count, #materials
-    end
-
-    -- Whether any planned texture is of a kind (field: 'cape', a cape LUT copy, Recolor.build_luts; 'sheet', a decal
-    -- sheet copy, Recolor.sheet_spec).
-    local function any_of(luts, field)
-        for _, spec in pairs(luts) do
-            if spec[field] then return true end
-        end
-        return false
-    end
-
-    -- The textures this apply can take, per size (planned LUTs and patterns whose vanilla texture is loaded, not held
-    -- yet), reserved in the pool before any is taken (pool.reserve).
-    local function reserve(result, vanilla)
-        local demand = {}
-        for _, kind in ipairs({'luts', 'patterns'}) do
-            local specs = result[kind]
-            for _, name in pairs(vanilla[kind]) do
-                if not self.textures[name] then
-                    local spec = specs[name]
-                    local size = Engine.pool_key(spec)
-                    local d = demand[size] or {spec = spec, count = 0}
-                    d.count, demand[size] = d.count + 1, d
-                end
-            end
-        end
-        for _, d in pairs(demand) do pool.reserve(d.spec, d.count) end
-    end
-
-    -- Binds the plan's target units (only: {[unit] = true}, else every one); returns how many bindings were made, the
-    -- target units that had no materials ({[unit] = true}: dead, or not ready yet) or nil, and the slots left waiting
-    -- (bind_slot) or nil.
-    local function bind_units(result, identity, slot, only)
-        local vanilla = {luts = vanilla_objects(result.luts), patterns = vanilla_objects(result.patterns)}
-        vanilla.any_pattern = next(vanilla.patterns) ~= nil
-        vanilla.any_tint, vanilla.any_sheet = any_of(result.luts, 'cape'), any_of(result.luts, 'sheet')
-        vanilla.any_albedo = any_of(result.luts, 'albedo')
-        reserve(result, vanilla)
-        local pieces = piece_index(result.targets or {result.target}, identity.body)
-        local meshes, count, pending, waiting = {}, 0, nil, {}
-        for _, u in ipairs(Avatar.units(memory, identity, slot, result.first, result.last)) do
-            if pieces[u.type .. ':' .. u.slot] and (not only or only[u.unit]) then
-                local bound, materials = bind_unit(result, u, vanilla, meshes, waiting)
-                count = count + bound
-                if materials == 0 then
-                    pending = pending or {}
-                    pending[u.unit] = true
-                end
-            end
-        end
-        commit(meshes)
-        return count, pending, waiting[1] and waiting or nil
-    end
-
-    -- Applies a job result: a new plan binds its textures over the plan before's (bind_slot) and puts the vanilla
-    -- textures back where it binds none, after; the same plan only binds units that are still vanilla (a respawn, a
-    -- new preview).
-    function self.apply(result, identity, slot, frame)
-        if result.action == 'restore' then
-            self.restore(frame)
-            return 0
-        end
-        local replaced = self.key ~= result.key and retire(frame) or nil
-        before = replaced and index_of(replaced)
-        self.key, self.result = result.key, result
-        local ok, count, pending, waiting = pcall(bind_units, result, identity, slot)
-        before = nil
-        if replaced then put_back(replaced) end -- also when binding failed: none of the plan before stays bound
-        if not ok then error(count, 0) end
-        self.pending = (pending or waiting) and {units = pending, slots = waiting, identity = identity, slot = slot,
-                                                 since = frame} or nil
-        self.prune()
-        rebuild_probes()
-        self.applied = self.applied + count
-        return count
-    end
-
-    -- One waiting slot read again (settle): bound when it now holds a texture the plan changes. Returns whether it is
-    -- done (bound, its unit gone, or one of ours bound there) and whether it bound.
-    local function retry_slot(e, meshes)
-        if native.alive(e.unit) == 0 then return true, false end
-        local held = Engine.bindings(read, e.material, small, big)
-        local bound = held and Engine.binding_in(big, held, e.slot)
-        local name = bound and e.vanilla[bound]
-        if not name then return bound ~= nil and owned(bound), false end
-        local texture = texture_for(e.specs, name)
-        Engine.bind(native, e.material, e.slot, texture.object)
-        self.bindings[#self.bindings + 1] = {unit = e.unit, mesh = e.mesh, material = e.material, slot = e.slot,
-                                             vanilla = bound, texture = texture.object}
-        meshes[e.mesh] = true
-        return true, true
-    end
-
-    -- The last apply's target units without materials and slots holding a texture neither the plan's nor ours
-    -- (self.pending; live sessions 2026-10-14: in the Armory, an armor changed under the same cape gave the preview a
-    -- new cape unit whose LUT slots held a placeholder until the game set the kit's LUT a few frames later; a plan
-    -- applied before that, as a kept plan is within 2 frames, bound nothing there and nothing bound it later, so the
-    -- cape kept its own colors) bound once they are ready: on every PENDING_EVERY-th frame for PENDING_FRAMES frames
-    -- after the apply, those units and slots alone. A slot on a LUT the plan does not change waits to the end too.
-    -- Returns how many bindings it made and 'done', 'pending' or 'expired' (units still without materials at the end).
-    -- The pending units tried again (settle): bindings made, units still without materials, slots now waiting.
-    local function retry_units(p)
-        if not p.units then return 0, nil, nil end
-        local ok, count, still, waiting = pcall(bind_units, self.result, p.identity, p.slot, p.units)
-        if not ok then
-            self.pending = nil
-            error(count, 0)
-        end
-        return count, still, waiting
-    end
-
-    -- The waiting slots tried again (settle) after slots (the units' new ones): bindings made, slots still waiting.
-    local function retry_slots(p, slots)
-        local meshes, count = {}, 0
-        for _, e in ipairs(p.slots or {}) do
-            local done, bound = retry_slot(e, meshes)
-            if bound then count = count + 1 end
-            if not done then
-                slots = slots or {}
-                slots[#slots + 1] = e
-            end
-        end
-        commit(meshes)
-        return count, slots
-    end
-
-    function self.settle(frame)
-        local p = self.pending
-        local age = frame - p.since
-        if age % Recolor.PENDING_EVERY ~= 0 then return 0, 'pending' end
-        if age > Recolor.PENDING_FRAMES or not self.result then
-            self.pending = nil
-            return 0, p.units and 'expired' or 'done'
-        end
-        local count, units, slots = retry_units(p)
-        local late
-        late, slots = retry_slots(p, slots)
-        count = count + late
-        p.units, p.slots = units, slots
-        if not units and not slots then self.pending = nil end
-        if count > 0 then
-            rebuild_probes()
-            self.applied = self.applied + count
-        end
-        return count, self.pending and 'pending' or 'done'
-    end
-    return self
+    if request.obsolete then return {action = 'obsolete'} end
+    if #targets == 0 then return {action = 'restore', reason = 'no weapon analysed'} end
+    return {action = 'apply', key = 'weapons:' .. source .. ':' .. table.concat(keys, ','), luts = out.luts,
+            patterns = out.patterns, first = 0, last = 0, targets = targets, kits = kits}
 end
 
 -- Code that runs once or rarely (jobs, startup, events) stays interpreted, sub-functions included: it must not
@@ -1284,14 +1113,18 @@ end
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({Recolor.apply_finish, Recolor.apply_copy, note_fit, build_tints, Recolor.build_luts,
         Recolor.build_lut,
-        hue_apart, Recolor.pattern_texel, measured_kit_of,
-        Recolor.build_patterns, Recolor.look_of, source_item, plan_target, planned, options_key, both_job, pair_job,
-        with_cape, analyse_new, analyser, items_job, covers, sum_part, records_sum, plan_key, item_key, cape_source_of,
+        hue_apart, Recolor.pattern_texel, measured_kit_of, Recolor.weapon_paint,
+        Recolor.build_patterns, Recolor.look_of, source_item, camo_copies, cape_parts, plan_target, planned,
+        options_key, both_job, pair_job,
+        with_cape, analyse_new, analysis_of, analyser, items_job, covers, sum_part, records_sum, plan_key, item_key,
+        cape_source_of,
         cape_of,
         job_capes, set_kept, item_analyses,
         signed,
         Recolor.patterns_of, pipeline, pipeline_of,
-        Recolor.job, piece_index, Recolor.controller}) do
+        Recolor.job, weapons_source, composed, weapon_package, kit_archives, weapon_kit, source_camo, weapon_template,
+        template_copy, piece_luts, weapon_luts, weapon_plan,
+        Recolor.weapons_job}) do
         jit.off(fn, true)
     end
 end

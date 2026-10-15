@@ -8,7 +8,9 @@ package.path = root .. '/src/?.lua;' .. package.path
 local ffi = require('ffi')
 local Avatar, Engine, Recolor, Addon = require('avatar'), require('engine'), require('recolor'), require('addon')
 require('sheets').attach(Recolor)
+require('bindings').attach(Recolor)
 local Preview, Schemes, Sync, Remote = require('preview'), require('schemes'), require('sync'), require('remote')
+local Weapons, Loadout = require('weapons'), require('loadout')
 local Fake = dofile(root .. '/tests/fake_game.lua')
 local budget = dofile(root .. '/tests/frame_budget.lua')
 local passed = 0
@@ -146,7 +148,31 @@ local function tracked_job(deps, holder, request, yield)
     if not ok then error(result, 0) end
     return result
 end
-local TestRecolor = setmetatable({job = tracked_job}, {__index = Recolor})
+-- The canned weapons job (src/recolor.lua Recolor.weapons_job): each weapon's LUT (WEAPON_LUTS by name; a preview
+-- weapon's too) planned; the request kept in `requests`; it yields 6 times (a job of its own over the budget).
+local WEAPON_LUTS = {}
+local WEAPON_DECALS = {} -- a weapon's decal sheets bound as they are ({from, to}: a scheme's, src/recolor.lua)
+local function weapons_job(_, holder, request, yield)
+    jobs = jobs + 1
+    requests[#requests + 1] = request
+    holder.pipeline = holder.pipeline or {kits = {signature = record_of}, reads = 0, dirty = false, closes = 0,
+                                          close = function() end}
+    for _ = 1, 6 do
+        yield()
+        if request.obsolete then return {action = 'obsolete'} end
+    end
+    local scheme = (request.scheme or 0) > 0
+    if request.mode == Recolor.OFF and not scheme then return {action = 'restore', reason = 'off'} end
+    local luts, targets = {}, {}
+    for _, w in ipairs(request.weapons) do
+        for _, lut in ipairs(WEAPON_LUTS[w.name] or {}) do luts[lut] = lut_spec() end
+        for _, d in ipairs(WEAPON_DECALS[w.name] or {}) do luts[d.from] = {decal = true, direct = d.to} end
+        targets[#targets + 1] = {kit = {kit_type = 'Weapon'}, pieces = {}}
+    end
+    return {action = 'apply', key = 'weapons:' .. request.mode .. ':' .. (request.scheme or 0) .. ':' .. request.sig,
+            luts = luts, patterns = {}, first = 0, last = 0, targets = targets}
+end
+local TestRecolor = setmetatable({job = tracked_job, weapons_job = weapons_job}, {__index = Recolor})
 
 -- A fresh world: local helmet unit 0x100 (slot 0), armor units 0x101 (torso) and 0x102 (hips undergarment),
 -- 0x103 (a piece with skin tones, left leg); the remote player's helmet 0x200 uses the same helmet LUT. options.lobby
@@ -169,6 +195,8 @@ local function setup(options)
     local m = {Avatar = Avatar, Preview = Preview, Recolor = TestRecolor, Engine = Engine, Schemes = Schemes,
                memory = memory, native = engine.native, game = Fake.GAME, Files = options.files,
                note = function(l) lines[#lines + 1] = l end}
+    local weapons = options.weapons and Fake.weapons(space) or nil -- Recolor Weapons (tests/test_weapons.lua)
+    if weapons then m.Weapons, m.Loadout = Weapons, Loadout end
     local lobby, lobby_calls = nil, {}
     if options.lobby then
         lobby = Fake.lobby(space, options.lobby.local_id, options.lobby.members)
@@ -176,7 +204,8 @@ local function setup(options)
         m.Sync, m.Remote, m.natives = Sync, Remote, options.lobby.natives or lobby.natives
     end
     local instance = Addon.new(m)
-    local world = {space = space, engine = engine, memory = memory, instance = instance, lines = lines, lobby = lobby}
+    local world = {space = space, engine = engine, memory = memory, instance = instance, lines = lines, lobby = lobby,
+                   weapons = weapons}
     -- One frame: the calls it made to memory, to the engine and to PlayFab, merged ('read_into', 'alive',
     -- 'members', ...).
     function world.frame()
@@ -1591,5 +1620,8 @@ check("the preview's cape counts only with Recolor Cape on", function()
     assert(#requests > count and requests[#requests].cape == 0x72492837, 'on: another cape is a new job')
 end)
 
-if rawget(_G, 'MYC_TEST_SETUP_ONLY') then return setup, requests, {same = same, classify = classify, records = RECORDS} end
+if rawget(_G, 'MYC_TEST_SETUP_ONLY') then
+    return setup, requests, {same = same, classify = classify, records = RECORDS, vanilla = VANILLA,
+                             weapon_luts = WEAPON_LUTS, weapon_decals = WEAPON_DECALS}
+end
 print('PASS test_addon (' .. passed .. ' checks)')

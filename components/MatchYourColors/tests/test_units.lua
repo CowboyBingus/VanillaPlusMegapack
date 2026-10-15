@@ -3097,4 +3097,182 @@ check('albedo: a target\'s planned albedos become specs and one log line; a chan
                      function() end), 'a texture other than the one analysed refuses')
 end)
 
+-- Recolor Weapons (v1.5) -------------------------------------------------------------------------------------------
+local Weapons, Kits = require('weapons'), require('kits')
+
+-- A copy span (src/weapons.lua COPY_SPAN from +0x78) with attachments and MaterialOverride rows written in.
+local function copy_span(attachments, main_rows, kinds)
+    local big = ffi.new('uint8_t[?]', Weapons.COPY_SPAN)
+    local function name_at(o, name)
+        local high, low = tonumber(name:sub(1, 8), 16), tonumber(name:sub(9, 16), 16)
+        for k = 0, 3 do big[o + k] = math.floor(low / 256 ^ k) % 256 big[o + 4 + k] = math.floor(high / 256 ^ k) % 256 end
+    end
+    local function u32_at(o, v) for k = 0, 3 do big[o + k] = math.floor(v / 256 ^ k) % 256 end end
+    local at = {0x78, 0x80, 0xA0, 0xC0}
+    for role, name in pairs(attachments) do name_at(at[role] - 0x78, name) end
+    local function rows(o, list)
+        for r, row in ipairs(list) do
+            u32_at(o + 40 * (r - 1), row[1])
+            name_at(o + 40 * (r - 1) + 8, row[2])
+            if row[3] then name_at(o + 40 * (r - 1) + 24, row[3]) end
+        end
+    end
+    rows(200 - 0x78, main_rows)
+    for e, kind in ipairs(kinds or {}) do
+        u32_at(600 + 408 * (e - 1) - 0x78, kind[1])
+        rows(600 + 408 * (e - 1) + 8 - 0x78, kind[2])
+    end
+    return big
+end
+
+check('weapons: a customization copy decodes to attachment names and per-slot paint (rows with a LUT or pattern of '
+      .. 'their own; LUT 0 keeps the material\'s), by role; the kit lists the weapon unit and its attachments', function()
+    local Z = '0000000000000000'
+    local big = copy_span({[1] = '129e5fb1b13c2018', [3] = '756e3fdaca41cfca'},
+        {{0x7c4a4a11, '72ba1e791ed0a166'}, {0x2b80449a, Z}, {0x1db4e620, Z, 'cf0cc31b981786c9'}},
+        {{4, {{0x11111111, 'abcdabcdabcdabcd'}}}, {5, {{0x22222222, Z}}}})
+    local w = {name = '968211c0033dce64', overrides = {}, attachments = {}}
+    Weapons.decode_copy(w, big)
+    assert(w.attachments[1] == '129e5fb1b13c2018' and w.attachments[3] == '756e3fdaca41cfca' and not w.attachments[2],
+           'attachments by role')
+    local main = w.overrides[0]
+    assert(main.rows[0x7c4a4a11].lut == '72ba1e791ed0a166' and not main.rows[0x2b80449a], 'a LUT 0 row is none')
+    assert(main.rows[0x1db4e620].lut == Z and main.rows[0x1db4e620].pattern == 'cf0cc31b981786c9', 'a pattern alone')
+    assert(w.overrides[3] and w.overrides[3].rows[0x11111111].lut == 'abcdabcdabcdabcd', 'the muzzle (kind 4) by role')
+    assert(w.overrides[2] and next(w.overrides[2].rows) == nil and w.overrides[2].text == '', 'magazines (kind 5) none')
+    local kit = Weapons.kit(w, 'dbd9381f9ea9788f')
+    assert(kit.kit_type == 'Weapon' and kit.archive == 'dbd9381f9ea9788f' and kit.id == 0x033dce64, 'the kit')
+    assert(#kit.pieces == 3 and kit.pieces[1].path == w.name and kit.pieces[1].slot == 0
+           and kit.pieces[2].path == '129e5fb1b13c2018' and kit.pieces[2].slot == 1
+           and kit.pieces[3].path == '756e3fdaca41cfca' and kit.pieces[3].slot == 3, 'pieces by role')
+    assert(kit.pieces[1].overrides_text and kit.pieces[1].overrides_text:find('72ba1e791ed0a166', 1, true)
+           and kit.pieces[3].overrides_text == '11111111=abcdabcdabcdabcd/0000000000000000', 'paint in the signature')
+    assert(Kits.signature(kit):find('72ba1e791ed0a166', 1, true), 'another paint is another record')
+    assert(Kits.weight('Weapon', kit.pieces[1], 0) == 1.0 and Kits.weight('Weapon', kit.pieces[2], 0) < 0.5,
+           'the weapon unit weighs most')
+end)
+
+check('weapons: an underbarrel (role 4) that is a weapon of its own takes the template\'s weapon classes where the '
+      .. 'attachments\' do not apply (the AR-11 Arbitrator\'s under-barrel module, control check 2026-10-15); a muzzle '
+      .. 'never does', function()
+    local w = {name = 'a8a91eb54892b6b2', overrides = {},
+               attachments = {[3] = '4851d75853622a47', [4] = 'b9c209b4f99b5335'}}
+    local template = {id = 'helldiver', archive = 'd7353578fc8df474',
+                      classes = {wb8b409a0 = '3d41e3dfac46deb9', a32090dd1 = 'b641b5115b3b40af'}}
+    local kit = Weapons.kit(w, 'bf2250de0b17285c', template)
+    local muzzle, under = kit.pieces[2], kit.pieces[3]
+    assert(under.overrides[0xb8b409a0] and under.overrides[0xb8b409a0].lut == '3d41e3dfac46deb9',
+           'the module\'s plasma class takes the weapon\'s')
+    assert(under.overrides[0x32090dd1].lut == 'b641b5115b3b40af', 'its attachment class stays the attachments\'')
+    assert(not muzzle.overrides[0xb8b409a0], 'a muzzle (a sub-unit) never takes the weapon\'s classes')
+end)
+
+check('weapons: the drawn-rows table parses per unit and material (triangles, 8 shares; missing rows 0)', function()
+    local rows = Kits.weapon_rows({units = {['968211c0033dce64'] =
+        'ddaa95e612f4468f:2940:0=0.9578,1=0.0422|7f112acd09a5e523:9687:0=0.1601,1=0.4128,5=0.1758'}})
+    local triangles, shares = rows('968211c0033dce64', 'ddaa95e612f4468f')
+    assert(triangles == 2940 and shares[1] == 0.9578 and shares[2] == 0.0422 and shares[3] == 0 and #shares == 8, 'rail')
+    triangles, shares = rows('968211c0033dce64', '7f112acd09a5e523')
+    assert(triangles == 9687 and shares[6] == 0.1758, 'body')
+    assert(rows('968211c0033dce64', 'ffffffffffffffff') == nil and rows('0000000000000001', 'ddaa95e612f4468f') == nil,
+           'unknown unit or material')
+    local data = require('weapon_data')
+    local liberator = Kits.weapon_rows(data)
+    local t, s = liberator('968211c0033dce64', 'ddaa95e612f4468f')
+    assert(t and s[1] > 0.9, 'the shipped table: the Liberator\'s rail draws row 0 (bare metal)')
+end)
+
+check('weapons: the inventory watch compares the three weapon slots and the slot in hand, not the throwable or '
+      .. 'backpack fields; its binding check compares an exact texture object', function()
+    local row = ffi.new('uint8_t[48]')
+    local cell = ffi.new('uint8_t[8]')
+    local memory = {read_into = function(p, size, out)
+        local at = tonumber(ffi.cast('uintptr_t', p))
+        if at == 0x10000 then ffi.copy(out, row, size) else ffi.copy(out, cell, size) end
+        return true
+    end}
+    local watch = Weapons.watch(memory, {row = 0x10000})
+    assert(watch.row_changed(), 'the first read counts as a change')
+    assert(not watch.row_changed(), 'the same row')
+    row[16] = 7 -- the throwable
+    row[20] = 9 -- the backpack
+    assert(not watch.row_changed(), 'a grenade or backpack changes nothing')
+    row[28] = 1
+    assert(watch.row_changed() and watch.held() == 1, 'the slot in hand')
+    row[8] = 3
+    assert(watch.row_changed(), 'a support weapon picked up')
+    cell[0], cell[5] = 0x40, 0x12
+    assert(watch.bound(0x20000, 0x40, 0x1200) and not watch.bound(0x20000, 0x41, 0x1200), 'the texture object, exact')
+end)
+
+check('weapons: a camo row\'s metallic bias (over 1.5) reads as its paint; bare metal (1.0) stays metal; only paint '
+      .. 'rows are planned', function()
+    local model = flat_model()
+    local values = ffi.new('float[?]', 23 * 3 * 4)
+    local function row(r, rgb, metallic)
+        values[(r * 23) * 4], values[(r * 23) * 4 + 1], values[(r * 23) * 4 + 2] = rgb[1], rgb[2], rgb[3]
+        values[(r * 23 + 6) * 4 + 3] = metallic
+        values[(r * 23 + 21) * 4] = -1 -- no camo layer
+    end
+    row(0, {0.05, 0.05, 0.05}, -0.5) row(1, {0.4, 0.4, 0.4}, 1.0) row(2, {0.1, 0.2, 0.05}, 4.21)
+    local lut, deps = {values = values, width = 23, height = 3}, {colour = model}
+    assert(Kits.lut_row(lut, 2, deps).metal, 'the color model alone calls the camo row metal')
+    local camo, steel, paint = Kits.lut_row(lut, 2, deps, true), Kits.lut_row(lut, 1, deps, true),
+        Kits.lut_row(lut, 0, deps, true)
+    assert(not camo.metal and steel.metal and not paint.metal, 'on a weapon: the bias row is paint, steel metal')
+    assert(camo.L > Kits.lut_row(lut, 2, deps).L, 'its paint not darkened as metal')
+    assert(values[(2 * 23 + 6) * 4 + 3] > 4.2, 'the LUT itself untouched')
+    local w = Recolor.weapon_paint({{key = 'x:0', metal = false}, {key = 'x:1', metal = true}, {key = 'x:2', metal = false}})
+    assert(#w == 2 and w[1].key == 'x:0' and w[2].key == 'x:2', 'bare metal rows are not planned')
+end)
+
+check('weapons: the preview\'s customization composed as the game does: the type\'s copy, then each id\'s patches of '
+      .. 'type 271 in order (the span outside the copy left alone)', function()
+    -- a tiny fake memory: entities D, the types' table, the deltas' table
+    local space = {}
+    local function region(base, size) local b = ffi.new('uint8_t[?]', size) space[#space + 1] = {base, size, b} return b end
+    local function find(at, size)
+        for _, r in ipairs(space) do if at >= r[1] and at + size <= r[1] + r[2] then return r[3] + (at - r[1]) end end
+    end
+    local function u32w(at, v) local p = find(at, 4) for k = 0, 3 do p[k] = math.floor(v / 256 ^ k) % 256 end end
+    local function u64w(at, v) u32w(at, v % 4294967296) u32w(at + 4, math.floor(v / 4294967296)) end
+    local function namew(at, name) u32w(at, tonumber(name:sub(9, 16), 16)) u32w(at + 4, tonumber(name:sub(1, 8), 16)) end
+    local G, D, TYPES, DELTAS = 0x7000000000, 0x100000000, 0x200000000, 0x300000000
+    region(G + 0x346BF98, 8) u64w(G + 0x346BF98, D)
+    region(D + 0xF12CF0, 8) u64w(D + 0xF12CF0, TYPES)
+    region(D + 0xF12E98, 8) u64w(D + 0xF12E98, DELTAS)
+    local name, id = '968211c0033dce64', '9ebaa151ad0c4a59'
+    local function mod(hex, n)
+        local high, low = tonumber(hex:sub(1, 8), 16), tonumber(hex:sub(9, 16), 16)
+        return ((high % n) * (4294967296 % n) + low % n) % n
+    end
+    region(TYPES, 382 * 16 + 0x17E0 + 4872 * 2)
+    local slot = mod(name, 382)
+    namew(TYPES + 16 * slot, name) u32w(TYPES + 16 * slot + 8, 1) -- index 1
+    local base = TYPES + 0x17E0 + 4872
+    namew(base + 0x78, '129e5fb1b13c2018') -- the type's optic
+    u32w(base + 200, 0x7c4a4a11) -- its m_weapon row, LUT 0
+    region(DELTAS, 72)
+    local buckets, starts, ops, patches, data = 0x310000000, 0x320000000, 0x330000000, 0x340000000, 0x350000000
+    u64w(DELTAS, buckets) u32w(DELTAS + 8, 8) u64w(DELTAS + 16, starts) u64w(DELTAS + 32, ops)
+    u64w(DELTAS + 48, patches) u64w(DELTAS + 64, data)
+    region(buckets, 8 * 16) namew(buckets + 16 * mod(id, 8), id) u32w(buckets + 16 * mod(id, 8) + 8, 0)
+    region(starts, 8) u32w(starts, 2) u32w(starts + 4, 0) -- two ops from op 0
+    region(ops, 24) u32w(ops, 99) u32w(ops + 12, 271) u32w(ops + 16, 0) u32w(ops + 20, 2) -- the first not type 271
+    region(patches, 24)
+    u32w(patches, 208) u32w(patches + 4, 8) u32w(patches + 8, 0) -- the m_weapon row's LUT
+    u32w(patches + 12, 0x10) u32w(patches + 16, 8) u32w(patches + 20, 8) -- outside the span: left alone
+    region(data, 16) namew(data, '72ba1e791ed0a166') namew(data + 8, 'ffffffffffffffff')
+    local reader_buf = ffi.new('uint8_t[256]')
+    local function read(at, size) local p = find(at, size) if not p then return nil end ffi.copy(reader_buf, p, size) return reader_buf end
+    local function read_into(at, size, out) local p = find(at, size) if not p then return false end ffi.copy(out, p, size) return true end
+    local w = {name = name, overrides = {}, attachments = {}}
+    assert(Weapons.compose(read, read_into, G, w, {id}, ffi.new('uint8_t[?]', Weapons.COPY_SPAN)), 'composed')
+    assert(w.attachments[1] == '129e5fb1b13c2018', 'the type\'s attachments')
+    assert(w.overrides[0].rows[0x7c4a4a11].lut == '72ba1e791ed0a166', 'the id\'s paint patched in')
+    local missing = {name = 'aaaaaaaaaaaaaaaa', overrides = {}, attachments = {}}
+    local ok, why = Weapons.compose(read, read_into, G, missing, {}, ffi.new('uint8_t[?]', Weapons.COPY_SPAN))
+    assert(not ok and why == 'weapon type not found', 'an unknown weapon')
+end)
+
 print('PASS test_units (' .. passed .. ' checks)')

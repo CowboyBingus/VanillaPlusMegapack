@@ -50,11 +50,15 @@ Avatar.low32_product = low32_product
 -- pointers: one pointer object per address is made once and kept (the chain's addresses are stable; the
 -- cache starts over at 1024), so repeated checks allocate nothing (as Consistent Vaulting does).
 local POINTER = ffi.typeof('const uint8_t *')
+-- A read larger than the buffer is refused (nil), never written past it: a test probe's 88-byte read into a 64-byte
+-- buffer corrupted the Lua heap and crashed the game in the garbage collector (harness trials 2026-10-15). The
+-- largest read today is the Armory weapon preview's 232 bytes (src/weapons.lua SLOT_READ).
+Avatar.READ_MAX = 256
 function Avatar.reader(memory)
-    local buffer = ffi.new('uint8_t[256]')
+    local buffer = ffi.new('uint8_t[?]', Avatar.READ_MAX)
     local pointers, cached = {}, 0
     return function(address, size)
-        if address < 0x10000 or address >= 0x800000000000 then return nil end
+        if address < 0x10000 or address >= 0x800000000000 or size > Avatar.READ_MAX then return nil end
         local p = pointers[address]
         if not p then
             if cached >= 1024 then pointers, cached = {}, 0 end

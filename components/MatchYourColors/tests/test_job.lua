@@ -2607,4 +2607,113 @@ check('a job dropped while it built its reader leaves no handle open once abando
            handles(), before))
 end)
 
+check('Recolor Weapons on the game files: the AR-23 Liberator (its unit and default attachments in its package) '
+      .. 'planned against the DS-191 Scorpion: its painted body takes the armor\'s identity, bare metal and the '
+      .. 'optic\'s lens keep theirs; a paint scheme as the source too; a weapon without a package keeps its colors',
+      function()
+    local Weapons, WeaponData = require('weapons'), require('weapon_data')
+    local packages = {['968211c0033dce64'] = 'dbd9381f9ea9788f'}
+    local wdeps = {}
+    for k, v in pairs(deps) do wdeps[k] = v end
+    wdeps.WeaponData, wdeps.Avatar = WeaponData, require('avatar')
+    wdeps.Weapons = setmetatable({package = function(_, _, _, name) return packages[name] end}, {__index = Weapons})
+    local wholder = {}
+    local function weapon_run(request)
+        local co = coroutine.create(function()
+            return Recolor.weapons_job(wdeps, wholder, request, coroutine.yield)
+        end)
+        local ok, result
+        repeat ok, result = coroutine.resume(co) assert(ok, tostring(result)) until coroutine.status(co) == 'dead'
+        return result
+    end
+    local liberator = {id = 1, name = '968211c0033dce64', unit = 1, units = {}, overrides = {},
+                       attachments = {[1] = '129e5fb1b13c2018', [2] = '7be1e04a7738e673', [3] = '756e3fdaca41cfca',
+                                      [4] = '309f7e645a8d2b56'}}
+    local request = {target = 'weapons', mode = Recolor.HELMET_FROM_ARMOR, scheme = 0, keep_hoods = false,
+                     materials = false, helmet = tonumber(HELMET, 16), armor = tonumber(ARMOR, 16), body = 0, cape = 0,
+                     weapons = {liberator}}
+    local result = weapon_run(request)
+    assert(result.action == 'apply' and #result.targets == 1, 'planned: ' .. tostring(result.reason))
+    local a = result.targets[1]
+    assert(a.kit.kit_type == 'Weapon' and a.drawn == 5, 'every piece by the drawn-rows table: ' .. tostring(a.drawn))
+    -- bound names (the Liberator's own LUTs) and the templates' (src/weapon_data.lua schemes: DESERT CAMO, as the
+    -- Scorpion's colors include a camo; its attachments' m_attachments LUT; an attachment's bound under its name and
+    -- Recolor.ATTACHMENT)
+    local body, rail, optic = 'babd338977faa2ff', 'd1c943c12a564150', '69a575a0b0d612d2' .. Recolor.ATTACHMENT
+    local camo_body, desert_body, attachments = 'ade6c402bf0030c9', 'f8d36a490676ec43', '9917dccd0010c083'
+    local function cell(data, r, c, ch) return data[(r * 23 + c) * 4 + ch] end
+    local function same_row(x, y, r)
+        for c = 0, 22 do
+            for ch = 0, 3 do if math.abs(cell(x, r, c, ch) - cell(y, r, c, ch)) > 1e-6 then return false end end
+        end
+        return true
+    end
+    assert(a.luts[camo_body] and result.luts[body] and result.luts[rail] and result.luts[optic],
+           'the camo template analysed, bound under the Liberator\'s own LUTs: body, rail (camo schemes paint it), optic')
+    local template, recolored = a.luts[camo_body].values, result.luts[body].data
+    assert(not same_row(template, recolored, 0), 'the body (row 0) takes a color')
+    assert(same_row(template, recolored, 6), 'the template\'s metal row (6) as it is')
+    assert(cell(recolored, 1, 21, 3) >= 0 and cell(recolored, 1, 21, 3) ~= cell(template, 1, 21, 3)
+           or not same_row(template, recolored, 1), 'the camo row takes the armor\'s camo')
+    assert(same_row(a.luts[attachments].values, result.luts[optic].data, 4), 'the optic\'s lens (mode 3) kept')
+    -- a source without camo: DESERT's rows; the rail (no class of DESERT's) is no target, keeps its own
+    request.armor = tonumber(B01_ARMOR, 16)
+    local solid = weapon_run(request)
+    assert(solid.targets[1].luts[desert_body] and solid.luts[body] and not solid.luts[rail], 'the solid template')
+    request.armor = tonumber(ARMOR, 16)
+    -- Desert Camo as the source: the game's own look, unplanned (its LUTs as they are)
+    request.scheme = 7
+    local native = weapon_run(request)
+    assert(native.action == 'apply' and same_row(native.targets[1].luts[camo_body].values, native.luts[body].data, 0)
+           and same_row(native.targets[1].luts[camo_body].values, native.luts[body].data, 1), 'the scheme as it is')
+    -- NIGHT also swaps the weapons' decal sheet for a blank one (no printed markings): bound as it is in place of the
+    -- Liberator's own sheet (control check 2026-10-15: the mod kept "AR-23 LIBERATOR" and the skull)
+    request.scheme = 10
+    local night = weapon_run(request)
+    local sheet = night.luts['7b3e68f1837b5730']
+    assert(sheet and sheet.decal and sheet.direct == 'f37a4e756300ab32', 'NIGHT: its decal sheet bound as it is')
+    -- a cache holding a weapon's analysis (the first test build saved them; the cache keeps no materials) is not used
+    -- for it: the next session analysed nothing again and every weapons job failed ("attempt to index local 'm' (a
+    -- boolean value)", harness trial 2026-10-15); a weapon's analysis is never saved
+    request.scheme = 0
+    local p = wholder.pipeline
+    local all, order = {}, {}
+    for k, v in pairs(p.analyses) do
+        if v then all[k], order[#order + 1] = v, k end
+    end
+    assert(Cache.write(CACHE, Cache.encode(p.header, all, order, p.samples)), 'a cache with the weapon\'s analysis')
+    wholder = {}
+    local again = weapon_run(request)
+    assert(again.action == 'apply' and again.luts[body], 'the next session: analysed again and applied')
+    assert(wholder.pipeline.save(), 'saved')
+    wholder.pipeline.dirty = true
+    assert(wholder.pipeline.save() and not Cache.read(CACHE):find(' Weapon ', 1, true), 'no weapon analysis saved')
+    wholder.pipeline.close()
+    os.remove(CACHE)
+    -- a weapon whose unit is not named as the weapon (src/weapon_data.lua unit_of): its body is analysed and recolored,
+    -- not only its attachments (the R-63CS Diligence Counter Sniper's olive body kept its colors: render review
+    -- 2026-10-15, case 6)
+    packages['4c786785c79d44e7'] = '2404fa21fe49c32d'
+    request.weapons = {{id = 3, name = '4c786785c79d44e7', unit = 3, units = {}, overrides = {},
+                        attachments = {[1] = '6d54652ee217d712', [2] = '9b30d4ac39ddff10', [3] = 'bd4245dcfd4b832f'}}}
+    local cs = weapon_run(request)
+    local body_piece = cs.action == 'apply' and cs.targets[1].pieces[1]
+    assert(body_piece and body_piece.piece.path == '6e68194b95d60145' and #body_piece.materials > 0,
+           'the R-63CS body (unit 6e68194b95d60145) analysed')
+    assert(cs.luts['768ca99c11d6582a'], 'its body recolored (bound under its own m_weapon LUT)')
+    -- a non-default attachment (not in the weapon's package) is found in its own archive (src/weapon_data.lua
+    -- attachment_archive): the AR-61 Tenderizer's Reflex Sight kept its colors (control check 2026-10-15)
+    packages['ce063aa33d95a812'] = 'd1968909ea085527'
+    request.weapons = {{id = 4, name = 'ce063aa33d95a812', unit = 4, units = {}, overrides = {},
+                        attachments = {[1] = '9dbc8aa8702ac9e1', [2] = '89cce4d15db88aa8', [3] = '2383b0439f0bc465',
+                                       [4] = '309f7e645a8d2b56'}}}
+    local sight = weapon_run(request)
+    local optic = sight.action == 'apply' and sight.targets[1].pieces[2]
+    assert(optic and optic.piece.path == '9dbc8aa8702ac9e1' and #optic.materials > 0, 'the Reflex Sight analysed')
+    assert(sight.luts['10f1803d6b7e1b58' .. Recolor.ATTACHMENT], 'the Reflex Sight recolored')
+    request.weapons = {{id = 2, name = '0000000000000bad', unit = 2, units = {}, overrides = {}, attachments = {}}}
+    local none = weapon_run(request)
+    assert(none.action == 'restore' and none.reason == 'no weapon analysed', 'no package: its colors kept')
+end)
+
 print('PASS test_job (' .. passed .. ' checks)')

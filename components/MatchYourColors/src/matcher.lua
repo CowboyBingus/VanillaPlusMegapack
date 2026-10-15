@@ -731,6 +731,17 @@ local function needs_flat_check(t, s)
     return big_t >= 2 and spread_t >= 20 and big_s >= 2 and spread_s >= 20
 end
 
+-- The palette's share sum and suit paint (s.share_sum, s.suit), and the identity's (main's) index in it (1 when
+-- absent).
+local function palette_main(s, main, source)
+    local shares = {}
+    for i, g in ipairs(s) do shares[i] = g.share end
+    s.share_sum, s.suit = npsum(shares, #s), source.suit_paint
+    local j_main = 1
+    for j = 1, #s do if s[j] == main then j_main = j end end
+    return j_main
+end
+
 -- Pairs {target group, source group} and the anchor group (nil without paint) (match12.py pair_groups). Hood
 -- groups (Recolor Hoods off) take no color.
 function Matcher.pair_groups(target, source)
@@ -746,13 +757,12 @@ function Matcher.pair_groups(target, source)
                                         source.cape_source and source.part_guard)
     if #t == 0 then return pairs, nil end
     local s = palette
-    local shares = {}
-    for i, g in ipairs(s) do shares[i] = g.share end
-    s.share_sum, s.suit = npsum(shares, #s), source.suit_paint
-    local j_main = 1
-    for j = 1, #s do if s[j] == main then j_main = j end end
+    local j_main = palette_main(s, main, source)
     local keep_ok = keep_matrix(t, s)
-    local anchor = anchor_of(t, keep_ok, j_main, s)
+    -- a weapon (src/recolor.lua, Recolor Weapons) takes the identity on its largest painted part whatever its lightness,
+    -- as the game's paint schemes paint a dark rifle white: by look class the Liberator's dark body went to the
+    -- source's dark greys and only its light optic took a tan armor's color (offline plans 2026-10-15)
+    local anchor = target.weapon and 1 or anchor_of(t, keep_ok, j_main, s)
     local allowed = allowed_matrix(t, s, keep_ok)
     vivid_minor_guard(allowed, t, s, keep_ok, j_main, source.cape_source)
     if source.part_guard then source.part_guard(allowed, t, s, keep_ok, ACCENT_C) end -- a cape source's (src/capes.lua)
@@ -1155,8 +1165,10 @@ end
 -- study measured paint only), else nil. An armor's band (armor) takes a color covering BAND_ARMOR_MIN_SHARE of the
 -- source and no light: an armor is far larger than a helmet, and the RS-100 Sanctioner's 2.8% gold painted a quarter
 -- of the O-44 Bonded Pilot, its red-brown plates, light gold (Reddit report 2026-10-14; v1.3 made them its black; the
--- user's floor for a secondary, review 1). A helmet's band keeps the agreed rule (the IX-VOIDWALKER's navy band takes
--- the RE-1861 Parade Commander's 5% dark red, the B-01 Tactical's lemon decal).
+-- user's floor for a secondary, review 1). A weapon's band (Recolor Weapons) takes the armor's rule: a scheme's light
+-- detail rows are bands of the weapon's body, and the PH-56 Jaguar's 0.6% yellow trim painted 40% of the P-2
+-- Peacemaker lemon yellow (independent render review 2026-10-15, case 6). A helmet's band keeps the agreed rule (the
+-- IX-VOIDWALKER's navy band takes the RE-1861 Parade Commander's 5% dark red, the B-01 Tactical's lemon decal).
 local function band_group(source, least)
     local best
     for _, g in ipairs(source.groups) do
@@ -1261,7 +1273,7 @@ function Matcher.plan(target, source, materials, cape)
     end
     local tones = cape and {} or tonal_offsets(choices, anchor)
     for _, c in ipairs(choices) do map_group(mapping, c[1], c[3], c[2], materials, source.armor, tones[c[1]]) end
-    tint_bands(mapping, choices, source, accent, target.armor)
+    tint_bands(mapping, choices, source, accent, target.armor or target.weapon)
     cloth_off_metal(mapping, choices, source, materials, tones)
     local small = accent or second or (source.cape_source and anchor and Matcher.identity(source)) or nil
     if small then map_small_accents(mapping, target, source, small, materials) end
@@ -1356,7 +1368,8 @@ if type(jit) == 'table' and type(jit.off) == 'function' then
         big_spread, palette_of, helmet_main, identity_of, Matcher.identity, structure_pairs,
         initial_assign, largest_paint,
         may_take, allowed_matrix, earth_tone, guard_part, vivid_minor_guard,
-        keep_matrix, anchor_of, closest_main, keep_matches, needs_flat_check, Matcher.pair_groups, source_accent,
+        keep_matrix, anchor_of, closest_main, keep_matches, needs_flat_check, palette_main, Matcher.pair_groups,
+        source_accent,
         hue_gap, family_share, is_accent, matches_source, kept_match, metal_echo, speck_across, choice, source_tint,
         reflected, painted, metallized, metal_shift, groups_by_source, lead_of, tonal_offsets, row_lightness,
         pair_goal, map_group,

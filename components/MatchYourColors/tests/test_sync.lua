@@ -11,6 +11,7 @@ local setup, requests, helpers = dofile(root .. '/tests/test_addon.lua')
 rawset(_G, 'MYC_TEST_SETUP_ONLY', nil) -- lint-ok: R8 test process only
 local Sync, Remote, Recolor = require('sync'), require('remote'), require('recolor')
 require('sheets').attach(Recolor)
+require('bindings').attach(Recolor)
 local Fake = dofile(root .. '/tests/fake_game.lua')
 local budget = dofile(root .. '/tests/frame_budget.lua')
 local passed = 0
@@ -25,7 +26,8 @@ local LOCAL_ID, REMOTE_ID = 'C0FFEE5EED0001', '1234'
 local LOCAL_KEY, REMOTE_KEY = '00c0ffee5eed0001', '0000000000001234'
 local HELMET_LUT = '962a946e964ebc40'
 local REMOTE_HELMET, REMOTE_ARMOR = 0x11111111, 0x22222222
-local SHARED = '1|2|3|0' -- helmet matches armor, complete sets kept, hoods recolored, no scheme
+-- helmet matches armor, complete sets kept, hoods recolored, no scheme: 'cbmyc2' (v1.5) and 'cbmyc' (v1.3-v1.4)
+local SHARED, LEGACY = 'v=1;m=2;f=3;s=0;', '1|2|3|0'
 local FAIL_HELMET = 0x0f0f0f0f -- the canned job fails for this helmet
 
 local function world(members, extra)
@@ -61,11 +63,14 @@ check('natives: the buffers the post\'s update points into outlive collections (
         if name == 'PFLobbyPostUpdate' then
             fn = function(_, _, _, member_update)
                 local u = ffi.cast('const MycMemberUpdate *', member_update)
-                local k, v = u.keys[0], u.values[0]
-                local at = tonumber(ffi.cast('uintptr_t', k))
-                seen = {count = u.count, garbage = at == GARBAGE or at == 0,
-                        key = (at ~= GARBAGE and at ~= 0) and ffi.string(k) or nil,
-                        value = v ~= nil and ffi.string(v) or nil}
+                seen = {count = u.count, keys = {}, values = {}}
+                for i = 0, math.min(u.count, 4) - 1 do
+                    local k, v = u.keys[i], u.values[i]
+                    local at = tonumber(ffi.cast('uintptr_t', k))
+                    seen.garbage = seen.garbage or at == GARBAGE or at == 0
+                    seen.keys[i + 1] = (at ~= GARBAGE and at ~= 0) and ffi.string(k) or nil
+                    seen.values[i + 1] = v ~= nil and ffi.string(v) or false
+                end
                 return 0
             end
         end
@@ -84,30 +89,60 @@ check('natives: the buffers the post\'s update points into outlive collections (
             junk[(round - 1) * 4000 + i] = a
         end
     end
-    assert(api.post(0, 0, SHARED) == 0, 'posted')
-    assert(seen and not seen.garbage and seen.count == 1 and seen.key == 'cbmyc' and seen.value == SHARED,
-           'the update still points at the key and the value: ' .. tostring(seen and seen.key))
+    assert(api.post(0, 0, SHARED, LEGACY) == 0, 'posted')
+    assert(seen and not seen.garbage and seen.count == 2 and seen.keys[1] == 'cbmyc2' and seen.keys[2] == 'cbmyc'
+           and seen.values[1] == SHARED and seen.values[2] == LEGACY,
+           'the update still points at both keys and values: ' .. tostring(seen and seen.keys[1]))
+    assert(api.post(0, 0, nil, nil) == 0 and seen.count == 2 and seen.values[1] == false and seen.values[2] == false,
+           'removal: both keys without a value')
     for _, cb in ipairs(callbacks) do cb:free() end
 end)
 
-check('encode and decode: every mode (Helmet and Armor Match Cape included), flag and scheme round trips; other versions and malformed values are refused',
-      function()
+-- Every option combination (the FLAGS bits, Recolor Weapons included) for each mode and a few schemes.
+local function each_options(fn)
     for mode = 1, 4 do
-        for flags = 0, 15 do
-            for scheme = 0, 12 do
-                local o = {mode = mode, keep_sets = flags % 2 == 1, recolor_hoods = math.floor(flags / 2) % 2 == 1,
-                           match_materials = math.floor(flags / 4) % 2 == 1, recolor_cape = flags >= 8,
-                           scheme = scheme}
-                local text = Sync.encode(o)
-                assert(text == string.format('1|%d|%d|%d', mode, flags, scheme), text)
-                local back = assert(Sync.decode(text), text)
-                for k, v in pairs(o) do assert(back[k] == v, text .. ': ' .. k) end
+        for flags = 0, 31 do
+            for _, scheme in ipairs({0, 1, 5, 12}) do
+                local o = {mode = mode, scheme = scheme}
+                for _, flag in ipairs(Sync.FLAGS) do o[flag[1]] = math.floor(flags / flag[2]) % 2 == 1 end
+                fn(o, flags)
             end
         end
     end
-    for _, bad in ipairs({'2|2|3|0', '1|0|3|0', '1|5|3|0', '1|2|16|0', '1|2|3|65', '1|2|3', '1|2|3|0|9', ' 1|2|3|0',
-                          '1|2|3|x', '', string.rep('1', 41), '1|-2|3|0'}) do
+end
+
+check('encode and decode: every mode, option and scheme round trips through cbmyc2; cbmyc (v1.3-v1.4\'s) carries '
+      .. 'the options those copies know, in their format', function()
+    each_options(function(o, flags)
+        local text = Sync.encode(o)
+        assert(text == string.format('v=1;m=%d;f=%d;s=%d;', o.mode, flags, o.scheme), text)
+        local back = assert(Sync.decode(text), text)
+        for k, v in pairs(o) do assert(back[k] == v, text .. ': ' .. k) end
+        local legacy = Sync.legacy(o)
+        assert(legacy == string.format('1|%d|%d|%d', o.mode, flags % 16, o.scheme), legacy)
+        local old = assert(Sync.decode(legacy), legacy)
+        for k, v in pairs(o) do
+            assert(old[k] == (k ~= 'recolor_weapons' and v or false), legacy .. ': ' .. k)
+        end
+    end)
+end)
+
+check('cbmyc2 is read forward-compatibly: unknown fields and flag bits are ignored, missing optional fields are off, '
+      .. 'a higher format level, an unknown mode, a value cut short and anything malformed are refused', function()
+    local o = assert(Sync.decode('s=5;x=hello;f=' .. (16 + 64 + 1024) .. ';m=3;v=1;zz_9=;'), 'any order, extra fields')
+    assert(o.mode == 3 and o.scheme == 5 and o.recolor_weapons and not o.keep_sets and not o.recolor_cape,
+           'known bits read, unknown bits (64, 1024) and fields ignored')
+    o = assert(Sync.decode('v=1;m=2;'), 'flags and scheme optional')
+    assert(o.mode == 2 and o.scheme == 0 and not o.recolor_weapons and not o.keep_sets, 'missing optional fields: off')
+    for _, bad in ipairs({'v=2;m=2;f=3;s=0;', 'm=2;f=3;s=0;', 'v=1;f=3;s=0;', 'v=1;m=5;f=3;s=0;', 'v=1;m=0;',
+                          'v=1;m=2;f=3;s=65;', 'v=1;m=2;f=-1;', 'v=1;m=2;f=3.5;', 'v=1;m=2;f=x;', 'v=1;m=2;f=3;s=0',
+                          'v=1;m=2;f=3;s', 'v=1;m=2;;', 'v=1;m=2;f==3;', '=1;m=2;', ' v=1;m=2;', 'v=1;m=2.5;',
+                          'v=1;m=2;f=4294967296;', '', string.rep('v=1;', 32), 'v=1|m=2'}) do
         assert(Sync.decode(bad) == nil, 'refused: ' .. bad)
+    end
+    for _, bad in ipairs({'2|2|3|0', '1|0|3|0', '1|5|3|0', '1|2|16|0', '1|2|3|65', '1|2|3', '1|2|3|0|9', ' 1|2|3|0',
+                          '1|2|3|x', '1|-2|3|0'}) do
+        assert(Sync.decode(bad) == nil, 'refused (cbmyc): ' .. bad)
     end
     assert(Sync.decode(nil) == nil and Sync.decode(12) == nil, 'no text')
 end)
@@ -131,7 +166,8 @@ check('always on (no option since 2026-10-07): shared and the others recolored f
     w.instance.set_option('sync', false) -- the removed option's old value: refused
     assert(w.instance.state.syncing and w.instance.state.options.sync == nil, 'syncing, no option')
     w.frames(700) -- the first post once the lobby has stayed joined for STEADY_FRAMES
-    assert(#w.lobby.posts == 1 and w.lobby.posts[1].text == SHARED, 'the value shared once')
+    assert(#w.lobby.posts == 1 and w.lobby.posts[1].text == SHARED and w.lobby.posts[1].legacy == LEGACY,
+           'both values shared once, in one post')
     assert(w.bound(0x200)[1] ~= vanilla(w), 'the other mod user recolored')
 end)
 
@@ -160,7 +196,31 @@ check('alone in the lobby: one lobby read every 120 frames, the value posted onc
     w.frames(100)
     w.instance.set_option('scheme', 5)
     w.frames(600)
-    assert(#w.lobby.posts == 2 and w.lobby.posts[2].text == '1|2|7|5', 'one post for both changes')
+    assert(#w.lobby.posts == 2 and w.lobby.posts[2].text == 'v=1;m=2;f=7;s=5;' and w.lobby.posts[2].legacy == '1|2|7|5',
+           'one post for both changes')
+end)
+
+check('squadmates on v1.3-v1.4 (cbmyc only) are recolored with their settings; a v1.5 squadmate\'s cbmyc2 wins over '
+      .. 'its cbmyc; a player without the mod costs two lookups a poll, a v1.5 squadmate one', function()
+    local old = world({{id = LOCAL_ID}, {id = REMOTE_ID, legacy = '1|2|5|0'}})
+    old.frames(4)
+    local last = requests[#requests]
+    assert(old.bound(0x200)[1] ~= vanilla(old) and last.target == 'remote' and last.keep_sets == true
+           and last.keep_hoods == true and last.materials == true, 'recolored with the older copy\'s settings')
+    local new = world({{id = LOCAL_ID}, {id = REMOTE_ID, value = 'v=1;m=2;f=2;s=0;', legacy = '1|2|5|0'}})
+    new.frames(4)
+    last = requests[#requests]
+    assert(last.keep_sets == false and last.keep_hoods == false and last.materials == false, 'cbmyc2 read, not cbmyc')
+    local reads = {cbmyc2 = new.lobby.reads.cbmyc2, cbmyc = new.lobby.reads.cbmyc}
+    new.frames(120)
+    assert(new.lobby.reads.cbmyc2 - reads.cbmyc2 == 1 and new.lobby.reads.cbmyc == reads.cbmyc,
+           'one lookup a poll for a v1.5 squadmate')
+    local none = world({{id = LOCAL_ID}, {id = REMOTE_ID}})
+    reads = {cbmyc2 = none.lobby.reads.cbmyc2, cbmyc = none.lobby.reads.cbmyc}
+    none.frames(120)
+    assert(none.lobby.reads.cbmyc2 - reads.cbmyc2 == 1 and none.lobby.reads.cbmyc - reads.cbmyc == 1,
+           'two lookups a poll for a player without the mod')
+    assert(none.bound(0x200)[1] == vanilla(none), 'not recolored')
 end)
 
 check('another mod user who shares is recolored with its own textures; the local Helldiver keeps its own', function()
@@ -240,7 +300,7 @@ end)
 check('its settings change: a new job with them; its Helldiver respawns: the new units recolored', function()
     local w = world(with_remote())
     w.frames(4)
-    w.lobby.members[2].value = '1|3|3|0' -- armor matches helmet: their armor is the target now
+    w.lobby.members[2].value = 'v=1;m=3;f=3;s=0;' -- armor matches helmet: their armor is the target now
     w.frames(124)
     local last = requests[#requests]
     assert(last.target == 'remote' and last.mode == Recolor.ARMOR_FROM_HELMET, 'their new mode')
@@ -279,7 +339,7 @@ end)
 
 check('a squadmate whose items match their cape (Helmet and Armor Match Cape) respawns in another cape: a job, not the '
       .. 'old result (user request 2026-10-09)', function()
-    local w = setup({lobby = {local_id = LOCAL_ID, members = with_remote('1|4|3|0')}})
+    local w = setup({lobby = {local_id = LOCAL_ID, members = with_remote('v=1;m=4;f=3;s=0;')}})
     w.space.u32(Fake.CUSTOMIZATION + 2420 + 68, 0x72492837) -- the squadmate's cape, before the first frame
     w.frames(13)
     local function remote_requests()
@@ -385,7 +445,7 @@ end)
 
 check('the local member never drives a recolor without the loopback; unreadable values and strangers are skipped',
       function()
-    local w = world({{id = LOCAL_ID, value = '1|3|3|0'}, {id = REMOTE_ID, value = 'garbage'},
+    local w = world({{id = LOCAL_ID, value = 'v=1;m=3;f=3;s=0;'}, {id = REMOTE_ID, value = 'garbage'},
                      {id = 'ABCDEF', value = SHARED}})
     local before = #requests
     w.frames(400)
@@ -414,7 +474,7 @@ check('a failing job for another player is tried FAILURE_LIMIT times, then left 
     assert(tries == Remote.FAILURE_LIMIT, tries .. ' tries')
     assert(logged(w, 'Sync: recolor of ' .. REMOTE_KEY .. ' failed (3/3): canned failure'), 'logged')
     w.space.u32(Fake.CUSTOMIZATION + 2416 + 68, REMOTE_HELMET)
-    w.lobby.members[2].value = '1|2|1|0' -- new settings: tried again
+    w.lobby.members[2].value = 'v=1;m=2;f=1;s=0;' -- new settings: tried again
     w.frames(124)
     assert(w.bound(0x200)[1] ~= vanilla(w), 'recolored with the new settings')
 end)
@@ -517,7 +577,7 @@ end)
 
 check('Recolor Squadmates: a squadmate who shares keeps their own settings with Squadmates Without the Mod and takes '
       .. 'yours with Everyone; your option changes reach the squadmates who take yours', function()
-    local w = world(with_remote('1|3|3|0')) -- they chose Armor Matches Helmet
+    local w = world(with_remote('v=1;m=3;f=3;s=0;')) -- they chose Armor Matches Helmet
     w.instance.set_option('squad', MISSING)
     w.frames(8)
     assert(requests[#requests].target == 'remote' and requests[#requests].mode == Recolor.ARMOR_FROM_HELMET,
@@ -567,7 +627,7 @@ end)
 
 check('a squadmate whose value fails to read keeps their entry as it is (Recolor Squadmates on: no flip to your '
       .. 'settings and back)', function()
-    local w = world(with_remote('1|3|3|0'))
+    local w = world(with_remote('v=1;m=3;f=3;s=0;'))
     w.instance.set_option('squad', MISSING)
     w.frames(8)
     local count = #requests
@@ -585,7 +645,8 @@ check('Recolor Squadmates: the calls a squadmate without the mod adds are a shar
     for _ = 1, 240 do -- off: the poll alone (the lobby, its two members, no player records), no watch or check
         local extra = diff(w.frame(), twin.frame())
         if extra.members then
-            assert(same(extra, {members = 1, property = 1, read_into = 13}), 'off poll: ' .. budget.describe(extra))
+            -- its two lookups: cbmyc2, then cbmyc (v1.5: a player without the mod has neither)
+            assert(same(extra, {members = 1, property = 2, read_into = 13}), 'off poll: ' .. budget.describe(extra))
         else
             assert(next(extra) == nil, 'off: ' .. budget.describe(extra))
         end
@@ -597,8 +658,9 @@ check('Recolor Squadmates: the calls a squadmate without the mod adds are a shar
         local extra = diff(w.frame(), twin.frame())
         local frame = w.instance.state.frame
         local expected = {}
-        if extra.members then -- a sharer's 28 less its value; the own value posted once the lobby is steady
-            expected, polls = {members = 1, property = 1, read_into = 27, post = extra.post and 1 or nil}, polls + 1
+        if extra.members then -- a sharer's 28 less its value (two lookups: neither key); the own value posted once
+            -- the lobby is steady
+            expected, polls = {members = 1, property = 2, read_into = 27, post = extra.post and 1 or nil}, polls + 1
         elseif frame % Remote.WATCH_FRAMES == 0 then
             expected = {read_into = 1}
         elseif frame % 30 == 1 then

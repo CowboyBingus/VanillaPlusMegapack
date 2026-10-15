@@ -66,6 +66,7 @@ function Cache.pieces_sum_of(kit)
             .. (piece.fields and (',' .. piece.fields) or '') -- a cape's scalar fields
             .. (piece.cape_lut and (',' .. piece.cape_lut .. ',' .. (piece.gradient or '') .. ','
                 .. (piece.decal or '')) or '') -- its tint and emblems
+            .. (piece.overrides_text and (',' .. piece.overrides_text) or '') -- a weapon's paint
         for i = 1, #text do
             a = (a + text:byte(i)) % 65521
             b = (b + a) % 65521

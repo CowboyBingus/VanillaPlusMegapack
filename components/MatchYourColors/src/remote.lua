@@ -18,17 +18,23 @@ Remote.FAILURE_LIMIT, Remote.WATCH_FRAMES = 3, 4
 local EMPTY = {}
 
 -- m: {Avatar, Recolor, Engine, Sync, memory, native, pool, game, read (Avatar.reader), note, records_same (the
--- addon's: whether a result was made of the kit records as they read now)}.
+-- addon's: whether a result was made of the kit records as they read now), Loadout and Weapons (optional: their
+-- weapons, v1.5)}.
+-- Recolor Weapons (v1.5): a player whose settings carry it (cbmyc2 flag 16, or Recolor Squadmates' own settings) gets
+-- their weapons recolored too, a src/loadout.lua of their own: on their watch turn (1 frame in WATCH_FRAMES, round
+-- robin) their weapon in hand's LUT binding and inventory row are read (2 reads), so a reload of theirs shows their
+-- weapon's own colors for up to WATCH_FRAMES frames per recolored player.
 function Remote.new(m)
     local Avatar, Recolor, Sync = m.Avatar, m.Recolor, m.Sync
     local self = {entries = {}, order = {}, retiring = {}, cursor = 0, served = 0, jobs = 0, rebinds = 0,
-                  pending = false}
+                  pending = false, frame = 0}
 
     local function key_of(member) return string.format('%08x%08x', member.peer_high, member.peer_low) end
 
     local function same(a, b)
         return a.mode == b.mode and a.keep_sets == b.keep_sets and a.recolor_hoods == b.recolor_hoods
             and a.match_materials == b.match_materials and a.recolor_cape == b.recolor_cape and a.scheme == b.scheme
+            and (a.recolor_weapons or false) == (b.recolor_weapons or false)
     end
 
     local function add(key)
@@ -39,10 +45,36 @@ function Remote.new(m)
         return e
     end
 
+    -- An entry's weapons (a loadout of its own while its settings recolor them; else none, their colors given back).
+    local function weapons_of(e, frame)
+        local want = m.Loadout and m.Weapons and e.settings and e.settings.recolor_weapons
+            and (e.settings.mode ~= Recolor.OFF or (e.settings.scheme or 0) ~= 0)
+        if not want then
+            if e.loadout then
+                e.loadout.clear(frame)
+                self.retiring[#self.retiring + 1] = e.loadout.controller
+                e.loadout = nil
+            end
+            return
+        end
+        e.loadout = e.loadout or m.Loadout.new({Weapons = m.Weapons, Recolor = Recolor, Engine = m.Engine,
+            Avatar = Avatar, memory = m.memory, native = m.native, pool = m.pool, game = m.game, read = m.read,
+            note = m.note})
+        if e.identity then
+            e.loadout.adopt(e.identity)
+            e.loadout.replan()
+            self.pending = true
+        end
+    end
+
     local function drop(key, frame)
         local e = self.entries[key]
         e.controller.restore(frame)
         if e.controller.retired[1] then self.retiring[#self.retiring + 1] = e.controller end
+        if e.loadout then
+            e.loadout.clear(frame)
+            self.retiring[#self.retiring + 1] = e.loadout.controller
+        end
         self.entries[key] = nil
         for i, k in ipairs(self.order) do
             if k == key then table.remove(self.order, i) break end
@@ -147,6 +179,7 @@ function Remote.new(m)
         return take(poll.players, member, settings, frame, settings == mine)
     end
     function self.update(frame, members, mine, everyone)
+        self.frame = frame
         poll.players = nil
         for key in pairs(seen) do seen[key] = nil end
         for _, member in ipairs(members or EMPTY) do
@@ -175,6 +208,7 @@ function Remote.new(m)
                 if identity then
                     e.identity, e.watch = identity, Avatar.watch(m.memory, identity, nil)
                     e.watch.changed() -- keeps the current units
+                    weapons_of(e, self.frame) -- their weapons (Recolor Weapons in their settings), planned after
                     self.served = i
                     local s = e.settings
                     return {target = 'remote', key = key, mode = s.mode, keep_sets = s.keep_sets,
@@ -186,6 +220,22 @@ function Remote.new(m)
                 m.note('Sync: ' .. key .. ' not resolved (' .. tostring(why) .. ').')
             end
         end
+        -- then their weapons (src/loadout.lua): one entry's at a time, its avatar planned first
+        for step = 1, n do
+            local i = (self.served + step - 1) % n + 1
+            local key = self.order[i]
+            local e = self.entries[key]
+            local w = not e.absent and e.loadout and e.identity and e.failures < Remote.FAILURE_LIMIT
+                and e.loadout.request()
+            if w then
+                self.served = i
+                local s, id = e.settings, e.identity
+                return {target = 'remote', key = key, mode = s.mode, keep_sets = s.keep_sets,
+                        keep_hoods = not s.recolor_hoods, materials = s.match_materials, scheme = s.scheme,
+                        capes = s.recolor_cape, helmet = id.helmet, armor = id.armor, body = id.body, cape = id.cape,
+                        weapons = w.weapons, sig = w.sig}
+            end
+        end
         self.pending = false
         return nil
     end
@@ -194,6 +244,16 @@ function Remote.new(m)
     function self.finish(ok, result, request, frame)
         local e = self.entries[request.key]
         if not e then return end
+        if request.weapons then -- their weapons' job (src/loadout.lua): a failure leaves them as they are
+            if not ok or not e.loadout then
+                m.note('Sync: weapons of ' .. request.key .. ' not recolored: ' .. tostring(ok and 'off' or result))
+                return
+            end
+            local count = e.loadout.finish(result, request, frame)
+            self.pending = self.pending or e.loadout.dirty
+            m.note(string.format('Sync: %s weapons recolored, %d materials.', request.key, count))
+            return
+        end
         if not ok then
             e.failures = e.failures + 1
             e.dirty = e.failures < Remote.FAILURE_LIMIT
@@ -214,6 +274,7 @@ function Remote.new(m)
     -- One entry's units checked (round robin; a change rebinds its applied result, else wants a job), retired textures
     -- collected.
     function self.step(frame)
+        self.frame = frame
         if self.retiring[1] then
             local keep = {}
             for _, c in ipairs(self.retiring) do
@@ -226,10 +287,16 @@ function Remote.new(m)
         self.cursor = self.cursor % n + 1
         local e = self.entries[self.order[self.cursor]]
         if e.controller.retired[1] then e.controller.collect(frame) end
+        if e.loadout then e.loadout.collect(frame) end
         if e.absent then return end -- no Helldiver: the next poll finds it again
         if e.watch and e.watch.changed() and not rebind(e, e.player, frame) then
             e.dirty = true
             self.pending = true
+        end
+        -- their weapons on the same turn: the weapon in hand's binding and the inventory row (src/loadout.lua)
+        if e.loadout then
+            e.loadout.step(frame, false, true)
+            if e.loadout.dirty then self.pending = true end
         end
     end
 
@@ -242,6 +309,7 @@ function Remote.new(m)
             e.dirty = true
             self.pending = true
         end
+        if not e.absent and e.loadout then e.loadout.check(self.frame) end
     end
 
     -- Every entry restored and dropped (sharing off, pause, stop).

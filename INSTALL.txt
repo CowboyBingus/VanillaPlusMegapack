@@ -75,7 +75,9 @@ option-selection checks passed. Live validation of the Mod Bindings Menu
 reset fix and measurement of its added binding-page and periodic checks are
 pending. Its ordinary gameplay idle checks and binding polling are unchanged.
 Match Your Colors v1.5 was checked in the game in the Armory, on the ship and
-in one solo mission; its per-frame cost in real play is not measured yet.
+in one solo mission, and its Recolor Weapons option against the game's own
+weapon paint schemes in the Armory; its per-frame cost in real play is not
+measured yet.
 Previous releases were checked in game:
 a clean run to the ship with every option, and the four new mods in joined
 missions of real play as their standalone releases.

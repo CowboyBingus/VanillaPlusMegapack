@@ -9,7 +9,7 @@ local ffi = require('ffi')
 local Fake = dofile(root .. '/tests/fake_game.lua')
 local modules = {}
 for _, name in ipairs({'avatar', 'preview', 'recolor', 'engine', 'files', 'slim', 'texture', 'colour', 'transfer',
-                       'matcher', 'zones', 'variety', 'albedo', 'sheets', 'kits', 'cache', 'schemes', 'capes', 'patches', 'sync', 'remote', 'addon'}) do
+                       'matcher', 'zones', 'variety', 'albedo', 'sheets', 'bindings', 'kits', 'cache', 'schemes', 'capes', 'patches', 'sync', 'remote', 'addon'}) do
     modules[name] = require(name)
 end
 local Engine, Addon = modules.engine, modules.addon
@@ -98,7 +98,7 @@ local function install(options)
                env = env, get_engine_api = get_api}
     for name, module in pairs({Avatar = 'avatar', Preview = 'preview', Recolor = 'recolor', Engine = 'engine',
                                Files = 'files', Slim = 'slim', Texture = 'texture', Colour = 'colour', Transfer = 'transfer',
-                               Matcher = 'matcher', Zones = 'zones', Variety = 'variety', Albedo = 'albedo', Sheets = 'sheets', Kits = 'kits', Cache = 'cache', Schemes = 'schemes',
+                               Matcher = 'matcher', Zones = 'zones', Variety = 'variety', Albedo = 'albedo', Sheets = 'sheets', Bindings = 'bindings', Kits = 'kits', Cache = 'cache', Schemes = 'schemes',
                                Capes = 'capes', Patches = 'patches', Sync = 'sync', Remote = 'remote'}) do
         m[name] = modules[module]
     end

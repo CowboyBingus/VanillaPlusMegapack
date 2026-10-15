@@ -9,4 +9,6 @@
 - Match Your Colors v1.5: brown leather, tan and khaki parts no longer turn into a helmet's accent color, such as bright red gloves and boots from the PH-9 Predator's beret.
 - Match Your Colors v1.5: modded gear that paints its colors into its texture instead of the game's color table, such as the Cowboy Hat mod, now gives its colors and takes yours.
 - Match Your Colors v1.5: cape designs drawn light on dark keep a readable contrast on their new colors (Proof of Faultless Virtue, Botslayer), and a recolored design sheet is only reused for one of the same layout.
+- Match Your Colors v1.5: new Recolor Weapons option (Off by default): your primary, sidearm and support weapon take your colors the way the game's weapon paint schemes repaint a weapon; with one of those schemes picked as Paint Scheme they wear it exactly as the game paints it.
+- Match Your Colors v1.5: Sync With Mod Users shares its settings in a form new options can extend, so squadmates with the mod see each other's weapons in their colors; squadmates on v1.3 and v1.4 still see the helmet, armor and cape settings.
 - New option: Stratagem Hero Expanded v1.0: the ship's Stratagem Hero arcade draws from all 96 loadout stratagems and 12 common mission stratagems (108) instead of its 27 launch-era ones; themed rounds stay.

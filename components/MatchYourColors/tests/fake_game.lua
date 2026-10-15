@@ -281,11 +281,108 @@ function Fake.engine(space, vanilla)
     return self
 end
 
+-- Recolor Weapons (src/weapons.lua): the inventory [game + 0x3326738] (map +40 from the avatars 0xe5 local and 0xe6
+-- remote to rows [+80] of 48 bytes), the weapon entities (map entities + 0xF1AEB0, records from index 300), the weapon
+-- customization manager [game + 0x3326A38] (map +632 to records [+672] of 128 bytes, map +696 to copies [+760] of 4872
+-- bytes: attachment names +0x78.., the MaterialOverride +200) and the Armory's weapon preview (UiPreviewSystem weapon
+-- slot 3, the ring head +50448: with the world's ui option). Returns {set(slot, weapon or nil, avatar index),
+-- hold(slot, avatar index), preview(weapon or nil), row(avatar index)}; weapon: {id, name (16 hex digits), unit,
+-- units = {attachment units}, attachments = {[role 1-4] = name}, paint = {[slot key] = lut}, ids (preview: its
+-- customization ids)}.
+Fake.INVENTORY, Fake.WCM = 0x1A0000000, 0x1A1000000
+local WEAPON_RECORDS, WEAPON_COPIES, INVENTORY_ROWS = 0x1A4000000, 0x1A5000000, 0x1A3000000
+function Fake.weapons(space)
+    local g, E = Fake.GAME, Fake.ENTITIES
+    space.u64(g + 0x3326738, Fake.INVENTORY) space.u64(g + 0x3326A38, Fake.WCM)
+    space.region(Fake.INVENTORY, 0x100)
+    map(space, Fake.INVENTORY + 40, 0x1A2000000, {[0xe5] = 0, [0xe6] = 1})
+    space.region(INVENTORY_ROWS, 48 * 2)
+    space.u64(Fake.INVENTORY + 80, INVENTORY_ROWS)
+    space.region(E + 0xF1AEB0, 32)
+    space.region(E + 0xF32F18 + 24 * 300, 24 * 32)
+    space.region(Fake.WCM, 0x400)
+    space.region(WEAPON_RECORDS, 128 * 32)
+    space.region(WEAPON_COPIES, 4872 * 32)
+    space.u64(Fake.WCM + 672, WEAPON_RECORDS) space.u64(Fake.WCM + 760, WEAPON_COPIES)
+    local ids, next_index = {}, 0 -- entity id -> its index (entity record, customization record and copy)
+    local self = {}
+    map(space, E + 0xF1AEB0, 0x1A6000000, {})
+    map(space, Fake.WCM + 632, 0x1A7000000, {})
+    map(space, Fake.WCM + 696, 0x1A8000000, {})
+    -- A map's data (made by map above) filled again with entries.
+    local function refill(data, entries)
+        for slot = 0, 63 do space.u32(data + 8 * slot, 0xFFFFFFFF) end
+        for key, value in pairs(entries) do
+            local slot = key % 64
+            while space.get32(data + 8 * slot) ~= 0xFFFFFFFF do slot = (slot + 1) % 64 end
+            space.u32(data + 8 * slot, key) space.u32(data + 8 * slot + 4, value)
+        end
+    end
+    local function maps()
+        local entities = {}
+        for id, i in pairs(ids) do entities[id] = 300 + i end
+        refill(0x1A6000000, entities)
+        refill(0x1A7000000, ids)
+        refill(0x1A8000000, ids)
+    end
+    local function name_at(at, name)
+        space.u32(at, tonumber(name:sub(9, 16), 16)) space.u32(at + 4, tonumber(name:sub(1, 8), 16))
+    end
+    -- One weapon's entity record, customization record and copy (paint rows: slot key, LUT name).
+    local function write_weapon(w)
+        local i = ids[w.id]
+        if not i then
+            i, next_index = next_index, next_index + 1
+            ids[w.id] = i
+            maps()
+        end
+        local record = E + 0xF32F18 + 24 * (300 + i)
+        name_at(record, w.name) space.u32(record + 8, w.id) space.u32(record + 12, w.unit)
+        local r = WEAPON_RECORDS + 128 * i
+        for k, unit in ipairs(w.units or {}) do space.u32(r + ({8, 12, 40, 68, 96})[k], unit) end
+        local c = WEAPON_COPIES + 4872 * i
+        local at = {0x78, 0x80, 0xA0, 0xC0}
+        for role, name in pairs(w.attachments or {}) do name_at(c + at[role], name) end
+        local row = 0
+        for key, lut in pairs(w.paint or {}) do
+            space.u32(c + 200 + 40 * row, key)
+            name_at(c + 200 + 40 * row + 8, lut)
+            row = row + 1
+        end
+    end
+    -- Puts weapon (nil: none) in the inventory slot (1 primary, 2 sidearm, 3 support) of avatar index a (0 local).
+    function self.set(slot, w, a)
+        if w then write_weapon(w) end
+        space.u32(INVENTORY_ROWS + 48 * (a or 0) + 4 * (slot - 1), w and w.id or 0)
+    end
+    function self.hold(slot, a) space.u32(INVENTORY_ROWS + 48 * (a or 0) + 28, slot) end
+    function self.row(a) return INVENTORY_ROWS + 48 * (a or 0) end
+    -- The Armory's weapon preview: slot 3 shows w (nil: none), the ring head moves.
+    local preview_at = Fake.UI + 76056 + 1560 * 3
+    local paired_at = preview_at + 1560 * 8 -- an underbarrel weapon's slot (src/weapons.lua paired_units)
+    space.region(preview_at, 232)
+    space.region(paired_at, 232)
+    function self.preview(w)
+        for o = 0, 228, 4 do space.u32(preview_at + o, 0) space.u32(paired_at + o, 0) end
+        if w then
+            space.u32(preview_at, w.unit)
+            if w.paired then space.u32(paired_at, w.paired) end
+            for k, unit in ipairs(w.units or {}) do space.u32(preview_at + 4 * k, unit) end
+            name_at(preview_at + 128, w.name)
+            space.u32(preview_at + 144, #(w.ids or {}))
+            for k, id in ipairs(w.ids or {}) do name_at(preview_at + 152 + 8 * (k - 1), id) end
+        end
+        space.u32(Fake.UI + 50448, space.get32(Fake.UI + 50448) + 1)
+    end
+    return self
+end
+
 -- The squad's PlayFab lobby as src/sync.lua reads it, and PlayFab's lobby calls over it. members: {{id = entity id
--- text, value = member property text or nil}, ...}; the local member is the one whose id is local_id. Returns
--- {members, natives (Sync.natives' stand-in), posts = {{handle (low, high), user, text}, ...}, post_result,
--- set_joined(bool), set_handle(low, high), sync()}: change members or values, then sync() writes them into the space.
--- A successful post sets the local member's value, as PlayFab would.
+-- text, value = the 'cbmyc2' property text or nil, legacy = the 'cbmyc' property text or nil (an older copy's)},
+-- ...}; the local member is the one whose id is local_id. Returns {members, natives (Sync.natives' stand-in), posts =
+-- {{handle (low, high), user, text, legacy}, ...}, post_result, reads = {cbmyc2 = n, cbmyc = n} (property calls by
+-- key), set_joined(bool), set_handle(low, high), sync()}: change members or values, then sync() writes them into the
+-- space. A successful post sets the local member's values, as PlayFab would.
 Fake.CONTEXT, Fake.ENGINE_LOBBY, Fake.PLAYFAB_LOBBY = 0x1C0000000, 0x1C1000000, 0x1C2000000
 local LOBBY_TEXTS, LOBBY_MEMBERS = 0x1C3000000, 0x1C4000000
 -- The member list's arrays of entity keys {id, type}, 16 bytes each: PlayFab's array is valid until its next call,
@@ -293,7 +390,7 @@ local LOBBY_TEXTS, LOBBY_MEMBERS = 0x1C3000000, 0x1C4000000
 Fake.LOBBY_MEMBERS = LOBBY_MEMBERS
 function Fake.lobby(space, local_id, members)
     local ffi_u64 = ffi.typeof('uint64_t')
-    local self = {members = members, posts = {}, post_result = 0}
+    local self = {members = members, posts = {}, post_result = 0, reads = {cbmyc2 = 0, cbmyc = 0}}
     space.u64(Fake.GAME + 0x347CEF0, Fake.CONTEXT)
     space.region(Fake.CONTEXT + 0x1D470, 8)
     space.u64(Fake.CONTEXT + 0x1D470, Fake.ENGINE_LOBBY)
@@ -341,13 +438,14 @@ function Fake.lobby(space, local_id, members)
         end
     end
     local api = {}
-    function api.post(handle, user, text)
+    function api.post(handle, user, text, legacy)
         check_key(user)
         local low, high = halves(handle)
-        self.posts[#self.posts + 1] = {low = low, high = high, user = user, text = text, array = self.array}
+        self.posts[#self.posts + 1] = {low = low, high = high, user = user, text = text, legacy = legacy,
+                                       array = self.array}
         if self.post_result ~= 0 then return self.post_result end
         for _, member in ipairs(self.members) do
-            if member.id == local_id then member.value = text end
+            if member.id == local_id then member.value, member.legacy = text, legacy end
         end
         return 0
     end
@@ -359,14 +457,17 @@ function Fake.lobby(space, local_id, members)
         self.sync()
         return #self.members, self.array, 0
     end
-    function api.property(handle, member_at)
+    function api.property(handle, member_at, legacy)
         local low, high = halves(handle)
         assert(low == self.handle.low and high == self.handle.high, 'the lobby handle, exact')
         local i = (member_at - self.array) / 16 + 1
         local member = assert(self.members[i], 'a member key from the member list')
+        local key = legacy and 'cbmyc' or 'cbmyc2'
+        self.reads[key] = self.reads[key] + 1
         if member.fail then return nil, 0x80004005 end -- a failed read (member.fail), not a missing value
-        if member.value == nil then return nil, 0 end
-        return text_at(63 + i, member.value), 0
+        local value = legacy and member.legacy or (not legacy and member.value) or nil
+        if value == nil then return nil, 0 end
+        return text_at((legacy and 127 or 63) + i, value), 0
     end
     -- The game's update processes PlayFab's lobby state changes every frame: the member array a call returned is no
     -- longer valid after it (a key kept from an earlier poll reads as zeros).
