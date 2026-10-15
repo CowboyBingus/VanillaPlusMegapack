@@ -30,6 +30,7 @@ local pack = {
         'mods/cowboybingus/laser_sentry_cooldown',
         'mods/cowboybingus/match_your_colors',
         'mods/cowboybingus/sticky_grenade_handles',
+        'mods/cowboybingus/stratagem_hero_expanded',
     },
 }
 loader.megapack = pack

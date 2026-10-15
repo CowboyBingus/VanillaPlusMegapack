@@ -10,6 +10,7 @@
 - Match Your Colors v1.5: a vivid helmet or armor color covering a tenth of it or more reaches the other item's parts, and clothing never takes a colored metal's flat paint.
 - Match Your Colors v1.5: modded gear that paints its colors into its texture instead of the game's color table, such as the Cowboy Hat mod, now gives its colors and takes yours.
 - Match Your Colors v1.5: cape designs drawn light on dark keep a readable contrast on their new colors (Proof of Faultless Virtue, Botslayer), and a recolored design sheet is only reused for one of the same layout.
+- New option: Stratagem Hero Expanded v1.0: the ship's Stratagem Hero arcade draws from all 96 loadout stratagems and 12 common mission stratagems (108) instead of its 27 launch-era ones; themed rounds stay.
 
 # v41
 

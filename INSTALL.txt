@@ -9,7 +9,7 @@ Requires the separate Bingus Shared Loader v18 / API 1.
 3. Import Vanilla-Plus-Megapack-v42.zip and Bingus Shared Loader v19 (v18 or newer works).
 4. With Arsenal's default priority, place the loader LAST. If first-mod
    priority is enabled, place the loader FIRST instead.
-5. Open the pack's Options and select any of the twenty-one independent mods.
+5. Open the pack's Options and select any of the twenty-two independent mods.
    Review these choices after updates; defaults depend on your manager.
 6. Purge / Deploy, then start the game. Close the game before changing options.
 
@@ -30,9 +30,9 @@ Enable the Mod Options Menu option to set Shallow Water Diving's maximum dive
 depth and Better Lobby Management's options on the MODS tab of the escape menu.
 
 Mod Bindings Menu, Mod Options Menu, Flame Damage Fixed, Better Lobby
-Management, Hellpod Drop Hold, Laser Sentry Cooldown, Match Your Colors and
-Sticky Grenade Handles are also released on their own. Use one copy of each: disable the
-standalone package or the pack option.
+Management, Hellpod Drop Hold, Laser Sentry Cooldown, Match Your Colors,
+Sticky Grenade Handles and Stratagem Hero Expanded are also released on their
+own. Use one copy of each: disable the standalone package or the pack option.
 
 Translations: Know Your Constellation, Better Lobby Management, Mod Options
 Menu, Mod Bindings Menu, Ship Station Hotkeys, Shallow Water Diving and Match
@@ -62,9 +62,10 @@ Included revisions:
 - Mod Bindings Menu v2.2.1
 - Better Lobby Management v1.2
 - Hellpod Drop Hold v1.2
-- Laser Sentry Cooldown v1.0
+- Laser Sentry Cooldown v1.1
 - Match Your Colors v1.5
 - Sticky Grenade Handles v1.0
+- Stratagem Hero Expanded v1.0
 
 An unchecked option cannot disable a separately enabled standalone copy.
 Remove older startup-replacing packages when migrating.

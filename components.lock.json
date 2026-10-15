@@ -797,5 +797,29 @@
       "tests/test_mod.lua": "C42DDF73BF2403A94380A380305E3CFEED7E4A6B77AC38A86D080C96F87DA09D"
     },
     "source_origin": "Standalone v1.0 release source for Steam build 25480438; offline checks passed; its resource is byte for byte the one in that release."
+  },
+  {
+    "slug": "StratagemHeroExpanded",
+    "name": "Stratagem Hero Expanded",
+    "revision": "v1.0",
+    "repository": "https://github.com/CowboyBingus/StratagemHeroExpanded",
+    "module": "mods/cowboybingus/stratagem_hero_expanded",
+    "entry": "direct",
+    "resource_sha256": "4F3304155DAC5C444CAD8A396EF902942EA11AD8C2AB5169D923D0CA9FAEC29C",
+    "source_sha256": {
+      "scripts/build.py": "ACBA4D8D7138B2C19107A00A3EACE5BD83229BFBC4FDF42039B8E153B9CF20F2",
+      "src/bingus_memory.lua": "3973924B1C009CC4E6C863A4EAF87F166899A16DDCB579C3D77AB5465172B416",
+      "src/bingus_runtime.lua": "C4450F555F697E583916D18F876412CA96F6963EB1BF4CDAD451EBB906C2F988",
+      "src/bingus_write.lua": "9A0A217811D109418FAEBB2AF8804BFB8301B0EEEB1E6B5BC020FDACBD596160",
+      "src/stratagem_hero_expanded.lua": "609414294A7C7099D3E70C6E3652ECBA62D127A4758511856ECC2D297E704E1B",
+      "tests/compile_entry.lua": "F43910D6C6742AD10DDF0E67772CEFB0FFEE4754E9A3386F7DA7F115C7DB1662",
+      "tests/frame_budget.lua": "4E1E9F47EE7FCCFD24F6C79D475103ABF77989FC344EBB527869029793654E49",
+      "tests/game_lua.py": "C6BBC5F25AB21EFFC4351436826CE89FED0440F022BED0D9C573E5EA82560CDD",
+      "tests/hostile_vm.lua": "779B1DFD0A5BB8A2CEAB53EC8729E492838FB90018490A290D1BAFB3D9F938C4",
+      "tests/test_entry.lua": "5A2918DEDA2897C6E0C9FC87EA564F8DD0AFAA75C3F03295AD85D0C973F989F4",
+      "tests/test_mod.lua": "869A72AA6EA95AF60BF305EB34E656732766A0D355EB04F63F26789AFDB8E676",
+      "tests/vanilla_tables.lua": "0060779912BA8E1C1D7D939892B173B581400B80B12677384A9419D1DCABF5F8"
+    },
+    "source_origin": "Standalone v1.0 pre-release source for Steam build 25480438; offline checks passed; its resource is byte for byte the one in that release."
   }
 ]

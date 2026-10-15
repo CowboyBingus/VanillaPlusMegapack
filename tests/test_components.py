@@ -172,8 +172,9 @@ def menu_commands(mods, build):
 
 
 def data_change_commands(mods, build):
-    """Hellpod Drop Hold, Laser Sentry Cooldown and Sticky Grenade Handles: the suites their own scripts/build.py
-    runs, in LuaJIT and in the game's own lua51.dll (each component's tests/game_lua.py, HD2_LUA51_DLL)."""
+    """Hellpod Drop Hold, Laser Sentry Cooldown, Sticky Grenade Handles and Stratagem Hero Expanded: the suites
+    their own scripts/build.py runs, in LuaJIT and in the game's own lua51.dll (each component's
+    tests/game_lua.py, HD2_LUA51_DLL)."""
     hold = mods / 'HellpodDropHold'
     # test_hold.lua checks that the adapter's module hash is its host executable's.
     commands = [[hold / 'tests/test_hold.lua', hold / 'src', sha(LUA.read_bytes())],
@@ -181,6 +182,7 @@ def data_change_commands(mods, build):
                  sha(Path(sys.executable).read_bytes())]]
     sentry = mods / 'LaserSentryCooldown'
     handles = mods / 'StickyGrenadeHandles'
+    arcade = mods / 'StratagemHeroExpanded'
     for vm in ([], ['game']):
         sentry_prefix = [sentry / 'tests/game_lua.py'] if vm else []
         commands += [[*sentry_prefix, sentry / 'tests/test_cooldown.lua', sentry],
@@ -193,6 +195,10 @@ def data_change_commands(mods, build):
         commands += [[*handles_prefix, handles / 'tests/test_mod.lua', handles],
                      [*handles_prefix, handles / 'tests/compile_entry.lua', build / 'StickyGrenadeHandles/entry.lua'],
                      [*handles_prefix, handles / 'tests/test_entry.lua', build / 'StickyGrenadeHandles/entry.lua']]
+        arcade_prefix = [arcade / 'tests/game_lua.py'] if vm else []
+        commands += [[*arcade_prefix, arcade / 'tests/test_mod.lua', arcade],
+                     [*arcade_prefix, arcade / 'tests/compile_entry.lua', build / 'StratagemHeroExpanded/entry.lua'],
+                     [*arcade_prefix, arcade / 'tests/test_entry.lua', build / 'StratagemHeroExpanded/entry.lua']]
     return commands
 
 

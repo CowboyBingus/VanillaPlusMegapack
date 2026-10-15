@@ -3,7 +3,11 @@ Supports Helldivers 2 Steam build 25480438 / EXE 1.8.46015.0.
 Offline source, package and read-only module checks passed. v42 updates Mod
 Bindings Menu to v2.2.1, whose label fix is not yet checked in game in another
 language, and Match Your Colors to v1.5, whose test builds were checked in the
-game in the Armory, on the ship and in one solo mission. v41 updates Match
+game in the Armory, on the ship and in one solo mission. v42 also adds
+Stratagem Hero Expanded (v1.0): its release build and the refreshed package
+ran to the ship and quit cleanly with loader v19, the package with all
+twenty-two options; its tables were written at load and held at shutdown.
+v41 updates Match
 Your Colors to v1.4, whose release build was played on this build on the ship
 and in the Armory. v40 updates Match
 Your Colors to v1.3, played on this build as its standalone release (its colors
