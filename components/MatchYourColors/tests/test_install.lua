@@ -9,7 +9,7 @@ local ffi = require('ffi')
 local Fake = dofile(root .. '/tests/fake_game.lua')
 local modules = {}
 for _, name in ipairs({'avatar', 'preview', 'recolor', 'engine', 'files', 'slim', 'texture', 'colour', 'transfer',
-                       'matcher', 'kits', 'cache', 'schemes', 'capes', 'patches', 'sync', 'remote', 'addon'}) do
+                       'matcher', 'zones', 'variety', 'albedo', 'sheets', 'kits', 'cache', 'schemes', 'capes', 'patches', 'sync', 'remote', 'addon'}) do
     modules[name] = require(name)
 end
 local Engine, Addon = modules.engine, modules.addon
@@ -98,7 +98,7 @@ local function install(options)
                env = env, get_engine_api = get_api}
     for name, module in pairs({Avatar = 'avatar', Preview = 'preview', Recolor = 'recolor', Engine = 'engine',
                                Files = 'files', Slim = 'slim', Texture = 'texture', Colour = 'colour', Transfer = 'transfer',
-                               Matcher = 'matcher', Kits = 'kits', Cache = 'cache', Schemes = 'schemes',
+                               Matcher = 'matcher', Zones = 'zones', Variety = 'variety', Albedo = 'albedo', Sheets = 'sheets', Kits = 'kits', Cache = 'cache', Schemes = 'schemes',
                                Capes = 'capes', Patches = 'patches', Sync = 'sync', Remote = 'remote'}) do
         m[name] = modules[module]
     end
@@ -138,9 +138,19 @@ check('install: engine functions verified, guard on the update chain, options re
     local capes = w.menu.registered[Addon.OPTION_CAPES]
     assert(capes and capes.type == 'toggle' and capes.default == false and capes.label() == 'Recolor Cape',
            'cape toggle: off by default')
+    local squad = w.menu.registered[Addon.OPTION_SQUAD] -- v1.5, user request 2026-10-14
+    assert(squad and squad.type == 'choice' and #squad.choices == 3 and squad.default == Addon.SQUAD_OFF
+           and squad.choices[1] == 'Off' and squad.choices[2]() == 'Squadmates Without the Mod'
+           and squad.choices[3]() == 'Everyone' and squad.label() == 'Recolor Squadmates',
+           'Recolor Squadmates: Off by default, then Squadmates Without the Mod and Everyone')
     local o = instance.state.options
     assert(o.recolor_hoods == true and o.match_materials == false and o.scheme == 0 and o.sync == nil
-           and o.recolor_cape == false, 'defaults applied at registration')
+           and o.recolor_cape == false and o.squad == Addon.SQUAD_OFF, 'defaults applied at registration')
+    w.menu.callbacks[Addon.OPTION_SQUAD](Addon.SQUAD_EVERYONE)
+    assert(o.squad == Addon.SQUAD_EVERYONE, 'on_change applies Recolor Squadmates')
+    w.menu.callbacks[Addon.OPTION_SQUAD](4)
+    assert(o.squad == Addon.SQUAD_EVERYONE, 'a value out of the choices is ignored')
+    w.menu.callbacks[Addon.OPTION_SQUAD](Addon.SQUAD_OFF)
     w.menu.callbacks[Addon.OPTION_CAPES](true)
     assert(o.recolor_cape == true, 'on_change applies the cape toggle')
     w.menu.callbacks[Addon.OPTION_CAPES](false)

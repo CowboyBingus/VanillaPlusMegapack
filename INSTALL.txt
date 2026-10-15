@@ -63,7 +63,7 @@ Included revisions:
 - Better Lobby Management v1.2
 - Hellpod Drop Hold v1.2
 - Laser Sentry Cooldown v1.0
-- Match Your Colors v1.4
+- Match Your Colors v1.5
 - Sticky Grenade Handles v1.0
 
 An unchecked option cannot disable a separately enabled standalone copy.
@@ -73,6 +73,8 @@ This is the refreshed v42 pre-release. Offline regression, package and
 option-selection checks passed. Live validation of the Mod Bindings Menu
 reset fix and measurement of its added binding-page and periodic checks are
 pending. Its ordinary gameplay idle checks and binding polling are unchanged.
+Match Your Colors v1.5 was checked in the game in the Armory, on the ship and
+in one solo mission; its per-frame cost in real play is not measured yet.
 Previous releases were checked in game:
 a clean run to the ship with every option, and the four new mods in joined
 missions of real play as their standalone releases.

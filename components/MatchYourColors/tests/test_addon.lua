@@ -7,6 +7,7 @@ local root = assert(arg and arg[1], 'usage: test_addon.lua <repository root>')
 package.path = root .. '/src/?.lua;' .. package.path
 local ffi = require('ffi')
 local Avatar, Engine, Recolor, Addon = require('avatar'), require('engine'), require('recolor'), require('addon')
+require('sheets').attach(Recolor)
 local Preview, Schemes, Sync, Remote = require('preview'), require('schemes'), require('sync'), require('remote')
 local Fake = dofile(root .. '/tests/fake_game.lua')
 local budget = dofile(root .. '/tests/frame_budget.lua')
@@ -29,6 +30,10 @@ local VANILLA = {[HELMET_LUT] = 0x190000000, [ARMOR_LUT] = 0x190001000, [OTHER_L
                  [CAPE_SHEET] = 0x190006000}
 local with_patterns = false -- the canned job also plans the helmet's pattern (v11.4)
 local with_sheet = false -- the canned job also recolors the cape's emblem in a copy of its decal sheet (round 6)
+-- v1.5: the helmet is a mod's without a color table (src/albedo.lua): Helmet Matches Armor recolors its albedo
+local HAT_ALBEDO = 'ab5e000000000002'
+VANILLA[HAT_ALBEDO] = 0x190007000
+local with_albedo = false
 
 -- The canned job: the plan changes the target kit's one LUT (a paint scheme: both kits' LUTs, as src/recolor.lua's
 -- scheme job). It calls yield 20 times (the fake clock moves 0.1 ms per read, so the 1.5 ms budget makes it span
@@ -52,7 +57,8 @@ local function with_cape(request, result)
     result.luts[CAPE_TINT] = {width = 16, height = 1, data = ffi.new('float[64]'), cape = true} -- its tint refitted
     if with_sheet then -- src/recolor.lua sheet_spec's (the data's size as a 2048 x 2048 BC3 chain says)
         result.luts[CAPE_SHEET] = {sheet = true, width = 2048, height = 2048, mips = 12, size = 5592432,
-                                   data = ffi.new('uint8_t[16]')}
+                                   data = ffi.new('uint8_t[16]'), name = CAPE_SHEET, recipe_sum = 0x1234,
+                                   sample = 0x5678}
     end
     result.cape_report = string.format('Cape %08x: canned report.', request.cape) -- src/capes.lua Capes.report
     result.targets = result.targets or {result.target}
@@ -120,10 +126,19 @@ local function fake_job(_, holder, request, yield)
                          targets = {helmet_target, armor_target}})
     end
     local helmet = request.mode == Recolor.HELMET_FROM_ARMOR
-    return with_cape(request, {action = 'apply', key = key, luts = {[helmet and HELMET_LUT or ARMOR_LUT] = lut_spec()},
+    local result = with_cape(request, {action = 'apply', key = key,
+            luts = {[helmet and HELMET_LUT or ARMOR_LUT] = lut_spec()},
             patterns = with_patterns and helmet and {[HELMET_PATTERN] = {width = 3, height = 1,
                                                                          data = ffi.new('float[12]')}} or nil,
             first = helmet and 0 or 1, last = helmet and 0 or 9, target = helmet and helmet_target or armor_target})
+    -- src/albedo.lua spec's: a 256 x 256 BC1 with its 9 mips ('preview': for the Armory preview's jobs alone)
+    if with_albedo and helmet and (with_albedo ~= 'preview' or request.target == 'ui') then
+        result.luts[HAT_ALBEDO] = {albedo = true, bc1 = true, name = HAT_ALBEDO, width = 256, height = 256, mips = 9,
+                                   size = 43704, format = 71, data = ffi.new('uint8_t[16]')}
+        result.albedo_report = 'Mod texture ' .. HAT_ALBEDO .. ' (a material without a color table): 3 colors read '
+            .. '(67%, 27%, 7% metal); 3 recolored.'
+    end
+    return result
 end
 local function tracked_job(deps, holder, request, yield)
     local ok, result = pcall(fake_job, deps, holder, request, yield)
@@ -830,12 +845,12 @@ check("the local UI preview takes its own plan (a hovered helmet); the remote pl
     for _, object in ipairs(w.bound(0x100)) do assert(object == avatar_texture.object, 'the avatar keeps its own') end
     local seen = false
     for _, line in ipairs(w.lines) do
-        if line:find('Preview recolored: 2 materials (helmet 0b0b0b0b', 1, true) and line:find('0 new textures;', 1, true)
+        if line:find('Preview recolored: 2 materials (helmet 0b0b0b0b', 1, true) and line:find('0 new, 1 refilled textures;', 1, true)
             and line:find('longest frame %d+%.%d ms%)%.$') then
             seen = true
         end
     end
-    assert(seen, 'logged, with the apply time, no new texture and the longest frame')
+    assert(seen, 'logged, with the apply time, no new texture, the refilled one and the longest frame')
 end)
 
 -- Runs frames until no job is running (at most limit).
@@ -1046,6 +1061,37 @@ check('a prepared plan\'s sizes are stocked ahead (pool.stock): POOL_STOCK free 
     local taken = assert(pool.take(luts.lut1))
     assert(taken and pool.made == made, 'taken from the stock')
     assert(pool.stock({luts = {one = spec(23, 8)}}) == 0, 'a smaller plan of a stocked size makes none')
+end)
+
+check('decal sheet copies (v1.5): a free sheet is refilled only with a sheet of its own mip chain and bytes, keeps '
+      .. 'the data it replaced until it is given back, and every sheet made or refilled leaves a log line', function()
+    local w = setup()
+    local pool = Engine.pool({native = w.engine.native, memory = w.memory})
+    local function sheet(name, mips, size, sum)
+        return {sheet = true, name = name, width = 2048, height = 2048, mips = mips, size = size, recipe_sum = sum,
+                sample = sum + 1, data = ffi.new('uint8_t[16]')}
+    end
+    local a = sheet('def05debf678e33e', 12, 5592432, 0x11)
+    local first = assert(pool.take(a))
+    assert(pool.made == 1 and pool.sheets.made == 1, 'a sheet made alone, no spares')
+    assert(#pool.sheet_notes == 1 and pool.sheet_notes[1] == 'Cape sheet def05debf678e33e r00000011 d00000012 (12 '
+           .. 'mips, 5592432 bytes): made', tostring(pool.sheet_notes[1]))
+    pool.give(first)
+    local modded = sheet('def05debf678e33e', 11, 5592416, 0x22) -- a mod's sheet: same size, one mip fewer
+    local other = assert(pool.take(modded))
+    assert(other ~= first and pool.made == 2 and pool.refilled == 0, 'another mip chain never refills the free sheet')
+    assert(w.engine.created[other.handle].mips == 11, 'made with its own mips')
+    pool.give(other)
+    local b = sheet('0665210854aa1969', 12, 5592432, 0x33)
+    local refilled = assert(pool.take(b))
+    assert(refilled == first and pool.refilled == 1 and pool.sheets.refilled == 1, 'the same layout is refilled')
+    assert(refilled.data == b.data and refilled.previous == a.data, 'the replaced data stays referenced')
+    assert(pool.sheet_notes[#pool.sheet_notes] == 'Cape sheet 0665210854aa1969 r00000033 d00000034 (12 mips, 5592432 '
+           .. 'bytes): refilled over def05debf678e33e r00000011', tostring(pool.sheet_notes[#pool.sheet_notes]))
+    pool.give(refilled)
+    assert(refilled.previous == nil, 'given back: the replaced data let go')
+    for i = 1, Engine.SHEET_NOTES + 4 do pool.give(assert(pool.take(sheet('def05debf678e33e', 12, 5592432, i)))) end
+    assert(#pool.sheet_notes == Engine.SHEET_NOTES, 'at most SHEET_NOTES lines kept until logged')
 end)
 
 check('a plan that must grow the pool makes room for the next plan of its shape in the same frame: two 9-LUT armor plans '
@@ -1287,10 +1333,187 @@ check('Recolor Cape: a recolored emblem\'s sheet (a BC3 copy with its mips) is b
     assert(made and made.format == Fake.BC3 and made.mips == 12 and made.size == 5592432, 'a BC3 sheet with its mips')
     for _, object in ipairs(bound) do assert(object == made.object, 'every cape material: the copy') end
     assert(w.engine.binding(helmet[1].material, Fake.DECAL_SLOT) == VANILLA[CAPE_SHEET], 'the cape\'s unit only')
+    local noted = 0
+    for _, line in ipairs(w.lines) do
+        if line == 'Cape sheet ' .. CAPE_SHEET .. ' r00001234 d00005678 (12 mips, 5592432 bytes): made.' then
+            noted = noted + 1
+        end
+    end
+    assert(noted == 1, 'the sheet made is logged once with the apply: ' .. noted)
     w.instance.set_option('recolor_cape', false)
     w.frames(3)
     for _, object in ipairs(sheets(0x106)) do assert(object == VANILLA[CAPE_SHEET], 'off: the sheet back') end
     with_sheet = false
+end)
+
+check('a mod\'s helmet without a color table (v1.5, the Cowboy Hat mod): its recolored albedo (a BC1 copy with its '
+      .. 'mips) is bound on its material\'s albedo slot, logged once, and put back with the plan', function()
+    with_albedo = true
+    local w = setup()
+    local hat = w.engine.unit(0x100, nil, 1, nil, nil, nil, HAT_ALBEDO) -- one material: the albedo, no LUT
+    local f = w.frames(4) -- resolve, the job over two frames, its apply on the next
+    -- the canned plan's helmet LUT (made with its spares, bound nowhere: the hat has no LUT slot) and the albedo (made
+    -- alone: one more create and vanilla lookup, its one bind)
+    expect(f, {alive = 2, can_get = 2, commit = 1, create = 4, get = 2, material = 1, materials = 1, mesh = 1,
+               meshes = 1, read_into = 29, resource = 4, set_resource = 1, time = 5}, 'the apply frame')
+    local bound = w.engine.binding(hat[1].material, Fake.ALBEDO_SLOT)
+    local made
+    for _, t in pairs(w.engine.created) do
+        if t.object == bound then made = t end
+    end
+    assert(made and made.format == Fake.BC1 and made.mips == 9 and made.size == 43704, 'a BC1 albedo with its mips')
+    local noted = 0
+    for _, line in ipairs(w.lines) do
+        if line:find('Mod texture ' .. HAT_ALBEDO .. ' (a material without a color table)', 1, true) then
+            noted = noted + 1
+        end
+    end
+    assert(noted == 1, 'the albedo report is logged once: ' .. noted)
+    w.instance.set_option('mode', Recolor.OFF)
+    w.frames(3)
+    assert(w.engine.binding(hat[1].material, Fake.ALBEDO_SLOT) == VANILLA[HAT_ALBEDO], 'off: the albedo back')
+    with_albedo = false
+end)
+
+-- Live 2026-10-14: a session that showed the Cowboy Hat in the Armory preview alone logged no line that it was read.
+check('a mod\'s helmet without a color table shown only in the Armory preview: its albedo is recolored there and its '
+      .. 'line logged once', function()
+    with_albedo = 'preview'
+    local w = setup({ui = true})
+    w.frames(4) -- the avatar's own plan (no mod texture)
+    local hat = w.engine.unit(0x300, nil, 1, nil, nil, nil, HAT_ALBEDO)
+    Fake.show_ui(w.space, 1, HOVERED, {[{0, 0}] = 0x300})
+    w.frames(7) -- seen within 4 frames (the gate), then the job over two frames
+    assert(w.engine.binding(hat[1].material, Fake.ALBEDO_SLOT) ~= VANILLA[HAT_ALBEDO], 'the preview hat recolored')
+    local noted = 0
+    for _, line in ipairs(w.lines) do
+        if line:find('Mod texture ' .. HAT_ALBEDO .. ' (a material without a color table)', 1, true) then
+            noted = noted + 1
+        end
+    end
+    assert(noted == 1, 'the albedo report is logged once: ' .. noted)
+    with_albedo = false
+end)
+
+check('a mod\'s albedo copies (v1.5) pool apart from LUTs and sheets by format, size and bytes: made alone, refilled '
+      .. 'only with an albedo of its layout, at most POOL_MAX_FREE_ALBEDOS free, stocked by its count', function()
+    local w = setup()
+    local pool = Engine.pool({native = w.engine.native, memory = w.memory})
+    local function albedo(bc1, side, mips, size)
+        return {albedo = true, bc1 = bc1, width = side, height = side, mips = mips, size = size,
+                data = ffi.new('uint8_t[16]')}
+    end
+    local a = albedo(true, 256, 9, 43704)
+    local first = assert(pool.take(a))
+    assert(pool.made == 1 and w.engine.created[first.handle].format == Fake.BC1, 'a BC1 albedo made alone')
+    pool.give(first)
+    local bc3 = assert(pool.take(albedo(false, 256, 9, 87408)))
+    assert(bc3 ~= first and pool.made == 2 and w.engine.created[bc3.handle].format == Fake.BC3, 'BC3: made apart')
+    local b = albedo(true, 256, 9, 43704)
+    local refilled = assert(pool.take(b))
+    assert(refilled == first and pool.refilled == 1 and refilled.previous == a.data, 'the same layout is refilled')
+    pool.give(refilled)
+    pool.give(bc3)
+    local second = assert(pool.take(albedo(true, 256, 9, 43704)))
+    local third = assert(pool.take(albedo(true, 256, 9, 43704)))
+    local destroyed = pool.destroyed
+    pool.give(second)
+    pool.give(third)
+    assert(pool.destroyed == destroyed + Engine.POOL_MAX_FREE_ALBEDOS, 'at most POOL_MAX_FREE_ALBEDOS kept free')
+    local made = pool.made
+    pool.stock({luts = {hat = albedo(true, 512, 10, 174776)}})
+    local stocked = pool.made - made
+    assert(pool.take(albedo(true, 512, 10, 174776)) and pool.made == made + stocked, 'stocked: taken without making')
+end)
+
+check('the Armory preview\'s cape unit named before it is ready is recolored once it is (live session 2026-10-14: an armor '
+      .. 'changed under the same cape left the cape in its own colors): its units are tried every 4th frame, alone, '
+      .. 'logged; a unit never ready is given up after 2 s, noted once', function()
+    local w = setup({ui = true})
+    w.instance.set_option('recolor_cape', true)
+    w.frames(4)
+    local function cape_object(unit) return w.engine.binding(w.engine.units[unit].materials[1].material) end
+    w.engine.unit(0x300, HELMET_LUT)
+    w.engine.unit(0x306, CAPE_LUT, nil, nil, CAPE_TINT)
+    local kits = {helmet = 0x0b0b0b0b, armor = 0x0ade6719, body = 0, cape = 0x72492837}
+    Fake.show_ui(w.space, 1, kits, {[{0, 0}] = 0x300, [{0, 1}] = 0x306})
+    w.frames(8)
+    local recolored = cape_object(0x306)
+    assert(recolored ~= VANILLA[CAPE_LUT], 'the cape recolored')
+    -- another armor: the record names the new units, the cape's before it lives
+    local other = {helmet = kits.helmet, armor = 0x4f7fb2bd, body = 0, cape = kits.cape}
+    w.engine.unit(0x310, HELMET_LUT)
+    w.engine.units[0x306].alive = false
+    Fake.show_ui(w.space, 1, other, {[{0, 0}] = 0x310, [{0, 1}] = 0x316})
+    w.frames(8)
+    assert(w.instance.ui_controller.pending and w.instance.ui_controller.pending.units[0x316], 'the cape unit pending')
+    -- while pending: every 4th frame one more read (the units), its unit's alive check and the planned textures'
+    -- lookups (three: the helmet LUT, the cape LUT, its tint); the frames between as idle with the preview shown
+    for _ = 1, 8 do
+        local f = w.frame()
+        local due = (w.instance.state.frame - w.instance.ui_controller.pending.since) % 4 == 0
+        expect(f, due and {alive = 1, can_get = 3, get = 3, read_into = 3} or IDLE_PREVIEW,
+               due and 'a try for the pending unit' or 'a frame between the tries')
+    end
+    w.engine.unit(0x316, CAPE_LUT, nil, nil, CAPE_TINT)
+    w.frames(4)
+    assert(cape_object(0x316) ~= VANILLA[CAPE_LUT], 'the new cape unit recolored once it lives')
+    assert(not w.instance.ui_controller.pending, 'nothing pending any more')
+    assert(logged(w, 'textures bound late (their materials were not ready at the apply).'), 'logged')
+    local f = w.frames(4)
+    assert(not f.material, 'no more tries: ' .. budget.describe(f))
+    -- a unit that never lives: given up 2 s (120 frames) after the apply, noted once
+    w.engine.unit(0x320, HELMET_LUT)
+    w.engine.units[0x316].alive = false
+    Fake.show_ui(w.space, 1, kits, {[{0, 0}] = 0x320, [{0, 1}] = 0x326})
+    w.frames(140)
+    assert(not w.instance.ui_controller.pending, 'given up')
+    assert(logged(w, 'Preview: a unit of the plan still had no materials 2 s after the apply'), 'noted')
+end)
+
+check('a preview cape unit whose LUT slots still hold a placeholder at the apply (debug session 2026-10-14: the game sets '
+      .. 'the kit\'s LUT a few frames after the unit appears, and a kept plan applies within 2 frames; the cape kept its '
+      .. 'own colors) is recolored once they hold its own LUT; a material on a LUT the plan does not change waits out '
+      .. 'the 2 s unlogged; the tries read only the waiting materials', function()
+    local PLACEHOLDER = 0x190009000
+    local w = setup({ui = true})
+    w.instance.set_option('recolor_cape', true)
+    w.frames(4)
+    w.engine.unit(0x300, HELMET_LUT)
+    w.engine.unit(0x306, CAPE_LUT, nil, nil, CAPE_TINT)
+    local kits = {helmet = 0x0b0b0b0b, armor = 0x0ade6719, body = 0, cape = 0x72492837}
+    Fake.show_ui(w.space, 1, kits, {[{0, 0}] = 0x300, [{0, 1}] = 0x306})
+    w.frames(8)
+    -- the next outfit's units: the cape's LUT slots hold a placeholder, one helmet material a LUT the plan keeps
+    local helmet = w.engine.unit(0x310, HELMET_LUT)
+    local cape = w.engine.unit(0x316, CAPE_LUT, nil, nil, CAPE_TINT)
+    for _, m in ipairs(cape) do w.space.u64(w.engine.entry(m.material) + 8, PLACEHOLDER) end
+    w.space.u64(w.engine.entry(helmet[2].material) + 8, VANILLA[OTHER_LUT])
+    local other = {helmet = kits.helmet, armor = 0x4f7fb2bd, body = 0, cape = kits.cape}
+    Fake.show_ui(w.space, 1, other, {[{0, 0}] = 0x310, [{0, 1}] = 0x316})
+    w.frames(8)
+    local pending = w.instance.ui_controller.pending
+    assert(pending and pending.slots and #pending.slots == 3, 'two cape slots and the other helmet material wait: '
+           .. tostring(pending and pending.slots and #pending.slots))
+    assert(w.engine.binding(cape[1].material) == PLACEHOLDER, 'nothing bound over the placeholder')
+    -- every 4th frame its alive check and its two reads per waiting material; the frames between as idle
+    for _ = 1, 8 do
+        local f = w.frame()
+        local due = (w.instance.state.frame - pending.since) % 4 == 0
+        expect(f, due and {alive = 3, read_into = 8} or IDLE_PREVIEW, due and 'a try' or 'between the tries')
+    end
+    -- the game sets the kit's LUT
+    for _, m in ipairs(cape) do w.space.u64(w.engine.entry(m.material) + 8, VANILLA[CAPE_LUT]) end
+    w.frames(4)
+    for _, m in ipairs(cape) do
+        local object = w.engine.binding(m.material)
+        assert(object ~= VANILLA[CAPE_LUT] and object ~= PLACEHOLDER, 'the cape recolored once it holds its own LUT')
+    end
+    assert(logged(w, 'Preview: 2 textures bound late (their materials were not ready at the apply).'), 'logged')
+    assert(w.engine.binding(helmet[2].material) == VANILLA[OTHER_LUT], 'the other LUT left as it is')
+    w.frames(130)
+    assert(not w.instance.ui_controller.pending, 'the other helmet material given up after 2 s')
+    assert(not logged(w, 'still had no materials'), 'unlogged')
 end)
 
 check('another cape in the loadout: no job while Recolor Cape is off, the option then recolors the cape worn', function()

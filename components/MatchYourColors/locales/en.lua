@@ -37,8 +37,13 @@ return {
         ['option.hoods.label'] = 'Recolor Hoods',
         ['option.hoods.description'] = 'Recolors hoods too, such as those of the RS-100 Sanctioner and SC-30 Trailblazer Scout helmets. Off: a hood keeps its own color, like the visor, while the rest of the helmet still matches.',
         ['option.materials.label'] = 'Match Materials',
-        ['option.materials.description'] = 'Metal parts that take a painted color become that paint, so a chrome or gold helmet with a white or green armor turns white or green instead of bronze. Small metal details and cloth keep their material.',
+        ['option.materials.description'] = 'Parts take the material of the color they take: metal parts that take a painted color become that paint (a chrome helmet with a white armor turns white, not bronze), and hard painted parts that take a helmet\'s or armor\'s bare metal become that metal (chrome, gold, cobalt). Cloth and small metal details keep their material.',
         ['option.capes.label'] = 'Recolor Cape',
+        -- The choice: Off / the two below. Only this player sees it.
+        ['option.squad.label'] = 'Recolor Squadmates',
+        ['option.squad.missing'] = 'Squadmates Without the Mod',
+        ['option.squad.everyone'] = 'Everyone',
+        ['option.squad.description'] = 'Recolors your squadmates\' helmets and armor with your settings, on your screen only. Squadmates Without the Mod: players who use this mod keep the colors they chose. Everyone: every squadmate takes your settings. Nothing changes for them: only you see it.',
         ['option.capes.description'] = 'Recolors your cape too, to the same colors: the armor\'s with Helmet Matches Armor, the helmet\'s with Armor Matches Helmet, or the paint scheme\'s. A complete set left alone still gives its cape its colors. With Helmet and Armor Match Cape the cape keeps its colors (it is the one matched). Emblems and other decals keep their colors.',
     },
     -- Mod Options Menu's limits, in characters.
@@ -50,6 +55,7 @@ return {
         ['scheme.helldiver'] = 48, ['scheme.forest'] = 48, ['scheme.forest_camo'] = 48, ['scheme.arctic'] = 48,
         ['scheme.arctic_camo'] = 48, ['scheme.desert'] = 48, ['scheme.desert_camo'] = 48, ['scheme.urban'] = 48,
         ['scheme.urban_camo'] = 48, ['scheme.night'] = 48, ['scheme.venus'] = 48, ['scheme.seaf'] = 48, ['option.capes.label'] = 64,
-        ['option.capes.description'] = 400,
+        ['option.capes.description'] = 400, ['option.squad.label'] = 64, ['option.squad.missing'] = 48,
+        ['option.squad.everyone'] = 48, ['option.squad.description'] = 400,
     },
 }

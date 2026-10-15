@@ -5,6 +5,14 @@
 - Mod Bindings Menu v2.2.1: ordinary gameplay idle checks and binding polling are unchanged. The fix adds checks while a binding page is open and during the periodic binding sweep; their cost has not been measured in game.
 - This remains a pre-release. Offline regression and package checks passed; live validation of the binding reset fix is pending.
 - Mod Bindings Menu v2.2.1: not yet checked in game in a language other than English.
-- The other twenty mods are unchanged from v41.
+- Match Your Colors v1.5: new Recolor Squadmates option: squadmates without the mod, or every squadmate, are recolored with your settings, on your screen only.
+- Match Your Colors v1.5: Match Materials now also turns a painted hard part into the metal it takes, such as the B-22 Model Citizen's chrome or the Eye of Liberty cape's gold; cloth never turns into metal.
+- Match Your Colors v1.5: with Helmet and Armor Match Cape your gear matches the cape as it looks in the game, so the default black capes give a black armor, not a grey one.
+- Match Your Colors v1.5: an armor that would turn one solid color, such as the SA-25 Steel Trooper, takes the helmet's or cape's own second, dark and accent colors on its clothing, straps and trims.
+- Match Your Colors v1.5: a vivid helmet or armor color covering a tenth of it or more reaches the other item's parts, and clothing never takes a colored metal's flat paint.
+- Match Your Colors v1.5: modded gear that paints its colors into its texture instead of the game's color table, such as the Cowboy Hat mod, now gives its colors and takes yours.
+- Match Your Colors v1.5: cape designs drawn light on dark keep a readable contrast on their new colors (Proof of Faultless Virtue, Botslayer), and a recolored design sheet is only reused for one of the same layout.
+- Match Your Colors v1.5: frames with nothing to recolor make the same game reads as v1.4; its per-frame cost in real play is not measured yet, and Recolor Squadmates is not yet tested in a squad.
+- The other nineteen mods are unchanged from v41.
 - Twenty-one independent options; use one copy of each mod: its standalone package or the pack option.
 - Requires Bingus Shared Loader v18 or newer; v19 is recommended.

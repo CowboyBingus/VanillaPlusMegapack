@@ -8,7 +8,8 @@
 --   * shift: on a neutral paint, the colors near it take its CIELAB change;
 --   * tone: toward a neutral target, every following color takes the target's tone;
 --   * flat: an accent band's row (goal.band: the accent's paint, src/matcher.lua) is one coat of it, every following
---     color the new paint color (apply);
+--     color the new paint color (apply); so is a row Match Materials turns into metal (goal.coat: the metal's paint,
+--     its finish already the metal's, src/recolor.lua apply_finish), without the paint floors;
 --   * the rest stay (bare metal, dirt, painted details of another hue), except under a flat role color (a paint
 --     scheme's material roles: all_rule), where every colored color takes the target's hue ('hue'; 'own' off a
 --     neutral paint: its own lightness).
@@ -141,7 +142,7 @@ Transfer.FLOOR_TURN = 30.0
 -- An accent band's goal is a paint already (goal.band).
 function Transfer.diffuse_goal(Colour, goal)
     local cal = goal.cal
-    if not cal or goal.band then return goal.L, goal.a, goal.b end
+    if not cal or goal.band or goal.coat then return goal.L, goal.a, goal.b end
     local w = math.min(math.max(1 - chroma(goal.a, goal.b) / Colour.GLOSS_C, 0), 1)
     local r, g, b = Colour.lab_to_linear(goal.L, goal.a, goal.b)
     return Colour.linear_to_lab(math.max(r - w * cal[4], 0), math.max(g - w * cal[5], 0), math.max(b - w * cal[6], 0))
@@ -154,11 +155,23 @@ local function not_paint(v, o)
     return (math.abs(v[o + 3] - 1) < 0.5 and math.abs(v[o + 32]) < 0.05) or v[o + METALLIC] > 0.5
 end
 
+-- A cape's cloth as the source (Helmet and Armor Match Cape: source.cloth, src/recolor.lua source_item) has no paint
+-- finish to take: a light hard paint it turns dark takes DARK_ROUGH, the game's median dark paint's roughness, when
+-- rougher than its own. Glossy light parts under a black cape kept their shine and read grey (user report 2026-10-14).
+Transfer.DARK_ROUGH = 0.67
+local function cloth_dark_finish(c, paint_L, dL)
+    if not_paint(c, 1) or c[1 + ROUGHNESS] >= Transfer.DARK_ROUGH then return nil end
+    if paint_L(c) - dL < Transfer.DARKEN_FOLLOW_L then return nil end
+    return Transfer.DARK_ROUGH
+end
+
 -- The roughness row c (row_values) takes when fitted to goal (the dark finish above), or nil. source: the source
 -- analysis (its luts) the goal's source row is in, or nil; paint_L(c): the lightness of c's paint (its mean albedo),
 -- asked only of a candidate; dL: the goal's lightness less the row's own gloss (Transfer.diffuse_goal).
 local function dark_finish(c, goal, source, paint_L, dL)
-    if goal.kind ~= 'pair' or goal.all or not (source and goal.source) or dL >= Transfer.DARK_L then return nil end
+    if goal.kind ~= 'pair' or not (source and goal.source) or dL >= Transfer.DARK_L then return nil end
+    if source.cloth then return cloth_dark_finish(c, paint_L, dL) end
+    if goal.all then return nil end
     local lut, r = goal.source:match('^(%x+):(%d+)$')
     local spec = lut and source.luts[lut]
     if not spec or spec.width <= 10 then return nil end -- a cape's tint LUT has no finish columns
@@ -197,7 +210,7 @@ local function rules_of(c, P, D, labs, de2000, srgb_to_lab, flat)
         if rule then rules[i], labs[i] = rule, lab end
     end
     camo_rules(rules, count, chromatic, all)
-    return whole_rules(rules, D, flat == 'coat')
+    return whole_rules(rules, D, flat == 'coat' or flat == 'metal')
 end
 
 -- A color's new CIELAB when the paint goes from P to T.
@@ -284,9 +297,18 @@ Transfer.NEUTRAL_GOAL_C = 5.0
 -- Twigsnapper's steel, L 34.6: research/scratch/dark-band/metal_paint_survey.lua); the B-22 Model Citizen's chrome
 -- guards read as dark chrome at L 44-50 (2026-10-10).
 Transfer.METAL_PAINT_MIN_L = 45.0
-local function paint_floor(paint_L, metal)
-    if not metal then return -math.huge end
-    return math.min(paint_L, Transfer.METAL_PAINT_MIN_L)
+-- A glossy hard paint (not metal, roughness under GLOSSY_ROUGH) the fit darkens keeps a paint of at least
+-- GLOSSY_PAINT_MIN_L, a cloth CLOTH_PAINT_MIN_L (its own when darker): under a goal below its gloss or sheen floor the
+-- fit ran the paint to L 0 (a B-01 Tactical cloth row with a sheen under Foesmasher's black, v1.5, and helmets' glossy
+-- parts matched to near-black armors), where the game paints 99% of its glossy hard paint at L 19.8 or lighter (1,409
+-- rows) and of its cloth at L 12.4 or lighter (2,192 rows; research/scratch/v15/paint_survey.lua, cloth_survey.lua).
+-- Its highlights or sheen alone keep it from looking darker. A matte hard paint has no floor (the game's go to L 4.9).
+Transfer.GLOSSY_PAINT_MIN_L, Transfer.CLOTH_PAINT_MIN_L, Transfer.GLOSSY_ROUGH = 20.0, 12.0, 0.5
+local function paint_floor(paint_L, metal, glossy, cloth)
+    if metal then return math.min(paint_L, Transfer.METAL_PAINT_MIN_L) end
+    if cloth then return math.min(paint_L, Transfer.CLOTH_PAINT_MIN_L) end
+    if glossy then return math.min(paint_L, Transfer.GLOSSY_PAINT_MIN_L) end
+    return -math.huge
 end
 
 local function neutral_goal(a, b, cal)
@@ -340,6 +362,13 @@ function Transfer.new(Colour, model, yield)
         return model.albedo(c)
     end
 
+    -- The lightest paint a fit may darken row c to (paint_floor); a metal coat (Match Materials, v1.5) is the source
+    -- metal's own paint: none.
+    local function floor_of(c, paint_L, metal, flat)
+        if flat == 'metal' then return -math.huge end
+        return paint_floor(paint_L, metal, c[1 + ROUGHNESS] < Transfer.GLOSSY_ROUGH, Colour.is_soft(c))
+    end
+
     function self.fit(c, L, a, b, cal, base_only, flat)
         local all = flat == true
         local look, look_from = look_of(c, cal)
@@ -353,7 +382,7 @@ function Transfer.new(Colour, model, yield)
         if base_only then rules = {[1] = rules[1]} end
         local neutral = neutral_goal(a, b, cal)
         local metal = c[28] > 0.5 -- column 6 w: metallic (src/colour.lua)
-        local floor = paint_floor(P[1], metal)
+        local floor = floor_of(c, P[1], metal, flat)
         local pL, pa, pb = look_from(c, r, g, bl)
         pause()
         local T = cap_chroma({math.max(P[1] + (L - pL), floor), P[2] + (a - pa), P[3] + (b - pb)}, D, metal)
@@ -443,7 +472,7 @@ function Transfer.new(Colour, model, yield)
     -- at the goal less its gloss (dL, da, db); a row dark_finish made rough (a matte paint now) through its gain
     -- without its gloss floor, at the goal less that gloss.
     local function aim(goal, flat, rough, dL, da, db)
-        local cal = flat ~= 'coat' and goal.cal or nil
+        local cal = flat ~= 'coat' and flat ~= 'metal' and goal.cal or nil
         if not cal then return nil, dL, da, db end
         if rough then return {cal[1], cal[2], cal[3], 0, 0, 0}, dL, da, db end
         return cal, goal.L, goal.a, goal.b
@@ -468,9 +497,9 @@ function Transfer.new(Colour, model, yield)
         local c = Colour.row_values(values, width, row)
         local start = origin and start_of(origin, row, c)
         c.own = start
-        local flat = goal.all or goal.band and 'coat' or nil
+        local flat = goal.all or (goal.band and 'coat') or (goal.coat and 'metal') or nil
         local dL, da, db = Transfer.diffuse_goal(Colour, goal)
-        local rough = flat ~= 'coat' and dark_finish(c, goal, source, paint_L, dL)
+        local rough = flat ~= 'coat' and flat ~= 'metal' and dark_finish(c, goal, source, paint_L, dL)
         -- no longer the row as copied: its albedo computed (the same today: the albedo reads no roughness)
         if rough then c[1 + ROUGHNESS], c.own = rough, nil end
         local cal, L, a, b = aim(goal, flat, rough, dL, da, db)
@@ -491,6 +520,7 @@ Transfer.COLUMNS = COLUMNS
 -- Runs inside a job, a few dozen rows per plan: interpreted (the albedo loop it calls stays compiled).
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({chroma, hue_gap, rule_of, camo_rules, all_rule, column_rule, rules_of, not_paint, dark_finish,
+                         cloth_dark_finish,
                          follow, flat_sheen, cap_chroma, no_pause, paint_floor, neutral_goal, colors_of, own_error,
                          Transfer.new}) do
         jit.off(fn, true)

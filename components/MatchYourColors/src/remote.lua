@@ -3,6 +3,10 @@
 -- their 120 bytes of unit refs, and a controller of their own that binds pooled textures to their units
 -- (src/recolor.lua). Their jobs run in the addon's single job slot, after the local avatar and UI preview. An entry
 -- is restored and dropped when its player leaves, stops sharing or shares something unreadable.
+-- Recolor Squadmates (v1.5, user request 2026-10-14: "a toggle for 'Apply to entire team'"): with it, players who share
+-- nothing take this player's settings (mine), or every player does (everyone); a player who shares keeps their own
+-- otherwise. An entry whose player has no Helldiver here (dead, not spawned yet) is kept, its textures with it, and
+-- bound again when the Helldiver is back (v1.3 dropped it and ran a new job on every respawn).
 --
 -- The addon calls step on 1 frame in WATCH_FRAMES and check every CHECK_FRAMES frames, only while an entry exists
 -- (or textures retire): step checks one entry's units (one 120-byte read, round robin) and hands textures of dropped
@@ -78,22 +82,30 @@ function Remote.new(m)
         return true
     end
 
-    -- One member's settings into its entry (a new one when needed); its key, or nil when it has no Helldiver here
-    -- (noted once until it has one: a lobby member whose peer id names no player here, the first two-player test's
-    -- question, 2026-10-07).
+    -- One member's settings into its entry (a new one when needed; mine: this player's settings, Recolor
+    -- Squadmates); its key, or nil when it has no Helldiver here and no entry yet (noted once until it has one: a lobby
+    -- member whose peer id names no player here, the first two-player test's question, 2026-10-07). An entry whose
+    -- player has none now (dead) is kept, absent.
     local unmatched = {}
-    local function take(players, member, settings, frame)
+    local function take(players, member, settings, frame, mine)
         local player = player_of(players, member)
         local key = key_of(member)
+        local e = self.entries[key]
         if not player then
+            if e then
+                e.absent = true
+                return key
+            end
             if not unmatched[key] then
                 unmatched[key] = true
-                m.note('Sync: ' .. key .. ' shares settings; no Helldiver of theirs found here yet.')
+                m.note('Sync: ' .. key .. (mine and ' takes your settings' or ' shares settings')
+                       .. '; no Helldiver of theirs found here yet.')
             end
             return nil
         end
         unmatched[key] = nil
-        local e = self.entries[key] or add(key)
+        e = e or add(key)
+        e.mine, e.absent = mine, nil
         local new_settings = not e.settings or not same(e.settings, settings)
         if new_settings or (e.player.unit ~= player.unit and not rebind(e, player, frame)) then
             e.settings, e.player, e.dirty, e.failures = settings, player, true, 0
@@ -115,19 +127,31 @@ function Remote.new(m)
         return settings
     end
 
-    -- From a sync poll: members {{peer_low, peer_high, text, local}, ...}, or nil (no lobby, or sharing off). The
-    -- players are read only when a member shares a readable value. seen and gone are reused.
+    -- From a sync poll: members {{peer_low, peer_high, text, local, failed}, ...}, or nil (no lobby, or sharing off);
+    -- mine: this player's settings for squadmates (Recolor Squadmates on), else nil; everyone: mine for every member,
+    -- else only for members who share nothing. A member whose value could not be read (failed) keeps its entry as it
+    -- is, so a sharer does not flip between their settings and mine. The players are read only when a member is to be
+    -- recolored. seen and gone are reused.
     local seen, gone = {}, {}
-    function self.update(frame, members)
-        local players
+    local poll = {} -- the players of this poll, read once when a member is to be recolored
+    local function settings_for(member, mine, everyone)
+        local own = settings_of(member.text)
+        if mine and (everyone or not own) then return mine end
+        return own
+    end
+    local function visit(member, frame, mine, everyone)
+        if member.failed and self.entries[key_of(member)] then return key_of(member) end
+        local settings = settings_for(member, mine, everyone)
+        if not settings then return nil end
+        poll.players = poll.players or Avatar.players(m.read, m.game)
+        return take(poll.players, member, settings, frame, settings == mine)
+    end
+    function self.update(frame, members, mine, everyone)
+        poll.players = nil
         for key in pairs(seen) do seen[key] = nil end
         for _, member in ipairs(members or EMPTY) do
-            local settings = settings_of(member.text)
-            if settings then
-                players = players or Avatar.players(m.read, m.game)
-                local key = take(players, member, settings, frame)
-                if key then seen[key] = true end
-            end
+            local key = visit(member, frame, mine, everyone)
+            if key then seen[key] = true end
         end
         for i = #gone, 1, -1 do gone[i] = nil end
         for key in pairs(self.entries) do
@@ -145,7 +169,7 @@ function Remote.new(m)
             local i = (self.served + step - 1) % n + 1
             local key = self.order[i]
             local e = self.entries[key]
-            if e.dirty and e.failures < Remote.FAILURE_LIMIT then
+            if e.dirty and not e.absent and e.failures < Remote.FAILURE_LIMIT then
                 e.dirty = false
                 local identity, why = Avatar.resolve_remote(m.read, m.game, e.player, {})
                 if identity then
@@ -183,7 +207,8 @@ function Remote.new(m)
         e.applied = request -- what its controller's result was made for (rebind)
         self.jobs = self.jobs + 1
         m.note(string.format('Sync: %s recolored, %d materials (%s).', request.key, count,
-                             result.action == 'apply' and 'shared settings' or tostring(result.reason)))
+                             result.action == 'apply' and (e.mine and 'your settings' or 'shared settings')
+                             or tostring(result.reason)))
     end
 
     -- One entry's units checked (round robin; a change rebinds its applied result, else wants a job), retired textures
@@ -201,6 +226,7 @@ function Remote.new(m)
         self.cursor = self.cursor % n + 1
         local e = self.entries[self.order[self.cursor]]
         if e.controller.retired[1] then e.controller.collect(frame) end
+        if e.absent then return end -- no Helldiver: the next poll finds it again
         if e.watch and e.watch.changed() and not rebind(e, e.player, frame) then
             e.dirty = true
             self.pending = true
@@ -212,7 +238,7 @@ function Remote.new(m)
         local n = #self.order
         if n == 0 then return end
         local e = self.entries[self.order[(self.cursor % n) + 1]]
-        if e.controller.probes > 0 and not e.controller.check() then
+        if not e.absent and e.controller.probes > 0 and not e.controller.check() then
             e.dirty = true
             self.pending = true
         end

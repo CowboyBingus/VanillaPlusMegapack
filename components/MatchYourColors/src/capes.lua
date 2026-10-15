@@ -823,6 +823,7 @@ local function with_outside(row)
     local out = {}
     for k, v in pairs(row) do out[k] = v end
     out.outside = row.row == Capes.INSIDE_ROW and 0 or row.area
+    out.cape = true -- cloth: no metal for Match Materials (src/matcher.lua metallized)
     return out
 end
 function Capes.source_rows(cape, Colour)
@@ -929,6 +930,29 @@ function Capes.emblem_patterns(cape, Colour)
 end
 
 -- Runs inside recolor jobs only: interpreted (no traces in the LuaJIT code cache every mod shares).
+-- The log's sums of a prepared sheet (src/sheets.lua sheet_spec) (src/engine.lua pool notes, once per sheet made): Adler-32 of its recipe key, and
+-- of 64 16-byte blocks spread over its bytes (what the copy holds, a reported garbled design told apart from a recipe).
+local function adler_text(s)
+    local a, b = 1, 0
+    for i = 1, #s do
+        a = (a + s:byte(i)) % 65521
+        b = (b + a) % 65521
+    end
+    return b * 65536 + a
+end
+local function sample_sum(data, size)
+    local a, b, blocks = 1, 0, math.floor(size / 16)
+    for k = 0, 63 do
+        local at = math.floor(k * (blocks - 1) / 63) * 16
+        for i = at, at + 15 do
+            a = (a + data[i]) % 65521
+            b = (b + a) % 65521
+        end
+    end
+    return b * 65536 + a
+end
+function Capes.sheet_sums(key, data, size) return adler_text(key), sample_sum(data, size) end
+
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({Capes.outline, expand565, alpha_palette, Capes.bc4_block, Capes.bc3_block, choose_mip,
                          plain_cell, word_cell, float32_cell, block_cell, read_mip, grid_positions, reset_blocks,
@@ -939,7 +963,8 @@ if type(jit) == 'table' and type(jit.off) == 'function' then
                          border_cell, count_border, zone_row, Capes.zones, layer_of, layer_point, sheet_rect,
                          texture_info, sheet_mip, sheet_texel, emblem_cell, emblem_of, emblems_of, endpoint_rgb, to565,
                          recolor_endpoint, recolor_blocks, Capes.recolor_sheet, sample, tint_inputs, emblem_layers,
-                         row_entry, add_tint_rows, material_rows, Capes.analyse}) do
+                         row_entry, add_tint_rows, material_rows, Capes.analyse, adler_text, sample_sum,
+                         Capes.sheet_sums}) do
         jit.off(fn, true)
     end
 end

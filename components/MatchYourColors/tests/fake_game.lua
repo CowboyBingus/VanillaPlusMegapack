@@ -16,6 +16,7 @@ Fake.PATTERN_SLOT = 0x81d4c49d
 Fake.CAPE_LUT_SLOT = 0x0e494183
 Fake.DECAL_SLOT = 0x632a8b80
 Fake.BC3 = 0x10000002 -- a cape's decal sheet copy (src/engine.lua)
+Fake.BC1, Fake.ALBEDO_SLOT = 0x10000000, 0xac652e43 -- a mod's recolored albedo (src/albedo.lua) and its slot
 Fake.AVATAR = {0x294dfa97, 0x4d1c334d}
 
 -- A sparse address space of byte regions.
@@ -184,9 +185,10 @@ function Fake.engine(space, vanilla)
     local next_material, next_texture, next_handle = 0x160000000, 0x170000000, 1
     local self = {units = units, created = created, vanilla = vanilla, native = native, commits = {}}
 
-    -- A unit whose materials are bound to the vanilla object of `lut` and, when given, of `pattern`, of `cape_lut` (a
-    -- cape's tint LUT) and of `decal` (its decal sheet) (one mesh per unit, `count` materials).
-    function self.unit(unit, lut, count, pattern, cape_lut, decal)
+    -- A unit whose materials are bound to the vanilla object of `lut` (none: a mod's material without a color table)
+    -- and, when given, of `pattern`, of `cape_lut` (a cape's tint LUT), of `decal` (its decal sheet) and of `albedo`
+    -- (one mesh per unit, `count` materials).
+    function self.unit(unit, lut, count, pattern, cape_lut, decal, albedo)
         local list = {}
         local mesh = 0x180000000 + unit * 16
         for _ = 1, count or 2 do
@@ -194,10 +196,11 @@ function Fake.engine(space, vanilla)
             next_material = next_material + 0x100
             space.region(material, 0x70)
             local array = material + 0x40 -- the binding array lives right after the header (fake layout)
-            local slots = {{Fake.LUT_SLOT, lut}}
+            local slots = lut and {{Fake.LUT_SLOT, lut}} or {}
             if pattern then slots[#slots + 1] = {Fake.PATTERN_SLOT, pattern} end
             if cape_lut then slots[#slots + 1] = {Fake.CAPE_LUT_SLOT, cape_lut} end
             if decal then slots[#slots + 1] = {Fake.DECAL_SLOT, decal} end
+            if albedo then slots[#slots + 1] = {Fake.ALBEDO_SLOT, albedo} end
             space.u32(material + 24, #slots) space.u64(material + 32, array)
             for i, s in ipairs(slots) do
                 space.u32(array + 16 * (i - 1), s[1]) space.u64(array + 16 * (i - 1) + 8, vanilla[s[2]])
@@ -235,15 +238,16 @@ function Fake.engine(space, vanilla)
     function native.commit(mesh) self.commits[#self.commits + 1] = mesh end
     function native.set_resource(material, slot, object)
         assert(slot == Fake.LUT_SLOT or slot == Fake.PATTERN_SLOT or slot == Fake.CAPE_LUT_SLOT
-               or slot == Fake.DECAL_SLOT, 'LUT, pattern, cape LUT or decal sheet slot')
+               or slot == Fake.DECAL_SLOT or slot == Fake.ALBEDO_SLOT, 'LUT, pattern, cape LUT, decal sheet or albedo slot')
         space.u64(entry(material, slot) + 8, object)
     end
     -- Textures are made updatable (validity 1); update() refills one of the same size. A LUT is RGBA32F of one mip,
-    -- a decal sheet copy BC3 with its mips (view[6]).
+    -- a decal sheet copy BC3 with its mips (view[6]), a mod's albedo BC1 or BC3 with its mips.
     function native.create(size, validity, view_type, view, data)
         assert(validity == 1 and view_type == 3)
         assert((view[0] == 0x80820820 and view[6] == 1 and size == view[2] * view[3] * 16)
-               or (view[0] == Fake.BC3 and view[6] > 1 and size > 0), 'an RGBA32F LUT or a BC3 sheet')
+               or ((view[0] == Fake.BC3 or view[0] == Fake.BC1) and view[6] > 1 and size > 0),
+               'an RGBA32F LUT, a BC3 sheet or a BC1 or BC3 albedo')
         local handle = next_handle
         next_handle = next_handle + 1
         local object = next_texture
@@ -360,6 +364,7 @@ function Fake.lobby(space, local_id, members)
         assert(low == self.handle.low and high == self.handle.high, 'the lobby handle, exact')
         local i = (member_at - self.array) / 16 + 1
         local member = assert(self.members[i], 'a member key from the member list')
+        if member.fail then return nil, 0x80004005 end -- a failed read (member.fail), not a missing value
         if member.value == nil then return nil, 0 end
         return text_at(63 + i, member.value), 0
     end

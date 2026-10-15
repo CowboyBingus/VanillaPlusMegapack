@@ -10,6 +10,7 @@ rawset(_G, 'MYC_TEST_SETUP_ONLY', true) -- lint-ok: R8 test process only
 local setup, requests, helpers = dofile(root .. '/tests/test_addon.lua')
 rawset(_G, 'MYC_TEST_SETUP_ONLY', nil) -- lint-ok: R8 test process only
 local Sync, Remote, Recolor = require('sync'), require('remote'), require('recolor')
+require('sheets').attach(Recolor)
 local Fake = dofile(root .. '/tests/fake_game.lua')
 local budget = dofile(root .. '/tests/frame_budget.lua')
 local passed = 0
@@ -485,6 +486,128 @@ check('pause and stop give the others their own colors; after a resume the next 
     assert(w.bound(0x200)[1] ~= vanilla(w), 'found again after the resume')
     w.instance.stopped('unloaded')
     for _, object in ipairs(w.bound(0x200)) do assert(object == vanilla(w), 'restored by the stop') end
+end)
+
+-- Recolor Squadmates (v1.5, user request 2026-10-14: "a toggle for 'Apply to entire team' ... odd being the only one
+-- that's been re-colored into camo"): squadmates without the mod take this player's settings, or every squadmate does.
+local MISSING, EVERYONE = 2, 3
+local function without_mod() return {{id = LOCAL_ID}, {id = REMOTE_ID}} end
+
+check('Recolor Squadmates, Squadmates Without the Mod: a squadmate who shares nothing takes your settings at the next '
+      .. 'frame\'s poll; Off gives their colors back; never posted, no job of your own', function()
+    local w = world(without_mod())
+    w.frames(240)
+    assert(not w.instance.remote.order[1], 'off: a squadmate without the mod keeps their colors')
+    local before, posts, sync_text = #requests, #w.lobby.posts, w.instance.state.sync_text
+    w.instance.set_option('squad', MISSING)
+    assert(w.instance.state.sync_text == sync_text, 'your shared value unchanged (v1.4 squadmates still read it)')
+    w.frames(4) -- the poll on the next frame, the job over two frames, its apply
+    for i = before + 1, #requests do assert(requests[i].target ~= 'avatar', 'no job of your own') end
+    local last = requests[#requests]
+    assert(last.target == 'remote' and last.key == REMOTE_KEY and last.mode == Recolor.HELMET_FROM_ARMOR
+           and last.keep_sets == true and last.keep_hoods == false and last.scheme == 0, 'your settings')
+    assert(w.bound(0x200)[1] ~= vanilla(w), 'their helmet recolored')
+    assert(logged(w, 'Sync: ' .. REMOTE_KEY .. ' recolored, 2 materials (your settings).'), 'logged as yours')
+    assert(#w.lobby.posts == posts, 'nothing posted for it')
+    w.instance.set_option('squad', 1)
+    w.frames(2)
+    for _, object in ipairs(w.bound(0x200)) do assert(object == vanilla(w), 'off: their colors back') end
+    assert(not w.instance.remote.order[1], 'and no entry')
+end)
+
+check('Recolor Squadmates: a squadmate who shares keeps their own settings with Squadmates Without the Mod and takes '
+      .. 'yours with Everyone; your option changes reach the squadmates who take yours', function()
+    local w = world(with_remote('1|3|3|0')) -- they chose Armor Matches Helmet
+    w.instance.set_option('squad', MISSING)
+    w.frames(8)
+    assert(requests[#requests].target == 'remote' and requests[#requests].mode == Recolor.ARMOR_FROM_HELMET,
+           'their own mode')
+    w.instance.set_option('squad', EVERYONE)
+    w.frames(6)
+    local last = requests[#requests]
+    assert(last.target == 'remote' and last.mode == Recolor.HELMET_FROM_ARMOR, 'yours with Everyone')
+    assert(w.bound(0x200)[1] ~= vanilla(w), 'their helmet recolored with your settings')
+    local count = #requests
+    w.instance.set_option('match_materials', true)
+    w.frames(6)
+    local again
+    for i = count + 1, #requests do if requests[i].target == 'remote' then again = requests[i] end end
+    assert(again and again.materials == true, 'your new setting reaches them')
+    count = #requests
+    w.instance.set_option('mode', Recolor.OFF) -- your own recoloring off: they show their own shared settings again
+    w.frames(8)
+    local own
+    for i = count + 1, #requests do if requests[i].target == 'remote' then own = requests[i] end end
+    assert(own and own.mode == Recolor.ARMOR_FROM_HELMET, 'their own mode again')
+end)
+
+check('a squadmate without a Helldiver (dead) keeps their entry and textures; on respawn the same look is bound '
+      .. 'again without a job (v1.3 dropped the entry and ran a job on every respawn)', function()
+    local w = world(with_remote())
+    w.frames(4)
+    local texture = w.bound(0x200)[1]
+    assert(texture ~= vanilla(w), 'recolored')
+    local unit_at = Fake.PLAYERS + 936 + 32
+    local unit = w.space.get32(unit_at)
+    w.space.u32(unit_at, 0) -- dead: the player has no unit
+    w.frames(240)
+    local e = w.instance.remote.entries[REMOTE_KEY]
+    assert(e and e.absent, 'kept, absent')
+    assert(not logged(w, 'Sync: ' .. REMOTE_KEY .. ' restored.'), 'not restored')
+    local count = #requests
+    w.engine.units[0x200].alive = false -- the respawn: new piece units
+    w.engine.unit(0x201, HELMET_LUT)
+    w.space.u32(remote_unit_at(0, 0), 0x201)
+    w.space.u32(unit_at, unit)
+    w.frames(124)
+    assert(not w.instance.remote.entries[REMOTE_KEY].absent, 'back')
+    assert(w.bound(0x201)[1] == texture, 'the new units bound to the same texture')
+    for i = count + 1, #requests do assert(requests[i].target ~= 'remote', 'no job: rebound') end
+end)
+
+check('a squadmate whose value fails to read keeps their entry as it is (Recolor Squadmates on: no flip to your '
+      .. 'settings and back)', function()
+    local w = world(with_remote('1|3|3|0'))
+    w.instance.set_option('squad', MISSING)
+    w.frames(8)
+    local count = #requests
+    w.lobby.members[2].fail = true
+    w.frames(240)
+    for i = count + 1, #requests do assert(requests[i].target ~= 'remote', 'no job while the read fails') end
+    assert(w.instance.remote.entries[REMOTE_KEY].settings.mode == Recolor.ARMOR_FROM_HELMET, 'their own settings kept')
+end)
+
+check('Recolor Squadmates: the calls a squadmate without the mod adds are a sharer\'s (a poll every 120 frames, one '
+      .. 'read on 1 frame in 4, two every 30); none with the option Off', function()
+    local w, twin = world(without_mod()), setup({})
+    twin.frames(5)
+    for _ = 1, 10 do w.frame() twin.frame() end
+    for _ = 1, 240 do -- off: the poll alone (the lobby, its two members, no player records), no watch or check
+        local extra = diff(w.frame(), twin.frame())
+        if extra.members then
+            assert(same(extra, {members = 1, property = 1, read_into = 13}), 'off poll: ' .. budget.describe(extra))
+        else
+            assert(next(extra) == nil, 'off: ' .. budget.describe(extra))
+        end
+    end
+    w.instance.set_option('squad', MISSING)
+    for _ = 1, 10 do w.frame() twin.frame() end -- recolored
+    local polls = 0
+    for _ = 1, 600 do
+        local extra = diff(w.frame(), twin.frame())
+        local frame = w.instance.state.frame
+        local expected = {}
+        if extra.members then -- a sharer's 28 less its value; the own value posted once the lobby is steady
+            expected, polls = {members = 1, property = 1, read_into = 27, post = extra.post and 1 or nil}, polls + 1
+        elseif frame % Remote.WATCH_FRAMES == 0 then
+            expected = {read_into = 1}
+        elseif frame % 30 == 1 then
+            expected = {read_into = 2}
+        end
+        assert(same(extra, expected), 'frame ' .. frame .. ': ' .. budget.describe(extra) .. ', expected '
+               .. budget.describe(expected))
+    end
+    assert(polls == 5, polls .. ' polls')
 end)
 
 print('PASS test_sync (' .. passed .. ' checks)')

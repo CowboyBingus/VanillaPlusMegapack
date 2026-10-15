@@ -54,6 +54,11 @@ Engine.RGBA32F = 0x80820820
 -- (exe 0x190c840, 8 bits per texel for n = 2) gives BC1, BC2, BC3, BC4, BC5, BC6H, BC7 for n = 0-6. A BC3 sheet with
 -- its full mip chain (DDS order) made and bound on a cape live (2026-10-07, research/live/live_emblem_probe.py).
 Engine.BC3 = 0x10000002
+-- BC1 (n = 0 in the table above; a mod's albedo of gear without a color table, src/albedo.lua, v1.5): made, bound and
+-- refilled live (2026-10-14: the Cowboy Hat's unchanged bytes render as the mod's own texture, research/live/
+-- live_v15_tickets.py; refilled copies as made ones, live_v15_hatrefill.py), its slot the material's albedo ('albedo',
+-- 0xac652e43).
+Engine.BC1, Engine.ALBEDO_SLOT = 0x10000000, 0xac652e43
 Engine.TEXTURE_VIEW = 3
 Engine.UPDATABLE = 1 -- create_buffer's validity: the texture takes update_buffer
 -- {table, slot offset, expected executable offset} for every function the mod calls.
@@ -208,10 +213,12 @@ function Engine.create_texture(native, spec, read, buffer)
 end
 
 -- New data for a runtime texture of the same size and format (queued for the render thread, no wait); the texture
--- keeps `data` referenced while it holds it.
+-- keeps `data` referenced while it holds it, and the data it replaces until the pool takes the texture back
+-- (pool.give, RETIRE_FRAMES after its last binding): the render thread reads the queued update later, and whether
+-- the engine still reads a texture's first data after an update was never measured (a decal sheet refill, v1.5).
 function Engine.update_texture(native, texture, data)
     native.update(texture.handle, texture.size or texture.width * texture.height * 16, data)
-    texture.data = data
+    texture.previous, texture.data = texture.data, data
 end
 
 -- Binds a texture object to a material's texture slot (the mesh is committed by the caller).
@@ -222,6 +229,8 @@ end
 Engine.POOL_SPARES = 2 -- free textures made beside one that must be made (that frame waits for the renderer anyway)
 Engine.POOL_MAX_FREE = 48 -- free textures kept per size; one more given back is destroyed (a 23 x 8 one is 2.9 KB)
 Engine.POOL_MAX_FREE_SHEETS = 1 -- free decal sheet copies kept (5.6 MB each, and their data)
+Engine.SHEET_NOTES = 16 -- decal sheet log lines the pool keeps until they are logged
+Engine.POOL_MAX_FREE_ALBEDOS = 1 -- free recolored albedos kept (2.8 MB each for a 2048 x 2048 BC1 with its mips)
 -- textures of a prepared plan's sizes made ahead, per texture it has (pool.stock): with 4 the harness's stress pass (an
 -- armor, a helmet and a cape in turn every 0.05 s in the Armory) still made 9 in an 8.7 ms frame (2026-10-11)
 Engine.POOL_STOCK = 6
@@ -234,16 +243,34 @@ Engine.POOL_SIZES = {{23, 8}, {23, 7}, {23, 6}, {23, 5}, {23, 4}, {16, 8}, {16, 
 -- ones made in the same frame; nil and why when the engine gives none.
 -- give(texture): back among the free ones; callers give a texture RETIRE_FRAMES frames after its last binding was
 -- undone, so no frame in flight still draws with it (src/recolor.lua RETIRE_FRAMES). deps: {native, memory}.
+-- Counters: made, refilled, destroyed, and sheets = {made, refilled}; sheet_notes: a line per decal sheet taken since
+-- the caller last cleared it (src/addon.lua logs them with the apply).
+-- A free texture's list: LUTs and patterns by size; a decal sheet copy also by its mip count and bytes, so a sheet
+-- is only ever refilled with data of its own layout (v1.4 keyed sheets by size alone: a modded sheet of the same
+-- size and fewer mips would have been refilled with the old mip chain's byte count).
+function Engine.pool_key(t)
+    if t.sheet then return 'sheet:' .. t.width .. 'x' .. t.height .. ':' .. (t.mips or 1) .. ':' .. t.size end
+    if t.albedo then return 'albedo:' .. (t.bc1 and 'bc1:' or 'bc3:') .. t.width .. 'x' .. t.height .. ':' .. t.size end
+    return t.width * 65536 + t.height
+end
+
+-- A decal sheet's log line for the pool (src/sheets.lua sheet_spec gives a spec its name, recipe sum and sample).
+local function sheet_note(spec, how, over)
+    return string.format('Cape sheet %s r%08x d%08x (%d mips, %d bytes): %s%s', tostring(spec.name),
+                         spec.recipe_sum or 0, spec.sample or 0, spec.mips or 1, spec.size or 0, how,
+                         over and string.format(' over %s r%08x', tostring(over.name), over.recipe_sum or 0) or '')
+end
+
 function Engine.pool(deps)
     local native, memory = deps.native, deps.memory
     local POINTER = ffi.typeof('const uint8_t *')
     local small = ffi.new('uint8_t[16]')
-    local free = {} -- [width * 65536 + height] = {texture, ...}; decal sheets under 'sheet:<width>x<height>'
-    local self = {made = 0, refilled = 0, destroyed = 0}
+    local free = {} -- [Engine.pool_key] = {texture, ...}
+    local self = {made = 0, refilled = 0, destroyed = 0, sheets = {made = 0, refilled = 0}, sheet_notes = {}}
 
     local function read(address, size, out) return memory.read_into(ffi.cast(POINTER, address), size, out) end
-    local function list_for(width, height, sheet)
-        local key = sheet and ('sheet:' .. width .. 'x' .. height) or width * 65536 + height
+    local function list_for(t)
+        local key = Engine.pool_key(t)
         local list = free[key]
         if not list then
             list = {}
@@ -251,13 +278,25 @@ function Engine.pool(deps)
         end
         return list
     end
+    -- A decal sheet made or refilled: counted, noted (the last SHEET_NOTES kept until src/addon.lua logs them), and
+    -- the texture told which sheet it now holds.
+    local function took_sheet(texture, spec, how)
+        self.sheets[how] = self.sheets[how] + 1
+        local over = how == 'refilled' and {name = texture.sheet_name, recipe_sum = texture.sheet_sum} or nil
+        local notes = self.sheet_notes
+        if #notes >= Engine.SHEET_NOTES then table.remove(notes, 1) end
+        notes[#notes + 1] = sheet_note(spec, how, over)
+        texture.sheet_name, texture.sheet_sum = spec.name, spec.recipe_sum
+    end
     local function make(spec)
         local texture, why
-        if spec.sheet then
+        if spec.sheet or spec.albedo then -- a block-compressed copy with its mip chain
             texture, why = Engine.create_texture(native, {width = spec.width, height = spec.height, data = spec.data,
-                                                          format = Engine.BC3, mips = spec.mips, size = spec.size}, read,
-                                                 small)
-            if texture then texture.sheet = true end
+                format = spec.bc1 and Engine.BC1 or Engine.BC3, mips = spec.mips, size = spec.size}, read, small)
+            if texture then
+                texture.sheet, texture.albedo, texture.bc1 = spec.sheet, spec.albedo, spec.bc1
+                if spec.sheet then took_sheet(texture, spec, 'made') end
+            end
         else
             texture, why = Engine.create_texture(native, spec, read, small)
         end
@@ -266,19 +305,20 @@ function Engine.pool(deps)
     end
 
     function self.take(spec)
-        local list = list_for(spec.width, spec.height, spec.sheet)
+        local list = list_for(spec)
         local texture = list[#list]
         if texture then
             list[#list] = nil
             if texture.data ~= spec.data then -- a spec's data never changes once built: the same buffer, the same texels
                 Engine.update_texture(native, texture, spec.data)
                 self.refilled = self.refilled + 1
+                if spec.sheet then took_sheet(texture, spec, 'refilled') end
             end
             return texture
         end
         local made, why = make(spec)
         if not made then return nil, why end
-        for _ = 1, spec.sheet and 0 or Engine.POOL_SPARES do
+        for _ = 1, (spec.sheet or spec.albedo) and 0 or Engine.POOL_SPARES do
             local spare = make(spec)
             if not spare then break end
             list[#list + 1] = spare
@@ -293,10 +333,10 @@ function Engine.pool(deps)
     -- plan of the same shape too, which is applied while this one is still bound or retiring: v1.3 grew a 9-LUT plan's
     -- size again on the next such plan, a second 5-7 ms frame. A helmet's plan (one texture a size) grows as before.
     function self.reserve(spec, count)
-        local list = list_for(spec.width, spec.height, spec.sheet)
+        local list = list_for(spec)
         local free = #list
         if free >= count then return end
-        local spares = spec.sheet and 0 or math.max(Engine.POOL_SPARES, count)
+        local spares = (spec.sheet or spec.albedo) and 0 or math.max(Engine.POOL_SPARES, count)
         local made = {}
         for _ = 1, count - free + spares do
             local texture = make(spec)
@@ -308,7 +348,7 @@ function Engine.pool(deps)
 
     -- Up to `want` free textures of spec's size (made with spec's data).
     local function fill(spec, want)
-        local list = list_for(spec.width, spec.height, spec.sheet)
+        local list = list_for(spec)
         for _ = #list + 1, want do
             local texture = make(spec)
             if not texture then return end
@@ -321,7 +361,7 @@ function Engine.pool(deps)
         local sizes, order = {}, {}
         for _, kind in ipairs({'luts', 'patterns'}) do
             for _, spec in pairs(result[kind] or {}) do
-                local list = list_for(spec.width, spec.height, spec.sheet)
+                local list = list_for(spec)
                 local size = sizes[list]
                 if not size then
                     size = {spec = spec, count = 0}
@@ -343,12 +383,12 @@ function Engine.pool(deps)
     function self.stock(result)
         local before = self.made
         for _, size in ipairs(sizes_of(result)) do
-            fill(size.spec, size.spec.sheet and size.count
+            fill(size.spec, (size.spec.sheet or size.spec.albedo) and size.count
                  or math.min(size.count * Engine.POOL_STOCK, Engine.POOL_MAX_FREE))
         end
         for _, size in ipairs(Engine.POOL_SIZES) do
             local width, height = size[1], size[2]
-            if #list_for(width, height) <= Engine.POOL_SPARES then
+            if #list_for({width = width, height = height}) <= Engine.POOL_SPARES then
                 fill({width = width, height = height, data = ffi.new('float[?]', width * height * 4)},
                      Engine.POOL_SPARES + 1)
             end
@@ -356,9 +396,14 @@ function Engine.pool(deps)
         return self.made - before
     end
 
+    local function max_free(texture)
+        if texture.sheet then return Engine.POOL_MAX_FREE_SHEETS end
+        return texture.albedo and Engine.POOL_MAX_FREE_ALBEDOS or Engine.POOL_MAX_FREE
+    end
     function self.give(texture)
-        local list = list_for(texture.width, texture.height, texture.sheet)
-        if #list >= (texture.sheet and Engine.POOL_MAX_FREE_SHEETS or Engine.POOL_MAX_FREE) then
+        texture.previous = nil -- RETIRE_FRAMES after its last binding: no queued update reads it any more
+        local list = list_for(texture)
+        if #list >= max_free(texture) then
             native.destroy(texture.handle)
             self.destroyed = self.destroyed + 1
             return
@@ -379,7 +424,7 @@ end
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({Engine.open, Engine.name64, Engine.texture_object, Engine.unit_materials, Engine.bindings,
-        Engine.binding_in, Engine.binding, Engine.pool,
+        Engine.binding_in, Engine.binding, Engine.pool, Engine.pool_key, sheet_note,
         Engine.create_texture, Engine.update_texture, Engine.bind}) do
         jit.off(fn, true)
     end

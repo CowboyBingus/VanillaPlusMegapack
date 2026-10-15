@@ -23,6 +23,10 @@ Texture.FORMAT_RGBA16F, Texture.FORMAT_RGBA8, Texture.FORMAT_RGBA8_SRGB, Texture
 Texture.FORMAT_R8 = 61
 Texture.FORMAT_BC3 = 77 -- capes' scalar fields (src/capes.lua decodes its blocks)
 Texture.FORMAT_BC4 = 80 -- capes' gradients (src/capes.lua)
+-- Mods' albedos of gear without a color table (src/albedo.lua, v1.5): BC1 (UNORM, sRGB) and BC3 sRGB.
+Texture.FORMAT_BC1, Texture.FORMAT_BC1_SRGB, Texture.FORMAT_BC3_SRGB = 71, 72, 78
+local BLOCK_BYTES = {[Texture.FORMAT_BC7] = 16, [Texture.FORMAT_BC3] = 16, [Texture.FORMAT_BC4] = 8,
+                     [Texture.FORMAT_BC1] = 8, [Texture.FORMAT_BC1_SRGB] = 8, [Texture.FORMAT_BC3_SRGB] = 16}
 -- Mods' LUTs: every texture the game ships the mod reads is in the formats above (the 11 paint schemes' LUTs too), but
 -- some mods write LUTs as R32G32B32A32_FLOAT; v1.3 rejected them ("unsupported texture format 2", user report
 -- 2026-10-08: every paint scheme a mod had replaced failed).
@@ -32,10 +36,8 @@ local TEXEL_BYTES = {[Texture.FORMAT_RGBA32F] = 16, [Texture.FORMAT_RGBA16F] = 8
 -- Bytes of mip `m` of a w x h layer in `format`.
 local function mip_bytes(format, w, h, m)
     local mw, mh = math.max(1, rshift(w, m)), math.max(1, rshift(h, m))
-    if format == Texture.FORMAT_BC7 or format == Texture.FORMAT_BC3 or format == Texture.FORMAT_BC4 then
-        local block = format == Texture.FORMAT_BC4 and 8 or 16
-        return math.max(1, rshift(mw + 3, 2)) * math.max(1, rshift(mh + 3, 2)) * block
-    end
+    local block = BLOCK_BYTES[format]
+    if block then return math.max(1, rshift(mw + 3, 2)) * math.max(1, rshift(mh + 3, 2)) * block end
     return mw * mh * (TEXEL_BYTES[format] or 4)
 end
 
@@ -52,8 +54,7 @@ function Texture.describe(main, size)
     info.format, info.layers = u32(main, d + 128), math.max(1, u32(main, d + 140))
     local f = info.format
     if f ~= Texture.FORMAT_RGBA16F and f ~= Texture.FORMAT_RGBA8 and f ~= Texture.FORMAT_RGBA8_SRGB
-        and f ~= Texture.FORMAT_BC7 and f ~= Texture.FORMAT_R8 and f ~= Texture.FORMAT_BC3
-        and f ~= Texture.FORMAT_BC4 and f ~= Texture.FORMAT_RGBA32F then
+        and f ~= Texture.FORMAT_R8 and f ~= Texture.FORMAT_RGBA32F and not BLOCK_BYTES[f] then
         error('unsupported texture format ' .. f, 0)
     end
     info.mip_offsets, info.layer_bytes = {}, 0

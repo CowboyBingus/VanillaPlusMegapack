@@ -42,7 +42,8 @@ local ffi = require('ffi')
 local Cache = {}
 
 Cache.FILE = 'MatchYourColors.cache'
-Cache.VERSION = 12
+Cache.VERSION = 13 -- 13 (v1.5): a mod's material without a color table is read (src/albedo.lua); v1.4 kept such a
+-- kit's analysis without its colors (the Cowboy Hat: no rows), which v1.5 must not reuse
 Cache.MAX_ENTRIES = 64
 local NUMBER = '%.17g'
 local TEXELS = 512 -- per sample layer (Kits.shared_samples)
@@ -226,7 +227,10 @@ function Cache.encode(header, analyses, order, samples, yield)
     if samples then encode_samples(parts, samples, yield) end
     local written = 0
     for _, key in ipairs(order) do
-        if analyses[key] and written < Cache.MAX_ENTRIES then
+        -- an analysis of a mod's albedo (src/albedo.lua: its clusters, read again each session), or with a mod's
+        -- material left unread (logged each session), is not kept
+        local a = analyses[key]
+        if a and not a.albedos and not a.unread and written < Cache.MAX_ENTRIES then
             encode_entry(parts, key, analyses[key])
             written = written + 1
             if yield then yield() end

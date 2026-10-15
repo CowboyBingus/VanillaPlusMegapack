@@ -7,8 +7,11 @@ package.path = root .. '/src/?.lua;' .. package.path
 local ffi = require('ffi')
 local Slim, Texture, Avatar = require('slim'), require('texture'), require('avatar')
 local Colour, Matcher, Recolor = require('colour'), require('matcher'), require('recolor')
+require('sheets').attach(Recolor)
 local Transfer = require('transfer')
 Matcher.use(Colour)
+require('zones').attach(Matcher, Colour)
+require('variety').attach(Matcher, Colour)
 local passed = 0
 local function check(name, fn)
     fn()
@@ -221,7 +224,8 @@ check('emblem sheets: a recipe whose prepared sheet something still holds is fou
     ffi.fill(original, size, 7)
     local copies = 0
     local ctx = {p = {sheet = function() return original end}, cape_kit = {archive = '0000000000000001'},
-                 deps = {Capes = {recolor_sheet = function() copies = copies + 1 end}, Colour = {}}}
+                 deps = {Capes = {recolor_sheet = function() copies = copies + 1 end,
+                                  sheet_sums = function() return 0, 0 end}, Colour = {}}}
     local function recipe(color)
         return {name = '0000000000001234', width = 32, height = 32, mips = 1, size = size,
                 cells = {{rect = {0, 0, 4, 4}, shift = {color, 0, 0}}}}
@@ -1295,9 +1299,13 @@ check('a cape of one dark color and vivid ones shows each of 15% or more on a mu
     n = reds({{'bbbbbbbbbbbbbbbb:0', 55, 22.4, 0, 0}, {'bbbbbbbbbbbbbbbb:1', 30, 71, 5, 60},
               {'bbbbbbbbbbbbbbbb:2', 15, 50, 0, 2}}, true, plated)
     assert(n >= 1, 'black 55%, gold 30% (L 71), grey 15%, not a cape: the light grey plates take the gold')
-    -- one as dark as the main is a minority still: a red of 30% (L 34) on black stays off the muted parts
+    -- from a helmet or armor a vivid color of 10% or more is no minority, as dark as the main or not: a red of 30%
+    -- (L 34) on black takes a muted part (the user's version comparisons 2026-10-15: the FS-05 Marksman's red never
+    -- reached the FS-37 Ravager, "the red failed to transfer"); one of 8% stays guarded
     n = reds({{'bbbbbbbbbbbbbbbb:0', 70, 22.4, 0, 0}, {'bbbbbbbbbbbbbbbb:1', 30, red[1], red[2], red[3]}}, true)
-    assert(n == 0, 'black 70%, red 30% (L 34), not a cape: the red guarded (' .. n .. ' parts)')
+    assert(n >= 1, 'black 70%, red 30% (L 34), not a cape: a muted part takes the red (' .. n .. ' parts)')
+    n = reds({{'bbbbbbbbbbbbbbbb:0', 92, 22.4, 0, 0}, {'bbbbbbbbbbbbbbbb:1', 8, red[1], red[2], red[3]}}, true)
+    assert(n == 0, 'black 92%, red 8%, not a cape: the red a minority, guarded (' .. n .. ' parts)')
     -- and makes its identity the dark one for the anchor: a red identity (L 36, not dark) under a lighter gold landed
     -- on the light plates and the dark main took the red too (the Thundering Hooves on the SR-64 Cinderblock, user
     -- 2026-10-10; a cape now goes by its outside, so a helmet or armor source keeps the case)
@@ -1360,6 +1368,29 @@ check('a colored band paired with a neutral black takes the source accent\'s col
     local muted = Matcher.plan(item(helmet, false), item(dress, true))[band]
     assert(muted.source:find('^bbbb') and math.sqrt(muted.a ^ 2 + muted.b ^ 2) < 1, string.format(
            'a muted part as paired (%s a %.1f b %.1f)', muted.source, muted.a, muted.b))
+end)
+
+-- Reddit report 2026-10-14: the O-44 Bonded Pilot's red-brown plates (a band, 25% of it) took the RS-100 Sanctioner's
+-- 2.8% gold and the armor read light gold; v1.3 made them its black. An armor's band takes a source color covering 10%
+-- of the source (the user's floor for a secondary) and no light; a helmet's keeps the agreed rule.
+check('an armor\'s band takes a source color covering 10% of the source and never a light; a helmet\'s band takes '
+      .. 'a smaller one as agreed', function()
+    local rows = {{'aaaaaaaaaaaaaaaa:0', 65, 66.7, 0, 7.3}, {'aaaaaaaaaaaaaaaa:1', 26, 32.8, -1.6, -10.1},
+                  {'aaaaaaaaaaaaaaaa:3', 9, 20.3, 0, 0}}
+    local band = 'aaaaaaaaaaaaaaaa:1'
+    local function source(red_share, lit)
+        local rows_s = {{'bbbbbbbbbbbbbbbb:0', 100 - red_share, 25.3, 0.5, 0.5}}
+        rows_s[2] = lit and {'bbbbbbbbbbbbbbbb:1', red_share, 47, -8, 45, false, 0, 3}
+            or {'bbbbbbbbbbbbbbbb:2', red_share, 33.9, 33, 25}
+        return item(rows_s, false) -- a helmet as the source
+    end
+    local function colored(m) return m and m.band and math.sqrt(m.a ^ 2 + m.b ^ 2) > 20 end
+    local armor, helmet = item(rows, true), item(rows, false)
+    assert(not colored(Matcher.plan(armor, source(3))[band]), 'an armor\'s band and a 3% red: as paired (black)')
+    assert(colored(Matcher.plan(armor, source(15))[band]), 'an armor\'s band and a 15% red: the red')
+    assert(not colored(Matcher.plan(armor, source(5, true))[band]), 'an armor\'s band and a light: as paired')
+    assert(colored(Matcher.plan(helmet, source(3))[band]), 'a helmet\'s band and a 3% red: the red (agreed)')
+    assert(colored(Matcher.plan(helmet, source(5, true))[band]), 'a helmet\'s band and a light: the light (agreed)')
 end)
 
 -- SEAF material roles on small synthetic armors: {key ('lut:row'), area, L, mode (0 hard, 1 soft), undergarment
@@ -1768,14 +1799,17 @@ check('cape zones: when no source color reads by lightness, a lost zone takes on
     Matcher.cape_zones(plan, pillars, bloodhound, zones, nil)
     assert(plan['c:2'].source == 's:1' and plan['c:2'].kind == 'zone', 'the bars: black on the red')
     assert(plan['c:0'].source == 's:0', 'the cloth stays red')
-    -- the Judgment Day: grey cloth, yellow marks; the cloth takes the black and the marks the red: they keep the red
-    -- (the lightness rule put their yellow back)
+    -- the Judgment Day: grey cloth, yellow marks (drawn by lightness: 39 apart); the cloth takes the black and the marks
+    -- the red, the same lightness: no color reads by lightness and one drawn by lightness takes none reading by hue
+    -- alone, so the marks keep their own yellow, readable on the black (the user chose "readable by lightness" knowing
+    -- it changes the marks agreed red on 2026-10-07; independent review 1 2026-10-14: Proof of Faultless Virtue read plain
+    -- red on the Bloodhound)
     local judgment = Matcher.item({row('c:0', 0, 0.9, 26, 0, 0), row('c:2', 2, 0.1, 65, -9, 55)}, false)
     plan = Matcher.plan(judgment, bloodhound, nil, true)
     local marks = plan['c:2'] and plan['c:2'].source
     assert(plan['c:0'].source == 's:1' and marks == 's:0', 'the plan: cloth black, marks red')
     Matcher.cape_zones(plan, judgment, bloodhound, zones, nil)
-    assert(plan['c:2'] and plan['c:2'].source == 's:0', 'the marks stay red, not their own yellow')
+    assert(plan['c:2'] == nil, 'the marks keep their own yellow, readable by lightness, not the red')
     -- a source whose colors read neither way: the marks keep their own colors, as before
     local grey = item({{'s:0', 0.62, 27, 0, 0}, {'s:1', 0.38, 25, 1, 1}}, false)
     plan = Matcher.plan(judgment, grey, nil, true)
@@ -1801,7 +1835,9 @@ check('cape zones: a color picked by CIELAB distance reads against the zone\'s c
                    [3] = {[0] = {[0] = 50, 0, 0, 0, 0, 0, 0, 0}, [2] = {[0] = 50, 0, 0, 0, 0, 0, 0, 0}}}
     Matcher.cape_zones(plan, stripes, ranger, zones, nil)
     assert(plan['c:2'].source == 's:1', 'the stripe stays brown, not the navy of its cloth')
-    assert(plan['c:3'].source == 's:1' and plan['c:3'].kind == 'zone', 'the outline: brown, reading against the cloth')
+    -- the outline (white, drawn by lightness on the dark cloth) takes no color reading by hue alone: it keeps its own
+    -- white, reading by lightness (independent review 1 2026-10-14, the user's "readable by lightness")
+    assert(plan['c:3'] == nil, 'the outline keeps its own white, reading against the cloth')
     -- Liberty's Herald on the UF-50 Bloodhound: a gold chevron (arms row 1, V row 2) on cloth planned black where its
     -- tint is weak and red where it is strong; neither main color reads against both, the 1.8% silver does
     local bloodhound = item({{'s:0', 0.6, 21, 20, 11}, {'s:1', 0.38, 21, 0, 0}, {'s:2', 0.018, 40, 0, 0}}, false)
@@ -2509,9 +2545,24 @@ check('Match Materials: big metal parts taking paint become it; small metal, clo
     local woven = Matcher.plan(embroidered, armor, true)
     assert(woven['t:0'].finish == 'a:0', 'the hard metal shell takes the paint')
     assert(woven['t:5'] and woven['t:5'].finish == nil, 'the metallic cloth stays as it is')
-    -- a metal source color: nothing turns into metal, the metal shell keeps its own material
+    -- a metal source color (v1.5, user decision 2026-10-14): a hard paint part taking it as it is turns into that
+    -- metal, one coat of its paint; a darker part keeping a share of its own lightness stays paint, cloth never turns,
+    -- and metal keeps its own material
     local gold = measured({{'m:0', 1.0, 60, 5, 40, 9000, true}}, true)
-    for key, goal in pairs(Matcher.plan(helmet, gold, true)) do assert(goal.finish == nil, 'metal source: ' .. key) end
+    for key, goal in pairs(Matcher.plan(helmet, gold, true)) do -- the metal shell leads: its darker paint stays paint
+        assert(goal.finish == nil, 'metal source: ' .. key .. ' keeps its material')
+    end
+    local painted_shell = measured_with({{'t:0', 0.6, 60, 2, 20, 6000}, {'t:2', 0.2, 25, 1, 3, 2000},
+                                         {'t:3', 0.2, 22, 0, 0, 2000}}, false, {['t:2'] = 1})
+    local golden = Matcher.plan(painted_shell, gold, true)
+    local plate = golden['t:0']
+    assert(plate and plate.finish == 'm:0' and plate.coat and plate.cal == nil, 'metal source: the paint shell the metal')
+    local rep = gold.groups[1].rep
+    assert(plate.L == rep.mL and plate.a == rep.ma and plate.b == rep.mb, 'one coat of the metal\'s own paint')
+    for _, key in ipairs({'t:2', 't:3'}) do
+        assert(golden[key] == nil or golden[key].finish == nil, 'metal source: ' .. key .. ' keeps its material')
+    end
+    for key, goal in pairs(Matcher.plan(painted_shell, gold)) do assert(goal.finish == nil, 'option off: ' .. key) end
     -- an accent of any size: a 3% metal trim taking the armor's red trim becomes red paint
     local trimmed = measured_with({{'t:0', 0.8, 30, 0, 0, 8000}, {'t:1', 0.03, 55, 10, 45, 300, true}}, false)
     local red = measured({{'r:0', 0.9, 24, 0, 0, 9000}, {'r:1', 0.1, 45, 64, 46, 1000}}, true)
@@ -2574,6 +2625,53 @@ check('Match Materials: the finish copy takes metallic, specular and roughness; 
     assert(not ok and tostring(why):find('not in the source analysis', 1, true), 'a missing source LUT is an error')
 end)
 
+-- src/variety.lua's roles on a plan crafted directly (v1.5, the mutation audit and independent review 1 2026-10-14). The
+-- armor: grey plates (three hard rows, 93%) and a blue trim (7%), all planned to the helmet's dark grey: one color.
+check('an armor left in one color: a source of one color leaves the plan as made (no shade "from nowhere": the user, '
+      .. 'review 1); with a second color of its own a trim with no source accent becomes a tone 25 L from main, away '
+      .. 'from the secondary (mirrored when out of range), and the darkest plates take the secondary', function()
+    local Variety = require('variety')
+    local armor = measured_with({{'a:0', 0.31, 45, 0, 0, 3100}, {'a:1', 0.31, 47, 0, 0, 3100},
+                                 {'a:2', 0.31, 49, 0, 0, 3100}, {'a:3', 0.07, 40, 0, -40, 700}}, true)
+    local function one_color()
+        local plan = {}
+        for _, key in ipairs({'a:0', 'a:1', 'a:2', 'a:3'}) do
+            plan[key] = {source = 'h:0', kind = 'pair', L = 28, a = 0, b = 0}
+        end
+        return plan
+    end
+    local plan = one_color()
+    local _, dominated = Variety.balance(plan, armor, measured_with({{'h:0', 1.0, 28, 0, 0, 9000}}, false))
+    assert(dominated, 'one color: dominated')
+    for key, m in pairs(plan) do
+        assert(m.source == 'h:0' and m.L == 28 and not m.tone, 'a one-color source: as made, ' .. key)
+    end
+    -- the helmet: dark grey (L 28, 85%) and a light grey of its own (L 55, 15%): the secondary
+    plan = one_color()
+    Variety.balance(plan, armor, measured_with({{'h:0', 0.85, 28, 0, 0, 7650}, {'h:1', 0.15, 55, 0, 0, 1350}}, false))
+    local trim = plan['a:3']
+    assert(trim.tone == 'accent' and trim.L > 45, string.format('the trim a tone 25 L from main, away from the secondary '
+           .. '(L 28 - 25 is out of range: L 53): %s L %.1f', tostring(trim.tone), trim.L))
+    local darkest = plan['a:0']
+    assert(darkest.source == 'h:1' and darkest.L > 50, string.format('the darkest plates the secondary (L 55): %s L %.1f',
+           tostring(darkest.source), darkest.L))
+end)
+
+-- Review renders 2026-10-14: the B-01 Tactical against the Cowboy Hat as v1.4 had cached it (no rows) failed in
+-- helmet_main ("attempt to index local 'top'"): Matcher.balance ran on a source with no colors.
+check('an armor in one color against a source with no colors (a mod\'s helmet without a color table, as v1.4 read it) '
+      .. 'keeps its own colors: no plan, no balance, no error', function()
+    local Variety = require('variety')
+    local armor = measured_with({{'a:0', 0.31, 45, 0, 0, 3100}, {'a:1', 0.31, 47, 0, 0, 3100},
+                                 {'a:2', 0.31, 49, 0, 0, 3100}, {'a:3', 0.07, 40, 0, -40, 700}}, true)
+    local empty = Matcher.item({}, false)
+    local ok, plan = pcall(Matcher.plan, armor, empty, true)
+    assert(ok, 'planned without an error: ' .. tostring(plan))
+    assert(next(plan) == nil, 'nothing planned: the armor keeps its own colors')
+    local _, dominated = Variety.balance({}, armor, empty)
+    assert(dominated == false, 'not balanced: nothing to balance with')
+end)
+
 check('Match Materials from a cape as the source: a tint row (its cape LUT, 16 columns) gives its material row\'s '
       .. 'finish, never columns of the cape LUT (Helmet and Armor Match Cape)', function()
     local mat, cape = ffi.new('float[?]', 23 * 3 * 4), ffi.new('float[?]', 16 * 3 * 4)
@@ -2587,6 +2685,398 @@ check('Match Materials from a cape as the source: a tint row (its cape LUT, 16 c
     local s = 2 * 23 * 4
     assert(data[27] == math.min(math.max(mat[s + 27], 0), 1) and data[32] == mat[s + 32] and data[35] == mat[s + 35]
            and data[40] == mat[s + 40], 'the material row 2 finish: ' .. data[32])
+end)
+
+-- Independent review round 3 (2026-10-14, case 1): the B-22 Model Citizen's chrome (roughness 0.10) on the FS-37
+-- Ravager's quilted chest read as a white blotch and sparkle.
+check('Match Materials: a part that was paint taking a mirror metal finish is at least METAL_ON_PAINT_ROUGH rough '
+      .. '(the game\'s median metal); a part that was metal keeps the source\'s roughness', function()
+    local chrome = ffi.new('float[?]', 23 * 4)
+    chrome[27], chrome[40] = 1.0, 0.10 -- column 6 w metallic, column 10 x roughness
+    local source = {luts = {cccccccccccccccc = {values = chrome, width = 23, height = 1}}}
+    local paint = ffi.new('float[?]', 23 * 4)
+    paint[27], paint[40] = 0.0, 0.70
+    Recolor.apply_finish(paint, 23, 0, source, 'cccccccccccccccc:0')
+    assert(paint[27] == 1 and math.abs(paint[40] - Recolor.METAL_ON_PAINT_ROUGH) < 1e-6,
+           string.format('paint turned metal: metallic %.2f roughness %.2f', paint[27], paint[40]))
+    local metal = ffi.new('float[?]', 23 * 4)
+    metal[27], metal[40] = 1.0, 0.40
+    Recolor.apply_finish(metal, 23, 0, source, 'cccccccccccccccc:0')
+    assert(math.abs(metal[40] - 0.10) < 1e-6, string.format('metal keeps the chrome: roughness %.2f', metal[40]))
+end)
+
+-- v1.5 (end-user report 2026-10-14, the Cowboy Hat mod): a mod's gear without a color table, its albedo read and
+-- recolored (src/albedo.lua). The BC1 rules are written here apart from src/albedo.lua: endpoints expanded by bit
+-- replication, 4-color thirds and 3-color halves rounded down, 3-color index 3 transparent.
+local Albedo = require('albedo')
+
+local function park_miller(seed)
+    local s = seed
+    return function(n)
+        s = (s * 16807) % 2147483647
+        return s % n
+    end
+end
+
+local function expand565(e)
+    local r, g, b = math.floor(e / 2048), math.floor(e / 32) % 64, e % 32
+    return {r * 8 + math.floor(r / 4), g * 4 + math.floor(g / 16), b * 8 + math.floor(b / 4)}
+end
+
+-- One texel of endpoints e0, e1 at index i in the 4-color (four) or 3-color mode: r, g, b, a.
+local function ref_texel(e0, e1, i, four)
+    local c0, c1 = expand565(e0), expand565(e1)
+    if i == 0 then return c0[1], c0[2], c0[3], 255 end
+    if i == 1 then return c1[1], c1[2], c1[3], 255 end
+    if not four and i == 3 then return 0, 0, 0, 0 end
+    local out = {}
+    for k = 1, 3 do
+        if not four then
+            out[k] = math.floor((c0[k] + c1[k]) / 2)
+        elseif i == 2 then
+            out[k] = math.floor((2 * c0[k] + c1[k]) / 3)
+        else
+            out[k] = math.floor((c0[k] + 2 * c1[k]) / 3)
+        end
+    end
+    return out[1], out[2], out[3], 255
+end
+
+local function pack565(r, g, b)
+    return math.floor(r * 31 / 255 + 0.5) * 2048 + math.floor(g * 63 / 255 + 0.5) * 32 + math.floor(b * 31 / 255 + 0.5)
+end
+
+local function put_block(p, o, c0, c1, idx)
+    p[o], p[o + 1], p[o + 2], p[o + 3] = c0 % 256, math.floor(c0 / 256), c1 % 256, math.floor(c1 / 256)
+    for k = 0, 3 do p[o + 4 + k] = math.floor(idx / 256 ^ k) % 256 end
+end
+
+local function get_block(p, o)
+    return p[o] + p[o + 1] * 256, p[o + 2] + p[o + 3] * 256,
+        p[o + 4] + p[o + 5] * 256 + p[o + 6] * 65536 + p[o + 7] * 16777216
+end
+
+local function random_blocks(count, step, rnd)
+    local data = ffi.new('uint8_t[?]', count * step)
+    for i = 0, count - 1 do
+        local o = i * step
+        if step == 16 then for k = 0, 7 do data[o + k] = rnd(256) end o = o + 8 end
+        put_block(data, o, rnd(65536), rnd(65536), rnd(65536) * 65536 + rnd(65536))
+    end
+    return data
+end
+
+local function copy(data, size)
+    local out = ffi.new('uint8_t[?]', size)
+    ffi.copy(out, data, size)
+    return out
+end
+
+check('albedo: a BC1 block decodes in its 4-color and 3-color modes; a BC3 color block is always 4-color', function()
+    local p, out = ffi.new('uint8_t[8]'), ffi.new('uint8_t[64]')
+    put_block(p, 0, 0xF800, 0x001F, 0xE4) -- red, blue; texels 0-3 take indices 0, 1, 2, 3
+    Albedo.color_block(p, 0, out, true)
+    local want = {{255, 0, 0, 255}, {0, 0, 255, 255}, {170, 0, 85, 255}, {85, 0, 170, 255}}
+    for t = 0, 3 do
+        for ch = 0, 3 do assert(out[4 * t + ch] == want[t + 1][ch + 1], 'four: texel ' .. t .. ' channel ' .. ch) end
+    end
+    put_block(p, 0, 0x001F, 0xF800, 0xE4) -- blue <= red: the 3-color mode
+    Albedo.color_block(p, 0, out, true)
+    want = {{0, 0, 255, 255}, {255, 0, 0, 255}, {127, 0, 127, 255}, {0, 0, 0, 0}}
+    for t = 0, 3 do
+        for ch = 0, 3 do assert(out[4 * t + ch] == want[t + 1][ch + 1], 'three: texel ' .. t .. ' channel ' .. ch) end
+    end
+    Albedo.color_block(p, 0, out, false) -- a BC3 color block: 4-color whatever the order
+    assert(out[8] == 85 and out[10] == 170 and out[12] == 170 and out[14] == 85 and out[15] == 255, 'BC3 four')
+end)
+
+check('albedo: blocks rewritten under any endpoint map decode to the mapped endpoints in their own mode (order flips, '
+      .. 'equal endpoints, transparency)', function()
+    local maps = {
+        reverse = function(e) return 65535 - e end,
+        hashed = function(e) return (e * 40503 + 7919) % 65536 end,
+        collapsed = function(e) return e - e % 4096 end, -- one block in 16 gets two equal endpoints
+    }
+    local out = ffi.new('uint8_t[64]')
+    for name, map in pairs(maps) do
+        for _, step in ipairs({8, 16}) do
+            local count = 2048
+            local data = random_blocks(count, step, park_miller(step * 7 + #name))
+            local before = copy(data, count * step)
+            Albedo.forget()
+            Albedo.rewrite(data, 0, count, step, map)
+            for i = 0, count - 1 do
+                local co = i * step + (step == 16 and 8 or 0)
+                local c0, c1, idx = get_block(before, co)
+                local four = step == 16 or c0 > c1
+                Albedo.color_block(data, co, out, step == 8)
+                for t = 0, 15 do
+                    local r, g, b, a = ref_texel(map(c0), map(c1), math.floor(idx / 4 ^ t) % 4, four)
+                    assert(out[4 * t] == r and out[4 * t + 1] == g and out[4 * t + 2] == b and out[4 * t + 3] == a,
+                           string.format('%s step %d block %d texel %d', name, step, i, t))
+                end
+                for k = 0, step - 9 do assert(data[i * step + k] == before[i * step + k], 'BC3 alpha block kept') end
+            end
+        end
+    end
+end)
+
+-- A synthetic mod albedo (a hat): 512 x 512 BC1 or BC3, 10 mips, whose mip 1 (256 x 256, the one read) holds leather
+-- (2,560 blocks), a dark band (1,024), a badge of the leather's color that is metal in the mra (256), with_green: 16
+-- green blocks (0.41%: merged), and transparent blocks; mip 0 is all green (never read), the smaller mips black. The
+-- mra: BC3, metal red where the badge is.
+local LEATHER, BAND, GREEN = {104, 72, 40}, {30, 30, 35}, {0, 255, 0}
+local function hat_texture(format, with_green)
+    local step = Albedo.BC1[format] and 8 or 16
+    local info = {format = format, width = 512, height = 512, mips = 10, mip_offsets = {}, layer_bytes = 0}
+    for m = 0, 9 do
+        info.mip_offsets[m] = info.layer_bytes
+        local side = math.max(1, 512 / 2 ^ m)
+        info.layer_bytes = info.layer_bytes + math.max(1, math.ceil(side / 4)) ^ 2 * step
+    end
+    info.total = info.layer_bytes
+    local data = ffi.new('uint8_t[?]', info.layer_bytes)
+    local mra_info = {format = 77, width = 512, height = 512, mips = 10, mip_offsets = {}, layer_bytes = 0}
+    for m = 0, 9 do
+        mra_info.mip_offsets[m] = mra_info.layer_bytes
+        local side = math.max(1, 512 / 2 ^ m)
+        mra_info.layer_bytes = mra_info.layer_bytes + math.max(1, math.ceil(side / 4)) ^ 2 * 16
+    end
+    local mra = ffi.new('uint8_t[?]', mra_info.layer_bytes)
+    local rnd = park_miller(11)
+    local co = step == 16 and 8 or 0
+    local green = pack565(GREEN[1], GREEN[2], GREEN[3])
+    for i = 0, 128 * 128 - 1 do put_block(data, i * step + co, green, green, 0) end
+    local kinds = {}
+    for i = 0, 64 * 64 - 1 do
+        local row, col = math.floor(i / 64), i % 64
+        local o = info.mip_offsets[1] + i * step + co
+        local metal = false
+        if row < 40 or (row >= 56 and row < 60) then
+            local n = function() return rnd(9) - 4 end -- within one 4-4-4 bin of the leather
+            local c0 = pack565(LEATHER[1] + n(), LEATHER[2] + n(), LEATHER[3] + n())
+            local c1 = pack565(LEATHER[1] + n(), LEATHER[2] + n(), LEATHER[3] + n())
+            if c0 < c1 then c0, c1 = c1, c0 end
+            if c0 == c1 then c1 = c0 - 32 end -- one green step: the same bin
+            put_block(data, o, c0, c1, rnd(65536) * 65536 + rnd(65536))
+            metal = row >= 56
+            kinds[i] = metal and 'badge' or 'leather'
+        elseif row < 56 then
+            local e = pack565(BAND[1], BAND[2], BAND[3])
+            put_block(data, o, e, e - 32, rnd(65536) * 65536 + rnd(65536)) -- one 4-4-4 bin
+            kinds[i] = 'band'
+        elseif with_green and row == 60 and col < 16 then
+            put_block(data, o, green, green - 1, 0)
+            kinds[i] = 'green'
+        else
+            put_block(data, o, 0, 0xFFFF, 0xFFFFFFFF) -- 3-color, all transparent
+            kinds[i] = 'clear'
+        end
+        local mo = mra_info.mip_offsets[1] + i * 16 + 8
+        put_block(mra, mo, metal and 0xF800 or 0, metal and 0xF800 or 0, 0)
+    end
+    local function reader(buffer)
+        return function(at, size, out, out_offset) ffi.copy(out + (out_offset or 0), buffer + at, size) end
+    end
+    local function texture(name)
+        if name == 'albedo' then return info, reader(data) end
+        if name == 'mra' then return mra_info, reader(mra) end
+        return nil
+    end
+    return texture, data, info, kinds
+end
+
+local function hat_read(format, with_green)
+    local texture = hat_texture(format, with_green)
+    return Albedo.read({albedo = 'albedo', mra = 'mra'}, texture, Colour, function() end)
+end
+
+check('albedo: a mod albedo reads into clusters: its mip under 256, opaque texels only, a metal part apart from the '
+      .. 'same color, a 0.41% color merged; the same clusters every read', function()
+    local clean = hat_read(71, false)
+    local L0, A0, B0 = Colour.srgb_to_lab(LEATHER[1] / 255, LEATHER[2] / 255, LEATHER[3] / 255)
+    local c = clean.clusters[1]
+    assert(#clean.clusters == 3 and math.sqrt((c.lab[1] - L0) ^ 2 + (c.lab[2] - A0) ^ 2 + (c.lab[3] - B0) ^ 2) < 3
+           and math.abs(clean.clusters[1].share - 2 / 3) < 1e-9 and math.abs(clean.clusters[3].share - 1 / 15) < 1e-9,
+           string.format('leather %.1f %.1f %.1f, %d clusters', c.lab[1], c.lab[2], c.lab[3], #clean.clusters))
+    local a = hat_read(71, true)
+    assert(a.format == 71 and a.width == 512 and a.mips == 10 and #a.clusters == 3, 'three clusters: ' .. #a.clusters)
+    local opaque = 2560 + 1024 + 256 + 16
+    local leather, band, badge = a.clusters[1], a.clusters[2], a.clusters[3]
+    assert(leather.metal == 0 and band.metal == 0 and badge.metal == 1, 'the badge is the metal cluster')
+    assert(math.abs(badge.lab[1] - L0) < 3, 'the badge has the leather color')
+    assert(band.lab[1] < 15, 'the band is dark')
+    local shares = {2560, 1024, 256}
+    local total = 0
+    for k, c in ipairs(a.clusters) do
+        total = total + c.share
+        assert(c.share >= shares[k] / opaque - 1e-9 and c.share <= (shares[k] + 16) / opaque + 1e-9,
+               'share ' .. k .. ' ' .. c.share)
+        assert(c.lab[2] > -20, 'no green cluster')
+    end
+    assert(math.abs(total - 1) < 1e-9, 'shares add up')
+    local again = hat_read(71, true)
+    for k, c in ipairs(a.clusters) do
+        local d = again.clusters[k]
+        assert(d.share == c.share and d.lab[1] == c.lab[1] and d.lab[2] == c.lab[2] and d.lab[3] == c.lab[3]
+               and d.metal == c.metal, 'deterministic ' .. k)
+    end
+    local bc3 = hat_read(78, true) -- its color blocks; its alpha is no transparency (other data): the 'transparent'
+    local metal = 0                -- blocks count, as their 4-color grey
+    for _, k in ipairs(bc3.clusters) do metal = metal + (k.metal == 1 and 1 or 0) end
+    assert(#bc3.clusters == 4 and metal == 1 and bc3.clusters[1].share >= 2560 / 4096 - 1e-9
+           and bc3.clusters[1].share <= 2576 / 4096 + 1e-9,
+           'a BC3 albedo: ' .. #bc3.clusters .. ' clusters, ' .. bc3.clusters[1].share)
+end)
+
+check('albedo: an unplanned albedo rewrites byte-exact (BC1 and BC3, every mip)', function()
+    for _, format in ipairs({71, 77}) do
+        local texture, data, info = hat_texture(format, true)
+        local albedo = Albedo.read({albedo = 'albedo', mra = 'mra'}, texture, Colour, function() end)
+        local before = copy(data, info.layer_bytes)
+        local spec = Albedo.spec('albedo', albedo, {}, data, Colour, function() end)
+        assert(spec.albedo and spec.bc1 == (format == 71) and spec.size == info.layer_bytes and spec.data == data,
+               'spec fields')
+        for i = 0, info.layer_bytes - 1 do assert(data[i] == before[i], 'byte ' .. i .. ' of format ' .. format) end
+    end
+end)
+
+check('albedo: a planned cluster takes its goal on every mip, the spread of its texels kept; other clusters and '
+      .. 'transparency stay', function()
+    local texture, data, info, kinds = hat_texture(71, false)
+    local albedo = Albedo.read({albedo = 'albedo', mra = 'mra'}, texture, Colour, function() end)
+    local before = copy(data, info.layer_bytes)
+    local goal = {L = 50, a = 35, b = 30} -- the plan's goal (a look) for the leather and its badge (one source color)
+    Albedo.spec('albedo', albedo, {[1] = goal, [3] = goal}, data, Colour, function() end)
+    goal = {} -- the albedo that looks like it (the study's typical response)
+    goal.L, goal.a, goal.b = Albedo.unlook(Colour, 50, 35, 30)
+    local out, was = ffi.new('uint8_t[64]'), ffi.new('uint8_t[64]')
+    local worst, sum, n, c = {leather = 0, band = 0}, {0, 0, 0}, 0, albedo.clusters[1].lab
+    for i = 0, 64 * 64 - 1 do
+        local o = info.mip_offsets[1] + i * 8
+        Albedo.color_block(data, o, out, true)
+        Albedo.color_block(before, o, was, true)
+        for t = 0, 15 do
+            assert((out[4 * t + 3] == 0) == (was[4 * t + 3] == 0), 'transparency kept: block ' .. i)
+            local L, A, B = Colour.srgb_to_lab(out[4 * t] / 255, out[4 * t + 1] / 255, out[4 * t + 2] / 255)
+            local L0, A0, B0 = Colour.srgb_to_lab(was[4 * t] / 255, was[4 * t + 1] / 255, was[4 * t + 2] / 255)
+            local kind = kinds[i]
+            if kind == 'leather' or kind == 'badge' then -- its offset from the goal is its offset from the cluster
+                local dL, da, db = (L - goal.L) - (L0 - c[1]), (A - goal.a) - (A0 - c[2]), (B - goal.b) - (B0 - c[3])
+                worst.leather = math.max(worst.leather, math.sqrt(dL * dL + da * da + db * db))
+                sum[1], sum[2], sum[3], n = sum[1] + L, sum[2] + A, sum[3] + B, n + 1
+            elseif kind == 'band' then
+                worst.band = math.max(worst.band, math.sqrt((L - L0) ^ 2 + (A - A0) ^ 2 + (B - B0) ^ 2))
+            end
+        end
+    end
+    local mean = math.sqrt((sum[1] / n - goal.L) ^ 2 + (sum[2] / n - goal.a) ^ 2 + (sum[3] / n - goal.b) ^ 2)
+    assert(mean < 2 and worst.leather < 5, string.format('leather at the goal (%.2f), its spread kept (%.2f)', mean,
+                                                        worst.leather))
+    assert(worst.band < 0.5, string.format('band unchanged: %.2f', worst.band))
+    for m = 2, 9 do -- the smaller mips (black, nearest the unplanned band) are kept
+        local o = info.mip_offsets[m]
+        assert(data[o] == before[o] and data[o + 2] == before[o + 2], 'mip ' .. m)
+    end
+    Albedo.color_block(data, info.mip_offsets[0], out, true) -- mip 0 (green, nearest the leather) moves with it
+    Albedo.color_block(before, info.mip_offsets[0], was, true)
+    assert(out[3] == 255 and (out[0] ~= was[0] or out[1] ~= was[1] or out[2] ~= was[2]), 'mip 0 rewritten too')
+end)
+
+check('albedo: a darkened cluster\'s parts keep their luminance ratio (a lightened one\'s keep their difference), and '
+      .. 'a goal under NEUTRAL_C passes no hue offsets', function()
+    local function lab_of(data, t) -- texel t of the block's decode
+        local out = ffi.new('uint8_t[64]')
+        Albedo.color_block(data, 0, out, true)
+        return Colour.srgb_to_lab(out[4 * t] / 255, out[4 * t + 1] / 255, out[4 * t + 2] / 255)
+    end
+    local function block_of(c0, c1)
+        local data = ffi.new('uint8_t[8]')
+        put_block(data, 0, c0, c1, 0x4) -- texel 0 c0, texel 1 c1
+        return data
+    end
+    local function one_cluster(L, a, b)
+        return {format = 71, width = 4, height = 4, mips = 1, total = 8,
+                clusters = {{share = 1, lab = {L, a, b}, lin = {Colour.lab_to_linear(L, a, b)}, metal = 0}}}
+    end
+    local function Y(L) return (Colour.lab_to_linear(L, 0, 0)) end
+    -- greys: the cluster is c1 (L 49), darkened to L 20; c0 (L 64) keeps its ratio: L 28, where a difference gives 35
+    local data = block_of(pack565(153, 153, 153), pack565(119, 119, 119))
+    local L0, L1 = lab_of(data, 0), lab_of(data, 1)
+    local base = Albedo.unlook(Colour, 20, 0, 0) -- the albedo that looks like the goal's L 20
+    local y = Y(base) * Y(L0) / Y(L1)
+    local want = Colour.linear_to_lab(y, y, y)
+    Albedo.spec('albedo', one_cluster(L1, 0, 0), {[1] = {L = 20, a = 0, b = 0}}, data, Colour, function() end)
+    local got = lab_of(data, 0)
+    assert(math.abs(got - want) < 1.5 and math.abs(got - (base + L0 - L1)) > 4, string.format(
+           'the lighter part darkened by the ratio: L %.1f, expected %.1f (a difference: %.1f)', got, want,
+           base + L0 - L1))
+    -- a reddish cluster (a 10) taking a near-neutral goal (a 3, under NEUTRAL_C): a redder part (a 40 more) gives no red
+    local function byte(x) return math.floor(Colour.linear_to_srgb(x) * 255 + 0.5) end
+    local function rgb565_of(L, a, b)
+        local r, g, bl = Colour.lab_to_linear(L, a, b)
+        return pack565(byte(r), byte(g), byte(bl))
+    end
+    data = block_of(rgb565_of(50, 50, 0), rgb565_of(50, 10, 0))
+    local _, a0 = lab_of(data, 0)
+    local cL, ca, cb = lab_of(data, 1)
+    Albedo.spec('albedo', one_cluster(cL, ca, cb), {[1] = {L = 50, a = 3, b = 0}}, data, Colour, function() end)
+    local _, a_got = lab_of(data, 0)
+    local _, a_goal = Albedo.unlook(Colour, 50, 3, 0)
+    local a_scaled = a_goal + (a0 - ca) * a_goal / ca
+    assert(math.abs(a_got - a_goal) < 2.5 and math.abs(a_scaled - a_goal) > 8, string.format(
+           'no hue offset toward a near-neutral goal: a %.1f, the goal\'s albedo a %.1f (scaled offsets: %.1f)',
+           a_got, a_goal, a_scaled))
+end)
+
+check('albedo: only a mod\'s material of the character template with a BC1 or BC3 power-of-two albedo is read',
+      function()
+    local describe = function(name)
+        if name == 'missing' then return nil end
+        if name == 'broken' then error('unsupported texture format 2', 0) end
+        if name == 'bc7' then return {format = 98, width = 512, height = 512} end
+        if name == 'odd' then return {format = 71, width = 500, height = 512} end
+        return {format = 71, width = 2048, height = 2048}
+    end
+    local mod, template = {file = '9ba626afa44a3aa3.patch_1'}, '7712ee7808e0ec50'
+    local slots = function(albedo) return {[Albedo.SLOT_ALBEDO] = albedo, [Albedo.SLOT_MRA] = 'mra'} end
+    local e = Albedo.eligible(mod, template, slots('hat'), describe)
+    assert(e and e.albedo == 'hat' and e.mra == 'mra', 'the hat')
+    local function refused(record, parent, textures, why)
+        local ok, reason = Albedo.eligible(record, parent, textures, describe)
+        assert(ok == nil and reason:find(why, 1, true), why .. ': ' .. tostring(reason))
+    end
+    refused({}, template, slots('hat'), 'not a mod')
+    refused(mod, 'ffffffffffffffff', slots('hat'), 'shader template')
+    refused(mod, template, {}, 'no albedo')
+    refused(mod, template, slots('missing'), 'not found')
+    refused(mod, template, slots('broken'), 'unsupported texture format 2')
+    refused(mod, template, slots('bc7'), 'albedo format 98')
+    refused(mod, template, slots('odd'), 'albedo size 500 x 512')
+end)
+
+check('albedo: a target\'s planned albedos become specs and one log line; a changed texture refuses', function()
+    local texture, data, info = hat_texture(71)
+    local albedo = Albedo.read({albedo = 'albedo', mra = 'mra'}, texture, Colour, function() end)
+    local name = 'aaaaaaaaaaaaaaaa'
+    local target = {albedos = {[name] = albedo}, kit = {archive = 'patch'}}
+    local function chain(n, archive)
+        assert(n == name and archive == 'patch')
+        return copy(data, info.layer_bytes), info
+    end
+    local out = {}
+    local line = Albedo.plan_specs(target, {[name .. ':0'] = {L = 50, a = 10, b = 10}}, out, chain, Colour,
+                                   function() end)
+    assert(out[name] and out[name].albedo and out[name].bc1 and out[name].width == 512 and out[name].mips == 10,
+           'a spec for the planned albedo')
+    assert(line == 'Mod texture ' .. name .. ' (a material without a color table): 3 colors read (67%, 27%, 7% metal); '
+           .. '1 recolored.', line)
+    out = {}
+    line = Albedo.plan_specs(target, {}, out, chain, Colour, function() end)
+    assert(next(out) == nil and line:find('0 recolored', 1, true), 'nothing planned: no texture made')
+    local wrong = function() local i = {} for k, v in pairs(info) do i[k] = v end i.format = 77 return data, i end
+    assert(not pcall(Albedo.plan_specs, target, {[name .. ':1'] = {L = 5, a = 0, b = 0}}, {}, wrong, Colour,
+                     function() end), 'a texture other than the one analysed refuses')
 end)
 
 print('PASS test_units (' .. passed .. ' checks)')

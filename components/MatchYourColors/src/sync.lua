@@ -260,12 +260,13 @@ function Sync.session(deps)
             local own = id ~= nil and id == l.id
             if own and read.text(read.u64(key_at + 8)) then l.own = key_at end
             if low and (include_local or not own) then
-                local value_at = api.property(l.handle, key_at)
+                local value_at, result = api.property(l.handle, key_at)
                 local n = #list + 1
                 local r = records[n] or {}
                 records[n] = r
                 r.peer_low, r.peer_high, r['local'] = low, high, own
                 r.text = value_at and read.text(value_at) or nil
+                r.failed = result ~= nil and result ~= 0 -- a failed read, not a missing value (src/remote.lua update)
                 list[n] = r
             end
         end

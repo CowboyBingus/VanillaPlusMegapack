@@ -14,11 +14,14 @@ package.path = root .. '/src/?.lua;' .. package.path
 local ffi = require('ffi')
 local Files, Slim, Texture = require('files'), require('slim'), require('texture')
 local Colour, Matcher, Kits, Recolor = require('colour'), require('matcher'), require('kits'), require('recolor')
+require('sheets').attach(Recolor)
 local Cache, Transfer, Patches, Schemes = require('cache'), require('transfer'), require('patches'), require('schemes')
 local Capes = require('capes')
 local appearance = require('appearance').new(require('appearance_data'))
 local Fake = dofile(root .. '/tests/fake_game.lua')
 Matcher.use(Colour)
+require('zones').attach(Matcher, Colour)
+require('variety').attach(Matcher, Colour)
 local game_root = os.getenv('HD2_GAME_ROOT') or 'C:/Program Files (x86)/Steam/steamapps/common/Helldivers 2'
 local probe = io.open(game_root .. '/data/bundles.nxa', 'rb')
 if not probe then
@@ -209,6 +212,32 @@ for _, kit in ipairs(fresh_capes) do chosen[#chosen + 1] = kit end
 assert(#fresh_capes == 4 and #chosen == 60 and cover and united and drape and emblem_cape and hooves and black_cape and red_cape
        and yellow_cape and red_planet and vision and triangulation and navy_cape and hem_cape and sleeve_cape
        and safe_distance, 'fixture kits')
+-- The v1.5 tickets' kits (user reports 2026-10-14), added by id: the B-22 Model Citizen helmet under the Eye of Liberty
+-- (Match Materials: "only the color gets translated"); the default black cape Foesmasher on the B-01 Tactical and the
+-- DS-42 Federation's Blade ("black in the default capes is grey when applied to armour").
+local B22_HELMET, EYE_OF_LIBERTY = 'ec49526f', '1b03e942'
+local FOESMASHER, DS42_ARMOR = '4657cfb3', '4a545f06'
+-- the CE-74 Breaker helmet (tan): the skin-tone clothing check's helmet since v1.5 (with the CPR-80 Bulwark the PH-9
+-- Predator's camo shirt now takes an olive drab of the Bulwark's yellow, its own olive within a hair)
+local BREAKER = 'ee2e8ce0'
+-- Diagram of the Noblest Payload: a cape whose emblem row is hard bare metal (no part takes it as metal), and the FS-55
+-- Devastator that would have (the mutation audit, 2026-10-14)
+local DIAGRAM, DEVASTATOR = 'a7945016', 'd3461392'
+local V15_KITS = {B22_HELMET, EYE_OF_LIBERTY, FOESMASHER, DS42_ARMOR, BREAKER, DIAGRAM, DEVASTATOR}
+do
+    local wanted, have = {}, {}
+    for _, id in ipairs(V15_KITS) do wanted[id] = true end
+    for _, kit in ipairs(chosen) do have[kit.id] = true end
+    for _, list in ipairs({KITS, CAPES}) do
+        for _, kit in ipairs(list) do
+            if wanted[kit.id] then
+                if not have[kit.id] then chosen[#chosen + 1], have[kit.id] = kit, true end
+                wanted[kit.id] = nil
+            end
+        end
+    end
+    assert(next(wanted) == nil, 'v1.5 fixture kits: ' .. tostring(next(wanted)))
+end
 local space = Fake.world({players = 0})
 catalogue(space, chosen)
 local memory = Fake.memory(space)
@@ -227,6 +256,7 @@ local function clear_patches()
 end
 clear_patches()
 local deps = {Files = Files, Slim = Slim, Patches = Patches, Texture = Texture, Colour = Colour, Transfer = Transfer,
+              Albedo = require('albedo'),
               Matcher = Matcher, Kits = Kits, Schemes = Schemes, Capes = Capes, memory = memory, game = Fake.GAME,
               data_folder = game_root .. '/data/', patch_folder = PATCHES, Cache = Cache, cache_path = CACHE,
               build = {exe_sha256 = 'TEST-EXE', game_sha256 = 'TEST-GAME'}, Appearance = appearance,
@@ -666,7 +696,7 @@ check('Helmet and Armor Match Cape (user request 2026-10-09): both items take th
     local cape, armor, helmet = analysis_of(p, COVER_OF_DARKNESS), analysis_of(p, ARMOR), analysis_of(p, HELMET)
     -- the cape as a source: its dark grey outside (54%), red lining (35%), grey sash (11%) and beige trim
     local s = Matcher.item(Capes.source_rows(cape, Colour), false, Capes.emblem_patterns(cape, Colour),
-                           Recolor.look_of(cape, appearance))
+                           Recolor.source_look_of(cape, appearance))
     s.part_guard, s.cape_source = Capes.dark_parts_guard, true -- as the job's (src/recolor.lua source_item)
     local GREY, RED, SASH = cover.pieces[1].lut .. ':0', cover.pieces[1].lut .. ':4', cover.pieces[1].lut .. ':3'
     assert(s.groups[1].rep.key == GREY and s.groups[2].rep.key == RED and s.groups[3].rep.key == SASH, 'the cape\'s colors')
@@ -744,7 +774,7 @@ check('Helmet and Armor Match Cape: the Drape of Glory\'s emblem (a dark grey sh
            and share > 0 and share < 0.2, 'its emblem, share ' .. share)
     local L = Colour.srgb_to_lab(patterns[1].r, patterns[1].g, patterns[1].b)
     assert(math.abs(L - e.L) < 0.5, 'its own color: L ' .. L .. ', emblem ' .. e.L)
-    local s = Matcher.item(Capes.source_rows(cape, Colour), false, patterns, Recolor.look_of(cape, appearance))
+    local s = Matcher.item(Capes.source_rows(cape, Colour), false, patterns, Recolor.source_look_of(cape, appearance))
     assert(s.patterns[1] and math.abs(s.patterns[1].share - share) < 1e-12, 'a color of the cape item')
     assert(p.save(), 'saved')
     p.close()
@@ -831,7 +861,7 @@ check('Helmet and Armor Match Cape on a near one-color item (the B-01 Tactical, 
     local p = holder.pipeline
     local cape = analysis_of(p, HOOVES)
     local s = Matcher.item(Capes.source_rows(cape, Colour), false, Capes.emblem_patterns(cape, Colour),
-                           Recolor.look_of(cape, appearance))
+                           Recolor.source_look_of(cape, appearance))
     s.part_guard, s.cape_source = Capes.dark_parts_guard, true
     local function plan_of(id)
         local a = analysis_of(p, id)
@@ -896,7 +926,7 @@ check('Helmet and Armor Match Cape: a cape of black and one vivid color (0beb97b
     local p = holder.pipeline
     local cape, a = analysis_of(p, RED_CAPE), analysis_of(p, SET_ARMOR)
     local s = Matcher.item(Capes.source_rows(cape, Colour), false, Capes.emblem_patterns(cape, Colour),
-                           Recolor.look_of(cape, appearance))
+                           Recolor.source_look_of(cape, appearance))
     s.part_guard, s.cape_source = Capes.dark_parts_guard, true
     local BLACK, RED = s.groups[1].rep.key, s.groups[2].rep.key
     assert(#s.groups == 2 and s.groups[2].a > 25, 'the cape: black, then red')
@@ -917,22 +947,39 @@ check('Helmet and Armor Match Cape: a cape of black and one vivid color (0beb97b
     local o = 2 * spec.width * 4
     local _, ra, rb = Colour.srgb_to_lab(spec.data[o], spec.data[o + 1], spec.data[o + 2])
     assert(ra > 20 and ra > rb, string.format('the plates red: a %.1f b %.1f', ra, rb))
-    s.cape_source = nil -- the same colors from a helmet or armor: a vivid minority, guarded off the plates
-    assert(Schemes.plan(Matcher, nil, t, s, false, false)['4de1865b60971124:2'].source == BLACK, 'guarded without a cape')
+    -- the same colors from a helmet or armor: a vivid color of 10% or more (21% here) is no minority, its plates red
+    -- too (the user's version comparisons 2026-10-15: the FS-05 Marksman's red never reached the Ravager)
+    s.cape_source = nil
+    assert(Schemes.plan(Matcher, nil, t, s, false, false)['4de1865b60971124:2'].source == RED, 'red without a cape too')
     p.close()
 end)
 
 check('a near-neutral goal fitted through a measured response cancels the row\'s own cast: the B-24 Enforcer\'s coat '
       .. '(response R 1.08, B 0.87) under the black cape d79370cb gets a cool paint, no more saturated than its goal '
       .. '(gallery 2026-10-11: the coat rust brown, L 40 a 6.7 b 10.4, its goal L 33.6 a 2.2 b 3.2)', function()
+    -- the neutral goal as v1.4 planned it: without src/variety.lua's balance (v1.5 gives the coat a secondary, below)
+    local balance = Matcher.balance
+    Matcher.balance = nil
     holder = {}
-    local result = run({mode = Recolor.CAPE_SOURCE, keep_sets = true, helmet = 0xa5574ac2, armor = tonumber(ENFORCER, 16),
-                        body = 0, cape = tonumber(YELLOW_CAPE, 16)})
+    local request = {mode = Recolor.CAPE_SOURCE, keep_sets = true, helmet = 0xa5574ac2, armor = tonumber(ENFORCER, 16),
+                     body = 0, cape = tonumber(YELLOW_CAPE, 16)}
+    local result = run(request)
+    Matcher.balance = balance
     assert(result.action == 'apply', 'the Enforcer under the cape')
     local spec = assert(result.luts['98ce638cf129b632'], 'the coat\'s LUT')
     local L, a, b = Colour.srgb_to_lab(spec.data[0], spec.data[1], spec.data[2])
     assert(L > 20 and L < 35 and b < -1 and math.sqrt(a * a + b * b) < 4.5,
            string.format('the coat a cool dark paint against its warm response: L %.1f a %.1f b %.1f', L, a, b))
+    holder.pipeline.close()
+    -- v1.5: the cape has no secondary of its own (its grey is 2% of it, its yellow vivid), so src/variety.lua leaves the
+    -- plan as made: the coat the same cool dark paint. A drab of the yellow read olive, a color the cape does not have
+    -- (independent review 1 2026-10-14; the user: the published look was better than a shade "from nowhere")
+    holder = {}
+    result = run(request)
+    spec = assert(result.luts['98ce638cf129b632'], 'the coat\'s LUT')
+    local L1, a1, b1 = Colour.srgb_to_lab(spec.data[0], spec.data[1], spec.data[2])
+    assert(math.abs(L1 - L) < 0.01 and math.abs(a1 - a) < 0.01 and math.abs(b1 - b) < 0.01, string.format(
+           'the coat as made: L %.1f a %.1f b %.1f (without the rule L %.1f a %.1f b %.1f)', L1, a1, b1, L, a, b))
     holder.pipeline.close()
 end)
 
@@ -953,15 +1000,225 @@ check('a bare-metal part the fit darkens keeps a paint of L 45 or more: the CPR-
     holder.pipeline.close()
 end)
 
--- A cape source item and a target's plan against it, as the job makes them.
+check('Helmet and Armor Match Cape keeps a one-color item\'s chrome with Match Materials off: the B-22 Model Citizen '
+      .. 'helmet (chrome 89%) under the Eye of Liberty is a dark chrome; with the option on it is the cape\'s gold metal '
+      .. '(user report 2026-10-14, "only the color gets translated": v1.4 made it matte cloth either way; independent '
+      .. 'review 1: it went flat grey, the user chose "hard parts gold metal")', function()
+    for _, materials in ipairs({false, true}) do
+        holder = {}
+        local result = run({mode = Recolor.CAPE_SOURCE, keep_sets = true, materials = materials,
+                            helmet = tonumber(B22_HELMET, 16), armor = tonumber(ARMOR, 16), body = 0,
+                            cape = tonumber(EYE_OF_LIBERTY, 16)})
+        assert(result.action == 'apply', 'the B-22 helmet under the Eye of Liberty')
+        local spec = assert(result.luts['7d27f46409a3e60c'], 'the chrome\'s LUT')
+        for _, r in ipairs({0, 2, 3}) do
+            local o = r * spec.width * 4
+            local metallic, roughness = spec.data[o + 27], spec.data[o + 40] -- columns 6 w and 10 x
+            local _, a, b = Colour.srgb_to_lab(spec.data[o], spec.data[o + 1], spec.data[o + 2])
+            local gold = b > 15 and math.abs(a) < 8 -- the Eye of Liberty's gold (b 30), not its black
+            local ok = metallic > 0.9 and roughness < 0.2 and (materials == gold)
+            assert(ok, string.format('materials %s: chrome row %d metallic %.2f roughness %.2f, paint a %.1f b %.1f',
+                                     tostring(materials), r, metallic, roughness, a, b))
+        end
+        holder.pipeline.close()
+    end
+end)
+
+-- A cape source item and a target's plan against it, as the job makes them (and the target item).
 local function cape_plan(p, cape_id, target_id)
     local cape, a = analysis_of(p, cape_id), analysis_of(p, target_id)
     local s = Matcher.item(Capes.source_rows(cape, Colour), false, Capes.emblem_patterns(cape, Colour),
-                           Recolor.look_of(cape, appearance))
+                           Recolor.source_look_of(cape, appearance))
     s.part_guard, s.cape_source = Capes.dark_parts_guard, true
     local t = Matcher.item(a.rows, a.kit.kit_type == 'Armor', Recolor.patterns_of(a), Recolor.look_of(a, appearance))
-    return Schemes.plan(Matcher, nil, t, s, false, false), s
+    return Schemes.plan(Matcher, nil, t, s, false, false), s, t
 end
+
+check('Helmet and Armor Match Cape under a default black cape: armors take the black as the cape shows it, not its '
+      .. 'lighter model color (user report 2026-10-14: "black in the default capes is grey when applied to armour"): '
+      .. 'Foesmasher\'s black is a look of L 21.5-24 (model 25.3), the B-01 Tactical\'s parts are no lighter on '
+      .. 'average than their own black, the DS-42 Federation\'s Blade\'s white plates turn a matte dark', function()
+    local function paint_L(values, width, r)
+        local o = r * width * 4
+        return (Colour.srgb_to_lab(values[o], values[o + 1], values[o + 2]))
+    end
+    holder = {}
+    local result = run({mode = Recolor.CAPE_SOURCE, keep_sets = true, helmet = tonumber(B01_HELMET, 16),
+                        armor = tonumber(B01_ARMOR, 16), body = 0, cape = tonumber(FOESMASHER, 16)})
+    assert(result.action == 'apply', 'the B-01 under Foesmasher')
+    local plan, s, t = cape_plan(holder.pipeline, FOESMASHER, B01_ARMOR)
+    local id = Matcher.identity(s)
+    assert(id.gL and id.gL > 21.5 and id.gL < 24 and id.mL > 25, string.format('the cape\'s black: look %s, model %.1f',
+           tostring(id.gL), id.mL))
+    assert(id.ga == id.ma and id.gb == id.mb, 'a neutral black keeps its model hue (its sheen gave its look a warm cast)')
+    -- the B-01 is of one color: the cape split (src/schemes.lua) paints its rows, each through its own response
+    local cal_of, split = {}, 0
+    for _, row in ipairs(t.rows) do cal_of[row.key] = row.cal end
+    for key, goal in pairs(plan) do
+        if goal.all and cal_of[key] then
+            assert(goal.cal, key .. ': a cape split row fits through its own response')
+            split = split + 1
+        end
+    end
+    assert(split > 0, 'cape split rows with a measured response')
+    local a = analysis_of(holder.pipeline, B01_ARMOR)
+    local before, after, n = 0, 0, 0
+    for key, goal in pairs(plan) do
+        local lut, r = key:match('^(%x+):(%d+)$')
+        local spec, own = result.luts[lut], a.luts[lut]
+        if goal.tone == 'accent' then -- v1.5: its trims an accent (src/variety.lua), a grey on the black
+            assert(goal.L > 35, string.format('%s, the accent, aims at L %.1f', key, goal.L))
+        elseif goal.tone then -- v1.5: the armor's secondary (src/variety.lua), a charcoal that still reads black
+            assert(goal.L < 36, string.format('%s, the %s tone, aims at L %.1f', key, goal.tone, goal.L))
+        elseif goal.source == id.rep.key and spec and own and own.values then
+            assert(goal.L < id.gL + 2.5, string.format('%s aims at L %.1f, the cape %.1f', key, goal.L, id.gL))
+            local was = paint_L(own.values, own.width, tonumber(r))
+            if was < 35 then -- its own black parts
+                before, after, n = before + was, after + paint_L(spec.data, spec.width, tonumber(r)), n + 1
+            end
+        end
+    end
+    assert(n >= 3 and after / n <= before / n + 1.5, string.format('%d black rows: paint L %.1f, their own %.1f', n,
+           after / n, before / n))
+    holder.pipeline.close()
+    holder = {}
+    result = run({mode = Recolor.CAPE_SOURCE, keep_sets = true, helmet = tonumber(B01_HELMET, 16),
+                  armor = tonumber(DS42_ARMOR, 16), body = 0, cape = tonumber(FOESMASHER, 16)})
+    assert(result.action == 'apply', 'the DS-42 under Foesmasher')
+    local spec = assert(result.luts['6d92b667d2e73b77'], 'the DS-42\'s plates')
+    local L = paint_L(spec.data, spec.width, 0)
+    assert(L < 32 and spec.data[40] >= 0.67, string.format('its white plates a matte dark: L %.1f roughness %.2f', L,
+           spec.data[40]))
+    -- its glossy plates (row 1, roughness 0.40) take the game's dark paint's roughness from the cape's cloth
+    local rough = spec.data[spec.width * 4 + 40]
+    assert(math.abs(rough - Transfer.DARK_ROUGH) < 1e-6, string.format('glossy plates under the cloth: roughness %.3f',
+           rough))
+    holder.pipeline.close()
+end)
+
+check('Match Materials carries a helmet\'s bare metal onto an armor\'s hard paint (user report 2026-10-14: the B-22 '
+      .. 'Model Citizen\'s chrome, "only the color gets translated"): each such row of the FS-37 Ravager is one coat of '
+      .. 'the chrome\'s paint with its finish, fitted without a response or floor; off, none', function()
+    for _, materials in ipairs({false, true}) do
+        holder = {}
+        local result = run({mode = Recolor.ARMOR_FROM_HELMET, keep_sets = true, materials = materials,
+                            helmet = tonumber(B22_HELMET, 16), armor = tonumber(SET_ARMOR, 16), body = 0})
+        assert(result.action == 'apply', 'the FS-37 Ravager from the B-22')
+        local p = holder.pipeline
+        local h, a = analysis_of(p, B22_HELMET), analysis_of(p, SET_ARMOR)
+        local t = Matcher.item(a.rows, true, Recolor.patterns_of(a), Recolor.look_of(a, appearance))
+        local s = Matcher.item(h.rows, false, Recolor.patterns_of(h), Recolor.look_of(h, appearance))
+        local transfer = Transfer.new(Colour, (p.model())) -- the job's pauses inside a fit: none here
+        local coats = 0
+        for key, goal in pairs(Matcher.plan(t, s, materials)) do
+            if goal.coat then
+                local lut, r = key:match('^(%x+):(%d+)$')
+                r = tonumber(r)
+                local own, spec = a.luts[lut], assert(result.luts[lut], key .. ': its LUT built')
+                local data = ffi.new('float[?]', own.width * own.height * 4)
+                ffi.copy(data, own.values, own.width * own.height * 16)
+                Recolor.apply_finish(data, own.width, r, h, goal.finish)
+                local c = Colour.row_values(data, own.width, r)
+                transfer.fit(c, goal.L, goal.a, goal.b, nil, nil, 'metal')
+                local base = r * own.width * 4
+                for _, column in ipairs(Transfer.COLUMNS) do
+                    for ch = 0, 2 do
+                        local got, want = spec.data[base + column * 4 + ch], c[column * 4 + ch + 1]
+                        assert(math.abs(got - want) < 1e-5, string.format('%s column %d: %.6f, one coat %.6f', key,
+                               column, got, want))
+                    end
+                end
+                assert(spec.data[base + 27] > 0.5, key .. ': metal')
+                coats = coats + 1
+            end
+        end
+        assert(materials == (coats > 0), string.format('Match Materials %s: %d rows turned metal', tostring(materials),
+               coats))
+        p.close()
+    end
+end)
+
+check('a cape\'s metallic rows give their metal too (live 2026-10-14: the Eye of Liberty\'s gold went flat pale yellow '
+      .. 'with its metallic zeroed): with Match Materials the FS-55 Devastator\'s hard paint turns into the metal of '
+      .. 'Diagram of the Noblest Payload (a hard metal row) and of the Eye of Liberty (cloth-mode metal rows), each such '
+      .. 'row built metal; its clothing never; with Match Materials off, none', function()
+    for _, cape_id in ipairs({DIAGRAM, EYE_OF_LIBERTY}) do
+        for _, materials in ipairs({false, true}) do
+            holder = {}
+            local result = run({mode = Recolor.CAPE_SOURCE, keep_sets = true, materials = materials, helmet = 0xa5574ac2,
+                                armor = tonumber(DEVASTATOR, 16), body = 0, cape = tonumber(cape_id, 16)})
+            assert(result.action == 'apply', 'the outfit under the cape')
+            local p = holder.pipeline
+            local cape = analysis_of(p, cape_id)
+            local s = Matcher.item(Capes.source_rows(cape, Colour), false, Capes.emblem_patterns(cape, Colour),
+                                   Recolor.source_look_of(cape, appearance))
+            s.part_guard, s.cape_source = Capes.dark_parts_guard, true
+            local a = analysis_of(p, DEVASTATOR)
+            local t = Matcher.item(a.rows, true, Recolor.patterns_of(a), Recolor.look_of(a, appearance))
+            local mode_of, coats = {}, 0
+            for _, row in ipairs(t.rows) do mode_of[row.key] = row.mode end
+            for key, goal in pairs(Schemes.plan(Matcher, nil, t, s, materials, false)) do
+                if goal.coat then
+                    assert(mode_of[key] == 0, key .. ': only hard paint turns into metal')
+                    local lut, r = key:match('^(%x+):(%d+)$')
+                    local spec = assert(result.luts[lut], key .. ': its LUT built')
+                    assert(spec.data[(tonumber(r) * spec.width + 6) * 4 + 3] > 0.5, key .. ': built metal')
+                    coats = coats + 1
+                end
+            end
+            assert(materials == (coats > 0), string.format('%s, Match Materials %s: %d rows turned metal', cape_id,
+                                                           tostring(materials), coats))
+            p.close()
+        end
+    end
+end)
+
+-- Independent review 1 2026-10-14 (cases 4, 5): under the Eye of Liberty with Match Materials the gold went to clothing
+-- as a pale yellow paint and no hard part showed gold; the user chose "hard parts gold metal" (src/schemes.lua
+-- metal_second).
+check('Helmet and Armor Match Cape with Match Materials, a cape whose second color is metal (the Eye of Liberty\'s '
+      .. 'gold): the FS-55 Devastator\'s hard paint takes it as gold metal on most of its area, its clothing the '
+      .. 'cape\'s black; with the option off its hard parts stay black', function()
+    for _, materials in ipairs({true, false}) do
+        holder = {}
+        local result = run({mode = Recolor.CAPE_SOURCE, keep_sets = true, materials = materials, helmet = 0xa5574ac2,
+                            armor = tonumber(DEVASTATOR, 16), body = 0, cape = tonumber(EYE_OF_LIBERTY, 16)})
+        assert(result.action == 'apply', 'the Devastator under the Eye of Liberty')
+        local a = analysis_of(holder.pipeline, DEVASTATOR)
+        local hard, gold, clothing, dark = 0.0, 0.0, 0.0, 0.0
+        for _, row in ipairs(a.rows) do
+            local spec = result.luts[row.lut]
+            if spec and row.area > 0 then
+                local o = row.row * spec.width * 4
+                local L, _, b = Colour.srgb_to_lab(spec.data[o], spec.data[o + 1], spec.data[o + 2])
+                if row.mode < 0.5 and row.under < 0.5 * row.area then
+                    hard = hard + row.area
+                    if spec.data[o + 27] > 0.9 and b > 15 then gold = gold + row.area end
+                elseif row.mode >= 0.5 and row.under >= 0.5 * row.area then
+                    clothing = clothing + row.area
+                    if L < 30 then dark = dark + row.area end
+                end
+            end
+        end
+        if materials then
+            assert(gold >= 0.6 * hard, string.format('hard paint gold metal: %.2f of %.2f', gold, hard))
+            assert(dark >= 0.8 * clothing, string.format('clothing the cape\'s black: %.2f of %.2f', dark, clothing))
+        else
+            assert(gold < 0.1 * hard, string.format('option off: hard paint not gold metal: %.2f of %.2f', gold, hard))
+        end
+        -- its helmet, the CPR-80 Bulwark (steel 79%, under the cape split's 80%), gilded too with the option on:
+        -- review round 4 found it the cape's black beside the gilded armor (src/schemes.lua Schemes.metal_second)
+        local steel = assert(result.luts['962a946e964ebc40'], 'the Bulwark\'s LUT')
+        for _, r in ipairs({0, 1}) do
+            local o = r * steel.width * 4
+            local _, _, b = Colour.srgb_to_lab(steel.data[o], steel.data[o + 1], steel.data[o + 2])
+            local is_gold = steel.data[o + 27] > 0.9 and b > 15
+            assert(is_gold == materials, string.format('materials %s: the helmet\'s steel row %d metallic %.2f b %.1f',
+                                                       tostring(materials), r, steel.data[o + 27], b))
+        end
+        holder.pipeline.close()
+    end
+end)
 
 check('Helmet and Armor Match Cape takes the cape\'s outside as its main color, not its lining: the O-3 Free Spirit '
       .. 'under Vision of Freedom (black outside, a grey lining of 49%) is dark, not grey (independent review '
@@ -1065,11 +1322,13 @@ check('Helmet and Armor Match Cape, the fresh gallery\'s failures (independent r
            .. tostring(grey and grey.source))
     assert(plan['17b654674e01e40e:1'].L < 35, 'the black main stays dark')
     holder.pipeline.close()
-    -- 80: the IE-3 Martyr's olive undersuit takes Federation's Embrace's blue (it kept its olive)
+    -- 80: the IE-3 Martyr's olive undersuit takes Federation's Embrace's blue (it kept its olive), never its own olive.
+    -- v1.5: the cape has no secondary of its own (its gold, 8%, reaches the trims), so the plan stays as made; a drab of
+    -- the gold read as a brown jumpsuit (independent review 1 2026-10-14; the user: no shade "from nowhere")
     plan = cape_case(FEDERATION, 'a5574ac2', MARTYR, MARTYR)
     local suit = plan['4d166892662fc759:3']
-    assert(suit and suit.source == '6c03ec08eb2dd96a:0' and suit.b < -12, 'the undersuit the blue: '
-           .. tostring(suit and suit.source))
+    assert(suit and suit.source == '6c03ec08eb2dd96a:0' and not suit.tone and suit.b < -5, 'the undersuit the cape\'s '
+           .. 'blue: ' .. tostring(suit and suit.source) .. string.format(' b %.1f', suit and suit.b or 0))
     holder.pipeline.close()
 end)
 
@@ -1135,7 +1394,11 @@ check('Armor Matches Helmet: only a colored goal and a paint of some color count
     spec = assert(result.luts['8ed9462dadec63ff'], 'the Scorpion\'s LUT')
     local o = 6 * spec.width * 4
     L, a, b = Colour.srgb_to_lab(spec.data[o], spec.data[o + 1], spec.data[o + 2])
-    assert(L < 3, string.format('a paint of no color keeps its response\'s: L %.1f a %.1f b %.1f', L, a, b))
+    -- v1.5: the fit no longer runs it to black (L 0.6) but keeps the game's darkest paint of its kind
+    -- (Transfer.CLOTH_PAINT_MIN_L / GLOSSY_PAINT_MIN_L, its own when darker), in the tan's hue: no turn either
+    local hue = math.deg(math.atan2(b, a))
+    assert(L >= 12 and L < 25 and hue > 40 and hue < 100, string.format(
+           'a paint at the floor in the goal\'s hue keeps its response\'s: L %.1f a %.1f b %.1f', L, a, b))
     holder.pipeline.close()
 end)
 
@@ -1489,25 +1752,34 @@ check('the SEAF scheme (user request 2026-10-09): the SEAF troopers\' uniform LU
     assert(differ > 0, 'the job uses the material roles')
 end)
 
--- A patch file (classic archive) in PATCHES holding one texture: main and GPU parts as Lua strings.
+-- A patch file (classic archive) in PATCHES holding resources ({name, type, main, gpu, stream} as Lua strings; gpu
+-- and stream may be absent), each part after the previous resource's in its file.
 local function le32(v) return string.char(v % 256, math.floor(v / 256) % 256, math.floor(v / 65536) % 256,
                                           math.floor(v / 16777216) % 256) end
 local function le64(hex) return le32(tonumber(hex:sub(9, 16), 16)) .. le32(tonumber(hex:sub(1, 8), 16)) end
-local function write_texture_patch(file, name, main, gpu, stream)
-    stream = stream or ''
-    local base = 72 + 32
-    local toc = le64(name) .. le64(Kits.TYPE_TEXTURE) .. le32(base + 80) .. le32(0) .. string.rep('\0', 8)
-        .. string.rep('\0', 8) .. string.rep('\0', 16) .. le32(#main) .. le32(#stream) .. le32(#gpu)
-        .. string.rep('\0', 12)
+local function write_patch(file, resources)
+    local main_at, stream_at, gpu_at = 72 + 32 + 80 * #resources, 0, 0
+    local toc, mains, streams, gpus = {}, {}, {}, {}
+    for i, r in ipairs(resources) do
+        local stream, gpu = r.stream or '', r.gpu or ''
+        toc[i] = le64(r.name) .. le64(r.type) .. le32(main_at) .. le32(0) .. le32(stream_at) .. le32(0) .. le32(gpu_at)
+            .. le32(0) .. string.rep('\0', 16) .. le32(#r.main) .. le32(#stream) .. le32(#gpu) .. string.rep('\0', 12)
+        mains[i], streams[i], gpus[i] = r.main, stream, gpu
+        main_at, stream_at, gpu_at = main_at + #r.main, stream_at + #stream, gpu_at + #gpu
+    end
     local out = assert(io.open(PATCHES .. file, 'wb'))
-    out:write(le32(0xF0000011), le32(1), le32(1), string.rep('\0', 60), string.rep('\0', 32), toc, main)
+    out:write(le32(0xF0000011), le32(1), le32(#resources), string.rep('\0', 60), string.rep('\0', 32),
+              table.concat(toc), table.concat(mains))
     out:close()
     out = assert(io.open(PATCHES .. file .. '.gpu_resources', 'wb'))
-    out:write(gpu)
+    out:write(table.concat(gpus))
     out:close()
     out = assert(io.open(PATCHES .. file .. '.stream', 'wb'))
-    out:write(stream)
+    out:write(table.concat(streams))
     out:close()
+end
+local function write_texture_patch(file, name, main, gpu, stream)
+    write_patch(file, {{name = name, type = Kits.TYPE_TEXTURE, main = main, gpu = gpu, stream = stream}})
 end
 
 check('a mod\'s LUT patch is read instead of the archived LUT and keys the cache apart (user report 2026-10-06)',
@@ -1739,6 +2011,203 @@ check('another mod\'s patch to an armor\'s geometry keeps the rows no kit shows 
         end
     end
     assert(analysis_of(holder.pipeline, GROUND_BREAKER).geometry_patched, 'the mask from the patch: geometry patched')
+    holder.pipeline.close()
+    clear_patches()
+    os.remove(deps.cache_path)
+    deps.cache_path = CACHE
+end)
+
+-- v1.5 (end user 2026-10-14: the Cowboy Hat mod "doesn't work"): a mod that gives a helmet a material without a color
+-- table, its colors in its albedo (src/albedo.lua). The test writes its own such mod, never a third-party file: the
+-- CPR-80 Bulwark helmet's units with every material replaced by one material of the character template whose albedo
+-- (256 x 256 BC1, 9 mips) holds leather, a dark band, a silver badge that is metal (the mra's red) and a transparent
+-- brim.
+local HAT_MATERIAL, HAT_ALBEDO, HAT_MRA = 'ab5e000000000001', 'ab5e000000000002', 'ab5e000000000003'
+local function hat_mod(albedo_format)
+    local u8 = ffi.new('uint8_t[?]', 8)
+    local function block(c0, c1, idx)
+        u8[0], u8[1], u8[2], u8[3] = c0 % 256, math.floor(c0 / 256), c1 % 256, math.floor(c1 / 256)
+        for k = 0, 3 do u8[4 + k] = math.floor(idx / 256 ^ k) % 256 end
+        return ffi.string(u8, 8)
+    end
+    local function rgb565(r, g, b)
+        return math.floor(r * 31 / 255 + 0.5) * 2048 + math.floor(g * 63 / 255 + 0.5) * 32 + math.floor(b * 31 / 255 + 0.5)
+    end
+    local leather, band, badge = rgb565(104, 72, 40), rgb565(30, 30, 35), rgb565(160, 160, 165)
+    local albedo, mra, seed = {}, {}, 7
+    for m = 0, 8 do
+        local side = math.max(1, 64 / 2 ^ m)
+        for i = 0, side * side - 1 do
+            local row = math.floor(i / side) * 64 / side -- mip 0's block row
+            seed = (seed * 16807) % 2147483647
+            local idx = seed % 4294967296
+            local c, metal = leather, m == 0 and row >= 56 and row < 60
+            if m == 0 and row >= 40 and row < 56 then c = band end
+            if metal then c = badge end
+            if m == 0 and row >= 60 then
+                albedo[#albedo + 1] = block(0, 0xFFFF, 0xFFFFFFFF) -- 3-color, transparent
+            else
+                albedo[#albedo + 1] = block(c, c - 32, idx) -- 4-color, one green step apart
+            end
+            mra[#mra + 1] = string.rep('\0', 8) .. block(metal and 0xF800 or 0, metal and 0xF800 or 0, 0)
+        end
+    end
+    local function dds(format, mips)
+        local head = ffi.new('uint8_t[?]', 0xC0 + 148)
+        local function put(at, v) for k = 0, 3 do head[at + k] = math.floor(v / 256 ^ k) % 256 end end
+        put(0xC0, 0x20534444) put(0xC0 + 12, 256) put(0xC0 + 16, 256) put(0xC0 + 28, mips) put(0xC0 + 84, 0x30315844)
+        put(0xC0 + 128, format) put(0xC0 + 140, 1)
+        return ffi.string(head, 0xC0 + 148)
+    end
+    local material = ffi.new('uint8_t[?]', 136 + 24)
+    local function put(at, v) for k = 0, 3 do material[at + k] = math.floor(v / 256 ^ k) % 256 end end
+    put(24, 0x08e0ec50) put(28, 0x7712ee78) -- the character template, content/art_shared/base_shaders/character
+    put(64, 2) put(136, deps.Albedo.SLOT_ALBEDO) put(140, deps.Albedo.SLOT_MRA)
+    put(144, tonumber(HAT_ALBEDO:sub(9), 16)) put(148, tonumber(HAT_ALBEDO:sub(1, 8), 16))
+    put(152, tonumber(HAT_MRA:sub(9), 16)) put(156, tonumber(HAT_MRA:sub(1, 8), 16))
+    return {{name = HAT_MATERIAL, type = Kits.TYPE_MATERIAL, main = ffi.string(material, 136 + 24)},
+            {name = HAT_ALBEDO, type = Kits.TYPE_TEXTURE, main = dds(albedo_format, 9),
+             gpu = table.concat(albedo):rep(albedo_format == 98 and 2 or 1)}, -- BC7: 16-byte blocks
+            {name = HAT_MRA, type = Kits.TYPE_TEXTURE, main = dds(77, 9), gpu = table.concat(mra)}}
+end
+
+-- The helmet's units from the game data with every material in their material map made the hat's.
+local function hat_units(shared)
+    local slim = Slim.open(Files.new(game_root .. '/data/'), '')
+    local kit
+    for _, k in ipairs(chosen) do if k.id == HELMET then kit = k end end
+    local out, done = {}, {}
+    for _, piece in ipairs(kit.pieces) do
+        local archive, record
+        for _, a in ipairs({kit.archive, shared}) do
+            record = slim.locate(a, piece.path, Kits.TYPE_UNIT)
+            if record then archive = a break end
+        end
+        if record and not done[piece.path] then
+            done[piece.path] = true
+            local function part(name)
+                local size = slim.part_size(record, name)
+                local bytes = ffi.new('uint8_t[?]', math.max(size, 1))
+                if size > 0 then slim.part(archive, record, name, 0, size, bytes, 0) end
+                return bytes, size
+            end
+            local main, size = part('main')
+            local function u32(o) return main[o] + main[o + 1] * 256 + main[o + 2] * 65536 + main[o + 3] * 16777216 end
+            local at = u32(112)
+            local n = u32(at)
+            for i = 0, n - 1 do
+                local o = at + 4 + 4 * n + 8 * i
+                local low, high = tonumber(HAT_MATERIAL:sub(9), 16), tonumber(HAT_MATERIAL:sub(1, 8), 16)
+                for k = 0, 3 do
+                    main[o + k], main[o + 4 + k] = math.floor(low / 256 ^ k) % 256, math.floor(high / 256 ^ k) % 256
+                end
+            end
+            local gpu, gpu_size = part('gpu')
+            local stream, stream_size = part('stream')
+            out[#out + 1] = {name = piece.path, type = Kits.TYPE_UNIT, main = ffi.string(main, size),
+                             gpu = ffi.string(gpu, gpu_size), stream = ffi.string(stream, stream_size)}
+        end
+    end
+    slim.close()
+    assert(#out > 0, 'the helmet\'s units in the game data')
+    return out
+end
+
+-- The mean CIELAB of the albedo's leather texels (mip 0 block rows 0-39 and every texel of mip 1) in a chain.
+local function leather_lab(data)
+    local out = ffi.new('uint8_t[64]')
+    local r, g, b, n = 0, 0, 0, 0
+    for i = 0, 64 * 64 + 32 * 32 - 1 do
+        if i >= 64 * 64 or math.floor(i / 64) < 40 then
+            deps.Albedo.color_block(data, i * 8, out, true)
+            for t = 0, 15 do
+                r, g, b, n = r + Colour.srgb_to_linear(out[4 * t] / 255), g + Colour.srgb_to_linear(out[4 * t + 1] / 255),
+                    b + Colour.srgb_to_linear(out[4 * t + 2] / 255), n + 1
+            end
+        end
+    end
+    return Colour.linear_to_lab(r / n, g / n, b / n)
+end
+
+check('a mod\'s helmet whose material has no color table (end user 2026-10-14: the Cowboy Hat mod "doesn\'t work"): its '
+      .. 'albedo gives its colors and takes the armor\'s, every mip, transparency kept; another albedo format is logged',
+      function()
+    clear_patches()
+    deps.cache_path = root .. '/build/test-job-hat.cache'
+    os.remove(deps.cache_path)
+    holder = {}
+    local helmet_request = {mode = Recolor.HELMET_FROM_ARMOR, keep_sets = true, helmet = 0xa5574ac2, armor = 0x0ade6719,
+                            body = 0}
+    run(helmet_request)
+    local shared = holder.pipeline.samples.archive
+    holder.pipeline.close()
+    local resources = hat_units(shared)
+    for _, r in ipairs(hat_mod(71)) do resources[#resources + 1] = r end
+    write_patch('9ba626afa44a3aa3.patch_0', resources)
+    -- Helmet Matches Armor: the hat's colors read, its albedo recolored
+    holder = {}
+    local result = run(helmet_request)
+    local p = holder.pipeline
+    local hat = analysis_of(p, HELMET)
+    assert(hat.albedos and hat.albedos[HAT_ALBEDO] and #hat.albedos[HAT_ALBEDO].clusters == 3, 'three colors read')
+    for _, row in ipairs(hat.rows) do -- its clusters are no patched LUT's rows (src/kits.lua mark_patched)
+        assert(row.albedo and row.lut == HAT_ALBEDO and not row.finish_changed, 'only the hat\'s colors')
+        -- matched as they look (the study's typical response; review renders 2026-10-14: by its albedo the B-01
+        -- Tactical's jacket took L 49 for a hat that shows L 30)
+        local c = hat.albedos[HAT_ALBEDO].clusters[row.row + 1]
+        local L = deps.Albedo.look(Colour, c.lin[1], c.lin[2], c.lin[3])
+        assert(row.L == L and (row.row ~= 0 or row.L < c.lab[1]), string.format('row %d as it looks: L %.1f, albedo L '
+               .. '%.1f', row.row, row.L, c.lab[1]))
+    end
+    assert(result.action == 'apply', 'recolored')
+    local spec = assert(result.luts[HAT_ALBEDO], 'the recolored albedo')
+    assert(spec.albedo and spec.bc1 and spec.width == 256 and spec.mips == 9 and spec.size == 43704, 'its spec')
+    assert(result.albedo_report and result.albedo_report:find('Mod texture ' .. HAT_ALBEDO .. ' (a material without a '
+           .. 'color table): 3 colors read (', 1, true), tostring(result.albedo_report))
+    local t = Matcher.item(hat.rows, false, Recolor.patterns_of(hat), Recolor.look_of(hat, appearance))
+    local armor = analysis_of(p, ARMOR)
+    local s = Matcher.item(armor.rows, true, Recolor.patterns_of(armor), Recolor.look_of(armor, appearance))
+    local planned_goal = assert(Matcher.plan(t, s)[HAT_ALBEDO .. ':0'], 'the leather planned')
+    local goal = {} -- the albedo that looks like the goal (src/albedo.lua unlook)
+    goal.L, goal.a, goal.b = deps.Albedo.unlook(Colour, planned_goal.L, planned_goal.a, planned_goal.b)
+    local L, a, b = leather_lab(spec.data)
+    local de = math.sqrt((L - goal.L) ^ 2 + (a - goal.a) ^ 2 + (b - goal.b) ^ 2)
+    assert(de < 3, string.format('the leather at its goal: %.1f (L %.1f a %.1f b %.1f, goal L %.1f a %.1f b %.1f)', de,
+                                 L, a, b, goal.L, goal.a, goal.b))
+    local out = ffi.new('uint8_t[64]')
+    for i = 60 * 64, 64 * 64 - 1 do -- the brim stays transparent
+        deps.Albedo.color_block(spec.data, i * 8, out, true)
+        for k = 0, 15 do assert(out[4 * k + 3] == 0, 'transparent texel kept') end
+    end
+    -- Armor Matches Helmet: the hat's colors are the source
+    local armor_result = run({mode = Recolor.ARMOR_FROM_HELMET, keep_sets = true, helmet = 0xa5574ac2,
+                              armor = 0x0ade6719, body = 0})
+    assert(armor_result.action == 'apply' and next(armor_result.luts), 'the armor recolored from the hat')
+    local from_hat = 0
+    local hat_item = Matcher.item(hat.rows, false, Recolor.patterns_of(hat), Recolor.look_of(hat, appearance))
+    local armor_item = Matcher.item(armor.rows, true, Recolor.patterns_of(armor), Recolor.look_of(armor, appearance))
+    for _, m in pairs(Matcher.plan(armor_item, hat_item)) do
+        if type(m.source) == 'string' and m.source:sub(1, 16) == HAT_ALBEDO then from_hat = from_hat + 1 end
+    end
+    assert(from_hat > 0, 'the armor takes the hat\'s colors')
+    p.close()
+    -- a fresh pipeline (the analysis is not cached: the same texture)
+    holder = {}
+    local again = run(helmet_request)
+    assert(ffi.string(again.luts[HAT_ALBEDO].data, 43704) == ffi.string(spec.data, 43704), 'the same recolor')
+    holder.pipeline.close()
+    -- a BC7 albedo: logged, left as it is
+    clear_patches()
+    resources = hat_units(shared)
+    for _, r in ipairs(hat_mod(98)) do resources[#resources + 1] = r end
+    write_patch('9ba626afa44a3aa3.patch_0', resources)
+    holder = {}
+    local bc7 = run(helmet_request)
+    hat = analysis_of(holder.pipeline, HELMET)
+    assert(not hat.albedos and hat.unread and hat.unread[HAT_MATERIAL], 'not read')
+    assert(not (bc7.luts and bc7.luts[HAT_ALBEDO]), 'nothing made')
+    assert(bc7.albedo_report == 'Mod material ' .. HAT_MATERIAL .. ' (from 9ba626afa44a3aa3.patch_0) has no color table '
+           .. 'and is left as it is: albedo format 98.', tostring(bc7.albedo_report) .. ' / ' .. tostring(bc7.action))
     holder.pipeline.close()
     clear_patches()
     os.remove(deps.cache_path)
@@ -1988,15 +2457,16 @@ check('a paint scheme whose LUT a mod replaced with an R32G32B32A32_FLOAT textur
     end
     assert(count > 1, 'both items\' LUTs compared')
     p.close()
-    -- a format nothing here reads (BC1): the job fails naming the texture and the mod's patch file
+    -- a format nothing here reads (BC6H; BC1 is read since v1.5, mods' albedos): the job fails naming the texture
+    -- and the mod's patch file
     os.remove(deps.cache_path)
     clear_patches()
     local at = 0xC0 + 128
-    write_texture_patch('9ba626afa44a3aa3.patch_0', forest.lut, main:sub(1, at) .. le32(71) .. main:sub(at + 5), gpu)
+    write_texture_patch('9ba626afa44a3aa3.patch_0', forest.lut, main:sub(1, at) .. le32(95) .. main:sub(at + 5), gpu)
     holder = {}
     local ok, why = pcall(run, request)
     assert(not ok and tostring(why):find('texture ' .. forest.lut .. ' (from 9ba626afa44a3aa3.patch_0): unsupported '
-           .. 'texture format 71', 1, true), 'the failure names the texture and its patch: ' .. tostring(why))
+           .. 'texture format 95', 1, true), 'the failure names the texture and its patch: ' .. tostring(why))
     if holder.pipeline then holder.pipeline.close() end
     os.remove(deps.cache_path)
     deps.cache_path = CACHE
@@ -2078,7 +2548,7 @@ check('clothing on a piece with skin tones is recolored (user ticket 2026-10-09:
     for _, case in ipairs({{PREDATOR, '3b41a34df833c650', 2}, {JAGUAR, 'd83e84b662e81030', 2}}) do
         local armor, lut, row = case[1], case[2], case[3]
         holder = {}
-        local result = run({mode = Recolor.ARMOR_FROM_HELMET, keep_sets = true, helmet = 0xa5574ac2,
+        local result = run({mode = Recolor.ARMOR_FROM_HELMET, keep_sets = true, helmet = tonumber(BREAKER, 16),
                             armor = tonumber(armor, 16), body = 0})
         local a = analysis_of(holder.pipeline, armor)
         local skin_piece, rows = false, 0

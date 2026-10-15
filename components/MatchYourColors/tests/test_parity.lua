@@ -17,8 +17,12 @@ local ffi = require('ffi')
 local Files, Slim, Texture = require('files'), require('slim'), require('texture')
 local Colour, Matcher, Kits, Transfer = require('colour'), require('matcher'), require('kits'), require('transfer')
 local Recolor, Capes = require('recolor'), require('capes')
+require('sheets').attach(Recolor)
 local appearance = require('appearance').new(require('appearance_data'))
 Matcher.use(Colour)
+require('zones').attach(Matcher, Colour)
+local Variety = require('variety')
+Variety.attach(Matcher, Colour)
 local runtime = dofile(root .. '/src/bingus_runtime.lua')
 local clock = dofile(root .. '/src/bingus_memory.lua').new(runtime).time
 
@@ -280,8 +284,10 @@ end
 -- it went through (or nil).
 local function fit_as_job(transfer, c0, case, goal, cal)
     local function copy() local c = {} for k = 1, #c0 do c[k] = c0[k] end return c end
-    local c, use, flat = copy(), not goal.band and cal or nil, goal.band and 'coat' or nil
-    local d = {Transfer.diffuse_goal(Colour, {L = case.L, a = case.a, b = case.b, cal = cal, band = goal.band})}
+    local flat = goal.band and 'coat' or goal.coat and 'metal' or nil -- a metal coat: Match Materials' metal (v1.5)
+    local c, use = copy(), not flat and cal or nil
+    local d = {Transfer.diffuse_goal(Colour, {L = case.L, a = case.a, b = case.b, cal = cal, band = goal.band,
+                                              coat = goal.coat})}
     local aim = use and {case.L, case.a, case.b} or d
     local _, _, _, err = transfer.fit(c, aim[1], aim[2], aim[3], use, nil, flat)
     if use and (err >= Transfer.RESPONSE_MISS or turned_under(c, use, aim)) then
@@ -370,7 +376,7 @@ local REPORTED = {
      {{{56, 4, 12}, {20, 0, 0}, 'pair'}}},
     {'30e54b57', '289884f4', 'Honorary Guard armor <- Obedient: dark (its material kept), its gold trim kept',
      {{{23, 0, 0}, {24, 0, 0}, 'pair', {15, 30}}, {{75, 8, 39}, 'keep'}}},
-    {'b3550d20', '289884f4', 'Bloodhound armor <- Obedient: the red goes dark grey, never brown or pale',
+    {as_made = true, 'b3550d20', '289884f4', 'Bloodhound armor <- Obedient: the red goes dark grey, never brown or pale',
      {{{21, 20, 11}, {24, 0, 0}, 'pair', {15, 30}}, {{21, 0, 0}, {24, 0, 0}, 'pair'}}},
     {'24fdb2c0', 'b3550d20', 'Lawmaker <- Bloodhound armor: the shell takes the maroon',
      {{{42, -2, -4}, {21, 20, 11}, 'pair'}}},
@@ -430,6 +436,24 @@ local REPORTED = {
     {'47bcec20', 'fb4b1254', 'RS-100 Sanctioner <- CE-35 Trench Engineer, hoods kept: black hood, orange mask and band',
      {{{15, 0, -1}, 'keep'}, {{19, 1, 1}, {41, 33, 50}, 'pair'}, {{46, 4, 24}, {41, 33, 50}, 'accent'}},
      options = {keep_hoods = true}},
+    -- Reddit report 2026-10-14 (Armor Matches Helmet, Match Materials and Recolor Cape on, Recolor Hoods off): the
+    -- other way the O-44 Bonded Pilot's red-brown plates (a band, 25% of it) took the Sanctioner's 2.8% gold and the
+    -- armor read light gold; v1.3 made them black, as the reporter wants ("black-ish armor with the gold ropes"). An
+    -- armor's band needs a source color of 10% (src/matcher.lua band_hue_source); its own gold ropes take the gold.
+    {'bc5cf836', '47bcec20', 'O-44 Bonded Pilot <- RS-100 Sanctioner: black plates like the helmet, its gold ropes gold',
+     {{{20, 19, 11}, {16, 0, 0}, 'pair', {10, 30}}, {{64, 2, 31}, {46, 4, 24}, 'accent'}},
+     options = {materials = true, keep_hoods = true}},
+    -- the user's version comparisons (2026-10-15, Armor Matches Helmet with Match Materials): a vivid helmet color of
+    -- 10% or more reaches the armor (17: "the red failed to transfer"; 20: "the orange accent failed to transfer"), and
+    -- cloth never takes a colored metal's paint (15: "flat/muted orange became a dominant color even though it barely
+    -- exists on the helmet")
+    {'8b9ed77d', '1805a245', 'B-24 Enforcer <- BP-77 Grand Juror: the clothing the helmet\'s grey, never a mustard of its '
+     .. 'gold; the gold trim gold', {{{62, 3, 11}, {35, 0, -1}, 'pair', {20, 40}}, {{23, 23, 12}, {58, 4, 30}, 'accent'}},
+     options = {materials = true}},
+    {'1f9bfa78', 'd915a671', 'FS-37 Ravager <- FS-05 Marksman: the plates the helmet\'s red',
+     {{{34, -4, 6}, {34, 43, 44}, 'pair'}}, options = {materials = true}},
+    {'cb7e9736', 'fd428984', 'B-22 Model Citizen <- I-92 Fire Fighter: the chrome the helmet\'s orange',
+     {{{42, -2, -1}, {44, 35, 53}, 'pair'}}, options = {materials = true}},
     -- 2026-10-06 (user, screenshot 2): metal helmets stay bronze or gold on a white or green armor. Match Materials:
     -- a big metal part taking paint becomes that paint ('finish'); paint stays paint ('no finish').
     {'ec49526f', '4a545f06', 'B-22 Model Citizen <- DS-42 Federation\'s Blade, materials: the chrome shell takes the paint',
@@ -440,13 +464,25 @@ local REPORTED = {
      options = {materials = true}},
     {'b19d6c0a', 'aa32b384', 'DP-8 Mountain-Scaled <- EX-16 Prototype 16, materials: the gold takes the tan paint',
      {{{46, 3, 23}, {37, 0, 14}, 'pair', {34, 40}, 'finish'}}, options = {materials = true}},
+    -- 2026-10-14 (end user via the user: "only the color gets translated" from the B-22 Model Citizen's chrome and the
+    -- AD-26 Bleeding Edge's cobalt; v1.5, user decision): hard paint taking a bare metal becomes that metal, one coat
+    -- of its paint (L its paint's); the undersuit stays paint.
+    {'1f9bfa78', 'ec49526f', 'FS-37 Ravager <- B-22 Model Citizen, materials: the plates chrome, the undersuit paint',
+     {{{34, -4, 6}, {38, -2, -2}, 'pair', {55, 62}, 'finish'}, {{22, 0, 0}, {38, -2, -2}, 'pair', nil, 'no finish'}},
+     options = {materials = true}},
+    {'95903adf', 'dcce533f', 'CM-17 Butcher <- AD-26 Bleeding Edge, materials: its teal trim the cobalt metal',
+     {{{35, -27, 8}, {40, -1, -25}, 'accent', {38, 42}, 'finish'}}, options = {materials = true}},
     -- 2026-10-06 (user, rendered validation): Armor Matches Helmet turned a whole dark armor the bright red of the PH-9
     -- Predator's beret (42% of what shows: the helmet's largest part). A vivid minority is no helmet's identity now:
     -- the armor takes the mask's dark color; the red stays an accent (the B-01 Tactical's trim takes it).
-    {'9f212504', '1b2fde48', 'Armor 9f212504 <- PH-9 Predator: dark like the mask, never the beret\'s red',
+    {as_made = true, '9f212504', '1b2fde48', 'Armor 9f212504 <- PH-9 Predator: dark like the mask, never the beret\'s red',
      {{{23, 1, 0}, {23, -3, 6}, 'pair', {15, 30}}}},
-    {'4f7fb2bd', '1b2fde48', 'B-01 Tactical armor <- PH-9 Predator: dark like the mask, never the beret\'s red',
+    {as_made = true, '4f7fb2bd', '1b2fde48', 'B-01 Tactical armor <- PH-9 Predator: dark like the mask, never the beret\'s red',
      {{{23, 0, 0}, {23, -3, 6}, 'pair', {15, 30}}}},
+    -- independent review 1 2026-10-14 (case 38): the GS-17 Frontier Marshal's tan face mask, 6.5% of it, dressed the
+    -- whole coat a mustard; a secondary now needs 10% of the source (the user), so the plan stays as made
+    {as_made = true, 'd59566d5', 'f646f083', 'B-01 Tactical armor (d59566d5) <- GS-17 Frontier Marshal: dark grey like the helmet, '
+     .. 'never its small tan', {{{25, 1, 1}, {27, 0, 0}, 'pair', {15, 35}}}},
     -- 2026-10-06 (image review of the rendered validation, for the user): the capped Bulwark still went near-black (a
     -- dark color on bare metal reads black) on an ornate silver, navy and gold armor. A bare-metal part taking a dark
     -- color takes the source's bare metal when it shows some: the steel shell the chainmail's silver.
@@ -464,17 +500,17 @@ local REPORTED = {
     -- color.
     {'fd456de0', '261c4a52', 'DP-53 Savior of the Free <- B-01 Tactical: the gold braid takes the yellow stripe, not black',
      {{{49, 3, 26}, {61, -10, 42}, 'accent'}}},
-    {'3f1bec1a', 'cd3d20dc', 'DP-00 Tactical <- CW-36 Winter Warrior: no yellow left, the trim takes the helmet\'s dark',
+    {balanced = true, '3f1bec1a', 'cd3d20dc', 'DP-00 Tactical <- CW-36 Winter Warrior: no yellow left, the trim takes the helmet\'s dark',
      {{{55, -5, 50}, {59, 0, 6}, 'pair'}, {{44, -1, 45}, {24, 0, -2}, 'accent'}}},
-    {'3f1bec1a', '0e3b10bf', 'DP-00 Tactical <- UF-50 Bloodhound (right as it was): maroon plates and trim, dark suit',
+    {as_made = true, '3f1bec1a', '0e3b10bf', 'DP-00 Tactical <- UF-50 Bloodhound (right as it was): maroon plates and trim, dark suit',
      {{{55, -5, 50}, {21, 20, 11}, 'pair'}, {{44, -1, 45}, {21, 20, 11}, 'accent'}, {{23, 0, 0}, {22, 0, 0}, 'pair'}}},
     {'f7e6f127', '0e3b10bf', 'O-3 Free Spirit <- UF-50 Bloodhound: the suit takes the maroon',
      {{{26, 1, 1}, {21, 20, 11}, 'pair'}}},
     {'e9add047', '6478678e', 'AF-02 Haz-Master <- IX-VOIDWALKER: the yellow suit and the olive take the cream, dark navy',
      {{{61, -4, 49}, {59, 1, 6}, 'pair'}, {{33, -3, 17}, {59, 1, 6}, 'pair'}, {{22, 0, 0}, {24, -1, -8}, 'pair'}}},
-    {'6d30f386', '6478678e', 'B-01 Tactical (6d30f386) <- IX-VOIDWALKER: the suit takes the cream, the yellow the navy',
+    {balanced = true, '6d30f386', '6478678e', 'B-01 Tactical (6d30f386) <- IX-VOIDWALKER: the suit takes the cream, the yellow the navy',
      {{{22, 0, 0}, {59, 1, 6}, 'pair'}, {{79, 4, 68}, {24, -1, -8}, 'accent'}}, {f18dfbb5346732c1 = {24, -1, -8}}},
-    {'b513fd54', '6478678e', 'DP-40 Hero of the Federation <- IX-VOIDWALKER: white with navy trims',
+    {balanced = true, 'b513fd54', '6478678e', 'DP-40 Hero of the Federation <- IX-VOIDWALKER: white with navy trims',
      {{{25, 0, 0}, {59, 1, 6}, 'pair'}, {{52, 8, 42}, {24, -1, -8}, 'pair'}}},
     -- 2026-10-06 (image review) under the rule above: the B-01 Tactical's royal-blue band (a pattern) kept its color
     -- under an armor without an accent; it takes the B-22 Model Citizen's second color, its dark
@@ -500,8 +536,8 @@ local REPORTED = {
      .. 'leg camo gunmetal, never yellow',
      {{{32, -1, 9}, {39, 1, 1}, 'pair', {26, 33}}, {{20, 1, 1}, {39, 1, 1}, 'pair', {17, 25}},
       {{34, 1, 14}, {39, 1, 1}, 'pair'}}},
-    {'72b472a7', 'a5574ac2', 'PH-9 Predator <- CPR-80 Bulwark: gunmetal, never light grey; the dark plates stay darker',
-     {{{29, -2, 11}, {39, 1, 1}, 'pair', {25, 33}}, {{23, 1, 1}, {39, 1, 1}, 'pair', {19, 27}}}},
+    {as_made = true, '72b472a7', 'a5574ac2', 'PH-9 Predator <- CPR-80 Bulwark: gunmetal, never light grey; the dark plates stay darker',
+     {{{29, -2, 11}, {39, 1, 1}, 'pair', {25, 33}}, {{23, 1, 1}, {39, 1, 1}, 'pair', {19, 28}}}},
     {'0ade6719', 'a5574ac2', 'DS-191 Scorpion <- CPR-80 Bulwark: the tan panels gunmetal, never the stripes\' yellow',
      {{{44, 6, 17}, {39, 1, 1}, 'pair'}}},
     -- Gallery 2026-10-10 (user: "04's helmet failed the accent transfer (should be yellow, transferred gray)"; then,
@@ -533,7 +569,7 @@ local REPORTED = {
     -- black undersuit stays the structure (the pouches weigh nothing: counted, its own set asked L 34 for that black).
     -- rows: a row's planned lightness range ('lut:row' = {low, high}); the Trench Paramedic's undersuit takes one of
     -- the helmet's two darks by a near tie (float64 coverage), so only the lightness is pinned.
-    {'23d0e15c', 'a5574ac2', 'PH-56 Jaguar <- CPR-80 Bulwark: the shin wraps gunmetal like the rest, never their tan',
+    {as_made = true, '23d0e15c', 'a5574ac2', 'PH-56 Jaguar <- CPR-80 Bulwark: the shin wraps gunmetal like the rest, never their tan',
      {{{30, 3, 15}, {39, 1, 1}, 'pair'}}, rows = {['cb472f1634d0650f:0'] = {22, 32}}},
     {'d52bb413', 'a5574ac2', 'CM-21 Trench Paramedic <- CPR-80 Bulwark: the pouches dark like the undersuit',
      {}, rows = {['417485d7a718bff3:0'] = {16, 28}, ['c6f5e2827a6c95bc:3'] = {10, 22}}},
@@ -553,14 +589,43 @@ local function near(item, lab)
 end
 
 local reported = 0
+-- A group's largest hard row outside undergarment pieces (an armor src/variety.lua balanced keeps its main color
+-- there), else its first.
+local function main_row(g)
+    local best
+    for _, row in ipairs(g.rows) do
+        if row.mode < 0.5 and row.under < 0.5 * row.area and (not best or row.area > best.area) then best = row end
+    end
+    return best or g.rows[1]
+end
 -- One reported pair against its agreed look (t, s: matcher items; materials: Match Materials on). A group's 5th
--- field: 'finish' (its rows take the source row's finish) or 'no finish'.
+-- field: 'finish' (its rows take the source row's finish) or 'no finish'. case.balanced (v1.5, src/variety.lua): the
+-- armor was one color before the rule; a group's color is checked on its main row (main_row), and the armor must no
+-- longer be one color. case.as_made (v1.5, independent review 1 2026-10-14): the source has no secondary of its own, so
+-- the armor's plan is the plan without the rule (the user: the published look was better than a shade "from nowhere").
+local function check_as_made(plan, t, s, why, materials)
+    local balance = Matcher.balance
+    Matcher.balance = nil
+    local bare = Matcher.plan(t, s, materials)
+    Matcher.balance = balance
+    for key, m in pairs(plan) do
+        local o = bare[key]
+        assert(o and o.source == m.source and o.L == m.L and o.a == m.a and o.b == m.b, why .. ': as made, ' .. key)
+    end
+    for key in pairs(bare) do assert(plan[key], why .. ': as made, ' .. key) end
+end
 local function check_reported(case, t, s, why, materials)
     local plan = Matcher.plan(t, s, materials)
     local patterns = Matcher.pattern_plan(t, s, plan)
+    if case.as_made then check_as_made(plan, t, s, why, materials) end
+    if case.balanced then
+        local _, share, _, distinct = Variety.dominance(Variety.cells(plan, t))
+        assert(share < Variety.DOMINANT_SHARE or distinct >= Variety.SECOND_MIN,
+               string.format('%s: one color (%.2f, %.2f apart)', why, share, distinct))
+    end
     for _, e in ipairs(case[4]) do
         local g = assert(near(t, e[1]), why .. ': target color ' .. table.concat(e[1], ' '))
-        local m = plan[g.rows[1].key]
+        local m = plan[(case.balanced and main_row(g) or g.rows[1]).key]
         if e[2] == 'keep' then
             for _, row in ipairs(g.rows) do
                 assert(plan[row.key] == nil, why .. ': ' .. table.concat(e[1], ' ') .. ' keeps its color')
@@ -924,16 +989,41 @@ local REPORTED_CAPES = {
     -- both, so it takes the Bloodhound's 1.8% silver, V and side stripes alike (one design color stays one).
     {'bd961a7c', 'b3550d20', true, 'Pillars of Freedom <- UF-50 Bloodhound: the cloth red, the bars black on it',
      {['b6c5bbb630fcf839:0'] = {21, 'pair', 'vivid'}, ['b6c5bbb630fcf839:2'] = {21, 'zone', 'neutral'}}, {}},
-    {'c24b74f5', 'b3550d20', true, 'Judgment Day <- UF-50 Bloodhound: the cloth black, the bands red',
-     {['716e89b0d447112d:0'] = {21, 'pair', 'neutral'}, ['716e89b0d447112d:1'] = {21, 'zone', 'vivid'},
-      ['716e89b0d447112d:3'] = {21, 'zone', 'vivid'}}, {}},
+    -- v1.5 (independent review 1 2026-10-14: Proof of Faultless Virtue read plain red on the Bloodhound; the user chose
+    -- "readable by lightness", changing the agreed red bands): a design drawn by lightness (a gap of 30 or more) never
+    -- takes a color reading by hue alone; the Judgment Day's bands and Fre Liberam's sword take the silver, Faultless's
+    -- chevrons, skull and emblem too. Designs drawn by hue (the Pillars' bars, Fre Liberam's eagle) keep their pick.
+    {'c24b74f5', 'b3550d20', true, 'Judgment Day <- UF-50 Bloodhound: the cloth black, the bands silver',
+     {['716e89b0d447112d:0'] = {19, 'pair', 'neutral'}, ['716e89b0d447112d:1'] = {40, 'zone', 'neutral'},
+      ['716e89b0d447112d:3'] = {40, 'zone', 'neutral'}}, {}},
+    {'ec5c680e', 'b3550d20', true, 'Proof of Faultless Virtue <- UF-50 Bloodhound: red cloth, the design and emblem silver',
+     {['ee326e4a6273a00e:0'] = {21, 'pair', 'vivid'}, ['ee326e4a6273a00e:2'] = {40, 'zone', 'neutral'},
+      ['ee326e4a6273a00e:3'] = {40, 'zone', 'neutral'}}, {}, {[1] = {40, 'neutral'}}},
     {'d45f0974', 'b3550d20', true, "Liberty's Herald <- UF-50 Bloodhound: the cloth black, its tint red, the chevron "
      .. 'silver',
      {['a52382a8e96628da:0'] = {21, 'pair', 'neutral'}, ['980ffc1d56ece0e8:0'] = {21, 'pair', 'vivid'},
       ['a52382a8e96628da:1'] = {40, 'zone', 'neutral'}, ['a52382a8e96628da:2'] = {40, 'zone', 'neutral'}}, {}},
-    {'391bc756', 'b3550d20', true, 'Fre Liberam <- UF-50 Bloodhound: the cloth black, the eagle and its sword red',
-     {['4843bbf7f6900021:0'] = {21, 'pair', 'neutral'}, ['4843bbf7f6900021:2'] = {21, 'zone', 'vivid'},
-      ['4843bbf7f6900021:3'] = {21, 'zone', 'vivid'}}, {}},
+    {'391bc756', 'b3550d20', true, 'Fre Liberam <- UF-50 Bloodhound: the cloth black, the eagle red, its sword silver',
+     {['4843bbf7f6900021:0'] = {19, 'pair', 'neutral'}, ['4843bbf7f6900021:2'] = {21, 'zone', 'vivid'},
+      ['4843bbf7f6900021:3'] = {40, 'zone', 'neutral'}}, {}},
+    -- 2026-10-14 (end-user reports 2026-10-08 and -12: Proof of Faultless Virtue's and Botslayer's designs "unrecognizable"):
+    -- a design drawn by lightness that nothing keeps readable takes a light grey tone of its border (src/zones.lua
+    -- lost_tone): with the FS-38 Eradicator's olive everything went one color. 7th field: emblem picks {L, kind}.
+    {'ec5c680e', '20a85cc1', false, 'Proof of Faultless Virtue <- FS-38 Eradicator: the design light grey on the olive',
+     {['ee326e4a6273a00e:0'] = {30, 'pair'}, ['ee326e4a6273a00e:3'] = {59, 'zone', 'neutral'}}, {},
+     {[1] = {60, 'neutral'}}},
+    {'2bcc4463', '20a85cc1', false, 'Botslayer <- FS-38 Eradicator: its marks and emblem light grey on the olive',
+     {['f067af46bdb2b8c4:0'] = {30, 'pair'}, ['f067af46bdb2b8c4:1'] = {60, 'zone', 'neutral'}}, {},
+     {[1] = {60, 'neutral'}}},
+    {'ec5c680e', 'dae4a744', false, 'Proof of Faultless Virtue <- SA-25 Steel Trooper: dark cloth, a grey design',
+     {['ee326e4a6273a00e:0'] = {20, 'pair'}, ['ee326e4a6273a00e:3'] = {54, 'zone', 'neutral'}}, {},
+     {[1] = {54, 'neutral'}}},
+    -- the lost tone is for designs drawn by lightness with a gap of 60 or more (src/zones.lua STRONG_GAP): Bastion of
+    -- Integrity's orange design (row 2, L 35 on its cream L 81: a gap of 47) takes the FS-37 Ravager helmet's color with
+    -- its cloth, lost as in v1.4, no grey tone (the mutation audit, 2026-10-14: 193 cape plans are such; the user decides
+    -- whether they take the tone too)
+    {'9e29ea2f', '7934ed8b', false, 'Bastion of Integrity <- FS-37 Ravager helmet: its design (a gap of 47) planned '
+     .. 'with its cloth, no grey tone', {['b3b5c08e97bff572:2'] = {30, 'pair'}}, {}},
 }
 local reported_capes = 0
 -- One planned row of a reported cape outfit against its expected color (want: see REPORTED_CAPES).
@@ -957,6 +1047,16 @@ local function check_reported_cape(case, a, source, transfer)
     local plan = Matcher.plan(t, source, case[3], true)
     if a.zones then Matcher.cape_zones(plan, t, source, a.zones, a.tint_of) end
     for key, want in pairs(case[5]) do check_cape_goal(case, plan, key, want) end
+    if case[7] then
+        local picks = Matcher.cape_emblems(plan, t, source, a.emblems, a.tint_of)
+        for i, want in pairs(case[7]) do
+            local pick = assert(picks[i], case[4] .. ': emblem ' .. i .. ' picked')
+            local c = math.sqrt(pick.a * pick.a + pick.b * pick.b)
+            assert(math.abs(pick.L - want[1]) < 3 and (want[2] ~= 'neutral' or c < 6), string.format(
+                   '%s: emblem %d takes L %.1f chroma %.1f, expected about %d (%s)', case[4], i, pick.L, c, want[1],
+                   want[2]))
+        end
+    end
     local built = Recolor.build_luts(a, plan, transfer, function() end, nil) -- cloth: no finish to copy
     for _, tint in ipairs(case[6]) do
         local spec = assert(built[next(a.tint_of)], case[4] .. ': its cape LUT rebuilt')

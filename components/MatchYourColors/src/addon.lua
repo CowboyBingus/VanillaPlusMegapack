@@ -26,7 +26,7 @@
 -- No memory writes: the recolor goes through engine calls (src/engine.lua).
 local ffi = require('ffi')
 
-local Addon = {VERSION = '1.4'}
+local Addon = {VERSION = '1.5'}
 Addon.REVISION = 'v' .. Addon.VERSION
 Addon.MOD_ID = 'cowboybingus.match_your_colors'
 Addon.OPTION_MODE = 'cowboybingus.match_your_colors.mode'
@@ -35,6 +35,10 @@ Addon.OPTION_SETS = 'cowboybingus.match_your_colors.keep_sets'
 Addon.OPTION_HOODS = 'cowboybingus.match_your_colors.recolor_hoods'
 Addon.OPTION_MATERIALS = 'cowboybingus.match_your_colors.match_materials'
 Addon.OPTION_CAPES = 'cowboybingus.match_your_colors.recolor_cape'
+Addon.OPTION_SQUAD = 'cowboybingus.match_your_colors.recolor_squadmates'
+-- Recolor Squadmates' values (the menu's choice index): off, squadmates without the mod take this player's settings,
+-- every squadmate takes them (v1.5; never shared: other players' sync values stay v1.4's)
+Addon.SQUAD_OFF, Addon.SQUAD_MISSING, Addon.SQUAD_EVERYONE = 1, 2, 3
 Addon.RESOLVE_FRAMES = 15
 Addon.VERIFY_FRAMES = 120
 Addon.CHECK_FRAMES = 30
@@ -85,7 +89,7 @@ function Addon.new(m)
     local state = {frame = 0, next_resolve = 0, next_verify = 0, next_check = 0, identity = nil, watch = nil, slot = nil,
                    dirty = false, job = nil, request = nil, failures = {}, why = nil, budget_end = 0,
                    options = {mode = Recolor.HELMET_FROM_ARMOR, keep_sets = true, recolor_hoods = true,
-                              match_materials = false, recolor_cape = false, scheme = 0},
+                              match_materials = false, recolor_cape = false, scheme = 0, squad = Addon.SQUAD_OFF},
                    next_sync = 0, loopback = false, holder = {}, status = 'starting', active = true}
     local pool = m.Engine.pool({native = m.native, memory = memory})
     local controller = Recolor.controller({Engine = m.Engine, Avatar = Avatar, memory = memory, native = m.native,
@@ -98,6 +102,7 @@ function Addon.new(m)
     local probe = {} -- the identity table every check refills; adopted identities are copies
     -- wait: a game-data read the disk has not answered yet lets the job sit out a frame (src/files.lua).
     local job_deps = {Files = m.Files, Slim = m.Slim, Patches = m.Patches, Texture = m.Texture, Colour = m.Colour,
+                      Albedo = m.Albedo,
                       Transfer = m.Transfer, Matcher = m.Matcher, Kits = m.Kits, Schemes = m.Schemes, Capes = m.Capes,
                       memory = memory, wait = coroutine.yield,
                       game = m.game,
@@ -132,6 +137,18 @@ function Addon.new(m)
 
     local function maybe_yield()
         if time() >= state.budget_end then coroutine.yield() end
+    end
+
+    -- Recolor Squadmates: the settings squadmates take (src/remote.lua update's mine; a new table per change, which
+    -- the squadmates' entries compare), or nil when it is off or this player's own recoloring is.
+    local function squad_settings()
+        local o = state.options
+        if o.squad == Addon.SQUAD_OFF or (o.mode == Recolor.OFF and o.scheme == 0) then
+            state.squad_mine = nil
+            return
+        end
+        state.squad_mine = {mode = o.mode, keep_sets = o.keep_sets, recolor_hoods = o.recolor_hoods,
+                            match_materials = o.match_materials, recolor_cape = o.recolor_cape, scheme = o.scheme}
     end
 
     -- The local player's UI preview, located with the identity; kept while it is the same slot record.
@@ -290,19 +307,40 @@ function Addon.new(m)
         if reader.dirty then state.save_at = frame + Addon.SAVE_DELAY_FRAMES end
     end
 
-    -- Applies a result with `ctl`; the count, the apply's time in ms and how many textures had to be made.
+    -- Applies a result with `ctl`; the count, the apply's time in ms, how many textures had to be made and how many
+    -- free ones were refilled.
     local function timed_apply(ctl, result, identity, slot, frame)
-        local made, started = pool.made, time()
+        local made, refilled, started = pool.made, pool.refilled, time()
         local count = ctl.apply(result, identity, slot, frame)
-        return count, (time() - started) * 1000, pool.made - made
+        return count, (time() - started) * 1000, pool.made - made, pool.refilled - refilled
     end
 
-    -- A cape plan's development line (src/capes.lua Capes.report), once per plan.
+    -- The pool's decal sheet lines since the last ones logged (src/engine.lua took_sheet: made, or refilled over which
+    -- sheet), so a garbled cape design in a report can be told apart from a recipe (v1.5).
+    local function note_sheets()
+        local notes = pool.sheet_notes
+        for i = 1, #notes do
+            note(notes[i] .. '.')
+            notes[i] = nil
+        end
+    end
+
+    -- A mod texture's line (src/albedo.lua: the colors read, how many recolored), once per plan; the Armory preview's
+    -- too, so a modded hat only previewed still shows in the log that it was read (live 2026-10-14).
+    local function note_albedo(result)
+        if result.albedo_report and result.albedo_report ~= state.albedo_report then
+            note(result.albedo_report)
+            state.albedo_report = result.albedo_report
+        end
+    end
+
+    -- A cape plan's development line (src/capes.lua Capes.report) and a mod texture's, once per plan.
     local function note_cape(result)
         if result.cape_report and result.cape_report ~= state.cape_report then
             note(result.cape_report)
             state.cape_report = result.cape_report
         end
+        note_albedo(result)
     end
 
     -- The log lines of an applied result (applied: the apply's ms, the textures it made, its longest frame and, for
@@ -319,10 +357,12 @@ function Addon.new(m)
             .. (request.keep_hoods and ', hoods kept' or '') .. (request.materials and ', materials matched' or '')
             .. (request.capes and ', cape' or '')
         note(string.format('Recolored %d materials (%s, %d LUTs; job %.1f ms of work over %d frames, longest '
-            .. 'slice %.1f ms in %s, heap %+.0f KB; applied in %.2f ms, %d new textures; longest frame %.1f ms%s).',
-            count, how, luts, job.work * 1000, job.frames, job.longest * 1000, tostring(job.longest_stage), job.heap_kb,
-            applied.ms, applied.made, applied.frame * 1000, after_text(applied.after)))
+            .. 'slice %.1f ms in %s, heap %+.0f KB; applied in %.2f ms, %d new, %d refilled textures; longest frame '
+            .. '%.1f ms%s).', count, how, luts, job.work * 1000, job.frames, job.longest * 1000,
+            tostring(job.longest_stage), job.heap_kb, applied.ms, applied.made, applied.refilled,
+            applied.frame * 1000, after_text(applied.after)))
         note_cape(result)
+        note_sheets()
         if reader and reader.reads > 0 then
             note(string.format('Game data read so far: %d reads, %.1f MB, longest read %.1f ms (%d KB), %d frames '
                 .. 'waited on the disk.', reader.reads, reader.bytes / 1048576, reader.longest * 1000,
@@ -345,17 +385,21 @@ function Addon.new(m)
             return
         end
         local key = ui_controller.key
-        local count, ms, made = timed_apply(ui_controller, result, {units_at = ui.where.units_at, body = request.body},
-                                            nil, frame)
+        local count, ms, made, refilled = timed_apply(ui_controller, result,
+                                                      {units_at = ui.where.units_at, body = request.body}, nil, frame)
         ui.applied, ui.dirty = request, false -- what ui_controller.result was made for (poll_ui's rebind); current
         if reader then note_cache(reader, frame) end
         if result.action == 'apply' and (count > 0 or result.key ~= key) then
             local job = state.last_job
-            note(string.format('Preview recolored: %d materials (helmet %08x, armor %08x; job %.1f ms of work over %d '
-                .. 'frames, longest slice %.1f ms; applied in %.2f ms, %d new textures; longest frame %.1f ms).', count,
-                request.helmet, request.armor, job.work * 1000, job.frames, job.longest * 1000, ms, made,
+            note(string.format('Preview recolored: %d materials (helmet %08x, armor %08x%s; job %.1f ms of work over '
+                .. '%d frames, longest slice %.1f ms; applied in %.2f ms, %d new, %d refilled textures; longest frame '
+                .. '%.1f ms).', count, request.helmet, request.armor,
+                cape_counts(request.mode, request.scheme, request.capes) and string.format(', cape %08x', request.cape or 0) or '', job.work * 1000,
+                job.frames, job.longest * 1000, ms, made, refilled,
                 math.max(job.longest, time() - state.frame_started) * 1000))
+            note_albedo(result)
         end
+        note_sheets()
     end
 
     -- The local player resolved again for a finished job: nil when the result no longer applies (the kits or
@@ -420,6 +464,7 @@ function Addon.new(m)
                           heap_kb = gcinfo() - state.job_heap}
         if request.target == 'remote' then -- another mod user's Helldiver: its entry counts its own failures
             remote.finish(ok, result, request, frame)
+            note_sheets()
             if ok and reader then note_cache(reader, frame) end
             return
         end
@@ -434,14 +479,15 @@ function Addon.new(m)
         if request.target == 'ui' then return finish_ui(result, request, frame, reader) end
         local now = still_current(request, frame)
         if not now then return end
-        local count, ms, made = timed_apply(controller, result, now, Avatar.preview_slot(memory, now, read), frame)
+        local count, ms, made, refilled = timed_apply(controller, result, now, Avatar.preview_slot(memory, now, read),
+                                                      frame)
         state.applied = request -- what controller.result was made for (rebind)
         if reader then note_cache(reader, frame) end
         state.status = result.action == 'apply' and 'active' or ('vanilla: ' .. tostring(result.reason))
         local after = state.found_at and frame - state.found_at
         state.found_at = nil
         -- the job's longest frame of its own work: its longest slice, or this frame's slice, close, resolve and apply
-        log_result(result, request, count, reader, {ms = ms, made = made, after = after,
+        log_result(result, request, count, reader, {ms = ms, made = made, refilled = refilled, after = after,
                                                     frame = math.max(state.job_slice, time() - state.frame_started)})
         state.last_reason = result.reason
     end
@@ -631,10 +677,12 @@ function Addon.new(m)
         end
     end
 
-    -- The lobby poll: this player's value posted when due, the members' values to the other players' recolors.
+    -- The lobby poll: this player's value posted when due, the members' values to the other players' recolors (with
+    -- Recolor Squadmates, this player's settings for those who share none, or for everyone).
     local function poll_sync(frame)
         state.next_sync = frame + m.Sync.POLL_FRAMES
-        remote.update(frame, session.poll(frame, state.sync_text, state.loopback))
+        remote.update(frame, session.poll(frame, state.sync_text, state.loopback), state.squad_mine,
+                      state.options.squad == Addon.SQUAD_EVERYONE)
     end
 
     -- Sync With Mod Users, on a frame with no recolor job and no cache save: a second check this frame, of other
@@ -704,12 +752,33 @@ function Addon.new(m)
         end
     end
 
+    -- A controller's units that had no materials at its last apply (not ready yet) bound once they have them
+    -- (Recolor controller settle). A second piece of work on a frame, only while such units are pending (a few frames
+    -- after an apply); what: 'Helldiver' or 'Preview' for the log.
+    local function settle(c, frame, what)
+        local ok, count, outcome = pcall(c.settle, frame)
+        if not ok then
+            note(what .. ': binding units that were not ready failed: ' .. tostring(count))
+            return
+        end
+        if count > 0 then
+            note(string.format('%s: %d textures bound late (their materials were not ready at the apply).', what,
+                               count))
+        end
+        if outcome == 'expired' and not state.expired_noted then
+            state.expired_noted = true
+            note(what .. ': a unit of the plan still had no materials 2 s after the apply; it keeps its own colors.')
+        end
+    end
+
     -- Every frame, before the game's update.
     function self.step()
         local frame = state.frame + 1
         state.frame = frame
         if controller.retired[1] then controller.collect(frame) end
         if ui_controller.retired[1] then ui_controller.collect(frame) end
+        if controller.pending then settle(controller, frame, 'Helldiver') end
+        if ui_controller.pending then settle(ui_controller, frame, 'Preview') end
         if state.job then
             local request = state.request
             if frame % Addon.UI_GATE_FRAMES == 0 and not state.ended and request and request.target == 'ui'
@@ -730,19 +799,25 @@ function Addon.new(m)
     local SCHEMES = m.Schemes and #m.Schemes.LIST or 0
     local function valid(name, value)
         if name == 'mode' then return value == 1 or value == 2 or value == 3 or value == 4 end
+        if name == 'squad' then return value == 1 or value == 2 or value == 3 end
         if name == 'scheme' then
             return type(value) == 'number' and value % 1 == 0 and value >= 0 and value <= SCHEMES
         end
         return TOGGLES[name] == true and type(value) == 'boolean'
     end
     -- A value equal to the current one changes nothing (v1.3 ran a job for it: the audit, rank 13). Turning local
-    -- recoloring back on (state.active) makes the preview, unwatched meanwhile, count as newly shown.
+    -- recoloring back on (state.active) makes the preview, unwatched meanwhile, count as newly shown. Recolor
+    -- Squadmates and, while it is on, every option reach the squadmates at the next frame's poll; it starts no job of
+    -- this player's own.
     function self.set_option(name, value)
         if not valid(name, value) then return end
         local o = state.options
         if o[name] == value then return end
         o[name] = value
         note('Option ' .. name .. ' = ' .. tostring(value) .. '.')
+        squad_settings()
+        if name == 'squad' or o.squad ~= Addon.SQUAD_OFF then state.next_sync = state.frame + 1 end
+        if name == 'squad' then return end
         if session then state.sync_text = m.Sync.encode(o) end -- posted once it has settled (src/sync.lua)
         state.dirty = true
         local was_active = state.active
@@ -761,8 +836,8 @@ function Addon.new(m)
     function self.options_text()
         local o = state.options
         return string.format('mode %d, paint scheme %d, keep sets %s, recolor hoods %s, match materials %s, recolor '
-            .. 'cape %s', o.mode, o.scheme, tostring(o.keep_sets), tostring(o.recolor_hoods), tostring(o.match_materials),
-            tostring(o.recolor_cape))
+            .. 'cape %s, recolor squadmates %d', o.mode, o.scheme, tostring(o.keep_sets), tostring(o.recolor_hoods),
+            tostring(o.match_materials), tostring(o.recolor_cape), o.squad)
     end
 
     -- Test builds only (reached through their global): the local player's own shared value drives the sync path
@@ -824,8 +899,9 @@ function Addon.new(m)
         if reason == 'shutdown' then
             save_at_shutdown()
             note('Shutdown: ' .. state.status .. string.format(' (applied %d, restored %d; textures made %d, '
-                .. 'refilled %d, destroyed %d', controller.applied, controller.restored, pool.made, pool.refilled,
-                pool.destroyed) .. (session and string.format('; sync: %d posts, %d failed, other players recolored '
+                .. 'refilled %d, destroyed %d; cape sheets made %d, refilled %d', controller.applied,
+                controller.restored, pool.made, pool.refilled, pool.destroyed, pool.sheets.made, pool.sheets.refilled)
+                .. (session and string.format('; sync: %d posts, %d failed, other players recolored '
                 .. '%d times', session.posts, session.failures, remote.jobs) or '') .. ').')
             return
         end
@@ -849,10 +925,11 @@ function Addon.new(m)
         for _, fn in ipairs({locate_ui, adopt, close_kept, lose, resolve, record_same, records_same, rebind, verify,
                              request_key,
                              mode_of, options_changed, kits_changed,
-                             note_cache, timed_apply, log_result, finish_ui, still_current, finish_ahead,
+                             note_cache, timed_apply, note_sheets, note_albedo, note_cape, log_result, finish_ui,
+                             still_current, finish_ahead,
                              release_reader, finish, run_job,
                              options_request, with_kits, request_for, plan_ahead, start_job, start_ahead, save_step,
-                             check_bindings, poll_sync, valid, watch_ui_job,
+                             check_bindings, poll_sync, valid, watch_ui_job, squad_settings, settle,
                              self.set_option, self.options_text, self.set_loopback, release_files, self.pause,
                              save_at_shutdown, self.stopped}) do
             jit.off(fn, true)
@@ -901,6 +978,11 @@ function Addon.options(instance, tr, note, Schemes)
             ok, why = register_scheme(menu, mod)
             if not ok then return false, why end
         end
+        ok, why = menu.register_option(Addon.OPTION_SQUAD, {type = 'choice', mod = mod, mod_id = Addon.MOD_ID,
+            label = text(menu, 'option.squad.label'), description = text(menu, 'option.squad.description'),
+            choices = {'Off', text(menu, 'option.squad.missing'), text(menu, 'option.squad.everyone')},
+            default = Addon.SQUAD_OFF})
+        if not ok then return false, why end
         for _, toggle in ipairs(Addon.TOGGLES) do
             ok, why = menu.register_option(toggle[1], {type = 'toggle', mod = mod, mod_id = Addon.MOD_ID,
                 label = text(menu, toggle[3]), description = text(menu, toggle[4]), default = toggle[5]})
@@ -912,6 +994,8 @@ function Addon.options(instance, tr, note, Schemes)
             instance.set_option('scheme', scheme_of(menu.get(Addon.OPTION_SCHEME)))
             menu.on_change(Addon.OPTION_SCHEME, function(value) instance.set_option('scheme', scheme_of(value)) end)
         end
+        instance.set_option('squad', menu.get(Addon.OPTION_SQUAD))
+        menu.on_change(Addon.OPTION_SQUAD, function(value) instance.set_option('squad', value) end)
         for _, toggle in ipairs(Addon.TOGGLES) do
             local id, name = toggle[1], toggle[2]
             instance.set_option(name, menu.get(id))
@@ -976,11 +1060,14 @@ function Addon.install(m)
         local native, problem = m.Engine.open(memory, memory.address(game), memory.address(exe), m.get_engine_api)
         require_that(native, tostring(problem))
         m.Matcher.use(m.Colour)
+        m.Zones.attach(m.Matcher, m.Colour) -- a cape's design zones and emblems (src/zones.lua)
+        m.Sheets.attach(m.Recolor) -- the emblem-sheet copies (src/sheets.lua)
+        m.Variety.attach(m.Matcher, m.Colour) -- an armor never left in one color (src/variety.lua)
         return Addon.new({Avatar = m.Avatar, Preview = m.Preview, Recolor = m.Recolor, Engine = m.Engine,
                           Files = m.Files, Slim = m.Slim,
                           Texture = m.Texture, Colour = m.Colour, Transfer = m.Transfer, Matcher = m.Matcher,
                           Kits = m.Kits, Schemes = m.Schemes, Capes = m.Capes, Patches = m.Patches, Sync = m.Sync,
-                          Remote = m.Remote,
+                          Remote = m.Remote, Albedo = m.Albedo,
                           memory = memory,
                           Appearance = m.Appearance and m.AppearanceData and m.Appearance.new(m.AppearanceData),
                           native = native, game = memory.address(game), note = note, Cache = m.Cache,

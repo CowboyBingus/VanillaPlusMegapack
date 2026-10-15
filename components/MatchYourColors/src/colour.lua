@@ -381,6 +381,9 @@ function Colour.row_diffuse(row)
     if c and row.lin then return c[1] * row.ar, c[2] * row.ag, c[3] * row.ab end
 end
 
+-- A source group's look its goals aim at: a cape source's (src/matcher.lua borrow_rows: gL, ga, gb), else its look.
+local function goal_look(g) return g.gL or g.L, g.ga or g.a, g.gb or g.b end
+
 -- The source group's diffuse color and target group t's (Lab, for map_group): each look less its rows' gloss, weighed
 -- as group_look weighs them; a look as it is where none of its rows shows gloss.
 function Colour.diffuse_colors(t, src)
@@ -391,9 +394,9 @@ function Colour.diffuse_colors(t, src)
         if r then fr, fg, fb = fr + w * (row.lin[1] - r), fg + w * (row.lin[2] - g), fb + w * (row.lin[3] - b) end
         weight = weight + w
     end
-    local sL, sa, sb = src.L, src.a, src.b
+    local sL, sa, sb = goal_look(src)
     if fr ~= 0 or fg ~= 0 or fb ~= 0 then
-        local r, g, b = Colour.lab_to_linear(src.L, src.a, src.b)
+        local r, g, b = Colour.lab_to_linear(sL, sa, sb)
         weight = math.max(weight, 1e-12)
         sL, sa, sb = Colour.linear_to_lab(math.max(r - fr / weight, 0), math.max(g - fg / weight, 0), math.max(b - fb / weight, 0))
     end
@@ -540,7 +543,7 @@ Colour.SAMPLES = SAMPLES
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({mean_hue, Colour.de2000, Colour.srgb_to_lab, lab_finv, linear_to_srgb, Colour.lab_to_linear,
         Colour.lab_to_srgb, Colour.npsum, Colour.pysum, Colour.weight_field, Colour.group_look, Colour.row_diffuse,
-        Colour.diffuse_colors, Colour.with_gloss, Colour.outside_first, Colour.two_tone, mostly_outside, second_main,
+        goal_look, Colour.diffuse_colors, Colour.with_gloss, Colour.outside_first, Colour.two_tone, mostly_outside, second_main,
         Colour.cape_second, Colour.nearest_lightness, Colour.cape_structure}) do
         jit.off(fn, true)
     end

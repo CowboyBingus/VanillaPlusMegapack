@@ -76,7 +76,7 @@ local function unit_materials(slim, archive, record, scratch)
     return out
 end
 
--- A material's texture slots: {slot number -> texture hash}.
+-- A material's texture slots: {slot number -> texture hash}, and its parent (its shader template's hash, +24).
 local function material_textures(slim, archive, record, scratch)
     local head = scratch(136)
     slim.part(archive, record, 'main', 0, 136, head, 0)
@@ -85,7 +85,7 @@ local function material_textures(slim, archive, record, scratch)
     slim.part(archive, record, 'main', 0, 136 + 12 * n, data, 0)
     local out = {}
     for i = 0, n - 1 do out[u32(data, 136 + 4 * i)] = hex64(data, 136 + 4 * n + 8 * i) end
-    return out
+    return out, hex64(head, 24)
 end
 
 -- Texture loaders with per-session caches: lut(hash) -> {values, width, height} or nil, coverage(hash) ->
@@ -116,6 +116,9 @@ function Kits.textures(deps)
         if not ok then error(texture_error(name, record, info), 0) end
         return info, Texture.pixels(slim, archive, record, info), record
     end
+
+    -- A texture's description and pixel reader (Texture.describe, Texture.pixels) and record, or nil (src/albedo.lua).
+    self.describe = describe
 
     function self.lut(name)
         local found = luts[name]
@@ -206,30 +209,46 @@ local function add_pattern_textures(entry, deps, piece, textures)
     if mask and mask ~= Kits.NO_LUT and deps.find(mask, Kits.TYPE_TEXTURE) then entry.pattern_mask = mask end
 end
 
--- The materials of one piece that carry a material LUT: {{material, lut, mask, pattern, pattern_mask}, ...}, in
--- the unit's order, or nil when the piece's unit is not in the searched archives. pattern: the kit's pattern
--- texture, else the material's default, when found; pattern_mask: the material's pattern mask, when found too.
+-- A material's entry: with a material LUT, {material, lut, mask, pattern, pattern_mask}; without one, a mod's material
+-- of gear whose albedo holds its colors (src/albedo.lua, v1.5: the Cowboy Hat), {material, albedo, mra}; else nil,
+-- and why when it is a mod's material src/albedo.lua cannot read.
+local function material_entry(deps, piece, material, record, textures, parent)
+    local default = textures[Kits.SLOT_LUT]
+    if not default then
+        if not deps.Albedo then return nil end
+        local entry, why = deps.Albedo.eligible(record, parent, textures, deps.textures.describe)
+        if entry then entry.material = material end
+        return entry, record.file and why or nil
+    end
+    local lut = piece.lut ~= Kits.NO_LUT and piece.lut or default
+    if not deps.find(lut, Kits.TYPE_TEXTURE) then return nil end
+    local entry = {material = material, lut = lut, mask = textures[Kits.SLOT_MASK]}
+    add_pattern_textures(entry, deps, piece, textures)
+    return entry
+end
+
+-- The materials of one piece that carry a material LUT (or an albedo with the colors, above), in the unit's order, or
+-- nil when the piece's unit is not in the searched archives. pattern: the kit's pattern texture, else the material's
+-- default, when found; pattern_mask: the material's pattern mask, when found too. Also the mods' materials without a
+-- color table left unread: {{material, file, why}, ...} or nil.
 local function piece_materials(deps, piece)
     local archive, record = deps.find(piece.path, Kits.TYPE_UNIT)
     if not archive then return nil end
-    local out = {}
+    local out, unread = {}, nil
     for _, material in ipairs(unit_materials(deps.slim, archive, record, deps.scratch)) do
         local m_archive, m_record = deps.find(material, Kits.TYPE_MATERIAL)
         if m_archive then
-            local textures = material_textures(deps.slim, m_archive, m_record, deps.scratch)
-            local default = textures[Kits.SLOT_LUT]
-            if default then
-                local lut = piece.lut ~= Kits.NO_LUT and piece.lut or default
-                if deps.find(lut, Kits.TYPE_TEXTURE) then
-                    local entry = {material = material, lut = lut, mask = textures[Kits.SLOT_MASK]}
-                    add_pattern_textures(entry, deps, piece, textures)
-                    out[#out + 1] = entry
-                end
+            local textures, parent = material_textures(deps.slim, m_archive, m_record, deps.scratch)
+            local entry, why = material_entry(deps, piece, material, m_record, textures, parent)
+            out[#out + 1] = entry
+            if why then
+                unread = unread or {}
+                unread[#unread + 1] = {material = material, file = m_record.file, why = why}
             end
         end
         deps.yield()
     end
-    return out
+    return out, unread
 end
 
 -- Adds one material's pattern area to the accumulators (weight x mask coverage / materials) when its pattern is
@@ -275,24 +294,59 @@ local function add_rows(acc, piece, weight, count, material, lut, coverage)
     end
 end
 
+-- A material whose albedo holds its colors (src/albedo.lua): its clusters read once per analysis (out.albedos), each
+-- a row of area weight x its share / materials (key '<albedo>:<cluster - 1>'; undergarment pieces' as under).
+local function add_albedo(acc, out, deps, piece, weight, count, material)
+    out.albedos = out.albedos or {}
+    local albedo = out.albedos[material.albedo]
+    if albedo == nil then
+        albedo = deps.Albedo.read(material, deps.textures.describe, deps.Colour, deps.yield) or false
+        out.albedos[material.albedo] = albedo
+    end
+    for k, c in ipairs(albedo and albedo.clusters or {}) do
+        local key, area = material.albedo .. ':' .. (k - 1), weight * c.share / count
+        if acc.area[key] == nil then
+            acc.order[#acc.order + 1] = key
+            acc.area[key], acc.under[key], acc.row_of[key] = 0.0, 0.0, {material.albedo, k - 1}
+        end
+        acc.area[key] = acc.area[key] + area
+        if piece.type == Kits.UNDERGARMENT then acc.under[key] = acc.under[key] + area end
+    end
+end
+
+-- A mod's materials without a color table left unread (piece_materials), once per analysis (out.unread: {[material]
+-- = {material, file, why}}, for the job's log).
+local function note_unread(out, unread)
+    for _, u in ipairs(unread or {}) do
+        out.unread = out.unread or {}
+        out.unread[u.material] = u
+    end
+end
+
 -- One piece: its materials (when spawned for this body) and, for a weighted piece, its rows. skin: the piece has
 -- skin tones (kept for the cache and logs; it no longer leaves the piece out).
 local function add_piece(acc, out, kit, piece, body, deps)
     local weight = Kits.weight(kit.kit_type, piece, body)
     -- Pieces of the other body type are never spawned for this avatar: not read at all.
     local spawned = piece.body == body or piece.body == Kits.BODY_ANY or kit.kit_type == Kits.HELMET
-    local materials = spawned and piece_materials(deps, piece) or nil
+    local materials, unread
+    if spawned then materials, unread = piece_materials(deps, piece) end
+    note_unread(out, unread)
     if spawned and not materials then out.dropped = out.dropped + 1 end
     local entry = {piece = piece, weight = weight, materials = materials or {}, skin = piece.tone > 0}
     out.pieces[#out.pieces + 1] = entry
     if weight <= 0 or not materials then return end
     for _, material in ipairs(materials) do
-        local lut = deps.textures.lut(material.lut)
-        out.luts[material.lut] = lut
-        local coverage = material.mask and deps.find(material.mask, Kits.TYPE_TEXTURE)
-            and deps.textures.coverage(material.mask) or nil
-        add_rows(acc, piece, weight, #materials, material, lut, coverage)
-        add_pattern(acc, out, deps, weight, #materials, material)
+        if material.albedo then
+            add_albedo(acc, out, deps, piece, weight, #materials, material)
+        else
+            local lut = deps.textures.lut(material.lut)
+            out.luts[material.lut] = lut
+            local coverage = material.mask and deps.find(material.mask, Kits.TYPE_TEXTURE)
+                and deps.textures.coverage(material.mask) or nil
+            add_rows(acc, piece, weight, #materials, material, lut, coverage)
+            add_pattern(acc, out, deps, weight, #materials, material)
+        end
         deps.yield()
     end
 end
@@ -302,6 +356,19 @@ end
 function Kits.emissive(lut, r)
     if lut.width <= 13 then return 0 end
     return lut.values[(r * lut.width + 13) * 4]
+end
+
+-- A LUT row's colors and flags (the color model's row_info), and an albedo cluster's (src/albedo.lua: its look, its
+-- mean albedo, metal over half its texels; paint, mode 0, no camo).
+local function lut_row(lut, r, deps)
+    local L, a, b, metal, camo, mode, full, ar, ag, ab = deps.colour.row_info(lut.values, lut.width, r)
+    return {L = L, a = a, b = b, metal = metal, camo = camo, mode = mode, full = full, ar = ar, ag = ag, ab = ab,
+            emissive = Kits.emissive(lut, r)}
+end
+local function albedo_row(albedo, r)
+    local c = albedo.clusters[r + 1]
+    return {L = c.seen[1], a = c.seen[2], b = c.seen[3], metal = c.metal > 0.5, camo = false, mode = 0,
+            full = c.metal >= 0.9, ar = c.lin[1], ag = c.lin[2], ab = c.lin[3], emissive = 0, albedo = true}
 end
 
 -- A kit's analysis for one body type: {kit, rows = {{key, area, under, L, a, b, metal, camo, mode, full, ar, ag,
@@ -317,11 +384,9 @@ function Kits.analyse(kit, body, deps)
     out.rows = {}
     for _, key in ipairs(acc.order) do
         local lut_name, r = acc.row_of[key][1], acc.row_of[key][2]
-        local lut = out.luts[lut_name]
-        local L, a, b, metal, camo, mode, full, ar, ag, ab = deps.colour.row_info(lut.values, lut.width, r)
-        out.rows[#out.rows + 1] = {key = key, lut = lut_name, row = r, area = acc.area[key], under = acc.under[key],
-                                   L = L, a = a, b = b, metal = metal, camo = camo, mode = mode, full = full, ar = ar,
-                                   ag = ag, ab = ab, emissive = Kits.emissive(lut, r)}
+        local row = out.luts[lut_name] and lut_row(out.luts[lut_name], r, deps) or albedo_row(out.albedos[lut_name], r)
+        row.key, row.lut, row.row, row.area, row.under = key, lut_name, r, acc.area[key], acc.under[key]
+        out.rows[#out.rows + 1] = row
         deps.yield()
     end
     out.patterns = {}
@@ -390,8 +455,10 @@ function Kits.mark_patched(analysis, touched, original, colour)
     for _, entry in ipairs(analysis.pieces) do
         if entry.weight > 0 and piece_patched(entry, patched) then analysis.geometry_patched = true end
     end
-    for _, row in ipairs(analysis.rows) do
-        if patched[row.lut .. ' ' .. Kits.TYPE_TEXTURE] then mark_row(row, analysis.luts[row.lut], original, colour) end
+    for _, row in ipairs(analysis.rows) do -- an albedo's clusters are no LUT rows (src/albedo.lua)
+        if patched[row.lut .. ' ' .. Kits.TYPE_TEXTURE] and not row.albedo then
+            mark_row(row, analysis.luts[row.lut], original, colour)
+        end
     end
     return analysis
 end
@@ -552,7 +619,9 @@ end
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({hex64, Kits.weight, unit_materials, material_textures, texture_error, Kits.textures,
         Kits.shared_samples,
-        add_pattern_textures, piece_materials, add_pattern, add_rows, add_piece, Kits.emissive, Kits.analyse,
+        add_pattern_textures, material_entry, piece_materials, add_pattern, add_rows, add_albedo, note_unread,
+        add_piece,
+        Kits.emissive, lut_row, albedo_row, Kits.analyse,
         row_change, piece_patched, mark_row, Kits.mark_patched, Kits.signature, piece_of, read_record, kit_of,
         Kits.catalogue}) do
         jit.off(fn, true)

@@ -181,16 +181,34 @@ end
 -- through responses measured on black plastic (albedo under 0.05 linear) plates overshot to a pale powder blue (the
 -- Scorpion's pads, the B-01's plates and helmet) while the Bulwark's painted steel read close to the troopers'
 -- (independent image review 2026-10-09, round 9).
-local function flat(mapping, part, src, role)
+-- Under a cape (cape: Helmet and Armor Match Cape) the role colors are the cape's look (src/matcher.lua borrow_rows: gL,
+-- ga, gb), fitted through each part's own response, and a part ends at most CAPE_TONE_UP lighter than it: up to
+-- ROLE_TONE lighter, the B-01 Tactical's gear under Foesmasher's black was asked L 31 for a cape seen at L 21 and read
+-- grey (user report 2026-10-14).
+local CAPE_TONE_UP = 2
+local function flat(mapping, part, src, role, cape)
+    local L, a, b, up = src.L, src.a, src.b, ROLE_TONE
+    if cape then L, a, b, up = src.gL or src.L, src.ga or src.a, src.gb or src.b, CAPE_TONE_UP end
     for _, row in ipairs(part.rows) do
         local goal = mapping[row.key]
-        local tone = math.max(-ROLE_TONE, math.min(ROLE_TONE, goal.L - src.L))
-        goal.L, goal.a, goal.b, goal.all = src.L + tone, src.a, src.b, true
-        if role ~= UNIFORM then goal.cal = nil end
+        local tone = math.max(-ROLE_TONE, math.min(up, goal.L - L))
+        goal.L, goal.a, goal.b, goal.all = L + tone, a, b, true
+        if role ~= UNIFORM and not cape then goal.cal = nil end
     end
 end
 -- Group g's rows by role and material, each bucket mapped as a part of g (g's lightness: the rows' offsets; hard rows
--- as paint: Match Materials' finish).
+-- as paint: Match Materials' finish when has.materials: always for SEAF, only with the option on under a cape; v1.4
+-- painted every hard row under a cape whatever the option, so the B-22 Model Citizen helmet's chrome turned matte
+-- cloth under the Eye of Liberty: user report 2026-10-14).
+-- A role's color for hard or soft rows: with has.metal_second (below) hard parts of the main's role take the metal
+-- second and soft rows of the second's role the main.
+local function role_color(roles, role, is_hard, has)
+    if has.metal_second then
+        if is_hard and role == BLUE then return roles[UNIFORM] end
+        if not is_hard and role == UNIFORM then return roles[BLUE] end
+    end
+    return roles[role]
+end
 local function map_group_roles(M, mapping, g, roles, has)
     local buckets, order = {}, {}
     for _, row in ipairs(g.rows) do
@@ -199,12 +217,13 @@ local function map_group_roles(M, mapping, g, roles, has)
         table.insert(buckets[k], row)
     end
     for _, k in ipairs(order) do
-        local role = math.floor(k / 2)
+        local role, is_hard = math.floor(k / 2), k % 2 == 1
+        local color = role_color(roles, role, is_hard, has)
         local part = {}
         for key, v in pairs(g) do part[key] = v end
         part.rows = buckets[k]
-        M.map_group(mapping, part, 'pair', roles[role], k % 2 == 1, has.armor)
-        flat(mapping, part, roles[role], role)
+        M.map_group(mapping, part, 'pair', color, is_hard and has.materials, has.armor)
+        flat(mapping, part, color, role, has.cape)
     end
 end
 -- Item t's colored lenses (glass, not glowing): a dark neutral smoke, as the gear.
@@ -220,20 +239,38 @@ end
 -- The plan of target item t against the scheme's item s by material roles; Matcher: src/matcher.lua; role_keys: the
 -- keys of the scheme's primary, secondary and cloth rows (Schemes.role_keys).
 -- opts (optional): {accent = the role of colored trims (default the gear), lenses = false (colored lenses keep their
--- colors)}.
+-- colors), materials = false (hard rows keep their own finish; default: they take the role's, as SEAF paints)}.
+-- The role plan's options into the inventory: accent_role, materials (hard rows painted: SEAF, or Match Materials under
+-- a cape), cape (the cape split).
+local function with_options(has, opts)
+    has.accent_role = opts and opts.accent or GEAR
+    has.materials = not opts or opts.materials ~= false
+    has.cape = opts and opts.cape or false
+    return has
+end
+-- Under a cape an armor is never left in one color (src/variety.lua, v1.5); SEAF's roles are its own.
+local function cape_balanced(Matcher, mapping, target, source, has)
+    if has.cape and target.armor and Matcher.balance then Matcher.balance(mapping, target, source) end
+    return mapping
+end
+
 function Schemes.role_plan(Matcher, target, source, role_keys, opts)
     local by_key, roles = {}, {}
     for _, g in ipairs(source.groups) do
         for _, row in ipairs(g.rows) do by_key[row.key] = g end
     end
     for i, key in ipairs(role_keys) do roles[i] = by_key[key] end
-    local mapping, has = {}, inventory(Matcher, target)
-    has.accent_role = opts and opts.accent or GEAR
+    local mapping, has = {}, with_options(inventory(Matcher, target), opts)
+    -- Match Materials under a cape whose second color is metal (the Eye of Liberty's gold, its LUT's metallic): hard parts
+    -- take that metal and clothing the main. Cloth never turns metal: the gold went to clothing as a pale yellow paint
+    -- and the plates kept the cape's black (independent review 1 2026-10-14; the user chose "Hard parts gold metal").
+    has.metal_second = has.cape and has.materials and roles[UNIFORM] ~= nil and roles[UNIFORM] ~= roles[BLUE]
+        and roles[UNIFORM].rep.metal or false
     for _, g in ipairs(target.groups) do
         if not g.hood then map_group_roles(Matcher, mapping, g, roles, has) end
     end
     if not (opts and opts.lenses == false) then map_lenses(Matcher, mapping, target, roles[GEAR]) end
-    return mapping
+    return cape_balanced(Matcher, mapping, target, source, has)
 end
 
 -- Helmet and Armor Match Cape on a near one-color item (its largest group CAPE_SPLIT of its paint or more: the B-01
@@ -243,7 +280,6 @@ end
 -- an item is split by material as the SEAF roles: plates the cape's main color, clothing its second (the largest at
 -- least CAPE_APART from the main), gear its darkest (a muted one first), colored trims its second; lenses keep theirs.
 local CAPE_SPLIT, CAPE_APART = 0.8, 15.0
-local CAPE_OPTS = {accent = UNIFORM, lenses = false}
 local function apart(x, y)
     local dL, da, db = x.L - y.L, x.a - y.a, x.b - y.b
     return math.sqrt(dL * dL + da * da + db * db) >= CAPE_APART
@@ -264,6 +300,18 @@ local function cape_keys(M, s)
     second = second or main
     return {main.rep.key, second.rep.key, dark.g.rep.key}
 end
+-- Whether cape source s's second color (cape_keys) is metal (the Eye of Liberty's gold): with Match Materials every
+-- helmet and armor under it is split by material, so its hard parts take that metal (role_plan metal_second) whatever
+-- its largest color's share: the CPR-80 Bulwark helmet (steel 79%, under CAPE_SPLIT) kept the cape's black, its stripe
+-- a near-white gold, beside a gilded armor (independent review round 4, 2026-10-14).
+function Schemes.metal_second(M, s)
+    local keys = cape_keys(M, s)
+    if keys[2] == keys[1] then return false end
+    for _, g in ipairs(s.groups) do
+        if g.rep.key == keys[2] then return g.rep.metal and true or false end
+    end
+    return false
+end
 
 -- The plan of target item t against source item s (src/matcher.lua): a scheme with material roles (SEAF) plans a
 -- helmet or an armor by material (Matcher.role_plan), anything else (no scheme: nil; a cape) as Matcher.plan.
@@ -271,8 +319,10 @@ function Schemes.plan(Matcher, scheme, t, s, materials, cape)
     if scheme and scheme.roles == 'material' and not cape then
         return Schemes.role_plan(Matcher, t, s, Schemes.role_keys(scheme))
     end
-    if s.cape_source and not cape and t.groups[1] and t.groups[1].share >= CAPE_SPLIT and s.groups[1] then
-        return Schemes.role_plan(Matcher, t, s, cape_keys(Matcher, s), CAPE_OPTS)
+    if s.cape_source and not cape and t.groups[1] and s.groups[1]
+        and (t.groups[1].share >= CAPE_SPLIT or (materials and Schemes.metal_second(Matcher, s))) then
+        return Schemes.role_plan(Matcher, t, s, cape_keys(Matcher, s),
+                                 {accent = UNIFORM, lenses = false, materials = materials and true or false, cape = true})
     end
     return Matcher.plan(t, s, materials, cape)
 end
@@ -304,7 +354,8 @@ end
 -- Runs once per scheme and job: interpreted (it must not add traces to the LuaJIT code cache every mod shares).
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({Schemes.get, Schemes.roles, Schemes.role_keys, chroma, dark, accent, hard, clothing, coverage, before,
-                         lead_rows, tally, inventory, hard_role, soft_role, row_role, flat, map_group_roles, map_lenses,
+                         lead_rows, tally, inventory, hard_role, soft_role, row_role, flat, role_color, map_group_roles, map_lenses,
+                         with_options, cape_balanced, Schemes.metal_second,
                          Schemes.role_plan, apart, cape_keys, Schemes.plan, Schemes.item}) do
         jit.off(fn, true)
     end

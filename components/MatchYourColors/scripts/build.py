@@ -40,7 +40,7 @@ sys.path.insert(0, str(loader_checkout() / 'scripts'))
 from archive import ARCHIVE, make_archive, resource_hash  # noqa: E402
 from build_addon import entry_source  # noqa: E402
 
-VERSION = '1.4'
+VERSION = '1.5'
 LUA_NAME = 'mods/cowboybingus/match_your_colors'
 GUID = 'b0694ff1-c08f-43e9-8611-e0ec75ea3ab5'
 TITLE = 'Match Your Colors v' + VERSION
@@ -68,12 +68,12 @@ CANONICAL = {'tests/frame_budget.lua': 'PerformanceBaseline/frame_budget.lua',
              'TRANSLATING.md': 'Translations/TRANSLATING.md'}
 # The modules, assembled in this order, each as `local <name> = (function() <file> end)()`.
 SOURCES = [('T', 'bingus_text.lua'), ('runtime', 'bingus_runtime.lua'), ('runtime_memory', 'bingus_memory.lua'),
-           ('Files', 'files.lua'), ('Slim', 'slim.lua'), ('Patches', 'patches.lua'), ('Texture', 'texture.lua'),
+           ('Files', 'files.lua'), ('Slim', 'slim.lua'), ('Patches', 'patches.lua'), ('Texture', 'texture.lua'), ('Albedo', 'albedo.lua'),
            ('Colour', 'colour.lua'),
-           ('Transfer', 'transfer.lua'), ('Matcher', 'matcher.lua'), ('Schemes', 'schemes.lua'),
+           ('Transfer', 'transfer.lua'), ('Matcher', 'matcher.lua'), ('Zones', 'zones.lua'), ('Variety', 'variety.lua'), ('Schemes', 'schemes.lua'),
            ('Appearance', 'appearance.lua'), ('AppearanceData', 'appearance_data.lua'), ('Kits', 'kits.lua'),
            ('Cache', 'cache.lua'), ('Capes', 'capes.lua'), ('Engine', 'engine.lua'), ('Avatar', 'avatar.lua'),
-           ('Preview', 'preview.lua'), ('Recolor', 'recolor.lua'), ('Sync', 'sync.lua'), ('Remote', 'remote.lua'),
+           ('Preview', 'preview.lua'), ('Recolor', 'recolor.lua'), ('Sheets', 'sheets.lua'), ('Sync', 'sync.lua'), ('Remote', 'remote.lua'),
            ('Addon', 'addon.lua')]
 VENDORED = ('bingus_text.lua', 'bingus_runtime.lua', 'bingus_memory.lua')
 # Names the mod's own sources must never contain: code or thread creation, page protection, library loading,
@@ -114,8 +114,9 @@ def assemble(test: bool = False) -> bytes:
         lines += [f'{target} = (function()', read_lua(path), 'end)()']
     lines.append('local instance = Addon.install({runtime = runtime, memory = runtime_memory, T = T, '
                  'locales = locales, Avatar = Avatar, Preview = Preview, Recolor = Recolor, Engine = Engine, '
-                 'Files = Files, Slim = Slim, Patches = Patches, '
-                 'Texture = Texture, Colour = Colour, Transfer = Transfer, Matcher = Matcher, Kits = Kits, '
+                 'Files = Files, Slim = Slim, Patches = Patches, Albedo = Albedo, '
+                 'Texture = Texture, Colour = Colour, Transfer = Transfer, Matcher = Matcher, Zones = Zones, Variety = Variety, Kits = Kits, '
+                 'Sheets = Sheets, '
                  'Cache = Cache, Appearance = Appearance, AppearanceData = AppearanceData, Schemes = Schemes, '
                  'Capes = Capes, '
                  'Sync = Sync, Remote = Remote})')

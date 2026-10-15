@@ -27,12 +27,14 @@ end
 -- Cases: no preview slot; a preview slot; the UI preview system with nothing shown; the UI preview shown; sync on
 -- alone in the lobby; sync on with another mod user's Helldiver recolored; Recolor Cape on with the UI preview shown
 -- (the cape recolored on the avatar and the preview, its kit compared on every check); Helmet and Armor Match Cape
--- with the UI preview shown (the cape as the source: its kit compared on every check, both items recolored).
+-- with the UI preview shown (the cape as the source: its kit compared on every check, both items recolored); Recolor
+-- Squadmates (v1.5) with a squadmate without the mod recolored with this player's settings.
 local LOCAL_ID = 'C0FFEE5EED0001'
 local CASES = {{}, {previews = true}, {ui = true}, {ui = true, shown = true},
                {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}}}},
                {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}, {id = '1234', value = '1|2|3|0'}}}},
-               {ui = true, shown = true, capes = true}, {ui = true, shown = true, cape_source = true}}
+               {ui = true, shown = true, capes = true}, {ui = true, shown = true, cape_source = true},
+               {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}, {id = '1234'}}}, squad = 2}}
 for _, case in ipairs(CASES) do
     local w = setup({previews = case.previews, ui = case.ui, lobby = case.lobby})
     if case.shown then
@@ -41,6 +43,7 @@ for _, case in ipairs(CASES) do
     end
     if case.capes then w.instance.set_option('recolor_cape', true) end
     if case.cape_source then w.instance.set_option('mode', 4) end -- src/recolor.lua Recolor.CAPE_SOURCE
+    if case.squad then w.instance.set_option('squad', case.squad) end
     w.frames(12)
     local step, state = w.instance.step, w.instance.state
     for _ = 1, 360 do step() end -- three periodic checks and polls (the value posted): one-time growth happens here
@@ -71,4 +74,4 @@ for _, case in ipairs(CASES) do
 end
 print('PASS test_idle_alloc (' .. passed .. ' checks: 2400 idle frames each, with and without a preview slot, '
     .. 'with the UI preview hidden and shown, with sync on alone and with another mod user recolored, with Recolor '
-    .. 'Cape on, with Helmet and Armor Match Cape)')
+    .. 'Cape on, with Helmet and Armor Match Cape, with Recolor Squadmates)')

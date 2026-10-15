@@ -18,12 +18,14 @@ local ffi = require('ffi')
 local Recolor = {}
 
 Recolor.OFF, Recolor.HELMET_FROM_ARMOR, Recolor.ARMOR_FROM_HELMET = 1, 2, 3
+-- a plan's units without materials at its apply are tried again every PENDING_EVERY frames for PENDING_FRAMES
+-- (controller settle)
+Recolor.PENDING_EVERY, Recolor.PENDING_FRAMES = 4, 120
 -- Helmet and Armor Match Cape: both items planned against the worn (or previewed) cape (cape_source_job).
 Recolor.CAPE_SOURCE = 4
 Recolor.RETIRE_FRAMES = 4
-Recolor.SHEETS_KEPT = 2 -- recolored sheets a session keeps ready (the bound one and the next)
-Recolor.SHEET_FORMAT = 77 -- DXGI BC3 (src/texture.lua FORMAT_BC3): the decal sheets recolored
-Recolor.SHEET_CHUNK = 262144 -- bytes of a sheet read between two pause points
+-- The emblem-sheet copies (Recolor.sheet_recipe, sheet_spec, c_buffer, SHEET_FORMAT, SHEET_CHUNK, SHEETS_KEPT) are
+-- src/sheets.lua's, attached to Recolor (Sheets.attach) before any job runs.
 local SLOTS = {[Recolor.HELMET_FROM_ARMOR] = {0, 0}, [Recolor.ARMOR_FROM_HELMET] = {1, 9}}
 local LUT_WIDTH = 23
 local HIGH = 4294967296
@@ -33,6 +35,11 @@ local HIGH = 4294967296
 -- detail and mesh; v1.0's whole-row copies drew chrome specks with them), the source's specular (column 8) and
 -- roughness (column 10 x). Mode, detail layer and controls, colors, camo and tiling stay the target's. A cape's tint
 -- row (source.tint_of: its cape LUT -> material LUT; a cape as the source) has its material row's finish.
+-- A row that was paint (metallic under 0.5) taking a metal finish is at least METAL_ON_PAINT_ROUGH rough, the game's
+-- median hard bare-metal roughness (1,083 rows by area: p25 and p50 0.30; research/scratch/v15/metal_rough_survey.lua):
+-- the B-22 Model Citizen's mirror chrome (0.10, kept for parts made for it) on the FS-37 Ravager's quilted chest
+-- reflected the Armory's lights as a white blotch and sparkle (independent review round 3, 2026-10-14).
+Recolor.METAL_ON_PAINT_ROUGH = 0.30
 function Recolor.apply_finish(data, width, r, source, key)
     local lut, row = key:match('^(%x+):(%d+)$')
     lut = lut and source.tint_of and source.tint_of[lut] or lut
@@ -40,10 +47,12 @@ function Recolor.apply_finish(data, width, r, source, key)
     if not spec then error('finish source ' .. tostring(key) .. ' not in the source analysis', 0) end
     local v, s = spec.values, tonumber(row) * spec.width * 4
     local t = r * width * 4
+    local was_paint = data[t + 27] < 0.5
     data[t + 27] = math.min(math.max(v[s + 27], 0), 1)
     data[t + 28], data[t + 29], data[t + 30], data[t + 31] = 0, 0, 0, 0
     data[t + 32], data[t + 33], data[t + 34], data[t + 35] = v[s + 32], v[s + 33], v[s + 34], v[s + 35]
     data[t + 40] = v[s + 40]
+    if was_paint and data[t + 27] >= 0.5 then data[t + 40] = math.max(data[t + 40], Recolor.METAL_ON_PAINT_ROUGH) end
 end
 
 -- A paint scheme's camo row onto LUT row r of data (width columns): its colors (base, detail, wear: columns 0, 2,
@@ -108,7 +117,9 @@ function Recolor.build_luts(target, plan, transfer, yield, source, stats)
     end
     local out, tint_of = {}, target.tint_of or {}
     for lut, rows in pairs(changed) do
-        if not tint_of[lut] then out[lut] = Recolor.build_lut(target.luts[lut], rows, transfer, yield, source, stats) end
+        if not tint_of[lut] and target.luts[lut] then -- an albedo's clusters: src/albedo.lua plan_specs
+            out[lut] = Recolor.build_lut(target.luts[lut], rows, transfer, yield, source, stats)
+        end
     end
     for lut, rows in pairs(changed) do
         local material = tint_of[lut]
@@ -136,123 +147,6 @@ function Recolor.build_lut(original, rows, transfer, yield, source, stats)
         yield()
     end
     return {width = width, height = height, data = data}
-end
-
--- Emblem sheets (KB match-your-colors-cape-tint, round 2). A cape emblem that would no longer read
--- (Matcher.cape_emblems) is recolored in a copy of the cape's decal sheet (Capes.recolor_sheet) bound on the
--- decal_sheet slot of its materials (src/engine.lua DECAL_SLOT, BC3 with its mip chain). A plan keeps only the
--- recipe (sheet_recipe); each job turns it into the sheet's data (sheet_spec: SHEETS_KEPT recipes kept, the original
--- bytes of the last sheet read kept by the pipeline), in buffers outside the Lua heap (the game's LuaJIT keeps every
--- Lua object below 2 GB, shared with the whole game: KB user-crash-report-2026-10-02), freed by the collector once
--- nothing references them (a texture keeps its data). About 5.6 MB per sheet; nothing here runs per frame.
-local MALLOC_DECLARED = 'myc1_malloc_declared'
-local function c_buffer(size)
-    if not pcall(ffi.typeof, MALLOC_DECLARED) then
-        ffi.cdef [[
-            typedef struct myc1_malloc_declared { int unused; } myc1_malloc_declared;
-            void *myc1_malloc(size_t size) __asm__("malloc");
-            void myc1_free(void *pointer) __asm__("free");
-        ]]
-    end
-    local raw = ffi.C.myc1_malloc(size)
-    if raw == nil then error('no memory for a ' .. size .. '-byte sheet', 0) end
-    return ffi.gc(ffi.cast('uint8_t *', raw), ffi.C.myc1_free)
-end
-Recolor.c_buffer = c_buffer
-
--- The bytes of a w x h BC3 mip chain of `mips` mips.
-local function bc3_bytes(width, height, mips)
-    local total = 0
-    for m = 0, mips - 1 do
-        local w, h = math.max(1, math.floor(width / 2 ^ m)), math.max(1, math.floor(height / 2 ^ m))
-        total = total + math.max(1, math.floor((w + 3) / 4)) * math.max(1, math.floor((h + 3) / 4)) * 16
-    end
-    return total
-end
-
--- A color shift rounded to SHIFT_STEP: the endpoints round to 5-6 bits, and a shift that differs in its last bits
--- (the reference's and the runtime's emblem colors agree to about 1e-12) could move one across a rounding edge.
-Recolor.SHIFT_STEP = 1 / 1024
-local function step(x) return math.floor(x / Recolor.SHIFT_STEP + 0.5) * Recolor.SHIFT_STEP end
-
--- The recipe of a cape plan's sheet: {name, width, height, mips, size, cells = {{rect, shift}}} for the emblems that
--- take a color (picks: Matcher.cape_emblems, by emblem index), in emblem order, a cell overlapping an earlier one left
--- out; nil when none takes one or its sheet is not a BC3 sheet.
--- Whether rect overlaps the rect of one of cells.
-local function overlaps(cells, rect)
-    for _, cell in ipairs(cells) do
-        local r = cell.rect
-        if rect[1] < r[3] and r[1] < rect[3] and rect[2] < r[4] and r[2] < rect[4] then return true end
-    end
-    return false
-end
-
-function Recolor.sheet_recipe(target, picks)
-    local recipe
-    for i, e in ipairs(target.emblems or {}) do
-        local pick = picks[i]
-        if pick and e.rect and e.sheet_format == Recolor.SHEET_FORMAT and (not recipe or recipe.name == e.sheet) then
-            recipe = recipe or {name = e.sheet, width = e.sheet_width, height = e.sheet_height, mips = e.sheet_mips,
-                                size = bc3_bytes(e.sheet_width, e.sheet_height, e.sheet_mips), cells = {}}
-            if not overlaps(recipe.cells, e.rect) then
-                recipe.cells[#recipe.cells + 1] = {rect = e.rect, shift = {step(pick.L - e.L), step(pick.a - e.a),
-                                                                           step(pick.b - e.b)}}
-            end
-        end
-    end
-    return recipe
-end
-
--- A recipe as a string (the sheets kept are keyed by it).
-local function sheet_key(recipe)
-    local parts = {recipe.name}
-    for _, cell in ipairs(recipe.cells) do
-        local r, d = cell.rect, cell.shift
-        parts[#parts + 1] = string.format('%d,%d,%d,%d:%.9g,%.9g,%.9g', r[1], r[2], r[3], r[4], d[1], d[2], d[3])
-    end
-    return table.concat(parts, ';')
-end
-
-local sheets_kept, sheets_order = {}, {}
--- Every prepared sheet anything still references (a result a controller has bound, the local player's, the preview's
--- or a squadmate's), found again by its recipe before another copy is made: SHEETS_KEPT alone made six 5.6 MB copies
--- for the recipes 1, 2, 3, 1, 2, 3 of three live capes (the audit, rank 6). Weak: it keeps nothing alive.
-local sheets_live = setmetatable({}, {__mode = 'v'})
-
--- key's spec among the kept ones, most recently used last; the oldest past SHEETS_KEPT is let go.
-local function keep_sheet(key, spec)
-    for i, k in ipairs(sheets_order) do
-        if k == key then table.remove(sheets_order, i) break end
-    end
-    sheets_kept[key], sheets_order[#sheets_order + 1] = spec, key
-    if #sheets_order > Recolor.SHEETS_KEPT then sheets_kept[table.remove(sheets_order, 1)] = nil end
-end
-
--- The sheet data of a recipe (a job's: ctx with p, the pipeline, cape_kit and deps): {sheet = true, width, height,
--- mips, size, data (uint8_t pointer, outside the Lua heap)}, the recolored copy of the cape's sheet; nil and why when
--- the sheet cannot be read. yield() between the steps and inside the recolor.
-function Recolor.sheet_spec(ctx, recipe, yield)
-    local key = sheet_key(recipe)
-    local spec = sheets_kept[key] or sheets_live[key]
-    if spec then
-        keep_sheet(key, spec)
-        return spec
-    end
-    local original, why = ctx.p.sheet(recipe, ctx.cape_kit.archive)
-    if not original then return nil, why end
-    local data = c_buffer(recipe.size)
-    for at = 0, recipe.size - 1, Recolor.SHEET_CHUNK * 4 do -- about 0.1 ms a piece outside the game
-        ffi.copy(data + at, original + at, math.min(Recolor.SHEET_CHUNK * 4, recipe.size - at))
-        yield()
-    end
-    for _, cell in ipairs(recipe.cells) do
-        ctx.deps.Capes.recolor_sheet(data, recipe, cell, ctx.deps.Colour, yield)
-    end
-    spec = {sheet = true, width = recipe.width, height = recipe.height, mips = recipe.mips, size = recipe.size,
-            data = data}
-    sheets_live[key] = spec
-    keep_sheet(key, spec)
-    return spec
 end
 
 -- A kit analysis's measured appearance for the matcher: {kit = its entry (or nil), row, seen_share, hoods = its hood
@@ -299,6 +193,13 @@ function Recolor.look_of(analysis, appearance, yield)
     if not covers(kit, analysis.rows) and appearance.index_seen then appearance.index_seen(yield) end
     return {kit = kit, row = appearance.row, seen_share = appearance.seen_share,
             hoods = appearance.hoods and appearance.hoods(id) or nil}
+end
+-- A cape's look as the source of Helmet and Armor Match Cape: its colors' goals aim at their look on screen
+-- (src/matcher.lua borrow_rows, CAPE_SHADE).
+function Recolor.source_look_of(cape, appearance, yield)
+    local look = Recolor.look_of(cape, appearance, yield)
+    if look then look.seen = true end
+    return look
 end
 
 -- Degrees between two hues (a, b pairs), 0-180.
@@ -474,7 +375,7 @@ local function pipeline(deps, yield, state)
         end
         if not self.deps then
             self.deps = {yield = yield, textures = Kits.textures(job), colour = self.model(), Kits = Kits,
-                         Texture = Texture, Colour = Colour}
+                         Texture = Texture, Colour = Colour, Albedo = deps.Albedo}
         end
         self.deps.slim, self.deps.scratch, self.deps.big_scratch = job.slim, job.scratch, job.big_scratch
     end
@@ -530,26 +431,33 @@ local function pipeline(deps, yield, state)
     -- A cape's decal sheet (recipe: Recolor.sheet_recipe's), its whole mip chain (DDS order) in a buffer outside the
     -- Lua heap, read in SHEET_CHUNK pieces with a pause after each; the last sheet read is kept for the session. nil
     -- and why when it is not found or no longer the BC3 sheet the recipe was made for.
-    function self.sheet(recipe, archive)
-        local kept = self.kept_sheet
-        if kept and kept.name == recipe.name then return kept.data end
+    -- A texture's whole mip chain (its first layer, DDS order) in a buffer outside the Lua heap, read in SHEET_CHUNK
+    -- pieces with a pause after each, and its description; nil and why when it is not found.
+    function self.chain(name, archive)
         self.open()
         self.find_in(archive)
-        local found, record = self.deps.find(recipe.name, Kits.TYPE_TEXTURE)
-        if not found then return nil, 'decal sheet ' .. recipe.name .. ' not found' end
+        local found, record = self.deps.find(name, Kits.TYPE_TEXTURE)
+        if not found then return nil, name .. ' not found' end
         local size = job.slim.part_size(record, 'main')
         local main = job.scratch(size)
         job.slim.part(found, record, 'main', 0, size, main, 0)
         local info = Texture.describe(main, size)
+        local data = Recolor.c_buffer(info.layer_bytes)
+        local pixels = Texture.pixels(job.slim, found, record, info)
+        for at = 0, info.layer_bytes - 1, Recolor.SHEET_CHUNK do
+            pixels(at, math.min(Recolor.SHEET_CHUNK, info.layer_bytes - at), data, at)
+            yield()
+        end
+        return data, info
+    end
+    function self.sheet(recipe, archive)
+        local kept = self.kept_sheet
+        if kept and kept.name == recipe.name then return kept.data end
+        local data, info = self.chain(recipe.name, archive)
+        if not data then return nil, 'decal sheet ' .. info end
         if info.format ~= Recolor.SHEET_FORMAT or info.width ~= recipe.width or info.height ~= recipe.height
             or info.mips ~= recipe.mips or info.total ~= recipe.size then
             return nil, 'decal sheet ' .. recipe.name .. ' is not the sheet analysed'
-        end
-        local data = c_buffer(info.total)
-        local pixels = Texture.pixels(job.slim, found, record, info)
-        for at = 0, info.total - 1, Recolor.SHEET_CHUNK do
-            pixels(at, math.min(Recolor.SHEET_CHUNK, info.total - at), data, at)
-            yield()
         end
         self.kept_sheet = {name = recipe.name, data = data}
         return data
@@ -664,10 +572,11 @@ local function source_item(ctx, yield)
         local cape = ctx.cape_source
         ctx.s = deps.Matcher.item(deps.Capes.source_rows(cape, deps.Colour), false,
                                   deps.Capes.emblem_patterns(cape, deps.Colour),
-                                  Recolor.look_of(cape, deps.Appearance, yield))
+                                  Recolor.source_look_of(cape, deps.Appearance, yield))
         ctx.s.part_guard = deps.Capes.dark_parts_guard -- dark gloves and boots stay dark
         ctx.s.cape_source = true -- a near one-color item splits by material (src/schemes.lua Schemes.plan)
-        ctx.source_luts = cape
+        -- its finishes are cloth (src/transfer.lua dark_finish: a light paint turned dark takes a dark paint's rough)
+        ctx.source_luts = {luts = cape.luts, tint_of = cape.tint_of, cloth = true}
     else
         local source = ctx.source
         ctx.s = deps.Matcher.item(source.rows, source.kit.kit_type == deps.Kits.ARMOR, Recolor.patterns_of(source),
@@ -706,6 +615,9 @@ local function plan_target(ctx, target, made, yield)
     end
     for name, spec in pairs(Recolor.build_patterns(target, Matcher.pattern_plan(t, s, plan), deps.Colour)) do
         made.patterns[name] = spec
+    end
+    if target.albedos or target.unread then -- a mod's gear without a color table (src/albedo.lua)
+        made.albedo_report = deps.Albedo.plan_specs(target, plan, made.luts, ctx.p.chain, deps.Colour, yield)
     end
 end
 
@@ -807,7 +719,7 @@ local function pair_job(ctx, h, a, yield)
     local made = planned(ctx, key, {target}, yield)
     local slots = SLOTS[request.mode]
     return {action = 'apply', key = key, luts = made.luts, patterns = made.patterns, first = slots[1],
-            last = slots[2], target = target}
+            last = slots[2], target = target, albedo_report = made.albedo_report}
 end
 
 -- Recolor Cape: the cape (src/capes.lua) planned against the job's source item; its LUT joins result (in a new
@@ -1157,14 +1069,29 @@ function Recolor.controller(deps)
     -- (before) counts as holding that binding's vanilla texture, and the binding is taken over: bound over at once,
     -- not put back first (v1.3 restored every binding of the plan before, two reads and a bind each, then read each
     -- slot again).
-    local function bind_slot(u, m, held, slot, specs, vanilla)
+    -- Whether object is one of this controller's textures (bound now, or retired and not given back yet).
+    local function owned(object)
+        for _, texture in pairs(self.textures) do if texture.object == object then return true end end
+        for _, texture in ipairs(self.retired) do if texture.object == object then return true end end
+        return false
+    end
+
+    -- waiting: a slot that holds a texture neither the plan changes nor ours is added to it (the game may not have
+    -- given the material its own texture yet: settle).
+    local function bind_slot(u, m, held, slot, specs, vanilla, waiting)
         local bound = Engine.binding_in(big, held, slot)
         local slots = bound and before and before[m.material]
         local old = slots and slots[slot]
         if old and old.texture ~= bound then old = nil end
         local original = old and old.vanilla or bound
         local name = original and vanilla[original]
-        if not name then return false end
+        if not name then
+            if bound and waiting and not owned(bound) then
+                waiting[#waiting + 1] = {unit = u.unit, mesh = m.mesh, material = m.material, slot = slot, specs = specs,
+                                         vanilla = vanilla}
+            end
+            return false
+        end
         local texture = texture_for(specs, name)
         Engine.bind(native, m.material, slot, texture.object)
         if old then old.taken = true end
@@ -1175,12 +1102,12 @@ function Recolor.controller(deps)
 
     -- Binds unit u's material m in each of slots ({slot, specs, vanilla objects}) the plan changes, its bindings read
     -- once for all of them (v1.3 read them again for each slot); marks its mesh to commit. Returns how many it bound.
-    local function bind_material(u, m, slots, meshes)
+    local function bind_material(u, m, slots, meshes, waiting)
         local held = Engine.bindings(read, m.material, small, big)
         if not held then return 0 end
         local count = 0
         for _, s in ipairs(slots) do
-            if bind_slot(u, m, held, s[1], s[2], s[3]) then
+            if bind_slot(u, m, held, s[1], s[2], s[3], waiting) then
                 meshes[m.mesh], count = true, count + 1
             end
         end
@@ -1192,16 +1119,17 @@ function Recolor.controller(deps)
     -- Binds one unit's materials (vanilla: {luts, patterns} objects by name; the pattern slot is read only when
     -- the plan changes a pattern, the cape LUT slot only on the cape's unit (slot 1) when the plan changes its tint);
     -- marks the meshes to commit. Returns how many bindings were made.
-    local function bind_unit(result, u, vanilla, meshes)
+    local function bind_unit(result, u, vanilla, meshes, waiting)
         local slots = {{Engine.LUT_SLOT, result.luts, vanilla.luts}}
         if vanilla.any_pattern then slots[#slots + 1] = {Engine.PATTERN_SLOT, result.patterns, vanilla.patterns} end
         if u.slot == 1 then -- the cape's unit: its tint and its emblems' sheet
             if vanilla.any_tint then slots[#slots + 1] = {Engine.CAPE_LUT_SLOT, result.luts, vanilla.luts} end
             if vanilla.any_sheet then slots[#slots + 1] = {Engine.DECAL_SLOT, result.luts, vanilla.luts} end
         end
-        local count = 0
-        for _, m in ipairs(Engine.unit_materials(native, u.unit)) do count = count + bind_material(u, m, slots, meshes) end
-        return count
+        if vanilla.any_albedo then slots[#slots + 1] = {Engine.ALBEDO_SLOT, result.luts, vanilla.luts} end
+        local count, materials = 0, Engine.unit_materials(native, u.unit)
+        for _, m in ipairs(materials) do count = count + bind_material(u, m, slots, meshes, waiting) end
+        return count, #materials
     end
 
     -- Whether any planned texture is of a kind (field: 'cape', a cape LUT copy, Recolor.build_luts; 'sheet', a decal
@@ -1222,7 +1150,7 @@ function Recolor.controller(deps)
             for _, name in pairs(vanilla[kind]) do
                 if not self.textures[name] then
                     local spec = specs[name]
-                    local size = (spec.sheet and 'sheet:' or '') .. spec.width .. 'x' .. spec.height
+                    local size = Engine.pool_key(spec)
                     local d = demand[size] or {spec = spec, count = 0}
                     d.count, demand[size] = d.count + 1, d
                 end
@@ -1231,18 +1159,29 @@ function Recolor.controller(deps)
         for _, d in pairs(demand) do pool.reserve(d.spec, d.count) end
     end
 
-    local function bind_units(result, identity, slot)
+    -- Binds the plan's target units (only: {[unit] = true}, else every one); returns how many bindings were made, the
+    -- target units that had no materials ({[unit] = true}: dead, or not ready yet) or nil, and the slots left waiting
+    -- (bind_slot) or nil.
+    local function bind_units(result, identity, slot, only)
         local vanilla = {luts = vanilla_objects(result.luts), patterns = vanilla_objects(result.patterns)}
         vanilla.any_pattern = next(vanilla.patterns) ~= nil
         vanilla.any_tint, vanilla.any_sheet = any_of(result.luts, 'cape'), any_of(result.luts, 'sheet')
+        vanilla.any_albedo = any_of(result.luts, 'albedo')
         reserve(result, vanilla)
         local pieces = piece_index(result.targets or {result.target}, identity.body)
-        local meshes, count = {}, 0
+        local meshes, count, pending, waiting = {}, 0, nil, {}
         for _, u in ipairs(Avatar.units(memory, identity, slot, result.first, result.last)) do
-            if pieces[u.type .. ':' .. u.slot] then count = count + bind_unit(result, u, vanilla, meshes) end
+            if pieces[u.type .. ':' .. u.slot] and (not only or only[u.unit]) then
+                local bound, materials = bind_unit(result, u, vanilla, meshes, waiting)
+                count = count + bound
+                if materials == 0 then
+                    pending = pending or {}
+                    pending[u.unit] = true
+                end
+            end
         end
         commit(meshes)
-        return count
+        return count, pending, waiting[1] and waiting or nil
     end
 
     -- Applies a job result: a new plan binds its textures over the plan before's (bind_slot) and puts the vanilla
@@ -1256,14 +1195,86 @@ function Recolor.controller(deps)
         local replaced = self.key ~= result.key and retire(frame) or nil
         before = replaced and index_of(replaced)
         self.key, self.result = result.key, result
-        local ok, count = pcall(bind_units, result, identity, slot)
+        local ok, count, pending, waiting = pcall(bind_units, result, identity, slot)
         before = nil
         if replaced then put_back(replaced) end -- also when binding failed: none of the plan before stays bound
         if not ok then error(count, 0) end
+        self.pending = (pending or waiting) and {units = pending, slots = waiting, identity = identity, slot = slot,
+                                                 since = frame} or nil
         self.prune()
         rebuild_probes()
         self.applied = self.applied + count
         return count
+    end
+
+    -- One waiting slot read again (settle): bound when it now holds a texture the plan changes. Returns whether it is
+    -- done (bound, its unit gone, or one of ours bound there) and whether it bound.
+    local function retry_slot(e, meshes)
+        if native.alive(e.unit) == 0 then return true, false end
+        local held = Engine.bindings(read, e.material, small, big)
+        local bound = held and Engine.binding_in(big, held, e.slot)
+        local name = bound and e.vanilla[bound]
+        if not name then return bound ~= nil and owned(bound), false end
+        local texture = texture_for(e.specs, name)
+        Engine.bind(native, e.material, e.slot, texture.object)
+        self.bindings[#self.bindings + 1] = {unit = e.unit, mesh = e.mesh, material = e.material, slot = e.slot,
+                                             vanilla = bound, texture = texture.object}
+        meshes[e.mesh] = true
+        return true, true
+    end
+
+    -- The last apply's target units without materials and slots holding a texture neither the plan's nor ours
+    -- (self.pending; live sessions 2026-10-14: in the Armory, an armor changed under the same cape gave the preview a
+    -- new cape unit whose LUT slots held a placeholder until the game set the kit's LUT a few frames later; a plan
+    -- applied before that, as a kept plan is within 2 frames, bound nothing there and nothing bound it later, so the
+    -- cape kept its own colors) bound once they are ready: on every PENDING_EVERY-th frame for PENDING_FRAMES frames
+    -- after the apply, those units and slots alone. A slot on a LUT the plan does not change waits to the end too.
+    -- Returns how many bindings it made and 'done', 'pending' or 'expired' (units still without materials at the end).
+    -- The pending units tried again (settle): bindings made, units still without materials, slots now waiting.
+    local function retry_units(p)
+        if not p.units then return 0, nil, nil end
+        local ok, count, still, waiting = pcall(bind_units, self.result, p.identity, p.slot, p.units)
+        if not ok then
+            self.pending = nil
+            error(count, 0)
+        end
+        return count, still, waiting
+    end
+
+    -- The waiting slots tried again (settle) after slots (the units' new ones): bindings made, slots still waiting.
+    local function retry_slots(p, slots)
+        local meshes, count = {}, 0
+        for _, e in ipairs(p.slots or {}) do
+            local done, bound = retry_slot(e, meshes)
+            if bound then count = count + 1 end
+            if not done then
+                slots = slots or {}
+                slots[#slots + 1] = e
+            end
+        end
+        commit(meshes)
+        return count, slots
+    end
+
+    function self.settle(frame)
+        local p = self.pending
+        local age = frame - p.since
+        if age % Recolor.PENDING_EVERY ~= 0 then return 0, 'pending' end
+        if age > Recolor.PENDING_FRAMES or not self.result then
+            self.pending = nil
+            return 0, p.units and 'expired' or 'done'
+        end
+        local count, units, slots = retry_units(p)
+        local late
+        late, slots = retry_slots(p, slots)
+        count = count + late
+        p.units, p.slots = units, slots
+        if not units and not slots then self.pending = nil end
+        if count > 0 then
+            rebuild_probes()
+            self.applied = self.applied + count
+        end
+        return count, self.pending and 'pending' or 'done'
     end
     return self
 end
@@ -1272,8 +1283,7 @@ end
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({Recolor.apply_finish, Recolor.apply_copy, note_fit, build_tints, Recolor.build_luts,
-        Recolor.build_lut, c_buffer, bc3_bytes, step, overlaps, Recolor.sheet_recipe, sheet_key, keep_sheet,
-        Recolor.sheet_spec,
+        Recolor.build_lut,
         hue_apart, Recolor.pattern_texel, measured_kit_of,
         Recolor.build_patterns, Recolor.look_of, source_item, plan_target, planned, options_key, both_job, pair_job,
         with_cape, analyse_new, analyser, items_job, covers, sum_part, records_sum, plan_key, item_key, cape_source_of,

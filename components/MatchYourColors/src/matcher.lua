@@ -71,6 +71,7 @@ local LOOK_DARK_L = 30.0 -- a part looks dark below this perceived lightness (a 
 local SECOND_MAIN_SHARE, LIGHTER_MAIN_L = 0.25, 20.0 -- a source's second main color (anchor_of, vivid_minor_guard)
 local TWO_TONE_SHARE = 0.15 -- a cape's vivid color this big is its design when it has no other muted one (two_tone)
 local OWN_COLOR_C, BLACK_C, BAND_MAX_SHARE, LIGHT_BAND_L, DARK_PAIR_L = 9.0, 4.0, 0.4, 45.0, 30.0 -- tint_bands
+local BAND_ARMOR_MIN_SHARE = 0.10 -- an armor's band takes a source color of this share or more (band_hue_source)
 local CAPE_LIMITS = {second = SECOND_MAIN_SHARE, main = MAIN_COLOR, keep = KEEP_DE, accent_c = ACCENT_C, -- capes'
                      own_c = OWN_COLOR_C}
 local W_LIGHT, W_CHROMA, W_KEEP, W_PROP, W_FLAT = 1.0, 0.5, 0.15, 1.0, 0.5
@@ -297,11 +298,21 @@ end
 -- a response cancels the cloth's own tint toward a neutral goal, src/transfer.lua neutral_goal): Drape of Glory's sheen
 -- cloth took the B-01 Tactical's dark and looked brown (image review 2026-10-07). Looks stay the model's; a mod's row
 -- whose finish changed keeps the model.
+-- A cape as the SOURCE (look.seen: Helmet and Armor Match Cape) also gets the look parts aim at (the group's gL, ga,
+-- gb: Matcher.item): its colors through those responses. Its identity's look so meets the cape's back on screen (117
+-- capes of the 2026-10-11 gallery: a median +0.6 L; research/scratch/v15/cape_shade_fit.py), its model color a median
+-- 1.0 L lighter, and the default black capes' black is a look of L 22.7 (on screen 18-23) for a model L 25.3. Aimed at
+-- the model color, armors under them were painted L 28-34 and read grey (user report 2026-10-14: "black in the default
+-- capes is grey when applied to armour"). Decisions (identity, pairs, guards) keep the model colors: only goals move.
+local SEEN_TINT_C = 5.0 -- a model color under this chroma passes no tint (NEUTRAL_TINT_C, map_group)
 local function borrow_rows(rows, look)
     for _, row in ipairs(rows) do
         local lut = look.tint_of and look.tint_of[row.lut] or row.lut
         local cal = not row.finish_changed and look.row(lut, row.row) or nil
         if cal then row.cal = {cal[1], cal[2], cal[3], cal[4], cal[5], cal[6]} end
+        if look.seen then
+            row.lin = cal and {seen(row.cal, row.ar, row.ag, row.ab)} or {lab_to_linear(row.L, row.a, row.b)}
+        end
     end
 end
 
@@ -317,6 +328,21 @@ local function look_rows(rows, measured, kit, look)
     end
 end
 
+-- A cape source group's goal look (borrow_rows): a neutral keeps its own hue (a black cloth's sheen gave its look a
+-- warm cast, chroma 1.1).
+local function seen_look(g)
+    g.gL, g.ga, g.gb = group_look(g.rows)
+    if chroma(g.ma, g.mb) < SEEN_TINT_C then g.ga, g.gb = g.ma, g.mb end
+end
+-- The groups' looks: a measured item's perceived colors; a cape source's goal looks.
+local function group_looks(item, look)
+    if item.measured then
+        for _, g in ipairs(item.groups) do g.L, g.a, g.b = group_look(g.rows) end
+    elseif look and look.seen then
+        for _, g in ipairs(item.groups) do seen_look(g) end
+    end
+end
+
 function Matcher.item(analysis_rows, armor, patterns, look, keep_hoods)
     local kit = look and look.kit
     local rows = copy_rows(analysis_rows, keep_hoods and look and look.hoods or nil)
@@ -325,9 +351,7 @@ function Matcher.item(analysis_rows, armor, patterns, look, keep_hoods)
     local paint_area = paint_of(item, kit)
     item.paint_area = paint_area
     item.groups = make_groups(item.paint, paint_area)
-    if item.measured then
-        for _, g in ipairs(item.groups) do g.L, g.a, g.b = group_look(g.rows) end
-    end
+    group_looks(item, look)
     item.suit_paint = armor and suit_is_paint(item.groups, LARGE_AREA) or false
     -- as a target its suit takes colors when no group outside it reaches PAINT_SHARE: else the recolor shows nowhere
     -- (the O-3 Free Spirit, 97% suit, unchanged with the UF-50 Bloodhound; user 2026-10-07); an armor with a part of
@@ -597,11 +621,16 @@ end
 -- dark grey under the black cape 0beb97bc with its 21% red (gallery 2026-10-11, the same loss as the Hooves'); the
 -- search's proportion term places it. The Cover of Darkness keeps its guard: its 11% grey sash is a muted color.
 -- Helmet and armor sources keep the guard (Lua only, as src/capes.lua's part_guard: match12 plans no capes).
-local function guard_part(row, s, keep_row, j_main, under, pair_only)
+-- A vivid color covering VIVID_PART_SHARE of a helmet or armor source is no minority either: it may take muted parts
+-- that are not undergarment cloth (the user's version comparisons 2026-10-15: the FS-05 Marksman's red, 27%, and the
+-- I-92 Fire Fighter's orange, 22%, never reached the FS-37 Ravager's plates or the B-22 Model Citizen's chrome, "the
+-- red failed to transfer"; the CPR-80 Bulwark's 9% yellow stays guarded; the same 10% as a secondary's floor).
+local VIVID_PART_SHARE = 0.10
+local function guard_part(row, s, keep_row, j_main, under, pair_only, least)
     local any = false
     for j = 1, #s do
         local second = not under and (s[j].share >= SECOND_MAIN_SHARE and s[j].L >= s[j_main].L + LIGHTER_MAIN_L
-            or pair_only and s[j].share >= TWO_TONE_SHARE)
+            or pair_only and s[j].share >= TWO_TONE_SHARE or s[j].share >= least)
         if j ~= j_main and chroma(s[j].ma, s[j].mb) >= ACCENT_VIVID and not keep_row[j] and not second then
             row[j] = false
         end
@@ -612,10 +641,11 @@ end
 
 local function vivid_minor_guard(allowed, t, s, keep_ok, j_main, cape)
     local pair_only = cape and two_tone_of(s, j_main, MAIN_COLOR, ACCENT_VIVID) -- src/colour.lua Colour.two_tone
+    local least = cape and math.huge or VIVID_PART_SHARE
     for i = 1, #t do
         local under = t[i].under >= 0.5 * t[i].area -- undergarment cloth: the Helldiver's base clothing, any size
         if (t[i].share >= PAINT_SHARE or under) and chroma(t[i].ma, t[i].mb) < ACCENT_C then
-            guard_part(allowed[i], s, keep_ok[i], j_main, under, pair_only)
+            guard_part(allowed[i], s, keep_ok[i], j_main, under, pair_only, least)
         end
     end
 end
@@ -873,6 +903,23 @@ local function painted(t, kind, src, row)
     return row.mode == 0 and row.metal and not rep.metal and (kind == 'accent' or t.share >= PAINT_SHARE)
 end
 
+-- Whether target row `row` of group t becomes the metal it takes (Match Materials, v1.5): a hard (mode 0) paint row,
+-- not bare metal and not clothing (mostly on undergarment pieces), taking a hard bare-metal LUT row of a helmet or
+-- armor, or a cape's metallic row of any mode (src/capes.lua source_rows row.cape: its cloth renders the metallic, the
+-- Eye of Liberty's gold going flat pale yellow with its column 6 w zeroed, live 2026-10-14; a paint scheme's camo
+-- copy is no metal), as a pair or as an accent of any size, where it takes the color as it is: not as a darker part
+-- keeping a share of its own lightness (tone < 0, tonal_offsets) nor as the undersuit's structure, which would turn
+-- bright chrome on the FS-37 Ravager's black parts with the B-22 Model Citizen. Until v1.5 parts never turned into
+-- metal ("only the color gets translated": the B-22 Model Citizen's chrome and the AD-26 Bleeding Edge's cobalt
+-- accents gave matte paint; user report 2026-10-14). Cloth never becomes metal (v1.0's whole-row copies gave gold
+-- fabric).
+local function metallized(t, src, row, tone)
+    local rep = src.rep
+    if not rep.lut or rep.copy or not rep.metal or (rep.mode ~= 0 and not rep.cape) then return false end
+    if (tone or 0) < 0 or is_structure(t) then return false end
+    return row.mode == 0 and not row.metal and not (row.area > 0 and row.under >= 0.5 * row.area)
+end
+
 -- mapping[row key] = {source, kind, L, a, b, cal, finish, copy} for every row of target group t taking source color
 -- src: each row keeps its lightness offset from its group and its hue offset scaled with the chroma change; an
 -- unmeasured bare metal row taking paint aims PAINT_REFLECTION lighter. materials: a painted row aims at the paint's own
@@ -1002,8 +1049,12 @@ local function map_group(mapping, t, kind, src, materials, source_armor, tone)
             mapping[row.key] = {source = src.rep.key, kind = kind, L = src.L, a = src.a, b = src.b,
                                 copy = src.rep.key, finish = paint and src.rep.key or nil}
         elseif materials and painted(t, kind, src, row) then
-            mapping[row.key] = {source = src.rep.key, kind = kind, L = src.L, a = src.a, b = src.b, cal = src.rep.cal,
-                                finish = src.rep.key}
+            mapping[row.key] = {source = src.rep.key, kind = kind, L = src.gL or src.L, a = src.ga or src.a,
+                                b = src.gb or src.b, cal = src.rep.cal, finish = src.rep.key}
+        elseif materials and metallized(t, src, row, tone) then -- its finish and one coat of its paint (transfer)
+            local rep = src.rep
+            mapping[row.key] = {source = rep.key, kind = kind, L = rep.mL, a = rep.ma, b = rep.mb, finish = rep.key,
+                                coat = true}
         else
             local L, a, b = pair_goal(row, src, d, source_armor, tone)
             mapping[row.key] = {source = src.rep.key, kind = kind, L = L, a = a, b = b, cal = row.cal}
@@ -1080,19 +1131,33 @@ end
 -- or more, model chroma ACCENT_C or more; the B-24 Enforcer's dark reds, 16%, too dark to be its visible accent), else
 -- its most salient colored light or lens (Matcher.light: the KDM-763 Pacesetter's yellow light strips on black paint,
 -- gallery 2026-10-10; lights never give their color otherwise; by texture area and model color, as the appearance
--- study measured paint only), else nil.
-local function band_hue_source(source, accent)
-    if accent and chroma(accent.ma, accent.mb) >= ACCENT_C then return accent end
-    local best, weight = nil, 0
+-- study measured paint only), else nil. An armor's band (armor) takes a color covering BAND_ARMOR_MIN_SHARE of the
+-- source and no light: an armor is far larger than a helmet, and the RS-100 Sanctioner's 2.8% gold painted a quarter
+-- of the O-44 Bonded Pilot, its red-brown plates, light gold (Reddit report 2026-10-14; v1.3 made them its black; the
+-- user's floor for a secondary, review 1). A helmet's band keeps the agreed rule (the IX-VOIDWALKER's navy band takes
+-- the RE-1861 Parade Commander's 5% dark red, the B-01 Tactical's lemon decal).
+local function band_group(source, least)
+    local best
     for _, g in ipairs(source.groups) do
         local c = chroma(g.ma, g.mb)
-        if g.share >= PAIR_MIN_SHARE and c >= ACCENT_C and (not best or c > chroma(best.ma, best.mb)) then best = g end
+        if g.share >= math.max(PAIR_MIN_SHARE, least) and c >= ACCENT_C and (not best or c > chroma(best.ma, best.mb)) then
+            best = g
+        end
     end
-    for _, row in ipairs(best == nil and source.rows or {}) do
+    return best
+end
+local function band_light(source)
+    local best, weight = nil, 0
+    for _, row in ipairs(source.rows) do
         local w = Matcher.light(row) and chroma(row.ma, row.mb) >= ACCENT_C and row.tex_area * chroma(row.ma, row.mb) or 0
         if w > weight then best, weight = {L = row.mL, a = row.ma, b = row.mb, mL = row.mL, ma = row.ma, mb = row.mb}, w end
     end
     return best
+end
+local function band_hue_source(source, accent, armor)
+    local least = armor and BAND_ARMOR_MIN_SHARE or 0
+    if accent and chroma(accent.ma, accent.mb) >= ACCENT_C and (accent.share or 0) >= least then return accent end
+    return band_group(source, least) or (not armor and band_light(source)) or nil
 end
 -- The item's largest part and its bands (band_part).
 local function bands_of(choices)
@@ -1101,16 +1166,64 @@ local function bands_of(choices)
     for _, c in ipairs(choices) do if band_part(c, largest) then bands[#bands + 1] = c[1] end end
     return largest, bands
 end
-local function tint_bands(mapping, choices, source, accent)
-    accent = band_hue_source(source, accent)
+local function tint_bands(mapping, choices, source, accent, armor)
+    accent = band_hue_source(source, accent, armor)
     if not accent then return end
     local largest, bands = bands_of(choices)
     for _, c in ipairs(choices) do
         for _, row in ipairs(band_pair(c, largest) and of_bands(c[1], bands) and c[1].rows or {}) do
             local m = mapping[row.key] -- the pair's source and finish stay; the paint, a flat coat (src/transfer.lua)
-            if m then m.L, m.a, m.b, m.band = accent.mL, accent.ma, accent.mb, true end
+            if m then
+                m.L, m.a, m.b, m.band = accent.mL, accent.ma, accent.mb, true
+                if m.coat then m.coat, m.finish = nil, nil end -- a band stays paint (Match Materials' metal: metallized)
+            end
         end
     end
+end
+
+-- Cloth (soft rows) paired with a colored bare-metal source color (look chroma TINT_C or more: gold, bronze, cobalt)
+-- takes the source's non-metal palette color nearest it in look lightness instead: cloth never turns metal, and the
+-- metal's paint on it read as a flat mustard that barely shows on the source (the B-24 Enforcer's coat and undersuit,
+-- 46% of it, from the BP-77 Grand Juror's 31% gold; the user's version comparisons 2026-10-15, case 15). A source of
+-- metal alone leaves it (research/match12.py cloth_off_metal).
+local function plain_nearest(source, src)
+    local best, gap
+    for _, g in ipairs(palette_of(source)) do
+        local d = math.abs(g.L - src.L)
+        if not g.metal and (not best or d < gap) then best, gap = g, d end
+    end
+    return best
+end
+-- The planned cloth rows of target group t (soft, no band coat), or nil.
+local function cloth_rows(mapping, t)
+    local rows
+    for _, row in ipairs(t.rows) do
+        local m = mapping[row.key]
+        if m and not m.band and row.mode >= 0.5 then
+            rows = rows or {}
+            rows[#rows + 1] = row
+        end
+    end
+    return rows
+end
+local function cloth_off_metal(mapping, choices, source, materials, tones)
+    for _, c in ipairs(choices) do
+        local t, src = c[1], c[2]
+        local rows = c[3] == 'pair' and src.metal and chroma(src.a, src.b) >= TINT_C and cloth_rows(mapping, t)
+        local alt = rows and plain_nearest(source, src)
+        if alt then
+            local part = {}
+            for key, v in pairs(t) do part[key] = v end
+            part.rows = rows
+            map_group(mapping, part, 'pair', alt, materials, source.armor, tones[t])
+        end
+    end
+end
+
+-- An armor's plan never left in one color (src/variety.lua Matcher.balance, v1.5); a cape's as it is.
+local function balanced(mapping, target, source, cape)
+    if Matcher.balance and target.armor and not cape then Matcher.balance(mapping, target, source) end
+    return mapping
 end
 
 function Matcher.plan(target, source, materials, cape)
@@ -1127,10 +1240,11 @@ function Matcher.plan(target, source, materials, cape)
     end
     local tones = cape and {} or tonal_offsets(choices, anchor)
     for _, c in ipairs(choices) do map_group(mapping, c[1], c[3], c[2], materials, source.armor, tones[c[1]]) end
-    tint_bands(mapping, choices, source, accent)
+    tint_bands(mapping, choices, source, accent, target.armor)
+    cloth_off_metal(mapping, choices, source, materials, tones)
     local small = accent or second or (source.cape_source and anchor and Matcher.identity(source)) or nil
     if small then map_small_accents(mapping, target, source, small, materials) end
-    return mapping
+    return balanced(mapping, target, source, cape)
 end
 
 -- The source's identity color (identity_of over its palette); src/schemes.lua's near one-color split takes it as the
@@ -1140,276 +1254,10 @@ function Matcher.identity(source) return identity_of(source, palette_of(source))
 -- For src/schemes.lua's material roles (a paint scheme whose parts take its colors by material, SEAF): the row mapping
 -- and the thresholds they share with the pairing.
 Matcher.map_group = map_group
+-- for src/zones.lua (a cape's design zones and emblems: Matcher.cape_zones, cape_emblems)
+Matcher.palette_of, Matcher.source_accent, Matcher.ACCENT_SOURCE_BIG = palette_of, source_accent, ACCENT_SOURCE_BIG
+Matcher.is_structure = is_structure -- src/variety.lua
 Matcher.ACCENT_C, Matcher.MAIN_COLOR, Matcher.PAINT_SHARE = ACCENT_C, MAIN_COLOR, PAINT_SHARE
-
--- Cape design zones (v1.3, KB match-your-colors-cape-tint; research/match12.py cape_zones): an outside emblem, mark or
--- sash (src/capes.lua zones: the cloth bordering it by row and tint bin) that read against half its border (lightness
--- contrast >= ZONE_READ) and no longer reads against half of it as planned (< ZONE_LOST) takes the source color that
--- reads against the most of its planned border (a palette color or the source's accent; ties: the zone's light/dark
--- order against its border kept, then the larger share), when that reads against half; failing that, the one reading
--- against the most of it by CIELAB distance (and against half its cloth), else a smaller source color by lightness,
--- when that reads against half (zone_choice); else its own colors, when they read against half; else the plan stays.
--- Zones go from the largest; a zone first tries the color an earlier zone of its target group took, so a design drawn
--- in one color stays one. The B-01 Tactical made the Drape of Glory's light top and blue-grey bottom one dark, and the
--- CW-36 Winter Warrior's light gave United in Equality's emblem and the purple band around it the same off-white
--- (2026-10-07).
-local ZONE_READ, ZONE_LOST, ZONE_BINS = 15.0, 10.0, 8
-
--- {[row] = {base = item row, tint = item row}} of a cape item (tint_of: its cape LUT -> material LUT).
-local function zone_parts(target, tint_of)
-    local parts = {}
-    for _, row in ipairs(target.rows) do
-        local p = parts[row.row] or {}
-        parts[row.row] = p
-        if tint_of and tint_of[row.lut] then p.tint = row else p.base = row end
-    end
-    return parts
-end
-
--- A row's display-linear color: plan's desired color (plan nil: its own).
-local function row_linear(row, plan)
-    local goal = plan and plan[row.key]
-    if goal then return lab_to_linear(goal.L, goal.a, goal.b) end
-    return lab_to_linear(row.L, row.a, row.b)
-end
-
--- A zone's lightness: its base and tint mixed by area.
-local function zone_lightness(p, plan)
-    local r, g, b, w = 0, 0, 0, 0
-    for _, row in ipairs({p.base or false, p.tint or false}) do
-        if row then
-            local lr, lg, lb = row_linear(row, plan)
-            r, g, b, w = r + row.tex_area * lr, g + row.tex_area * lg, b + row.tex_area * lb, w + row.tex_area
-        end
-    end
-    return (linear_to_lab(r / w, g / w, b / w))
-end
-
--- Whether a border cell of Lab color (cL, ca, cb) reads against lightness L: their lightness at least `threshold`
--- apart, or (hue: a Lab color {L, a, b}) their CIELAB distance from hue, where hue and chroma count too (squared, in
--- research/match12.py apart's order).
-local function apart(L, hue, cL, ca, cb, threshold)
-    if not hue then return math.abs(L - cL) >= threshold end
-    local dL, da, db = hue.L - cL, hue.a - ca, hue.b - cb
-    return dL * dL + da * da + db * db >= threshold * threshold
-end
-
--- One border row's cells into acc ({good, total, mean, hue}): at bin k its color is its base blended toward its tint
--- by (k + 0.5) / ZONE_BINS; a cell reads when it is `threshold` apart from L (acc.hue: from that color; apart).
-local function border_row(acc, L, counts, p, plan, threshold)
-    local br, bg, bb = row_linear(p.base or p.tint, plan)
-    local tr, tg, tb = row_linear(p.tint or p.base, plan)
-    for k = 0, ZONE_BINS - 1 do
-        local n = counts[k]
-        if n > 0 then
-            local t = (k + 0.5) / ZONE_BINS
-            local bL, ba, bb2 = linear_to_lab(br * (1 - t) + tr * t, bg * (1 - t) + tg * t, bb * (1 - t) + tb * t)
-            acc.total, acc.mean = acc.total + n, acc.mean + n * bL
-            if apart(L, acc.hue, bL, ba, bb2, threshold) then acc.good = acc.good + n end
-        end
-    end
-end
-
--- (border cells read, border cells, mean border L) of a zone of lightness L against `around` ({[row] = {[bin] =
--- cells}}) as plan colors it; hue (a Lab color {L, a, b}, or nil): read by CIELAB distance from it instead.
-local function zone_reads(L, around, parts, plan, threshold, hue)
-    local acc = {good = 0, total = 0, mean = 0.0, hue = hue or false}
-    for q = 0, 4 do
-        local counts, p = around[q], parts[q]
-        if counts and p and (p.base or p.tint) then border_row(acc, L, counts, p, plan, threshold) end
-    end
-    return acc.good, acc.total, acc.total > 0 and acc.mean / acc.total or 0.0
-end
-
--- The source colors a zone may take: the palette, then the accent when it is not in it.
-local function zone_candidates(source)
-    local list = palette_of(source)
-    local accent = source_accent(source)
-    if accent then
-        for _, g in ipairs(list) do if g == accent then return list end end
-        list[#list + 1] = accent
-    end
-    return list
-end
-
--- The smaller source colors the zone rule falls back on (zone_choice): groups outside `candidates` the source shows on
--- at least ACCENT_SOURCE_BIG of itself (no speck), largest first.
-local function zone_minor(source, candidates)
-    local list = {}
-    for _, g in ipairs(source.groups) do
-        local listed = false
-        for _, c in ipairs(candidates) do if c == g then listed = true end end
-        if g.share >= ACCENT_SOURCE_BIG and not listed then list[#list + 1] = g end
-    end
-    return list
-end
-
--- Whether candidate g may be picked by CIELAB distance (hue) for a zone with cloth (z.cloth: its border on rows that
--- are no design zones): it reads against half of that cloth too, so a zone does not take its cloth's color while
--- reading against its outline alone (Strength in Our Arms' stripe on the CW-4 Arctic Ranger, render 2026-10-07).
-local function on_cloth(g, z, hue)
-    if not (hue and z.cloth) then return true end
-    local good, total = zone_reads(g.L, z.cloth, z.parts, z.plan, ZONE_READ, g)
-    return 2 * good >= total
-end
-
--- The candidate reading against the most of a zone's border (z: {around, cloth, parts, plan, order, mean}; hue: by
--- CIELAB distance, on_cloth; ties: the order kept, then the earlier): it and its border cells read.
-local function zone_pick(candidates, z, hue)
-    local best, best_good, best_same
-    for _, g in ipairs(candidates) do
-        if on_cloth(g, z, hue) then
-            local good = zone_reads(g.L, z.around, z.parts, z.plan, ZONE_READ, hue and g)
-            local same = (g.L >= z.mean) == z.order
-            if not best or good > best_good or (good == best_good and same and not best_same) then
-                best, best_good, best_same = g, good, same
-            end
-        end
-    end
-    return best, best_good
-end
-
--- The source color a lost zone or emblem takes (z: see zone_pick; total: its border cells), or nil, the first that
--- reads against half its border: the candidates' pick by lightness; their pick by CIELAB distance (on_cloth); the
--- smaller source colors' (minor) pick by lightness. The UF-50 Bloodhound's red and black share a lightness (L 21.1 and
--- 20.8), so none of its colors read by lightness against the other: its red took the Pillars of Freedom's black and red
--- alike (the red bars lost), and the Judgment Day's, Liberty's Herald's and Fre Liberam's marks went back to their own
--- colors on its black (user, 2026-10-07: not recolored). Black reads against red, red against black; Liberty's
--- Herald's chevron, on black cloth above and red below, takes the Bloodhound's 1.8% silver.
-local function zone_choice(candidates, minor, z, total)
-    local best, good = zone_pick(candidates, z, false)
-    if best and 2 * good >= total then return best end
-    best, good = zone_pick(candidates, z, true)
-    if best and 2 * good >= total then return best end
-    best, good = zone_pick(minor, z, false)
-    if best and 2 * good >= total then return best end
-    return nil
-end
-
--- Zone p's rows take source group `best`, or (best nil) keep their own colors.
-local function apply_zone(mapping, p, best)
-    for _, row in ipairs({p.base or false, p.tint or false}) do
-        if row then -- the row fits through its own response (a cape's borrowed one), as every planned row does
-            mapping[row.key] = best and {source = best.rep.key, kind = 'zone', L = best.L, a = best.a, b = best.b,
-                                         cal = row.cal} or nil
-        end
-    end
-end
-
--- The part of a zone's border on rows that are no design zones (its cloth), or nil when it borders none.
-local function cloth_of(around, zones)
-    local cloth
-    for q = 0, 4 do
-        if around[q] and not zones[q] then
-            cloth = cloth or {}
-            cloth[q] = around[q]
-        end
-    end
-    return cloth
-end
-
--- One zone kept readable in mapping (see above; rule: {candidates, minor, zones, group_of, taken}): 'picked' (a source
--- color), 'kept' (its own colors), 'lost' (nothing reads), or nil (it did not read before, or still reads).
-local function keep_zone(mapping, z, around, parts, rule)
-    local p = parts[z]
-    local L0 = zone_lightness(p, nil)
-    local good, total, mean0 = zone_reads(L0, around, parts, nil, ZONE_READ)
-    if total == 0 or 2 * good < total then return nil end
-    local mean1
-    good, total, mean1 = zone_reads(zone_lightness(p, mapping), around, parts, mapping, ZONE_LOST)
-    if 2 * good >= total then return nil end
-    local zone = {around = around, cloth = cloth_of(around, rule.zones), parts = parts, plan = mapping,
-                  order = L0 >= mean0, mean = mean1}
-    local group = rule.group_of[p.base or p.tint]
-    local taken = group and rule.taken[group]
-    local best = taken and zone_choice({taken}, rule.none, zone, total)
-    best = best or zone_choice(rule.candidates, rule.minor, zone, total)
-    if best then
-        apply_zone(mapping, p, best)
-        if group and not taken then rule.taken[group] = best end
-        return 'picked'
-    end
-    if 2 * zone_reads(L0, around, parts, mapping, ZONE_READ) >= total then
-        apply_zone(mapping, p, nil)
-        return 'kept'
-    end
-    return 'lost'
-end
-
--- mapping (Matcher.plan's, of a cape item) with its design zones kept readable; zones: src/capes.lua zones, tint_of: the
--- cape's {[cape LUT] = material LUT} or nil. Changes mapping in place; returns it and {picked, kept, lost} (how many
--- zones took a source color, kept their own colors, or read against nothing; diagnostics).
-function Matcher.cape_zones(mapping, target, source, zones, tint_of)
-    local parts = zone_parts(target, tint_of)
-    local order = {}
-    for z in pairs(zones) do
-        local p = parts[z]
-        if p then
-            local area = 0.0
-            if p.base then area = area + p.base.tex_area end
-            if p.tint then area = area + p.tint.tex_area end
-            order[#order + 1] = {zone = z, area = area}
-        end
-    end
-    table.sort(order, function(x, y)
-        if x.area ~= y.area then return x.area > y.area end
-        return x.zone < y.zone
-    end)
-    local candidates = zone_candidates(source)
-    local rule = {candidates = candidates, minor = zone_minor(source, candidates), none = {}, zones = zones,
-                  group_of = {}, taken = {}}
-    for i, g in ipairs(target.groups) do
-        for _, row in ipairs(g.rows) do rule.group_of[row] = i end
-    end
-    local outcomes = {picked = 0, kept = 0, lost = 0}
-    for _, entry in ipairs(order) do
-        local outcome = keep_zone(mapping, entry.zone, zones[entry.zone], parts, rule)
-        if outcome then outcomes[outcome] = outcomes[outcome] + 1 end
-    end
-    return mapping, outcomes
-end
-
--- The emblems of a cape (src/capes.lua emblems: emblem-sheet layers, their colors the decal sheet's) kept readable
--- over the cloth under them as mapping colors it (Matcher.cape_zones applied first): one that read against half that
--- cloth (lightness contrast >= ZONE_READ) and no longer reads against half of it (< ZONE_LOST) takes the source color
--- reading against the most of it (zone_choice: by lightness, else by CIELAB distance), when that reads against half
--- (src/recolor.lua recolors its sheet cell);
--- else it stays, lost. The B-01 Tactical's dark gave the Drape of Glory's cloth its dark grey emblem's lightness and
--- the emblem vanished (user, image review 2026-10-07). Emblems go from the most cells. Returns {[emblem index] =
--- {source, L, a, b}} and {picked, lost} (diagnostics; match12.cape_emblems).
--- One emblem (see below): 'picked' and the source color it takes, 'lost', or nil (it did not read before, or still
--- reads).
-local function keep_emblem(e, parts, mapping, candidates, minor)
-    local good, total, mean0 = zone_reads(e.L, e.around, parts, nil, ZONE_READ)
-    if total == 0 or 2 * good < total then return nil end
-    local mean1
-    good, total, mean1 = zone_reads(e.L, e.around, parts, mapping, ZONE_LOST)
-    if 2 * good >= total then return nil end
-    local best = zone_choice(candidates, minor, {around = e.around, parts = parts, plan = mapping, order = e.L >= mean0,
-                                                 mean = mean1}, total)
-    if best then return 'picked', {source = best.rep.key, L = best.L, a = best.a, b = best.b} end
-    return 'lost'
-end
-
-function Matcher.cape_emblems(mapping, target, source, emblems, tint_of)
-    local picks, outcomes = {}, {picked = 0, lost = 0}
-    if not emblems or #emblems == 0 then return picks, outcomes end
-    local parts = zone_parts(target, tint_of)
-    local order = {}
-    for i = 1, #emblems do order[i] = i end
-    table.sort(order, function(x, y)
-        if emblems[x].cells ~= emblems[y].cells then return emblems[x].cells > emblems[y].cells end
-        return x < y
-    end)
-    local candidates = zone_candidates(source)
-    local minor = zone_minor(source, candidates)
-    for _, i in ipairs(order) do
-        local outcome, pick = keep_emblem(emblems[i], parts, mapping, candidates, minor)
-        if outcome then outcomes[outcome] = outcomes[outcome] + 1 end
-        picks[i] = pick
-    end
-    return picks, outcomes
-end
 
 -- The source color a light neutral pattern takes: the source's neutral paint (palette groups under ACCENT_C model
 -- chroma; hoods and, unless its suit is its paint, structure left out) nearest in lightness to the pattern's look, the
@@ -1483,18 +1331,18 @@ if type(jit) == 'table' and type(jit.off) == 'function' then
     for _, fn in ipairs({Matcher.use, sort_desc, chroma, is_neutral, neutral, looks_dark, light_of,
         is_structure, suit_is_paint, make_groups, item_patterns, copy_rows, paint_of, Matcher.item, most_salient,
         measured_kit, luminance, light_scale, respond, measure_rows, unmeasured_rows, borrow_rows, look_rows,
-        lighter_main, salience, fallback_accent, flat, cost, improve, search,
+        lighter_main, salience, fallback_accent, flat, cost, improve, search, seen_look, group_looks, balanced,
         big_spread, palette_of, helmet_main, identity_of, Matcher.identity, structure_pairs,
         initial_assign, largest_paint,
         may_take, allowed_matrix, guard_part, vivid_minor_guard,
         keep_matrix, anchor_of, closest_main, keep_matches, needs_flat_check, Matcher.pair_groups, source_accent,
         hue_gap, family_share, is_accent, matches_source, kept_match, metal_echo, speck_across, choice, source_tint,
-        reflected, painted, metal_shift, groups_by_source, lead_of, tonal_offsets, row_lightness, pair_goal, map_group,
+        reflected, painted, metallized, metal_shift, groups_by_source, lead_of, tonal_offsets, row_lightness,
+        pair_goal, map_group,
         map_small_accents,
-        hard_part, band_pair, band_part, of_bands, band_hue_source, bands_of, tint_bands, Matcher.plan,
-        zone_parts, row_linear, zone_lightness,
-        apart, border_row, zone_reads, zone_candidates, zone_minor, on_cloth, zone_pick, zone_choice, apply_zone,
-        cloth_of, keep_zone, Matcher.cape_zones, keep_emblem, Matcher.cape_emblems,
+        hard_part, band_pair, band_part, of_bands, band_group, band_light, band_hue_source, bands_of, tint_bands,
+        plain_nearest, cloth_rows, cloth_off_metal,
+        Matcher.plan,
         neutral_pattern_color, band_coat, pattern_pick, Matcher.pattern_plan, Matcher.light}) do
         jit.off(fn, true)
     end

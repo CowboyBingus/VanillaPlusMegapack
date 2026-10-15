@@ -227,6 +227,20 @@ check('another build, other data or a damaged file is not used', function()
     assert(not Cache.decode(nil, HEADER) and not Cache.decode('', HEADER), 'no file')
 end)
 
+-- Review renders 2026-10-14: v1.5 read the v1.4 file (format 12), whose analysis of the Democracy's Deputy under the
+-- Cowboy Hat mod had no rows (v1.4 cannot read a material without a color table), so the hat stayed as it was and gave
+-- no colors.
+check('v1.5: a v1.4 file (format 12) is not used: its analyses of a mod\'s gear without a color table have no colors',
+      function()
+    assert(Cache.VERSION >= 13, 'format 13 or later: ' .. Cache.VERSION)
+    local a = kit(1, 0)
+    local key = Cache.key(a.kit, 0)
+    local text = Cache.encode(HEADER, {[key] = a}, {key})
+    assert(Cache.decode(text, HEADER), 'this format is read')
+    local old, n = text:gsub('^MYCCACHE %d+ ', 'MYCCACHE 12 ', 1)
+    assert(n == 1 and not Cache.decode(old, HEADER), 'a format 12 file is not used')
+end)
+
 check('the file keeps the most recently used entries, at most MAX_ENTRIES', function()
     local all, order = {}, {}
     for i = 1, Cache.MAX_ENTRIES + 5 do
@@ -237,6 +251,20 @@ check('the file keeps the most recently used entries, at most MAX_ENTRIES', func
     end
     local entries, kept = Cache.decode(Cache.encode(HEADER, all, order), HEADER)
     assert(entries and #kept == Cache.MAX_ENTRIES and kept[1] == order[1], 'cap and order')
+end)
+
+check('v1.5: an analysis with a mod\'s albedo (read again each session) or a mod\'s material left unread (logged each '
+      .. 'session) is not kept; the others are', function()
+    local all, order = {}, {}
+    for i = 1, 3 do
+        local a = kit(i, i)
+        local key = Cache.key(a.kit, 0)
+        all[key], order[i] = a, key
+    end
+    all[order[1]].albedos = {ab5e000000000002 = {clusters = {}}}
+    all[order[2]].unread = {ab5e000000000001 = {material = 'ab5e000000000001', file = 'x.patch_0', why = 'albedo format 98'}}
+    local entries, kept = Cache.decode(Cache.encode(HEADER, all, order), HEADER)
+    assert(entries and #kept == 1 and kept[1] == order[3] and entries[order[3]], 'only the plain analysis kept')
 end)
 
 check('encoding and decoding pause after each entry, inside a coroutine (the yield crosses the pcall)', function()
