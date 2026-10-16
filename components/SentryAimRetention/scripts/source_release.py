@@ -1,7 +1,6 @@
 """Package only the audited public source inventory, without workspace history."""
 import hashlib
 import json
-from pathlib import Path
 import zipfile
 from privacy_audit import ROOT, SOURCE_FILES, audit
 from package import release_directory

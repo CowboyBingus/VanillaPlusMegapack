@@ -1,0 +1,30 @@
+name: Release Please
+
+# Opens/updates a "release PR" (version bump + draft changelog section) as
+# conventional commits land on main, and cuts a GitHub Release + tag once
+# that PR is merged. See docs/CI_AND_LABELS_PROPOSAL.md for why release-plz
+# (Rust/Cargo-only) isn't the right tool here, and for the versioning-scheme
+# question this leaves open (the pack currently uses a plain incrementing
+# number - v33, v34, v35 - not semver).
+#
+# `draft: true` above means it drafts the GitHub Release rather than
+# publishing it immediately, and the release PR's changelog section is meant
+# to be edited/expanded by hand in the project's existing narrative style
+# before merging - this automates the bookkeeping, not the writing.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

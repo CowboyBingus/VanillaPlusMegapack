@@ -1,0 +1,52 @@
+# Label definitions for VanillaPlusMegapack.
+# Synced by .github/workflows/labels-sync.yml (EndBug/label-sync) on every
+# push to main that touches this file. Editing this file is the only way
+# to add/rename/recolor labels once the sync workflow is enabled.
+#
+# Three groups:
+#   status:*  - mirrors the stages on the public roadmap board
+#               (Exploring / Planned / In progress / On hold / Completed / Discontinued)
+#   area:*    - which part of the pack a mod/issue touches, grouped from
+#               the components/ directory so the list stays short
+#   (default GitHub labels: bug, documentation, duplicate, enhancement,
+#    good first issue, help wanted, invalid, question, wontfix - kept as-is)
+
+# --- Status (roadmap stage) ---
+- name: "status: exploring"
+  color: "9CA3AF"
+  description: "Idea is being investigated; not committed to yet"
+- name: "status: planned"
+  color: "F59E0B"
+  description: "Committed direction, not started"
+- name: "status: in progress"
+  color: "FACC15"
+  description: "Actively being worked on"
+- name: "status: on hold"
+  color: "EF4444"
+  description: "Paused - blocked, waiting on an upstream change, or needs rethinking"
+- name: "status: completed"
+  color: "3B82F6"
+  description: "Implemented; pending release/publishing"
+- name: "status: discontinued"
+  color: "A855F7"
+  description: "Will not be pursued; superseded or out of scope"
+
+# --- Area (component grouping) ---
+- name: "area: vehicles-movement"
+  color: "E99695"
+  description: "Vehicles, hover pack, vaulting, diving, hellpod steering, ragdolling"
+- name: "area: weapons-stratagems"
+  color: "FBCA04"
+  description: "Arc Thrower, flame damage, sentries, turrets, reinforcements, stratagem bounce"
+- name: "area: enemies-ai"
+  color: "C2E0C6"
+  description: "Enemy spawning, collision, targeting/AI behavior"
+- name: "area: ui-menus"
+  color: "BFD4F2"
+  description: "Menus, scrollbars, options/bindings tabs, armory/constellation previews"
+- name: "area: lobby-social"
+  color: "D4C5F9"
+  description: "Lobby management, squad lead, lobby scanning, join filtering"
+- name: "area: build-packaging"
+  color: "5319E7"
+  description: "Build/package/archive/privacy-audit scripts, CI, release tooling"

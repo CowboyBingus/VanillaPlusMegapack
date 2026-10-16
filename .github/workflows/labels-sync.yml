@@ -1,0 +1,23 @@
+name: Sync labels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/labels.yml
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EndBug/label-sync@v2
+        with:
+          config-file: .github/labels.yml
+          # Only add/update labels defined in labels.yml; never delete labels
+          # that already exist on the repo (e.g. the GitHub defaults) unless
+          # you also list them here.
+          delete-other-labels: false
