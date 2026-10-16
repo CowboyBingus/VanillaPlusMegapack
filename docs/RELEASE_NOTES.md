@@ -14,4 +14,6 @@
 - Match Your Colors v1.5: new Recolor Weapons option (Off by default): your primary, sidearm and support weapon take your colors the way the game's weapon paint schemes repaint a weapon; with one of those schemes picked as Paint Scheme they wear it exactly as the game paints it.
 - Match Your Colors v1.5: Sync With Mod Users shares its settings in a form new options can extend, so squadmates with the mod see each other's weapons in their colors; squadmates on v1.3 and v1.4 still see the helmet, armor and cape settings.
 - Match Your Colors v1.5: on the loadout screen's squad cards your Helldiver shows your colors and each squadmate's shows theirs (or yours with Recolor Squadmates); a squadmate's card no longer takes your colors.
+- Match Your Colors v1.5: squadmates are now recolored in missions too; the mod looked for them only among your own player's records.
+- Match Your Colors v1.5: new choice Squadmates' Colors: Their Own Gear (default) or Your Colors, which gives the squadmates Recolor Squadmates recolors your colors, so the squad matches you.
 - New option: Stratagem Hero Expanded v1.0: the ship's Stratagem Hero arcade draws from all 96 loadout stratagems and 12 common mission stratagems (108) instead of its 27 launch-era ones; themed rounds stay.

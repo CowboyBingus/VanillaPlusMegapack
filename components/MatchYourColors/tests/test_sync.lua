@@ -250,10 +250,11 @@ check('the calls sync adds: a lobby poll every 120 frames, one 120-byte read on 
         local frame = w.instance.state.frame
         local expected = {}
         if (frame - 5) % 120 == 0 then
-            -- 7 for the lobby, 2 per member (key, id) and 2 for the local one's type, 1 for the other's value, 14 for
-            -- the players' records; the value posted once the lobby has stayed joined for STEADY_FRAMES (first poll:
+            -- 7 for the lobby, 2 per member (key, id) and 2 for the local one's type, 1 for the other's value, 10 for
+            -- the players (the map and this machine's record: 6, 2 a player; 14 before the map, 2026-10-16); the value
+            -- posted once the lobby has stayed joined for STEADY_FRAMES (first poll:
             -- frame 5, as frame 4 applies the local recolor)
-            expected, polls = {members = 1, property = 1, read_into = 28, post = frame == 605 and 1 or nil}, polls + 1
+            expected, polls = {members = 1, property = 1, read_into = 24, post = frame == 605 and 1 or nil}, polls + 1
         elseif frame % Remote.WATCH_FRAMES == 0 then
             expected, watches = {read_into = 1}, watches + 1
         elseif frame % 30 == 1 then
@@ -634,6 +635,77 @@ check('a squadmate without a Helldiver (dead) keeps their entry and textures; on
     for i = count + 1, #requests do assert(requests[i].target ~= 'remote', 'no job: rebound') end
 end)
 
+check('a squadmate here whose peer id is 0 (game.dll sets it once, when the player is added, 0 while the connection is '
+      .. 'not known; the squads of 2026-10-15/16: no squadmate recolored in the mission) takes your settings with '
+      .. 'Everyone, and with Squadmates Without the Mod while nobody shares; the log names the players', function()
+    local w = world(without_mod())
+    w.space.u32(Fake.PLAYERS + 712 + 56, 0) -- the remote player's peer id
+    w.instance.set_option('squad', EVERYONE)
+    w.frames(8)
+    local e = w.instance.remote.entries['player 6']
+    assert(e and w.bound(0x200)[1] ~= vanilla(w), 'their Helldiver recolored, as a player no member names')
+    assert(logged(w, 'Sync: ' .. REMOTE_KEY .. ' is none of the players here: '), 'the players logged')
+    w.instance.set_option('squad', MISSING)
+    w.frames(8)
+    assert(w.bound(0x200)[1] ~= vanilla(w), 'nobody shares: still yours')
+    w.lobby.members[2].value = SHARED -- a sharer in the lobby: the player could be theirs
+    w.frames(Sync.POLL_FRAMES + 8)
+    assert(not w.instance.remote.entries['player 6'], 'no entry')
+    for _, object in ipairs(w.bound(0x200)) do assert(object == vanilla(w), 'their own colors') end
+end)
+
+-- Squadmates' Colors (2026-10-16, the user: "make their color scheme match the players' as well", Their Own Gear kept as
+-- a distinct choice): with Your Colors the squadmates Recolor Squadmates recolors take this player's mode's source item.
+local function last_remote(from)
+    local found
+    for i = from + 1, #requests do if requests[i].target == 'remote' and not requests[i].weapons then found = requests[i] end end
+    return found
+end
+
+check('Squadmates\' Colors, Your Colors: a squadmate\'s job carries your source item (your armor with Helmet Matches '
+      .. 'Armor, your helmet with Armor Matches Helmet, your cape with Match Cape; nothing with a paint scheme), follows '
+      .. 'your gear, and Their Own Gear plans their own pair again', function()
+    local w = world(without_mod())
+    w.instance.set_option('squad', EVERYONE)
+    w.frames(8)
+    local count = #requests
+    assert(not last_remote(0).source_kit, 'Their Own Gear (the default): their own pair')
+    w.instance.set_option('squad_colors', 2)
+    w.frames(8)
+    local r = last_remote(count)
+    assert(r and r.source_kit == 0x0ade6719 and r.cape ~= 0x72492837, 'Helmet Matches Armor: your armor')
+    count = #requests
+    w.instance.set_option('mode', Recolor.ARMOR_FROM_HELMET)
+    w.frames(8)
+    r = last_remote(count)
+    assert(r and r.source_kit == 0xa5574ac2, 'Armor Matches Helmet: your helmet')
+    count = #requests
+    w.instance.set_option('mode', Recolor.CAPE_SOURCE)
+    w.frames(8)
+    r = last_remote(count)
+    assert(r and not r.source_kit and r.source_cape == 0x72492837 and r.cape == 0x72492837,
+           'Helmet and Armor Match Cape: your cape as their source')
+    count = #requests
+    w.instance.set_option('mode', Recolor.HELMET_FROM_ARMOR)
+    w.frames(8)
+    w.space.u32(Fake.CUSTOMIZATION + 2424, 0x4f7fb2bd) -- you put on another armor
+    w.frames(Sync.POLL_FRAMES + 20)
+    r = last_remote(count)
+    assert(r and r.source_kit == 0x4f7fb2bd, 'your new armor reaches them: ' .. string.format('%x', r and r.source_kit or 0))
+    count = #requests
+    w.instance.set_option('scheme', 3)
+    w.frames(8)
+    r = last_remote(count)
+    assert(r and r.scheme == 3 and not r.source_kit and not r.source_cape, 'a paint scheme: the scheme alone')
+    w.instance.set_option('scheme', 0)
+    w.frames(8)
+    count = #requests
+    w.instance.set_option('squad_colors', 1)
+    w.frames(8)
+    r = last_remote(count)
+    assert(r and not r.source_kit and not r.source_cape, 'Their Own Gear again: their own pair')
+end)
+
 check('a squadmate whose value fails to read keeps their entry as it is (Recolor Squadmates on: no flip to your '
       .. 'settings and back)', function()
     local w = world(with_remote('v=1;m=3;f=3;s=0;'))
@@ -644,6 +716,10 @@ check('a squadmate whose value fails to read keeps their entry as it is (Recolor
     w.frames(240)
     for i = count + 1, #requests do assert(requests[i].target ~= 'remote', 'no job while the read fails') end
     assert(w.instance.remote.entries[REMOTE_KEY].settings.mode == Recolor.ARMOR_FROM_HELMET, 'their own settings kept')
+    -- with Everyone too: their player stays their entry's, never a second entry as a player no member names
+    w.instance.set_option('squad', EVERYONE)
+    w.frames(Sync.POLL_FRAMES + 8)
+    assert(not w.instance.remote.entries['player 6'], 'no second entry for their Helldiver')
 end)
 
 check('Recolor Squadmates: the calls a squadmate without the mod adds are a sharer\'s (a poll every 120 frames, one '
@@ -667,9 +743,9 @@ check('Recolor Squadmates: the calls a squadmate without the mod adds are a shar
         local extra = diff(w.frame(), twin.frame())
         local frame = w.instance.state.frame
         local expected = {}
-        if extra.members then -- a sharer's 28 less its value (two lookups: neither key); the own value posted once
+        if extra.members then -- a sharer's 24 less its value (two lookups: neither key); the own value posted once
             -- the lobby is steady
-            expected, polls = {members = 1, property = 2, read_into = 27, post = extra.post and 1 or nil}, polls + 1
+            expected, polls = {members = 1, property = 2, read_into = 23, post = extra.post and 1 or nil}, polls + 1
         elseif frame % Remote.WATCH_FRAMES == 0 then
             expected = {read_into = 1}
         elseif frame % 30 == 1 then
@@ -752,8 +828,79 @@ check('the squad cards (reported 2026-10-15): the Armory\'s slot held a squadmat
     for _, object in ipairs(w.bound(0x400)) do assert(object == vanilla(w), 'their card given back') end
 end)
 
-check('a squad card of a squadmate who shares takes their own settings with Recolor Squadmates off; a shown slot '
-      .. 'listed for nobody (not the Armory\'s) is left as it is', function()
+check('the squad cards (reported again 2026-10-16, joining a mission in progress: "Still doesn\'t work."): the session '
+      .. 'still lists only you, in slot 0, where a squadmate\'s card is; your card is found by your own kits, the other '
+      .. 'card is a squadmate\'s and takes your settings with Everyone, or with Squadmates Without the Mod while nobody '
+      .. 'else shares any', function()
+    local w = squad_screen(without_mod(), 1, 2)
+    Fake.session(w.space, LOCAL_PEER, {{LOCAL_PEER[1], LOCAL_PEER[2], 0}}) -- the session before the join settles
+    w.instance.set_option('squad', EVERYONE)
+    w.frames(4)
+    local count = #requests
+    show_card(w, 0, REMOTE_KITS, 0x400)
+    show_card(w, 2, LOCAL_KITS, 0x410)
+    w.frames(20)
+    local card, own
+    for _, r in ipairs(card_requests(w, count)) do
+        assert(r.target ~= 'ui' or r.helmet ~= REMOTE_HELMET, 'their card never takes your preview\'s job')
+        if r.target == 'card' then card = r end
+        if r.target == 'ui' and r.helmet == LOCAL_KITS.helmet then own = r end
+    end
+    assert(own and w.instance.state.ui.where.slot == 2, 'your card: your preview, in slot 2')
+    assert(card and card.slot == 0 and card.key == 'squad' and card.mode == Recolor.HELMET_FROM_ARMOR,
+           'their card: a squadmate\'s, with your settings')
+    assert(w.bound(0x400)[1] ~= vanilla(w) and w.bound(0x410)[1] ~= vanilla(w), 'both cards recolored')
+    assert(logged(w, 'Squad cards: slot 0 a squadmate (your settings), slot 2 you.'), 'owners logged')
+    assert(logged(w, 'Squad card of a squadmate (slot 0): '), 'the card logged')
+    w.instance.set_option('squad', MISSING) -- nobody else shares settings: still yours
+    w.frames(12)
+    assert(w.bound(0x400)[1] ~= vanilla(w), 'Squadmates Without the Mod, nobody sharing: recolored')
+    w.lobby.members[2].value = SHARED -- someone shares: the unknown card could be theirs, so it keeps its colors
+    w.frames(Sync.POLL_FRAMES + 8)
+    for _, object in ipairs(w.bound(0x400)) do assert(object == vanilla(w), 'a sharer in the squad: its colors') end
+end)
+
+check('Squadmates\' Colors, Your Colors: a squadmate\'s card takes your source item too', function()
+    local w = squad_screen(without_mod(), 1, 2)
+    w.instance.set_option('squad', EVERYONE)
+    w.instance.set_option('squad_colors', 2)
+    w.frames(4)
+    local count = #requests
+    show_card(w, 1, REMOTE_KITS, 0x400)
+    show_card(w, 2, LOCAL_KITS, 0x410)
+    w.frames(20)
+    local card
+    for _, req in ipairs(card_requests(w, count)) do if req.target == 'card' then card = req end end
+    assert(card and card.source_kit == LOCAL_KITS.armor, 'their card planned against your armor')
+end)
+
+check('a squad card shown before the game fills in its kits (0: the squad of 2026-10-16 logged three failed jobs per card, '
+      .. '"kit 00000000 not in the catalogue", and the cards were recolored only as the mission loaded) waits for them: '
+      .. 'one job, for its kits, no failure', function()
+    local w = squad_screen(without_mod(), 1, 2)
+    Fake.session(w.space, LOCAL_PEER, {{LOCAL_PEER[1], LOCAL_PEER[2], 0}})
+    w.instance.set_option('squad', EVERYONE)
+    w.frames(4)
+    local count, lines = #requests, #w.lines
+    show_card(w, 2, LOCAL_KITS, 0x410)
+    show_card(w, 0, {helmet = 0, armor = 0, body = 0, cape = 0}, 0x400) -- shown, its kits not set yet
+    w.frames(12)
+    show_card(w, 0, REMOTE_KITS, 0x400)
+    w.frames(12)
+    local cards = 0
+    for _, r in ipairs(card_requests(w, count)) do
+        if r.target == 'card' then
+            cards = cards + 1
+            assert(r.helmet == REMOTE_HELMET, 'planned for its kits only')
+        end
+    end
+    assert(cards == 1 and w.bound(0x400)[1] ~= vanilla(w), 'one job, recolored: ' .. cards)
+    for i = lines + 1, #w.lines do assert(not w.lines[i]:find('recolor failed', 1, true), w.lines[i]) end
+end)
+
+check('a squad card of a squadmate who shares takes their own settings with Recolor Squadmates off; another shown '
+      .. 'slot listed for nobody is a squadmate\'s card whose player is not known: with the option off it keeps its '
+      .. 'colors', function()
     local w = squad_screen(with_remote('v=1;m=3;f=3;s=0;'), 3, 2) -- they chose Armor Matches Helmet
     local count = #requests
     show_card(w, 3, REMOTE_KITS, 0x400)
@@ -768,7 +915,8 @@ check('a squad card of a squadmate who shares takes their own settings with Reco
     assert(card and card.slot == 3 and card.mode == Recolor.ARMOR_FROM_HELMET, 'their own mode')
     assert(w.bound(0x401)[1] ~= w.engine.vanilla[ARMOR_LUT], 'their card\'s armor recolored')
     for _, object in ipairs(w.bound(0x420)) do assert(object == vanilla(w), 'the stranger\'s slot as it is') end
-    assert(logged(w, 'Squad cards: slot 2 you, slot 3 ' .. REMOTE_KEY .. ' (shared settings).'), 'owners logged')
+    assert(logged(w, 'Squad cards: slot 0 a squadmate (keeps its colors), slot 2 you, slot 3 ' .. REMOTE_KEY
+                     .. ' (shared settings).'), 'owners logged')
     -- their value fails to read: the card keeps their settings (no flip to yours and back)
     local before = #requests
     w.instance.set_option('squad', EVERYONE)

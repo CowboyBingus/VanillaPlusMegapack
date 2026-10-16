@@ -827,10 +827,12 @@ local function items_job(ctx, set, h, a, yield)
     end
     if ctx.scheme then return both_job(ctx, 'scheme:' .. ctx.scheme.id, h, a, yield) end
     if ctx.cape_source then return both_job(ctx, ctx.cape_source_key, h, a, yield) end
+    if ctx.kit_source then return both_job(ctx, ctx.kit_source_key, h, a, yield) end
     return pair_job(ctx, h, a, yield)
 end
 
--- The job: from a request {mode, keep_sets, keep_hoods, materials, scheme, helmet, armor, body, capes, cape} to
+-- The job: from a request {mode, keep_sets, keep_hoods, materials, scheme, helmet, armor, body, capes, cape, source_kit
+-- (Squadmates' Colors on Your Colors: this player's helmet or armor, the source of both items, kit_source_of)} to
 -- {action = 'restore' | 'apply', key, luts, patterns, first, last, target (analysis), targets (every target
 -- analysis)}. keep_hoods: Recolor Hoods off (the target's hood rows keep their colors); materials: Match Materials
 -- on; scheme: a paint scheme (1 to #Schemes.LIST, src/schemes.lua; 0 or nil none), which recolors both items
@@ -874,12 +876,26 @@ local function job_capes(ctx, analysis)
     end
 end
 
+-- Squadmates' Colors on Your Colors (src/addon.lua, src/remote.lua request_of: request.source_kit): this player's
+-- helmet or armor is the source of both of a squadmate's items, as the cape is with Helmet and Armor Match Cape; its
+-- kit, analysis and plan-key part into ctx (not with a scheme or the cape as the source). Returns the job's result when
+-- it cannot be analysed (the squadmate's items keep their colors), else nil.
+local function kit_source_of(ctx, analysis)
+    local request = ctx.request
+    if not request.source_kit or ctx.scheme or ctx.cape_mode then return nil end
+    local found, kit = pcall(ctx.p.kits.find, request.source_kit) -- find raises for a kit the catalogue lacks
+    local made = found and kit and not request.obsolete and analysis(kit)
+    if not made then return {action = request.obsolete and 'obsolete' or 'restore', reason = 'no source kit'} end
+    ctx.source_kit, ctx.kit_source = kit, made
+    ctx.kit_source_key = string.format('kitsrc:%08x:%s', kit.id, records_sum(ctx.deps.Kits, kit))
+end
+
 -- Whether Leave Complete Sets keeps the pair as it is (ctx.set): not with a scheme, nor with the cape as the source
--- (the user asked for the cape's colors on whatever they wear). Returns the job's result when nothing else needs a job
--- (no cape to recolor), else nil.
+-- (the user asked for the cape's colors on whatever they wear), nor with this player's item as the source (Your
+-- Colors). Returns the job's result when nothing else needs a job (no cape to recolor), else nil.
 local function set_kept(ctx)
     local r = ctx.request
-    ctx.set = not ctx.scheme and not ctx.cape_mode and r.keep_sets
+    ctx.set = not ctx.scheme and not ctx.cape_mode and not ctx.kit_source and r.keep_sets
         and ctx.helmet_kit.name_upper == ctx.armor_kit.name_upper
     if ctx.set and not ctx.cape and not r.obsolete then return {action = 'restore', reason = 'complete set'} end
 end
@@ -897,6 +913,7 @@ local function signed(ctx, result)
     result.signatures = {[ctx.helmet_kit.id] = signature(ctx.helmet_kit), [ctx.armor_kit.id] = signature(ctx.armor_kit)}
     if ctx.cape then result.signatures[ctx.cape_kit.id] = signature(ctx.cape_kit) end
     if ctx.cape_source then result.signatures[ctx.cape_source_kit.id] = signature(ctx.cape_source_kit) end
+    if ctx.kit_source then result.signatures[ctx.source_kit.id] = signature(ctx.source_kit) end
     return result
 end
 
@@ -919,10 +936,10 @@ function Recolor.job(deps, state, request, yield)
     local ctx = {deps = deps, p = p, state = state, request = request, scheme = scheme,
                  records = records_sum(deps.Kits, helmet, armor), helmet_kit = helmet, armor_kit = armor,
                  source_kit = request.mode == Recolor.ARMOR_FROM_HELMET and helmet or armor}
-    local early = job_capes(ctx, analysis) or set_kept(ctx)
+    local early = job_capes(ctx, analysis) or kit_source_of(ctx, analysis) or set_kept(ctx)
     if early then return early end
     local h, a = item_analyses(ctx, analysis)
-    ctx.source = request.mode == Recolor.ARMOR_FROM_HELMET and h or a
+    ctx.source = ctx.kit_source or (request.mode == Recolor.ARMOR_FROM_HELMET and h or a)
     local items = a and items_job(ctx, ctx.set, h, a, yield)
     if not items or request.obsolete then return {action = 'obsolete'} end
     return signed(ctx, with_cape(ctx, items, yield))
@@ -939,7 +956,8 @@ local function weapons_source(ctx, analysis)
         if cape_source_of(ctx, analysis) then return ctx.cape_source_key end
         return nil, 'no cape'
     end
-    local id = request.mode == Recolor.ARMOR_FROM_HELMET and request.helmet or request.armor
+    -- the mode's source item, or with Squadmates' Colors on Your Colors this player's (src/addon.lua source_kit)
+    local id = request.source_kit or (request.mode == Recolor.ARMOR_FROM_HELMET and request.helmet or request.armor)
     local kit = ctx.p.kits.find(id)
     ctx.source_kit = kit
     ctx.source = not request.obsolete and analysis(kit) or nil
@@ -1117,7 +1135,7 @@ if type(jit) == 'table' and type(jit.off) == 'function' then
         Recolor.build_patterns, Recolor.look_of, source_item, camo_copies, cape_parts, plan_target, planned,
         options_key, both_job, pair_job,
         with_cape, analyse_new, analysis_of, analyser, items_job, covers, sum_part, records_sum, plan_key, item_key,
-        cape_source_of,
+        cape_source_of, kit_source_of,
         cape_of,
         job_capes, set_kept, item_analyses,
         signed,

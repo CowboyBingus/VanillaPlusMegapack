@@ -77,42 +77,84 @@ local function worn(desired, n, watch, s)
     return false
 end
 
--- The owner of each shown player slot into out (reused): 'local' (the player's own preview), a squadmate's peer key
--- (their card: the session gives the slot to that peer and it shows a squadmate's desired kits) or false (nobody
--- found; also every slot not shown). watch: src/preview.lua's; own: the Armory's slot (u32 [pm + 948]).
-local lows, highs, desired = {}, {}, {} -- the session's peers by slot (session_peers); the squadmates' desired kits
-function Lineup.owners(read, game, Avatar, watch, own, out)
-    local low, high = session_peers(read, game, lows, highs)
-    local n -- the squadmates' desired kits, read when a slot of another peer is shown
-    for s = 0, SLOTS - 1 do
-        local peer_low, peer_high, owner = lows[s], highs[s], false
-        local shown = watch.status(s) ~= 'absent'
-        local other = shown and peer_low and not (peer_low == low and peer_high == high)
-        if other then n = n or Avatar.others_desired(read, game, desired) end
-        if shown and peer_low and not other then
-            owner = 'local'
-        elseif other and worn(desired, n, watch, s) then
-            owner = key_of(peer_low, peer_high)
-        elseif shown and s == own then
-            owner = 'local'
+-- Whether slot s is shown and has no owner in out yet.
+local function free(watch, out, s)
+    return s ~= nil and s >= 0 and s < SLOTS and out[s] == false and watch.status(s) ~= 'absent'
+end
+
+-- The player's own preview among the shown slots no card took: one that shows the player's desired kits (the session's
+-- slot of the local peer first, then the Armory's), else the session's slot of the local peer, else the Armory's;
+-- nil when none is free. On joining a mission in progress the session can still list only the local peer, in slot 0
+-- (the user's second squad, 2026-10-16: a squadmate's card in slot 0 was taken for the player's own again), so the
+-- player's own kits decide first.
+local order = {}
+local function own_slot(read, game, Avatar, watch, identity, out, session_slot)
+    local helmet, armor, cape = Avatar.desired_kits(read, game, identity.player)
+    order[1], order[2], order[3], order[4], order[5], order[6] = session_slot, identity.ui_slot, 0, 1, 2, 3
+    for i = 1, 6 do
+        local s = order[i]
+        if helmet and free(watch, out, s) then
+            local h, a, _, c = watch.slot_kits(s)
+            if h == helmet and a == armor and c == cape then return s end
         end
-        out[s] = owner
+    end
+    if free(watch, out, session_slot) then return session_slot end
+    if free(watch, out, identity.ui_slot) then return identity.ui_slot end
+    return nil
+end
+
+-- The owner of each shown player slot into out (reused): a squadmate's peer key (their card: the session gives the slot
+-- to that peer and it shows a squadmate's desired kits), 'local' (the player's own preview: own_slot), 'squad' (with
+-- more than one slot shown, any other shown slot: a squadmate's card whose player is not known) or false (also every
+-- slot not shown). watch: src/preview.lua's; identity: the local player's (player, ui_slot: the Armory's slot).
+local lows, highs, desired = {}, {}, {} -- the session's peers by slot (session_peers); the squadmates' desired kits
+local read_kits = {} -- n: the count in desired, once read in an owners call
+
+-- Slot s's card by the session: the key of the peer the session gives the shown slot to, when that is another peer
+-- and the slot shows a squadmate's desired kits; else false.
+local function session_card(read, game, Avatar, watch, s, low, high)
+    local peer_low, peer_high = lows[s], highs[s]
+    if not peer_low or (peer_low == low and peer_high == high) or watch.status(s) == 'absent' then return false end
+    read_kits.n = read_kits.n or Avatar.others_desired(read, game, desired)
+    return worn(desired, read_kits.n, watch, s) and key_of(peer_low, peer_high)
+end
+
+function Lineup.owners(read, game, Avatar, watch, identity, out)
+    local low, high = session_peers(read, game, lows, highs)
+    local shown, session_slot = 0, nil
+    read_kits.n = nil
+    for s = 0, SLOTS - 1 do
+        if lows[s] and lows[s] == low and highs[s] == high then session_slot = s end
+        if watch.status(s) ~= 'absent' then shown = shown + 1 end
+        out[s] = session_card(read, game, Avatar, watch, s, low, high)
+    end
+    local own = own_slot(read, game, Avatar, watch, identity, out, session_slot)
+    if own then out[own] = 'local' end
+    for s = 0, SLOTS - 1 do
+        if shown > 1 and free(watch, out, s) then out[s] = 'squad' end
     end
     return out
 end
 
--- The owners in one line for the log ('slot 0 0000000000001234 (your settings), slot 1 you'), or nil when every shown
--- slot is the player's own (the Armory alone).
-local function owners_text(owners, wanted, mine)
+-- The settings a card's owner takes: a squadmate's from the last lobby poll, an unknown squadmate's ('squad') this
+-- player's when Recolor Squadmates gives them to everyone or nobody else shares any (remote.unknown), or nil.
+local function settings_of(remote, owner)
+    if owner == 'squad' then return remote.unknown end
+    return owner and remote.wanted[owner] or nil
+end
+
+-- The owners in one line for the log ('slot 0 0000000000001234 (your settings), slot 1 you, slot 2 a squadmate (keeps
+-- its colors)'), or nil when every shown slot is the player's own (the Armory alone).
+local function owners_text(owners, remote)
     local parts, others = {}, false
     for s = 0, SLOTS - 1 do
         local owner = owners[s]
         if owner == 'local' then
             parts[#parts + 1] = 'slot ' .. s .. ' you'
         elseif owner then
-            local settings = wanted[owner]
-            parts[#parts + 1] = string.format('slot %d %s (%s)', s, owner, not settings and 'keeps its colors'
-                or (settings == mine and 'your settings' or 'shared settings'))
+            local settings = settings_of(remote, owner)
+            parts[#parts + 1] = string.format('slot %d %s (%s)', s, owner == 'squad' and 'a squadmate' or owner,
+                not settings and 'keeps its colors' or (settings == remote.mine and 'your settings' or 'shared settings'))
             others = true
         end
     end
@@ -149,7 +191,7 @@ function Lineup.new(m)
     local function rebind(card, frame)
         local result = card.controller.result
         if card.dirty or not card.applied or not result or not m.records_same(result, card.helmet, card.armor,
-            cape_counts(card.settings) and card.cape or nil) then
+            cape_counts(card.settings) and (card.settings.source_cape or card.cape) or nil) then
             return false
         end
         card.controller.apply(result, {units_at = watch.units_at(card.slot), body = card.body}, nil, frame)
@@ -166,13 +208,14 @@ function Lineup.new(m)
         return card
     end
 
-    -- Slot s shown with owner (a squadmate's key, or false) and status: its card made, kept, rebound, given a job or
-    -- dropped.
+    -- Slot s shown with owner (a squadmate's key, 'squad' or false) and status: its card made, kept, rebound, given a
+    -- job or dropped. A card shows before the game fills in its kits (0 for a few frames: the user's squad of
+    -- 2026-10-16 logged three failed jobs per card, "kit 00000000 not in the catalogue"): it waits for them.
     local function update(s, owner, status, frame)
-        local settings = owner and remote.wanted[owner]
-        if not settings then return drop(s, frame) end
-        local card = card_of(s)
+        local settings = settings_of(remote, owner)
         local helmet, armor, body, cape = watch.slot_kits(s)
+        if not settings or helmet == 0 or armor == 0 then return drop(s, frame) end
+        local card = card_of(s)
         if card.key ~= owner or not card.settings or not remote.same(card.settings, settings) or helmet ~= card.helmet
             or armor ~= card.armor or body ~= card.body or cape ~= card.cape then
             card.key, card.settings, card.mine = owner, settings, settings == remote.mine
@@ -184,22 +227,22 @@ function Lineup.new(m)
         end
     end
 
-    -- From the UI watch's poll (watch.changes slots showed, changed or went), after a lobby poll (stale) or a clear
-    -- (remap): the owners read again when a slot changed, every other player's card kept current. Returns the slot of
-    -- the player's own preview, or false when none is shown. own: the Armory's slot (identity.ui_slot); loopback (test
-    -- builds): the player's own card goes through this path with its shared value, as another player's would.
     -- The owners read again, logged when they changed.
-    local function remap(own)
+    local function remap(identity)
         self.remap = false
-        Lineup.owners(m.read, m.game, Avatar, watch, own, owners)
-        local text = owners_text(owners, remote.wanted, remote.mine)
+        Lineup.owners(m.read, m.game, Avatar, watch, identity, owners)
+        local text = owners_text(owners, remote)
         if text and text ~= logged then note('Squad cards: ' .. text .. '.') end
         logged = text or logged
     end
 
-    function self.observe(frame, w, own, loopback)
+    -- From the UI watch's poll (watch.changes slots showed, changed or went), after a lobby poll (stale) or a clear
+    -- (remap): the owners read again when a slot changed, every other player's card kept current. Returns the slot of
+    -- the player's own preview, or false when none is shown. identity: the local player's (src/avatar.lua); loopback
+    -- (test builds): the player's own card goes through this path with its shared value, as another player's would.
+    function self.observe(frame, w, identity, loopback)
         watch = w
-        if w.changes > 0 or self.remap then remap(own) end
+        if w.changes > 0 or self.remap then remap(identity) end
         self.stale = false
         local mine = false
         for s = 0, SLOTS - 1 do
@@ -223,11 +266,9 @@ function Lineup.new(m)
             local card = self.cards[s]
             if card and card.dirty and card.failures < Lineup.FAILURE_LIMIT then
                 card.dirty, self.served = false, s
-                local o = card.settings
-                return {target = 'card', slot = s, key = card.key, mode = o.mode, keep_sets = o.keep_sets,
-                        keep_hoods = not o.recolor_hoods, materials = o.match_materials, scheme = o.scheme,
-                        capes = o.recolor_cape, helmet = card.helmet, armor = card.armor, body = card.body,
-                        cape = card.cape}
+                local request = remote.request_of('card', card.key, card.settings, card)
+                request.slot = s
+                return request
             end
         end
         self.pending = false
@@ -243,7 +284,8 @@ function Lineup.new(m)
             card.failures = card.failures + 1
             card.dirty = card.failures < Lineup.FAILURE_LIMIT
             self.pending = self.pending or card.dirty
-            note(string.format('Squad card %s: recolor failed (%d/%d): %s', request.key, card.failures,
+            note(string.format('Squad card %s (slot %d): recolor failed (%d/%d): %s',
+                               request.key == 'squad' and 'of a squadmate' or request.key, request.slot, card.failures,
                                Lineup.FAILURE_LIMIT, tostring(result)))
             return
         end
@@ -251,7 +293,8 @@ function Lineup.new(m)
         local count = card.controller.apply(result, {units_at = watch.units_at(card.slot), body = request.body}, nil,
                                             frame)
         card.applied, self.jobs, self.busy = request, self.jobs + 1, true
-        note(string.format('Squad card %s (slot %d): %d materials recolored (%s).', request.key, request.slot, count,
+        note(string.format('Squad card %s (slot %d): %d materials recolored (%s).',
+                           request.key == 'squad' and 'of a squadmate' or request.key, request.slot, count,
                            result.action == 'apply' and (card.mine and 'your settings' or 'shared settings')
                            or tostring(result.reason)))
     end
@@ -300,7 +343,8 @@ end
 
 -- Runs on changes, jobs and checks only: interpreted (no traces in the LuaJIT code cache every mod shares).
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({session_peers, Lineup.session_text, worn, Lineup.owners, owners_text, Lineup.new}) do
+    for _, fn in ipairs({session_peers, Lineup.session_text, worn, free, own_slot, session_card, Lineup.owners,
+                         settings_of, owners_text, Lineup.new}) do
         jit.off(fn, true)
     end
 end

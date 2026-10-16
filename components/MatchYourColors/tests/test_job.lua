@@ -2661,6 +2661,11 @@ check('Recolor Weapons on the game files: the AR-23 Liberator (its unit and defa
     local solid = weapon_run(request)
     assert(solid.targets[1].luts[desert_body] and solid.luts[body] and not solid.luts[rail], 'the solid template')
     request.armor = tonumber(ARMOR, 16)
+    -- Squadmates' Colors on Your Colors: this player's armor (request.source_kit) is the source, not the squadmate's
+    request.source_kit = tonumber(B01_ARMOR, 16)
+    local yours = weapon_run(request)
+    assert(yours.targets[1].luts[desert_body] and not yours.luts[rail], 'your B-01\'s colors: the solid template')
+    request.source_kit = nil
     -- Desert Camo as the source: the game's own look, unplanned (its LUTs as they are)
     request.scheme = 7
     local native = weapon_run(request)
@@ -2714,6 +2719,31 @@ check('Recolor Weapons on the game files: the AR-23 Liberator (its unit and defa
     request.weapons = {{id = 2, name = '0000000000000bad', unit = 2, units = {}, overrides = {}, attachments = {}}}
     local none = weapon_run(request)
     assert(none.action == 'restore' and none.reason == 'no weapon analysed', 'no package: its colors kept')
+end)
+
+-- Squadmates' Colors on Your Colors (2026-10-16, the user: "make their color scheme match the players' as well"): a
+-- squadmate's helmet and armor are both planned against this player's source item (request.source_kit), as the cape
+-- is the source with Helmet and Armor Match Cape; a complete set is not kept; a source kit that is not found leaves
+-- their colors.
+check('Your Colors: a squadmate\'s helmet and armor both take this player\'s helmet (source_kit), keyed and signed by '
+      .. 'it; a complete set is recolored too; an unknown source kit keeps their colors', function()
+    holder = {}
+    local source = tonumber(WINTER_WARRIOR, 16)
+    local request = {mode = Recolor.ARMOR_FROM_HELMET, keep_sets = true, helmet = tonumber(HELMET, 16),
+                     armor = tonumber(ARMOR, 16), body = 0, source_kit = source}
+    local result = run(request)
+    assert(result.action == 'apply' and result.first == 0 and result.last == 9 and #result.targets == 2
+           and result.luts['962a946e964ebc40'], 'both items, the helmet\'s LUT among them')
+    assert(result.key:find('^kitsrc:cd3d20dc:') and result.signatures[source], 'keyed and signed by the source')
+    local own = run({mode = Recolor.ARMOR_FROM_HELMET, keep_sets = true, helmet = tonumber(HELMET, 16),
+                     armor = tonumber(ARMOR, 16), body = 0})
+    assert(not own.luts['962a946e964ebc40'] and own.key ~= result.key, 'their own gear: the armor alone, as before')
+    local set = run({mode = Recolor.ARMOR_FROM_HELMET, keep_sets = true, helmet = tonumber(SET_HELMET, 16),
+                     armor = tonumber(SET_ARMOR, 16), body = 0, source_kit = source})
+    assert(set.action == 'apply' and #set.targets == 2, 'a complete set takes your colors too')
+    local missing = run({mode = Recolor.ARMOR_FROM_HELMET, keep_sets = true, helmet = tonumber(HELMET, 16),
+                         armor = tonumber(ARMOR, 16), body = 0, source_kit = 0x12345678})
+    assert(missing.action == 'restore' and missing.reason == 'no source kit', 'no source: their colors')
 end)
 
 print('PASS test_job (' .. passed .. ' checks)')

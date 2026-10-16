@@ -386,6 +386,7 @@
   "components/MatchYourColors/src/lineup.lua",
   "components/MatchYourColors/src/loadout.lua",
   "components/MatchYourColors/src/matcher.lua",
+  "components/MatchYourColors/src/options.lua",
   "components/MatchYourColors/src/patches.lua",
   "components/MatchYourColors/src/preview.lua",
   "components/MatchYourColors/src/recolor.lua",

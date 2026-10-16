@@ -42,6 +42,10 @@ Addon.OPTION_WEAPONS = 'cowboybingus.match_your_colors.recolor_weapons'
 -- Recolor Squadmates' values (the menu's choice index): off, squadmates without the mod take this player's settings,
 -- every squadmate takes them (v1.5; never shared: other players' sync values stay v1.4's)
 Addon.SQUAD_OFF, Addon.SQUAD_MISSING, Addon.SQUAD_EVERYONE = 1, 2, 3
+-- Squadmates' Colors (2026-10-16, the user: "make their color scheme match the players' as well"): those squadmates'
+-- own gear matched with this player's Color Matching, or their gear in this player's colors (the mode's source item).
+Addon.OPTION_SQUAD_COLORS = 'cowboybingus.match_your_colors.squadmates_colors'
+Addon.SQUAD_OWN, Addon.SQUAD_YOURS = 1, 2
 Addon.RESOLVE_FRAMES = 15
 Addon.VERIFY_FRAMES = 120
 Addon.CHECK_FRAMES = 30
@@ -93,7 +97,7 @@ function Addon.new(m)
                    dirty = false, job = nil, request = nil, failures = {}, why = nil, budget_end = 0,
                    options = {mode = Recolor.HELMET_FROM_ARMOR, keep_sets = true, recolor_hoods = true,
                               match_materials = false, recolor_cape = false, recolor_weapons = false, scheme = 0,
-                              squad = Addon.SQUAD_OFF},
+                              squad = Addon.SQUAD_OFF, squad_colors = Addon.SQUAD_OWN},
                    next_sync = 0, loopback = false, holder = {}, status = 'starting', active = true}
     local pool = m.Engine.pool({native = m.native, memory = memory})
     local controller = Recolor.controller({Engine = m.Engine, Avatar = Avatar, memory = memory, native = m.native,
@@ -161,16 +165,24 @@ function Addon.new(m)
     end
 
     -- Recolor Squadmates: the settings squadmates take (src/remote.lua update's mine; a new table per change, which
-    -- the squadmates' entries compare), or nil when it is off or this player's own recoloring is.
+    -- the squadmates' entries compare), or nil when it is off or this player's own recoloring is. With Squadmates'
+    -- Colors on Your Colors and no paint scheme, the mode's source item of this player's kits: source_kit (the armor
+    -- for Helmet Matches Armor, the helmet for Armor Matches Helmet) or source_cape (Helmet and Armor Match Cape).
     local function squad_settings()
-        local o = state.options
+        local o, id = state.options, state.identity
         if o.squad == Addon.SQUAD_OFF or (o.mode == Recolor.OFF and o.scheme == 0) then
             state.squad_mine = nil
             return
         end
-        state.squad_mine = {mode = o.mode, keep_sets = o.keep_sets, recolor_hoods = o.recolor_hoods,
-                            match_materials = o.match_materials, recolor_cape = o.recolor_cape,
-                            recolor_weapons = o.recolor_weapons, scheme = o.scheme}
+        local mine = {mode = o.mode, keep_sets = o.keep_sets, recolor_hoods = o.recolor_hoods,
+                      match_materials = o.match_materials, recolor_cape = o.recolor_cape,
+                      recolor_weapons = o.recolor_weapons, scheme = o.scheme}
+        if o.squad_colors == Addon.SQUAD_YOURS and o.scheme == 0 and id then
+            mine.source_cape = o.mode == Recolor.CAPE_SOURCE and id.cape or nil
+            mine.source_kit = o.mode == Recolor.ARMOR_FROM_HELMET and id.helmet
+                or (o.mode == Recolor.HELMET_FROM_ARMOR and id.armor) or nil
+        end
+        state.squad_mine = mine
     end
 
     -- The local player's UI preview, located with the identity; kept while it is the same slot record (with the squad
@@ -189,6 +201,7 @@ function Addon.new(m)
     local function adopt(identity, frame)
         identity = Avatar.copy(identity)
         state.identity, state.slot = identity, Avatar.preview_slot(memory, identity, read)
+        squad_settings() -- Your Colors follows this player's kits
         state.watch = Avatar.watch(memory, identity, state.slot)
         state.watch.changed(true) -- keeps the current units and copies: later frames report only later changes
         state.next_verify, state.dirty, state.found_at = frame + Addon.VERIFY_FRAMES, true, frame
@@ -760,7 +773,7 @@ function Addon.new(m)
     -- this poll), 'absent' when none is, 'kits' for a slot given back to it (a card before: live 2026-10-15).
     local function own_status(ui, status, frame)
         if ui.watch.changes > 0 or lineup.stale or lineup.remap then
-            lineup.own = lineup.observe(frame, ui.watch, state.identity.ui_slot, state.loopback)
+            lineup.own = lineup.observe(frame, ui.watch, state.identity, state.loopback)
         end
         local own = lineup.own
         if own and own ~= ui.where.slot then
@@ -951,6 +964,7 @@ function Addon.new(m)
     local function valid(name, value)
         if name == 'mode' then return value == 1 or value == 2 or value == 3 or value == 4 end
         if name == 'squad' then return value == 1 or value == 2 or value == 3 end
+        if name == 'squad_colors' then return value == 1 or value == 2 end
         if name == 'scheme' then
             return type(value) == 'number' and value % 1 == 0 and value >= 0 and value <= SCHEMES
         end
@@ -968,7 +982,7 @@ function Addon.new(m)
         note('Option ' .. name .. ' = ' .. tostring(value) .. '.')
         squad_settings()
         if name == 'squad' or o.squad ~= Addon.SQUAD_OFF then state.next_sync = state.frame + 1 end
-        if name == 'squad' then return end
+        if name == 'squad' or name == 'squad_colors' then return end
         if session then state.sync_text = m.Sync.encode(o) end -- posted once it has settled (src/sync.lua)
         local was_active = state.active
         state.active = o.mode ~= Recolor.OFF or o.scheme ~= 0
@@ -989,9 +1003,9 @@ function Addon.new(m)
     function self.options_text()
         local o = state.options
         return string.format('mode %d, paint scheme %d, keep sets %s, recolor hoods %s, match materials %s, recolor '
-            .. 'cape %s, recolor weapons %s, recolor squadmates %d', o.mode, o.scheme, tostring(o.keep_sets),
-            tostring(o.recolor_hoods), tostring(o.match_materials), tostring(o.recolor_cape),
-            tostring(o.recolor_weapons), o.squad)
+            .. 'cape %s, recolor weapons %s, recolor squadmates %d, squadmates colors %d', o.mode, o.scheme,
+            tostring(o.keep_sets), tostring(o.recolor_hoods), tostring(o.match_materials), tostring(o.recolor_cape),
+            tostring(o.recolor_weapons), o.squad, o.squad_colors)
     end
 
     -- Test builds only (reached through their global): the local player's own shared value drives the sync path
@@ -1126,92 +1140,6 @@ function Addon.count(t)
     return n
 end
 
--- The scheme of a Paint Scheme menu value (1 Off, 2-12 the schemes), or nil.
-local function scheme_of(value)
-    return type(value) == 'number' and value - 1 or nil
-end
-
--- Mod Options Menu registration: the mode choice, the paint scheme choice (with Schemes, src/schemes.lua) and the
--- toggles (complete sets, hoods, materials, cape), registered once the menu's table exists (the loader's
--- after_startup event, else a few early frames). tr: the translator.
-function Addon.options(instance, tr, note, Schemes)
-    local registered, attempts = false, 0
-    local function text(menu, key)
-        if (tonumber(menu.version) or 1) >= 2 then return function() return tr(key) end end
-        return tr(key)
-    end
-    local function register_scheme(menu, mod)
-        local choices = {'Off'}
-        for _, scheme in ipairs(Schemes.LIST) do choices[#choices + 1] = text(menu, scheme.text) end
-        return menu.register_option(Addon.OPTION_SCHEME, {type = 'choice', mod = mod, mod_id = Addon.MOD_ID,
-            label = text(menu, 'option.scheme.label'), description = text(menu, 'option.scheme.description'),
-            choices = choices, default = 1})
-    end
-    local function register(menu)
-        local mod = text(menu, 'option.mod')
-        local ok, why = menu.register_option(Addon.OPTION_MODE, {type = 'choice', mod = mod, mod_id = Addon.MOD_ID,
-            label = text(menu, 'option.mode.label'), description = text(menu, 'option.mode.description'),
-            choices = {'Off', text(menu, 'option.mode.helmet'), text(menu, 'option.mode.armor'),
-                       text(menu, 'option.mode.cape')}, default = 2})
-        if not ok then return false, why end
-        if Schemes then
-            ok, why = register_scheme(menu, mod)
-            if not ok then return false, why end
-        end
-        ok, why = menu.register_option(Addon.OPTION_SQUAD, {type = 'choice', mod = mod, mod_id = Addon.MOD_ID,
-            label = text(menu, 'option.squad.label'), description = text(menu, 'option.squad.description'),
-            choices = {'Off', text(menu, 'option.squad.missing'), text(menu, 'option.squad.everyone')},
-            default = Addon.SQUAD_OFF})
-        if not ok then return false, why end
-        for _, toggle in ipairs(Addon.TOGGLES) do
-            ok, why = menu.register_option(toggle[1], {type = 'toggle', mod = mod, mod_id = Addon.MOD_ID,
-                label = text(menu, toggle[3]), description = text(menu, toggle[4]), default = toggle[5]})
-            if not ok then return false, why end
-        end
-        instance.set_option('mode', menu.get(Addon.OPTION_MODE))
-        menu.on_change(Addon.OPTION_MODE, function(value) instance.set_option('mode', value) end)
-        if Schemes then
-            instance.set_option('scheme', scheme_of(menu.get(Addon.OPTION_SCHEME)))
-            menu.on_change(Addon.OPTION_SCHEME, function(value) instance.set_option('scheme', scheme_of(value)) end)
-        end
-        instance.set_option('squad', menu.get(Addon.OPTION_SQUAD))
-        menu.on_change(Addon.OPTION_SQUAD, function(value) instance.set_option('squad', value) end)
-        for _, toggle in ipairs(Addon.TOGGLES) do
-            local id, name = toggle[1], toggle[2]
-            instance.set_option(name, menu.get(id))
-            menu.on_change(id, function(value) instance.set_option(name, value) end)
-        end
-        note('Options: ' .. instance.options_text() .. '.') -- set_option logs only changes
-        return true
-    end
-    local self = {}
-    -- One attempt; true once registered (or when no menu is installed: defaults stay).
-    function self.attempt()
-        if registered then return true end
-        attempts = attempts + 1
-        local menu = rawget(_G, 'ModOptionsMenu')
-        if type(menu) ~= 'table' or menu.api ~= 1 then return false end
-        local called, ok, why = pcall(register, menu)
-        registered = called and ok
-        if registered then
-            note('Mod Options Menu: options registered.')
-        else
-            note('Mod Options Menu: not registered (' .. tostring(called and why or ok) .. ').')
-        end
-        return registered
-    end
-    -- True on the frames of Addon.REGISTER_FRAMES until registered; afterwards one compare per frame.
-    local next_index, next_at = 1, Addon.REGISTER_FRAMES[1]
-    function self.due(frame)
-        if frame < next_at or registered then return false end
-        next_index = next_index + 1
-        next_at = Addon.REGISTER_FRAMES[next_index] or math.huge
-        return true
-    end
-    function self.registered() return registered end
-    return self
-end
-
 -- Bingus Shared Loader v18+ with API 1, recognized by what it offers, never by its internal version.
 function Addon.loader_ok(loader)
     return type(loader) == 'table' and loader.api == 1 and type(loader.open_log) == 'function'
@@ -1259,6 +1187,7 @@ function Addon.install(m)
         note('Disabled: ' .. tostring(instance))
         return nil
     end
+    if m.Options then m.Options.attach(Addon) end -- Addon.options (src/options.lua)
     local tr = m.T.new(m.locales.en, m.locales.bundled, function(message) note('text: ' .. message) end)
     local options = Addon.options(instance, tr, note, m.Schemes)
     local step = instance.step
@@ -1280,7 +1209,7 @@ end
 
 -- Startup and option registration run once: interpreted, sub-functions included.
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({same_identity, real_kits, after_text, scheme_of, Addon.options, Addon.loader_ok,
+    for _, fn in ipairs({same_identity, real_kits, after_text, Addon.loader_ok,
                          Addon.install, Addon.count}) do
         jit.off(fn, true)
     end

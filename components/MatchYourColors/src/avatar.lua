@@ -184,32 +184,67 @@ function Avatar.resolve(memory, game, read, out)
     return out
 end
 
--- One player record (player manager entity record i) as {player = entity id, index, local (bool), peer_low,
--- peer_high, unit}, or nil when it has no Helldiver.
-local function player_at(read, players, i)
-    local entity = pointer(read, players + P_ENTITIES + 8 * i)
-    local b = entity and read(entity, 24)
-    if not b then return nil end
-    local entity_id, owned = u32(b, 8), b[20] % 2 == 1
-    local index = Avatar.lookup(read, players + P_MAP, entity_id)
-    if not index or index >= MAX_PLAYERS then return nil end
-    local peer = read(players + P_PEERS + 56 * index, 8)
-    if not peer then return nil end
-    local peer_low, peer_high = u32(peer, 0), u32(peer, 4)
-    local unit = word(read, players + P_UNITS + 32 * index)
-    if not unit or unit == 0 then return nil end
-    return {player = entity_id, index = index, ['local'] = owned, peer_low = peer_low, peer_high = peer_high, unit = unit}
+-- Every player of the player manager: the map +208 from a player's entity id to its index holds them all; the entity
+-- records +232 (count +132) hold only this machine's players (a squad's other players are not in them: the user's
+-- squads of 2026-10-15/16 matched no squadmate, live dump 2026-10-16). Into out (reused): out[i] = {entity, index,
+-- local}; returns the count, 0 without a player manager. The map's entries are read 32 at a time (8 in the game: 1
+-- read), the records about 3 reads each.
+local entries = {}
+-- The map's entries in b (count of them) after the n already in out; the new count.
+local function add_entries(b, count, empty, out, n)
+    for i = 0, count - 1 do
+        local key, index = u32(b, 8 * i), u32(b, 8 * i + 4)
+        if key ~= empty and index < MAX_PLAYERS and n < MAX_PLAYERS then
+            n = n + 1
+            local e = out[n] or {}
+            e.entity, e.index, e['local'], out[n] = key, index, false, e
+        end
+    end
+    return n
 end
 
--- Every player with a Helldiver (the local one marked local): a list of player_at records. About 6 reads each.
+-- This machine's players (the entity records with the owned bit) marked local among out's n entries.
+local function mark_local(read, players, out, n)
+    local owned = word(read, players + P_COUNT) or 0
+    for k = 0, math.min(owned, MAX_PLAYERS) - 1 do
+        local entity = pointer(read, players + P_ENTITIES + 8 * k)
+        local b = entity and read(entity, 24)
+        local id = b and b[20] % 2 == 1 and u32(b, 8)
+        for i = 1, n do if out[i].entity == id then out[i]['local'] = true end end
+    end
+end
+
+function Avatar.player_entries(read, players, out)
+    local head = read(players + P_MAP, 16)
+    if not head then return 0 end
+    local data, capacity, empty = u32(head, 0) + u32(head, 4) * HIGH, u32(head, 8), u32(head, 12)
+    if data < 0x10000 or capacity == 0 or capacity > 64 then return 0 end
+    local n = 0
+    for first = 0, capacity - 1, 32 do
+        local count = math.min(32, capacity - first)
+        local b = read(data + 8 * first, 8 * count)
+        if not b then return 0 end
+        n = add_entries(b, count, empty, out, n)
+    end
+    mark_local(read, players, out, n)
+    return n
+end
+
+-- Every player with a Helldiver (this machine's marked local): {player = entity id, index, local, peer_low, peer_high,
+-- unit}, a new list. About 2 reads a player beside Avatar.player_entries.
 function Avatar.players(read, game)
     local out = {}
     local players = pointer(read, game + Avatar.PLAYERS)
-    local count = players and word(read, players + P_COUNT)
-    if not count or count == 0 or count > MAX_PLAYERS then return out end
-    for i = 0, count - 1 do
-        local found = player_at(read, players, i)
-        if found then out[#out + 1] = found end
+    if not players then return out end
+    for i = 1, Avatar.player_entries(read, players, entries) do
+        local e = entries[i]
+        local peer = read(players + P_PEERS + 56 * e.index, 8)
+        local low, high = peer and u32(peer, 0), peer and u32(peer, 4)
+        local unit = peer and word(read, players + P_UNITS + 32 * e.index)
+        if unit and unit ~= 0 then
+            out[#out + 1] = {player = e.entity, index = e.index, ['local'] = e['local'], peer_low = low,
+                             peer_high = high, unit = unit}
+        end
     end
     return out
 end
@@ -242,19 +277,16 @@ end
 -- (0 when that is not known yet: game.dll 0x6054f0), so it is not used to find the card's player.
 function Avatar.others_desired(read, game, out)
     local players = pointer(read, game + Avatar.PLAYERS)
-    local count = players and word(read, players + P_COUNT)
-    if not count or count > MAX_PLAYERS then return 0 end
+    if not players then return 0 end
     local n = 0
-    for i = 0, count - 1 do
-        local entity = pointer(read, players + P_ENTITIES + 8 * i)
-        local b = entity and read(entity, 24)
-        if b and b[20] % 2 == 0 then
-            local helmet, armor, cape = Avatar.desired_kits(read, game, u32(b, 8))
-            if helmet then
-                n = n + 1
-                local kits = out[n] or {}
-                kits[1], kits[2], kits[3], out[n] = helmet, armor, cape, kits
-            end
+    for i = 1, Avatar.player_entries(read, players, entries) do
+        local e = entries[i]
+        local helmet, armor, cape = nil, nil, nil
+        if not e['local'] then helmet, armor, cape = Avatar.desired_kits(read, game, e.entity) end
+        if helmet then
+            n = n + 1
+            local kits = out[n] or {}
+            kits[1], kits[2], kits[3], out[n] = helmet, armor, cape, kits
         end
     end
     return n
@@ -262,26 +294,19 @@ end
 
 -- Every player as the player manager holds it, for the log ('index 0 peer 00c0ffee5eed0001 unit 97 slot 1 (this
 -- machine's)'): when a lobby member names no player here (src/remote.lua), the line shows what the peer ids are.
-local function player_text(read, players, i)
-    local entity = pointer(read, players + P_ENTITIES + 8 * i)
-    local b = entity and read(entity, 24)
-    if not b then return nil end
-    local id, owned = u32(b, 8), b[20] % 2 == 1
-    local index = Avatar.lookup(read, players + P_MAP, id)
-    if not index or index >= MAX_PLAYERS then return nil end
-    local peer = read(players + P_PEERS + 56 * index, 8)
+local function player_text(read, players, e)
+    local peer = read(players + P_PEERS + 56 * e.index, 8)
     local low, high = peer and u32(peer, 0) or 0, peer and u32(peer, 4) or 0
-    return string.format('index %d peer %08x%08x unit %x slot %d%s', index, high, low,
-        word(read, players + P_UNITS + 32 * index) or 0, word(read, players + P_UI_SLOT + 32 * index) or -1,
-        owned and " (this machine's)" or '')
+    return string.format('index %d peer %08x%08x unit %x slot %d%s', e.index, high, low,
+        word(read, players + P_UNITS + 32 * e.index) or 0, word(read, players + P_UI_SLOT + 32 * e.index) or -1,
+        e['local'] and " (this machine's)" or '')
 end
 
 function Avatar.players_text(read, game)
     local players = pointer(read, game + Avatar.PLAYERS)
-    local count = players and word(read, players + P_COUNT)
-    if not count or count > MAX_PLAYERS then return 'no player manager' end
+    if not players then return 'no player manager' end
     local parts = {}
-    for i = 0, count - 1 do parts[#parts + 1] = player_text(read, players, i) end
+    for i = 1, Avatar.player_entries(read, players, entries) do parts[i] = player_text(read, players, entries[i]) end
     return #parts > 0 and table.concat(parts, ', ') or 'no players'
 end
 
@@ -386,9 +411,10 @@ end
 -- Code that runs once or rarely (jobs, startup, events) stays interpreted, sub-functions included: it must not
 -- add traces to the LuaJIT code cache the game and every mod share. Only the hot loops stay compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({low32_product, Avatar.reader, pointer, word, Avatar.lookup, local_player, applied_kits, avatar_record,
-        Avatar.resolve, player_at, Avatar.players, Avatar.resolve_remote, Avatar.desired_kits, Avatar.others_desired,
-        player_text, Avatar.players_text, Avatar.copy, Avatar.preview_slot, Avatar.units}) do
+    for _, fn in ipairs({low32_product, Avatar.reader, pointer, word, Avatar.lookup, local_player, applied_kits,
+        avatar_record, Avatar.resolve, add_entries, mark_local, Avatar.player_entries, Avatar.players,
+        Avatar.resolve_remote, Avatar.desired_kits, Avatar.others_desired, player_text, Avatar.players_text, Avatar.copy,
+        Avatar.preview_slot, Avatar.units}) do
         jit.off(fn, true)
     end
 end

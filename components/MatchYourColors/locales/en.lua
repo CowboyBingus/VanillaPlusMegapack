@@ -44,6 +44,11 @@ return {
         ['option.squad.missing'] = 'Squadmates Without the Mod',
         ['option.squad.everyone'] = 'Everyone',
         ['option.squad.description'] = 'Recolors your squadmates\' helmets and armor with your settings, on your screen only. Squadmates Without the Mod: players who use this mod keep the colors they chose. Everyone: every squadmate takes your settings. Nothing changes for them: only you see it.',
+        -- The choice: the two below. Only this player sees it.
+        ['option.squad_colors.label'] = 'Squadmates\' Colors',
+        ['option.squad_colors.own'] = 'Their Own Gear',
+        ['option.squad_colors.yours'] = 'Your Colors',
+        ['option.squad_colors.description'] = 'For the squadmates Recolor Squadmates recolors. Their Own Gear: your Color Matching on their own gear (their armor matches their own helmet, for example), so a matching set barely changes. Your Colors: their helmet and armor take your colors, those of the item your Color Matching matches (your armor, helmet or cape); a paint scheme gives everyone the scheme. Only you see it.',
         ['option.capes.description'] = 'Recolors your cape too, to the same colors: the armor\'s with Helmet Matches Armor, the helmet\'s with Armor Matches Helmet, or the paint scheme\'s. A complete set left alone still gives its cape its colors. With Helmet and Armor Match Cape the cape keeps its colors (it is the one matched). Emblems and other decals keep their colors.',
         ['option.weapons.label'] = 'Recolor Weapons',
         ['option.weapons.description'] = 'Recolors your weapons too (primary, sidearm, support weapon and their attachments), to the same colors as the cape: the armor\'s, the helmet\'s, the cape\'s or the paint scheme\'s. While on, it replaces a weapon\'s own paint scheme. Lenses, lights and decals keep their colors; grenades and backpacks keep theirs.',
@@ -58,7 +63,9 @@ return {
         ['scheme.arctic_camo'] = 48, ['scheme.desert'] = 48, ['scheme.desert_camo'] = 48, ['scheme.urban'] = 48,
         ['scheme.urban_camo'] = 48, ['scheme.night'] = 48, ['scheme.venus'] = 48, ['scheme.seaf'] = 48, ['option.capes.label'] = 64,
         ['option.capes.description'] = 400, ['option.squad.label'] = 64, ['option.squad.missing'] = 48,
-        ['option.squad.everyone'] = 48, ['option.squad.description'] = 400, ['option.weapons.label'] = 64,
+        ['option.squad.everyone'] = 48, ['option.squad.description'] = 400, ['option.squad_colors.label'] = 64,
+        ['option.squad_colors.own'] = 48, ['option.squad_colors.yours'] = 48, ['option.squad_colors.description'] = 400,
+        ['option.weapons.label'] = 64,
         ['option.weapons.description'] = 400,
     },
 }

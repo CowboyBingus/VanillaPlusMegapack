@@ -75,23 +75,26 @@ function Fake.space()
     return self
 end
 
--- A game map at header address `at` (data placed at `data`): keys -> values, multiplier 1, capacity 64.
-local function map(space, at, data, entries)
-    space.region(data, 64 * 8)
-    space.u64(at, data) space.u32(at + 8, 64) space.u32(at + 12, 0xFFFFFFFF) space.u32(at + 16, 1)
-    for slot = 0, 63 do space.u32(data + 8 * slot, 0xFFFFFFFF) end
+-- A game map at header address `at` (data placed at `data`): keys -> values, multiplier 1, capacity 64 (or capacity).
+local function map(space, at, data, entries, capacity)
+    capacity = capacity or 64
+    space.region(data, capacity * 8)
+    space.u64(at, data) space.u32(at + 8, capacity) space.u32(at + 12, 0xFFFFFFFF) space.u32(at + 16, 1)
+    for slot = 0, capacity - 1 do space.u32(data + 8 * slot, 0xFFFFFFFF) end
     for key, value in pairs(entries) do
-        local slot = key % 64
-        while space.get32(data + 8 * slot) ~= 0xFFFFFFFF do slot = (slot + 1) % 64 end
+        local slot = key % capacity
+        while space.get32(data + 8 * slot) ~= 0xFFFFFFFF do slot = (slot + 1) % capacity end
         space.u32(data + 8 * slot, key) space.u32(data + 8 * slot + 4, value)
     end
 end
 
 -- The world: two players (index 0 local, entity 5; index 1 remote, entity 6), their customization records,
 -- avatar entities (0xe5 local, 0xe6 remote) and avatar records with unit arrays, the preview manager and the UI
--- preview system (UI slots 1 local, 3 remote; nothing shown until Fake.show_ui).
+-- preview system (UI slots 1 local, 3 remote; nothing shown until Fake.show_ui). As in the game (live dump
+-- 2026-10-16), the player manager's entity records +232 (count +132) hold only this machine's player; the map +208
+-- (capacity 8) holds both.
 -- options: {local_units = {[{type, slot}] = unit}, remote_units = ..., helmet, armor, body, previews = bool,
--- ui = bool, players (count, default 2), no_manager = bool (no player manager: the title screen)}
+-- ui = bool, players (0: no players, a world loading), no_manager = bool (no player manager: the title screen)}
 function Fake.world(options)
     local s = Fake.space()
     local g = Fake.GAME
@@ -104,21 +107,22 @@ function Fake.world(options)
     -- players
     local P = Fake.PLAYERS
     s.region(P, 0x1000)
-    s.u32(P + 132, options.players or 2)
+    local none = options.players == 0
+    s.u32(P + 132, none and 0 or 1)
     local records = 0x150000000
     s.region(records, 0x100)
     for i, entity in ipairs({5, 6}) do
         local record = records + 32 * (i - 1)
         s.u32(record + 8, entity)
         s.byte(record + 20, i == 1 and 1 or 0)
-        s.u64(P + 232 + 8 * (i - 1), record)
+        if i == 1 then s.u64(P + 232, record) end -- this machine's player only
         -- peers as exact halves (0x00c0ffee5eed0001 is above 2^53: a Lua number would round it)
         s.u32(P + 712 + 56 * (i - 1), i == 1 and 0x5eed0001 or 0x1234)
         s.u32(P + 716 + 56 * (i - 1), i == 1 and 0x00c0ffee or 0)
         s.u32(P + 936 + 32 * (i - 1), i == 1 and 0x96 or 0x97)
         s.u32(P + 948 + 32 * (i - 1), Fake.UI_SLOTS[i])
     end
-    map(s, P + 208, 0x151000000, {[5] = 0, [6] = 1})
+    map(s, P + 208, 0x151000000, none and {} or {[5] = 0, [6] = 1}, 8)
     -- customization: records 0 (local) and 1 (remote)
     local C = Fake.CUSTOMIZATION
     s.region(C, 0x1000)

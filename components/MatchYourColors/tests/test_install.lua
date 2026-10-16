@@ -9,7 +9,7 @@ local ffi = require('ffi')
 local Fake = dofile(root .. '/tests/fake_game.lua')
 local modules = {}
 for _, name in ipairs({'avatar', 'preview', 'recolor', 'engine', 'files', 'slim', 'texture', 'colour', 'transfer',
-                       'matcher', 'zones', 'variety', 'albedo', 'sheets', 'bindings', 'kits', 'cache', 'schemes', 'capes', 'patches', 'sync', 'remote', 'addon'}) do
+                       'matcher', 'zones', 'variety', 'albedo', 'sheets', 'bindings', 'kits', 'cache', 'schemes', 'capes', 'patches', 'sync', 'remote', 'options', 'addon'}) do
     modules[name] = require(name)
 end
 local Engine, Addon = modules.engine, modules.addon
@@ -99,7 +99,7 @@ local function install(options)
     for name, module in pairs({Avatar = 'avatar', Preview = 'preview', Recolor = 'recolor', Engine = 'engine',
                                Files = 'files', Slim = 'slim', Texture = 'texture', Colour = 'colour', Transfer = 'transfer',
                                Matcher = 'matcher', Zones = 'zones', Variety = 'variety', Albedo = 'albedo', Sheets = 'sheets', Bindings = 'bindings', Kits = 'kits', Cache = 'cache', Schemes = 'schemes',
-                               Capes = 'capes', Patches = 'patches', Sync = 'sync', Remote = 'remote'}) do
+                               Capes = 'capes', Patches = 'patches', Sync = 'sync', Remote = 'remote', Options = 'options'}) do
         m[name] = modules[module]
     end
     local instance = Addon.install(m)
@@ -151,6 +151,17 @@ check('install: engine functions verified, guard on the update chain, options re
     w.menu.callbacks[Addon.OPTION_SQUAD](4)
     assert(o.squad == Addon.SQUAD_EVERYONE, 'a value out of the choices is ignored')
     w.menu.callbacks[Addon.OPTION_SQUAD](Addon.SQUAD_OFF)
+    -- Squadmates' Colors (2026-10-16): Their Own Gear (the default, Recolor Squadmates as before) or Your Colors
+    local colors = w.menu.registered[Addon.OPTION_SQUAD_COLORS]
+    assert(colors and colors.type == 'choice' and #colors.choices == 2 and colors.default == Addon.SQUAD_OWN
+           and colors.choices[1]() == 'Their Own Gear' and colors.choices[2]() == 'Your Colors'
+           and colors.label() == 'Squadmates\' Colors' and o.squad_colors == Addon.SQUAD_OWN,
+           'Squadmates\' Colors: Their Own Gear by default, then Your Colors')
+    w.menu.callbacks[Addon.OPTION_SQUAD_COLORS](Addon.SQUAD_YOURS)
+    assert(o.squad_colors == Addon.SQUAD_YOURS, 'on_change applies Squadmates\' Colors')
+    w.menu.callbacks[Addon.OPTION_SQUAD_COLORS](3)
+    assert(o.squad_colors == Addon.SQUAD_YOURS, 'a value out of the choices is ignored')
+    w.menu.callbacks[Addon.OPTION_SQUAD_COLORS](Addon.SQUAD_OWN)
     w.menu.callbacks[Addon.OPTION_CAPES](true)
     assert(o.recolor_cape == true, 'on_change applies the cape toggle')
     w.menu.callbacks[Addon.OPTION_CAPES](false)

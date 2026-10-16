@@ -35,8 +35,20 @@ function Remote.new(m)
     local function same(a, b)
         return a.mode == b.mode and a.keep_sets == b.keep_sets and a.recolor_hoods == b.recolor_hoods
             and a.match_materials == b.match_materials and a.recolor_cape == b.recolor_cape and a.scheme == b.scheme
-            and (a.recolor_weapons or false) == (b.recolor_weapons or false)
+            and (a.recolor_weapons or false) == (b.recolor_weapons or false) and a.source_kit == b.source_kit
+            and a.source_cape == b.source_cape
     end
+
+    -- A job request for target with settings s on kits {helmet, armor, body, cape}, as every squadmate's job (and squad
+    -- card's, src/lineup.lua) takes it: with Squadmates' Colors on Your Colors (s.source_kit or s.source_cape, src/addon.lua)
+    -- this player's source item instead of the mode's own.
+    local function request_of(target, key, s, kits)
+        return {target = target, key = key, mode = s.mode, keep_sets = s.keep_sets, keep_hoods = not s.recolor_hoods,
+                materials = s.match_materials, scheme = s.scheme, capes = s.recolor_cape, helmet = kits.helmet,
+                armor = kits.armor, body = kits.body, cape = s.source_cape or kits.cape, source_kit = s.source_kit,
+                source_cape = s.source_cape}
+    end
+    self.request_of = request_of
 
     local function add(key)
         local e = {key = key, failures = 0, controller = Recolor.controller({Engine = m.Engine, Avatar = Avatar,
@@ -103,9 +115,11 @@ function Remote.new(m)
         local identity = Avatar.resolve_remote(m.read, m.game, player, {})
         -- the cape counts with Recolor Cape on, or as the source (Helmet and Armor Match Cape without a scheme)
         local capes = applied.capes or (applied.mode == Recolor.CAPE_SOURCE and (applied.scheme or 0) == 0)
+        -- the cape that counts: theirs, or with Your Colors' cape source this player's (the request's)
+        local cape = applied.source_cape or (identity and identity.cape)
         if not identity or identity.helmet ~= applied.helmet or identity.armor ~= applied.armor
-            or identity.body ~= applied.body or (capes and identity.cape ~= applied.cape)
-            or not m.records_same(result, identity.helmet, identity.armor, capes and identity.cape or nil) then
+            or identity.body ~= applied.body or (capes and cape ~= applied.cape)
+            or not m.records_same(result, identity.helmet, identity.armor, capes and cape or nil) then
             return false
         end
         e.identity, e.player, e.watch = identity, player, Avatar.watch(m.memory, identity, nil)
@@ -135,6 +149,8 @@ function Remote.new(m)
                    .. (self.session_text and '; session: ' .. self.session_text(m.read, m.game) or '') .. '.')
         end
     end
+    local matched = {} -- the players a member named at this poll (by entity id)
+    local keep
     local function take(players, member, settings, frame, mine)
         local player = player_of(players, member)
         local key = key_of(member)
@@ -146,7 +162,12 @@ function Remote.new(m)
             end
             return not_found(key, players, mine)
         end
-        unmatched[key], missing[key] = nil, nil
+        unmatched[key], missing[key], matched[player.player] = nil, nil, true
+        return keep(key, player, settings, frame, mine)
+    end
+    -- An entry for key kept current with player and settings: a job when they changed, else new units rebound.
+    keep = function(key, player, settings, frame, mine)
+        local e = self.entries[key]
         e = e or add(key)
         e.mine, e.absent = mine, nil
         local new_settings = not e.settings or not same(e.settings, settings)
@@ -187,31 +208,58 @@ function Remote.new(m)
     -- and local_key (the local member's, for the test build's loopback). The two tables swap at each poll.
     self.wanted, self.same = {}, same
     local spare = {}
+    -- unknown: the settings of a squad card whose player is not known (src/lineup.lua 'squad'): this player's when every
+    -- squadmate takes them (Everyone) or no other member shares any (Squadmates Without the Mod), else none.
+    local sharing = false -- another member shares readable settings (this poll)
     local function want(member, mine, everyone)
         local key = key_of(member)
         if member['local'] then self.local_key = key end
+        -- a member whose value could not be read may share (no unknown settings for squadmates meanwhile)
+        sharing = sharing or (not member['local'] and (member.failed or settings_of(member.text)) and true or false)
         local settings = settings_for(member, mine, everyone)
         if member.failed and self.wanted[key] ~= nil then settings = self.wanted[key] end
         spare[key] = settings or nil
     end
     local function visit(member, frame, mine, everyone)
-        if member.failed and self.entries[key_of(member)] then return key_of(member) end
+        local kept = member.failed and self.entries[key_of(member)]
+        if kept then
+            if kept.player then matched[kept.player.player] = true end -- still theirs (no stray entry)
+            return key_of(member)
+        end
         local settings = settings_for(member, mine, everyone)
         if not settings then return nil end
         poll.players = poll.players or Avatar.players(m.read, m.game)
         return take(poll.players, member, settings, frame, settings == mine)
+    end
+    -- The other players here whom no member names (a player's peer id here can be 0: game.dll 0x6054f0 sets it once,
+    -- when the player is added, and 0 while its connection is not known yet) take an unknown squadmate's settings
+    -- (unknown), keyed 'player <entity id>'.
+    local function strays(frame)
+        if not self.unknown then return end
+        poll.players = poll.players or Avatar.players(m.read, m.game)
+        for _, p in ipairs(poll.players) do
+            if not p['local'] and not matched[p.player] then
+                local key = 'player ' .. p.player
+                seen[key] = true
+                keep(key, p, self.unknown, frame, true)
+            end
+        end
     end
     function self.update(frame, members, mine, everyone)
         self.frame, self.mine = frame, mine
         poll.players = nil
         for key in pairs(seen) do seen[key] = nil end
         for key in pairs(spare) do spare[key] = nil end
+        for key in pairs(matched) do matched[key] = nil end
+        sharing = false
         for _, member in ipairs(members or EMPTY) do
             want(member, mine, everyone)
             local key = visit(member, frame, mine, everyone)
             if key then seen[key] = true end
         end
         self.wanted, spare = spare, self.wanted
+        self.unknown = mine and (everyone or not sharing) and mine or nil
+        strays(frame)
         for i = #gone, 1, -1 do gone[i] = nil end
         for key in pairs(self.entries) do
             if not seen[key] then gone[#gone + 1] = key end
@@ -236,11 +284,7 @@ function Remote.new(m)
                     e.watch.changed() -- keeps the current units
                     weapons_of(e, self.frame) -- their weapons (Recolor Weapons in their settings), planned after
                     self.served = i
-                    local s = e.settings
-                    return {target = 'remote', key = key, mode = s.mode, keep_sets = s.keep_sets,
-                            keep_hoods = not s.recolor_hoods, materials = s.match_materials, scheme = s.scheme,
-                            capes = s.recolor_cape, helmet = identity.helmet, armor = identity.armor,
-                            body = identity.body, cape = identity.cape}
+                    return request_of('remote', key, e.settings, identity)
                 end
                 e.failures = e.failures + 1
                 m.note('Sync: ' .. key .. ' not resolved (' .. tostring(why) .. ').')
@@ -255,11 +299,9 @@ function Remote.new(m)
                 and e.loadout.request()
             if w then
                 self.served = i
-                local s, id = e.settings, e.identity
-                return {target = 'remote', key = key, mode = s.mode, keep_sets = s.keep_sets,
-                        keep_hoods = not s.recolor_hoods, materials = s.match_materials, scheme = s.scheme,
-                        capes = s.recolor_cape, helmet = id.helmet, armor = id.armor, body = id.body, cape = id.cape,
-                        weapons = w.weapons, sig = w.sig}
+                local request = request_of('remote', key, e.settings, e.identity)
+                request.weapons, request.sig = w.weapons, w.sig
+                return request
             end
         end
         self.pending = false
@@ -344,6 +386,7 @@ function Remote.new(m)
         for key in pairs(self.entries) do keys[#keys + 1] = key end
         for _, key in ipairs(keys) do drop(key, frame) end
         for key in pairs(self.wanted) do self.wanted[key] = nil end
+        self.unknown = nil
         self.pending = false
     end
     return self

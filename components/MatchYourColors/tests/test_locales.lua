@@ -7,9 +7,10 @@ assert(english.mod == 'match_your_colors' and english.language == 'en')
 rawset(_G, 'BingusTranslations', nil)
 Text.registry().game_language = 'en'
 Text.new(english) -- asserts every English text is valid and within its limit
--- The code that shows texts: the options (src/addon.lua) and the paint scheme names (src/schemes.lua).
+-- The code that shows texts: the options (src/options.lua, the toggles' in src/addon.lua) and the paint scheme names
+-- (src/schemes.lua).
 local code = ''
-for _, name in ipairs({'addon.lua', 'schemes.lua'}) do
+for _, name in ipairs({'addon.lua', 'options.lua', 'schemes.lua'}) do
     local file = assert(io.open(root .. '/src/' .. name, 'rb'))
     code = code .. file:read('*a') .. '\n'
     file:close()
@@ -31,6 +32,8 @@ local MENU = {['option.mod'] = 40, ['option.mode.label'] = 64, ['option.mode.hel
               ['option.scheme.label'] = 64, ['option.scheme.description'] = 400,
               ['option.capes.label'] = 64, ['option.capes.description'] = 400, ['option.squad.label'] = 64,
               ['option.squad.missing'] = 48, ['option.squad.everyone'] = 48, ['option.squad.description'] = 400,
+              ['option.squad_colors.label'] = 64, ['option.squad_colors.own'] = 48,
+              ['option.squad_colors.yours'] = 48, ['option.squad_colors.description'] = 400,
               ['option.weapons.label'] = 64, ['option.weapons.description'] = 400}
 for _, scheme in ipairs(dofile(root .. '/src/schemes.lua').LIST) do MENU[scheme.text] = 48 end -- choices
 local menu_texts = 0
