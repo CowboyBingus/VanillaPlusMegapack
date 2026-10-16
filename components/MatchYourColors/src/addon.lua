@@ -24,7 +24,10 @@
 --   * Sync With Mod Users (src/sync.lua, src/remote.lua; always on, no option since 2026-10-07): every
 --     Sync.POLL_FRAMES frames the squad's PlayFab lobby is read (and this player's settings posted when due); while
 --     other mod users' Helldivers are recolored, one of them has its units checked per frame (round robin) and one
---     its bindings every CHECK_FRAMES frames.
+--     its bindings every CHECK_FRAMES frames;
+--   * Hide Cape (src/cloak.lua, 2026-10-16): the local cape hidden on the frames the unit watch reports a change (no
+--     read of its own), one hidden cape's mask read on the binding check; other players' capes: the players read on
+--     the frame after a lobby poll while any is to be hidden, then one of them has its units read on 1 frame in 4.
 -- No memory writes: the recolor goes through engine calls (src/engine.lua).
 local ffi = require('ffi')
 
@@ -46,6 +49,10 @@ Addon.SQUAD_OFF, Addon.SQUAD_MISSING, Addon.SQUAD_EVERYONE = 1, 2, 3
 -- own gear matched with this player's Color Matching, or their gear in this player's colors (the mode's source item).
 Addon.OPTION_SQUAD_COLORS = 'cowboybingus.match_your_colors.squadmates_colors'
 Addon.SQUAD_OWN, Addon.SQUAD_YOURS = 1, 2
+-- Hide Cape (2026-10-16, src/cloak.lua): off, this player's cape (shared: squadmates with the mod hide it too), or every
+-- Helldiver's cape on this screen.
+Addon.OPTION_HIDE_CAPE = 'cowboybingus.match_your_colors.hide_cape'
+Addon.HIDE_OFF, Addon.HIDE_YOURS, Addon.HIDE_EVERYONE = 1, 2, 3
 Addon.RESOLVE_FRAMES = 15
 Addon.VERIFY_FRAMES = 120
 Addon.CHECK_FRAMES = 30
@@ -83,6 +90,13 @@ local function after_text(after)
     return string.format('; %d %s after the Helldiver was found', after, after == 1 and 'frame' or 'frames')
 end
 
+-- Hide Cape's capes hidden on this screen (src/cloak.lua), or nil without the module or the engine's visibility call.
+local function new_cloak(m)
+    if not (m.Cloak and m.native.visibility) then return nil end
+    return m.Cloak.new({Engine = m.Engine, Avatar = m.Avatar, Sync = m.Sync, native = m.native, memory = m.memory,
+                        game = m.game, note = m.note})
+end
+
 -- The instance: step() every frame, pause(reason), stopped(reason), set_option(name, value).
 -- m: the modules and services {Avatar, Preview, Recolor, Engine, Files, Slim, Texture, Colour, Transfer, Matcher,
 -- Kits, Schemes, Patches, Sync, Remote, memory, native, game, note, natives (PlayFab's, default Sync.natives)}; without
@@ -97,7 +111,8 @@ function Addon.new(m)
                    dirty = false, job = nil, request = nil, failures = {}, why = nil, budget_end = 0,
                    options = {mode = Recolor.HELMET_FROM_ARMOR, keep_sets = true, recolor_hoods = true,
                               match_materials = false, recolor_cape = false, recolor_weapons = false, scheme = 0,
-                              squad = Addon.SQUAD_OFF, squad_colors = Addon.SQUAD_OWN},
+                              squad = Addon.SQUAD_OFF, squad_colors = Addon.SQUAD_OWN, hide_cape = Addon.HIDE_OFF,
+                              cape_hidden = false},
                    next_sync = 0, loopback = false, holder = {}, status = 'starting', active = true}
     local pool = m.Engine.pool({native = m.native, memory = memory})
     local controller = Recolor.controller({Engine = m.Engine, Avatar = Avatar, memory = memory, native = m.native,
@@ -145,6 +160,7 @@ function Addon.new(m)
         memory = memory, native = m.native, pool = pool, game = m.game, read = Avatar.reader(memory), note = note,
         remote = remote, records_same = records_same})
     local queues = {remote = remote, card = lineup} -- the targets whose requests and results their module keeps
+    local cloak = new_cloak(m) -- Hide Cape: the capes hidden on this screen
     state.syncing = session ~= nil
     state.sync_text = session and m.Sync.encode(state.options) or nil
     -- Recolor Weapons: the local Helldiver's weapons, a target of their own (src/loadout.lua).
@@ -152,7 +168,7 @@ function Addon.new(m)
         Avatar = Avatar, memory = memory, native = m.native, pool = pool, game = m.game, read = Avatar.reader(memory),
         note = note})
     local self = {state = state, controller = controller, ui_controller = ui_controller, pool = pool, remote = remote,
-                  session = session, loadout = loadout, lineup = lineup}
+                  session = session, loadout = loadout, lineup = lineup, cloak = cloak}
 
     -- Whether the weapons are recolored: Recolor Weapons on while something local is (not in the test build's loopback,
     -- where the sync path recolors the avatar).
@@ -185,6 +201,14 @@ function Addon.new(m)
         state.squad_mine = mine
     end
 
+    -- Hide Cape: the local Helldiver's capes (slot 1 of the unit watch's refs, no read) hidden while the choice hides
+    -- them (on adopt and on a unit change: a respawn, another cape), shown again when it is off.
+    local function cloak_local()
+        if not cloak then return end
+        if state.options.hide_cape == Addon.HIDE_OFF then return cloak.drop('local', true) end
+        if state.watch then cloak.wear('local', state.watch.ref, false, state.frame) end
+    end
+
     -- The local player's UI preview, located with the identity; kept while it is the same slot record (with the squad
     -- cards, the same preview system: src/lineup.lua names the player's slot).
     local function locate_ui(identity, frame)
@@ -205,6 +229,7 @@ function Addon.new(m)
         state.watch = Avatar.watch(memory, identity, state.slot)
         state.watch.changed(true) -- keeps the current units and copies: later frames report only later changes
         state.next_verify, state.dirty, state.found_at = frame + Addon.VERIFY_FRAMES, true, frame
+        cloak_local()
         locate_ui(identity, frame)
         if weapons_on() then -- another Helldiver (a new mission) or other kits: its weapons, planned for them
             loadout.adopt(identity)
@@ -232,6 +257,7 @@ function Addon.new(m)
         state.identity, state.watch, state.slot, state.found_at = nil, nil, nil, nil
         state.next_resolve = frame + Addon.RESOLVE_FRAMES
         controller.prune()
+        if cloak then cloak.drop('local', false) end -- left hidden: no flash while the Helldiver is briefly not found
         if loadout then loadout.clear(frame) end
         if state.ui then
             ui_controller.restore(frame)
@@ -337,6 +363,7 @@ function Addon.new(m)
         end
         state.identity.cape = identity.cape
         if changed and not rebound and #controller.bindings > 0 then controller.prune() end
+        if changed then cloak_local() end -- Hide Cape: new units (their refs from the watch, no read)
     end
 
     -- After applying: the cache status and the mods' patches once; new analyses are written later by the save job
@@ -524,6 +551,7 @@ function Addon.new(m)
         if weapons_stale(request, result, preview, frame) then return end
         local started, made = time(), pool.made
         local count = preview and loadout.finish_preview(result, request, frame) or loadout.finish(result, request, frame)
+        if not count then return end -- the weapons changed while it ran: planned again
         local job = state.last_job
         if result.action == 'apply' then
             note(string.format('%s: %d materials (%d weapons, %d LUTs; job %.1f ms of work over %d frames, longest '
@@ -730,6 +758,7 @@ function Addon.new(m)
         if state.ui and ui_controller.probes > 0 and not ui_controller.check() then state.ui.dirty = true end
         if lineup and next(lineup.cards) then lineup.check() end
         if weapons_on() then loadout.check(frame) end
+        if cloak and cloak.order[1] then cloak.check(frame) end -- Hide Cape: one hidden cape still hidden (1 read)
         if state.reader_kept and frame - state.reader_kept >= Addon.KEEP_FRAMES then close_kept() end
         if state.closing and m.Files then state.closing = m.Files.close_some(Addon.CLOSES_PER_CHECK) > 0 end
     end
@@ -823,9 +852,20 @@ function Addon.new(m)
     -- Recolor Squadmates, this player's settings for those who share none, or for everyone).
     local function poll_sync(frame)
         state.next_sync = frame + m.Sync.POLL_FRAMES
-        remote.update(frame, session.poll(frame, state.sync_text, state.loopback), state.squad_mine,
-                      state.options.squad == Addon.SQUAD_EVERYONE)
+        local members = session.poll(frame, state.sync_text, state.loopback)
+        remote.update(frame, members, state.squad_mine, state.options.squad == Addon.SQUAD_EVERYONE)
         if lineup then lineup.stale = true end -- the cards look at their players' settings again
+        -- Hide Cape: the next frame, when a cape is to be hidden or other players' are (no read to tell)
+        if cloak and cloak.needed(members, state.options.hide_cape == Addon.HIDE_EVERYONE) then
+            state.cloak_members, state.cloak_due = members, true
+        end
+    end
+
+    -- Hide Cape: the other players whose capes are hidden here, on the frame after a lobby poll (its own frame: the
+    -- players are read then) or after the choice changed; members: the poll's (reused until the next poll).
+    local function cloak_update()
+        state.cloak_due = false
+        cloak.update(state.cloak_members, state.options.hide_cape == Addon.HIDE_EVERYONE, state.frame)
     end
 
     -- Sync With Mod Users, on a frame with no recolor job and no cache save: a second check this frame, of other
@@ -834,9 +874,13 @@ function Addon.new(m)
     -- textures retire), one unit watch on 1 frame in Remote.WATCH_FRAMES, else one binding check every CHECK_FRAMES
     -- frames and a job when one is due. Each frame does one of them at most; the calls into interpreted code are
     -- behind these compares.
+    -- Hide Cape's watch of other players' capes takes the frames WATCH_FRAMES leaves the squad's (frame % 4 == 2, never
+    -- a check frame: CHECK_FRAMES * k + 1 is odd).
     local WATCH_FRAMES = m.Remote and m.Remote.WATCH_FRAMES
     local function sync_step(frame)
         if frame >= state.next_sync and state.verified_at ~= frame then return poll_sync(frame) end
+        if state.cloak_due then return cloak_update() end
+        if cloak and cloak.others[1] and frame % WATCH_FRAMES == 2 then return cloak.step(frame) end
         if remote.order[1] == nil and remote.retiring[1] == nil then return end
         if frame % WATCH_FRAMES == 0 then return remote.step(frame) end
         if frame % Addon.CHECK_FRAMES == 1 then return remote.check() end
@@ -918,6 +962,17 @@ function Addon.new(m)
         end
     end
 
+    -- A frame with a recolor job: while it is the UI preview's, the preview read on 1 frame in UI_GATE_FRAMES
+    -- (watch_ui_job); then the job's work.
+    local function job_step(frame)
+        local request = state.request
+        if frame % Addon.UI_GATE_FRAMES == 0 and not state.ended and request and request.target == 'ui'
+            and not request.obsolete then
+            watch_ui_job(frame, request)
+        end
+        return run_job(frame)
+    end
+
     -- Every frame, before the game's update.
     function self.step()
         local frame = state.frame + 1
@@ -928,14 +983,10 @@ function Addon.new(m)
         if controller.pending then settle(controller, frame, 'Helldiver') end
         if ui_controller.pending then settle(ui_controller, frame, 'Preview') end
         if lineup and lineup.busy then lineup.step(frame, settle) end
-        if state.job then
-            local request = state.request
-            if frame % Addon.UI_GATE_FRAMES == 0 and not state.ended and request and request.target == 'ui'
-                and not request.obsolete then
-                watch_ui_job(frame, request)
-            end
-            return run_job(frame)
-        end
+        -- Hide Cape: while this player's new cape is young, its helmet's mask read every frame (a second check on
+        -- those frames: the hellpod's exit shows the cape again, src/cloak.lua); one compare otherwise
+        if cloak and frame <= cloak.young_until then cloak.young(frame) end
+        if state.job then return job_step(frame) end
         -- The lobby only while the local Helldiver exists (not on the title screen, while loading or dead): the lobby
         -- is settled then (its first post crashed the game on arrival on the ship, 2026-10-07: src/sync.lua).
         if local_step(frame) or not state.syncing or not state.identity then return end
@@ -963,7 +1014,7 @@ function Addon.new(m)
     local SCHEMES = m.Schemes and #m.Schemes.LIST or 0
     local function valid(name, value)
         if name == 'mode' then return value == 1 or value == 2 or value == 3 or value == 4 end
-        if name == 'squad' then return value == 1 or value == 2 or value == 3 end
+        if name == 'squad' or name == 'hide_cape' then return value == 1 or value == 2 or value == 3 end
         if name == 'squad_colors' then return value == 1 or value == 2 end
         if name == 'scheme' then
             return type(value) == 'number' and value % 1 == 0 and value >= 0 and value <= SCHEMES
@@ -974,12 +1025,23 @@ function Addon.new(m)
     -- recoloring back on (state.active) makes the preview, unwatched meanwhile, count as newly shown. Recolor
     -- Squadmates and, while it is on, every option reach the squadmates at the next frame's poll; it starts no job of
     -- this player's own.
+    -- Hide Cape changed: the shared flag (squadmates hide this player's cape), this player's cape now, the other
+    -- players' at the next frame (from the last poll's members); no recolor job.
+    local function hide_option()
+        local o = state.options
+        o.cape_hidden = o.hide_cape ~= Addon.HIDE_OFF
+        if session then state.sync_text = m.Sync.encode(o) end -- posted once it has settled (src/sync.lua)
+        if state.identity then cloak_local() end
+        state.cloak_due = cloak ~= nil and session ~= nil
+    end
+
     function self.set_option(name, value)
         if not valid(name, value) then return end
         local o = state.options
         if o[name] == value then return end
         o[name] = value
         note('Option ' .. name .. ' = ' .. tostring(value) .. '.')
+        if name == 'hide_cape' then return hide_option() end
         squad_settings()
         if name == 'squad' or o.squad ~= Addon.SQUAD_OFF then state.next_sync = state.frame + 1 end
         if name == 'squad' or name == 'squad_colors' then return end
@@ -1003,9 +1065,9 @@ function Addon.new(m)
     function self.options_text()
         local o = state.options
         return string.format('mode %d, paint scheme %d, keep sets %s, recolor hoods %s, match materials %s, recolor '
-            .. 'cape %s, recolor weapons %s, recolor squadmates %d, squadmates colors %d', o.mode, o.scheme,
-            tostring(o.keep_sets), tostring(o.recolor_hoods), tostring(o.match_materials), tostring(o.recolor_cape),
-            tostring(o.recolor_weapons), o.squad, o.squad_colors)
+            .. 'cape %s, recolor weapons %s, recolor squadmates %d, squadmates colors %d, hide cape %d', o.mode,
+            o.scheme, tostring(o.keep_sets), tostring(o.recolor_hoods), tostring(o.match_materials),
+            tostring(o.recolor_cape), tostring(o.recolor_weapons), o.squad, o.squad_colors, o.hide_cape)
     end
 
     -- Test builds only (reached through their global): the local player's own shared value drives the sync path
@@ -1044,6 +1106,7 @@ function Addon.new(m)
             remote.clear(state.frame)
             state.next_sync = 0
         end
+        if cloak then cloak.clear() end -- capes shown, as without the mod; hidden again after a resume
         state.identity, state.watch, state.slot, state.ui, state.next_resolve = nil, nil, nil, nil, 0
         state.warm, state.found_at = nil, nil
         state.status = 'paused: ' .. tostring(reason)
@@ -1073,7 +1136,9 @@ function Addon.new(m)
             .. (session and string.format('; sync: %d posts, %d failed, other players recolored '
             .. '%d times', session.posts, session.failures, remote.jobs) or '')
             .. (loadout and loadout.jobs > 0 and string.format('; weapons: %d jobs, bound again %d times (%d '
-            .. 'reloads)', loadout.jobs, loadout.rebinds, loadout.reloads) or '') .. ').')
+            .. 'reloads)', loadout.jobs, loadout.rebinds, loadout.reloads) or '')
+            .. (cloak and cloak.hidden > 0 and string.format('; capes hidden %d times, hidden again %d, shown %d',
+            cloak.hidden, cloak.reshown, cloak.shown) or '') .. ').')
     end
 
     -- Every recolor put back (the local Helldiver's, the preview's, the other players', the weapons'): true, or false
@@ -1083,7 +1148,7 @@ function Addon.new(m)
         local ui_ok, ui_problem = pcall(ui_controller.restore, state.frame)
         if ok and not ui_ok then ok, problem = false, ui_problem end
         for _, clear in ipairs({remote and remote.clear or false, loadout and loadout.clear or false,
-                                lineup and lineup.clear or false}) do
+                                lineup and lineup.clear or false, cloak and cloak.clear or false}) do
             local cleared, why = true, nil
             if clear then cleared, why = pcall(clear, state.frame) end
             if not cleared then ok, problem = false, why end
@@ -1115,6 +1180,7 @@ function Addon.new(m)
                              release_reader, job_failed, finish_remote, finish_local, finish, run_job,
                              options_request, with_kits, request_for, plan_ahead, start_job, start_ahead, save_step,
                              check_bindings, poll_sync, valid, watch_ui_job, squad_settings, settle, weapons_on,
+                             cloak_local, cloak_update, hide_option, job_step,
                              weapons_stale, finish_weapons, weapons_option,
                              self.set_option, self.options_text, self.set_loopback, release_files, self.pause,
                              save_at_shutdown, note_shutdown, restore_all, self.stopped}) do
@@ -1177,7 +1243,7 @@ function Addon.install(m)
                           Texture = m.Texture, Colour = m.Colour, Transfer = m.Transfer, Matcher = m.Matcher,
                           Kits = m.Kits, Schemes = m.Schemes, Capes = m.Capes, Patches = m.Patches, Sync = m.Sync,
                           Remote = m.Remote, Albedo = m.Albedo, Weapons = m.Weapons, Loadout = m.Loadout,
-                          WeaponData = m.WeaponData, Lineup = m.Lineup,
+                          WeaponData = m.WeaponData, Lineup = m.Lineup, Cloak = m.Cloak,
                           memory = memory,
                           Appearance = m.Appearance and m.AppearanceData and m.Appearance.new(m.AppearanceData),
                           native = native, game = memory.address(game), note = note, Cache = m.Cache,
@@ -1209,7 +1275,7 @@ end
 
 -- Startup and option registration run once: interpreted, sub-functions included.
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({same_identity, real_kits, after_text, Addon.loader_ok,
+    for _, fn in ipairs({same_identity, real_kits, after_text, new_cloak, Addon.loader_ok,
                          Addon.install, Addon.count}) do
         jit.off(fn, true)
     end

@@ -5,8 +5,11 @@
 --
 -- Inventory [game + 0x3326738]: the map +40 from an avatar's entity id to its row, rows [+80] of 48 bytes: +0 the
 -- primary, +4 the sidearm, +8 the support weapon (entity ids; a weapon picked up lands in its slot), +28 the slot in
--- hand (1-3; 0 on the ship, where no weapon is held). Entities [game + 0x346BF98]: the map +0xF1AEB0 from an entity id
--- to its record +0xF32F18 + 24 e (+0 its resource: the weapon's id, its unit's name; +12 its unit). Weapon
+-- hand (1-3; 0 on the ship, where no weapon is held); each row's entity [+64] (8-byte pointers to entity records, +8
+-- the id); the row count +20. The rows move: an avatar removed (a death, a player leaving) has another row and its
+-- entity moved into its index (0x9b2810 -> 0x9b15d0, static research 2026-10-16); a new one is added last (0x9b25c0).
+-- Entities [game + 0x346BF98]: the map +0xF1AEB0 from an entity id to its record +0xF32F18 + 24 e (+0 its resource:
+-- the weapon's id, its unit's name; +12 its unit). Weapon
 -- customization [game + 0x3326A38]: the map +632 to its record [+672] + 128 j (attachment units at +8, +12, +40, +68
 -- and +96, +100 the underbarrel's entity), and the map +696 to the weapon's own copy of its customization [+760] +
 -- 4872 k (none: the weapon type's, no paint of its own): its attachments' unit names (+0x78 optic, +0x80/+0x90/+0x98
@@ -24,7 +27,9 @@ local ffi = require('ffi')
 local Weapons = {}
 
 Weapons.INVENTORY, Weapons.ENTITIES, Weapons.CUSTOMIZATION = 0x3326738, 0x346BF98, 0x3326A38
-local I_MAP, I_ROWS, ROW_BYTES, CURRENT = 40, 80, 48, 28
+local I_MAP, I_OWNERS, I_ROWS, ROW_BYTES, CURRENT = 40, 64, 80, 48, 28
+local I_HEAD, I_COUNT = 16, 20 -- Weapons.owned's read: the row count to the row array
+local HEAD_BYTES = I_ROWS + 8 - I_HEAD
 Weapons.ROW_BYTES = ROW_BYTES
 local E_MAP, E_RECORDS, E_CATALOGUE = 0xF1AEB0, 0xF32F18, 0xF12558
 local C_MAP, C_RECORDS, C_RECORD_BYTES, C_INSTANCES, C_COPIES, COPY_BYTES = 632, 672, 128, 696, 760, 4872
@@ -62,13 +67,38 @@ end
 local function unit_id(v) return v ~= 0 and v ~= 0xFFFFFFFF end
 
 -- The inventory row of an avatar (its entity id): {inventory, rows (the row array; it moves only when the inventory
--- grows), row (address)}, or nil. read: Avatar.reader; lookup: Avatar.lookup.
-function Weapons.locate(read, lookup, game, avatar)
+-- grows), row (address), avatar, index}, or nil; with owned, also owners (the entity array [+64]) and owner (the row's
+-- entity there, Weapons.owned; 2 reads more). read: Avatar.reader; lookup: Avatar.lookup.
+function Weapons.locate(read, lookup, game, avatar, owned)
     local inventory = pointer(read, game + Weapons.INVENTORY)
     local index = inventory and lookup(read, inventory + I_MAP, avatar)
     local rows = index and index < MAX_ROWS and pointer(read, inventory + I_ROWS)
     if not rows then return nil end
-    return {inventory = inventory, rows = rows, row = rows + ROW_BYTES * index, avatar = avatar}
+    local where = {inventory = inventory, rows = rows, row = rows + ROW_BYTES * index, avatar = avatar, index = index}
+    where.owners = owned and pointer(read, inventory + I_OWNERS) or nil
+    where.owner = where.owners and pointer(read, where.owners + 8 * index) or nil
+    if where.owner then -- the addresses Weapons.owned reads, made once
+        where.head_at = ffi.cast('const uint8_t *', inventory + I_HEAD)
+        where.owner_at = ffi.cast('const uint8_t *', where.owners + 8 * index)
+    end
+    return where
+end
+
+local function u64(p, o) return u32(p, o) + u32(p, o + 4) * HIGH end
+
+-- Whether where (Weapons.locate with owned) is still the row of the avatar it was found for: in one read of the
+-- inventory's head (+16 to +87) its index under the row count (+20: a row moved away leaves its old bytes and entity
+-- past it, 0x9b15d0 clears nothing) and the entity and row arrays where they were (they move only when it grows); then
+-- the row's entity the same (one 8-byte read). False when anything differs or cannot be read; true when where has no
+-- entity to compare. scratch: a buffer of HEAD_BYTES or more. No allocation.
+Weapons.HEAD_BYTES = HEAD_BYTES
+function Weapons.owned(memory, where, scratch)
+    if not where.owner then return true end
+    if not memory.read_into(where.head_at, HEAD_BYTES, scratch) or where.index >= u32(scratch, I_COUNT - I_HEAD)
+        or u64(scratch, I_OWNERS - I_HEAD) ~= where.owners or u64(scratch, I_ROWS - I_HEAD) ~= where.rows then
+        return false
+    end
+    return memory.read_into(where.owner_at, 8, scratch) and u64(scratch, 0) == where.owner or false
 end
 
 -- One weapon of an entity id: {id, name (its resource: the weapon's id and its unit's name), unit, units = {unit ids
@@ -439,7 +469,8 @@ end
 -- Resolving and kits run on changes only: interpreted. The watch (its two checks are the per-frame step's) stays
 -- compiled.
 if type(jit) == 'table' and type(jit.off) == 'function' then
-    for _, fn in ipairs({pointer, unit_id, Weapons.locate, entity_record, attachment_units, weapon_of, override_rows,
+    for _, fn in ipairs({pointer, unit_id, Weapons.locate, u64, Weapons.owned, entity_record, attachment_units,
+                         weapon_of, override_rows,
                          Weapons.decode_copy, Weapons.resolve, Weapons.package, Weapons.preview, hex_mod, bucket_index,
                          apply_patch, delta_tables, apply_op, apply_id, Weapons.compose, templated, Weapons.kit,
                          paired_units, take_classes,

@@ -18,6 +18,8 @@ function Options.attach(Addon)
          {'Off', 'option.squad.missing', 'option.squad.everyone'}, Addon.SQUAD_OFF},
         {Addon.OPTION_SQUAD_COLORS, 'squad_colors', 'option.squad_colors.label', 'option.squad_colors.description',
          {'option.squad_colors.own', 'option.squad_colors.yours'}, Addon.SQUAD_OWN},
+        {Addon.OPTION_HIDE_CAPE, 'hide_cape', 'option.hide_cape.label', 'option.hide_cape.description',
+         {'Off', 'option.hide_cape.yours', 'option.hide_cape.everyone'}, Addon.HIDE_OFF},
     }
 
     -- tr: the translator.

@@ -98,10 +98,11 @@ check('natives: the buffers the post\'s update points into outlive collections (
     for _, cb in ipairs(callbacks) do cb:free() end
 end)
 
--- Every option combination (the FLAGS bits, Recolor Weapons included) for each mode and a few schemes.
+-- Every option combination (the FLAGS bits, Recolor Weapons and Hide Cape's shared flag included) for each mode and a
+-- few schemes.
 local function each_options(fn)
     for mode = 1, 4 do
-        for flags = 0, 31 do
+        for flags = 0, 63 do
             for _, scheme in ipairs({0, 1, 5, 12}) do
                 local o = {mode = mode, scheme = scheme}
                 for _, flag in ipairs(Sync.FLAGS) do o[flag[1]] = math.floor(flags / flag[2]) % 2 == 1 end
@@ -122,7 +123,7 @@ check('encode and decode: every mode, option and scheme round trips through cbmy
         assert(legacy == string.format('1|%d|%d|%d', o.mode, flags % 16, o.scheme), legacy)
         local old = assert(Sync.decode(legacy), legacy)
         for k, v in pairs(o) do
-            assert(old[k] == (k ~= 'recolor_weapons' and v or false), legacy .. ': ' .. k)
+            assert(old[k] == ((k ~= 'recolor_weapons' and k ~= 'cape_hidden') and v or false), legacy .. ': ' .. k)
         end
     end)
 end)
@@ -1060,6 +1061,352 @@ check('loopback (test build): the own preview goes through the squad-card path w
     for _, r in ipairs(card_requests(w, count)) do if r.target == 'ui' and r.mode ~= Recolor.OFF then own = r end end
     assert(own and not next(w.instance.lineup.cards), 'the preview\'s own job, no card')
     assert(w.bound(0x410)[1] ~= vanilla(w) and #w.instance.ui_controller.bindings > 0, 'recolored by the preview')
+end)
+
+-- Squadmates' weapons in a squad of three (Recolor Weapons, src/loadout.lua follow). A user's squad of four
+-- (2026-10-16, a mission with every squadmate recolored) logged five 'Sync: <peer> weapons recolored, 0 materials.'
+-- lines on three players: the game keeps inventory rows packed (tests/fake_game.lua Fake.weapons remove, as its
+-- 0x9b2810 -> 0x9b15d0), so a squadmate's death moved another player's row into theirs and v1.5, reading the row it
+-- found first, planned that player's weapons (already recolored: 0 bindings), never found its own player's new row
+-- after a respawn, and let the moved player's recolor plan whatever came into its old row (a respawned squadmate's
+-- weapons, with its own settings). Agreed outcome: each squadmate's weapons recolored with their own settings
+-- through deaths, respawns and moved rows; no job plans another player's weapons; no '0 materials' line.
+local THIRD_ID, THIRD_KEY = '5678', '0000000000005678'
+local CHECK_FRAMES = require('addon').CHECK_FRAMES
+local RIFLE, PISTOL, CANNON = '1a2b3c4d00000001', '1a2b3c4d00000002', '1a2b3c4d00000003'
+local RIFLE_LUT, PISTOL_LUT, CANNON_LUT = '5e6f708100000001', '5e6f708100000002', '5e6f708100000003'
+helpers.vanilla[RIFLE_LUT], helpers.vanilla[PISTOL_LUT], helpers.vanilla[CANNON_LUT] = 0x193000000, 0x193001000,
+    0x193002000
+helpers.weapon_luts[RIFLE], helpers.weapon_luts[PISTOL], helpers.weapon_luts[CANNON] = {RIFLE_LUT}, {PISTOL_LUT},
+    {CANNON_LUT}
+local function gun(id, name, unit) return {id = id, name = name, unit = unit, units = {}, attachments = {}} end
+-- Whether unit's material holds one of controller c's textures.
+local function bound_by(w, c, unit)
+    local object = w.bound(unit)[1]
+    for _, texture in pairs(c.textures) do if texture.object == object then return true end end
+    return false
+end
+local function weapon_requests(from)
+    local n = 0
+    for i = from + 1, #requests do if requests[i].target == 'remote' and requests[i].weapons then n = n + 1 end end
+    return n
+end
+-- The squad: this player, the squadmate (peer 0x1234: player 6, avatar 0xe6, inventory row 1, a rifle) sharing Armor
+-- Matches Helmet and a third mod user (peer 0x5678: player 7, avatar 0xe7, row 2, a pistol) sharing Helmet Matches
+-- Armor, both with Recolor Weapons (their own plans and textures); frames run until both weapons are recolored.
+local function squad_of_three()
+    local w = setup({weapons = true, lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID},
+                     {id = REMOTE_ID, value = 'v=1;m=3;f=19;s=0;'}, {id = THIRD_ID, value = 'v=1;m=2;f=19;s=0;'}}}})
+    local record = Fake.player(w.space, {entity = 7, index = 2, peer = 0x5678, record = 2, helmet = 0x33333333,
+        armor = 0x44444444, helldiver = {unit = 0x98, entity = 196, avatar = 0xe7, index = 2, units = {[{0, 0}] = 0x300}}})
+    w.engine.unit(0x300, HELMET_LUT)
+    assert(w.weapons.add(0xe7, record) == 2, 'the third player\'s row last')
+    w.engine.unit(0x600, RIFLE_LUT) w.engine.unit(0x610, PISTOL_LUT)
+    w.weapons.set(1, gun(0x321, RIFLE, 0x600), 1) w.weapons.hold(1, 1)
+    w.weapons.set(1, gun(0x331, PISTOL, 0x610), 2) w.weapons.hold(1, 2)
+    local remote = w.instance.remote
+    for _ = 1, 60 do
+        w.frames(10)
+        local a, b = remote.entries[REMOTE_KEY], remote.entries[THIRD_KEY]
+        if a and b and a.loadout and b.loadout and a.loadout.sig and b.loadout.sig then break end
+    end
+    return w, remote.entries[REMOTE_KEY], remote.entries[THIRD_KEY]
+end
+local function zero_line(w, from)
+    for i = from + 1, #w.lines do if w.lines[i]:find('weapons recolored, 0 materials', 1, true) then return w.lines[i] end end
+    return nil
+end
+
+check('squadmates\' weapons through a death, a respawn and rows the game moved: each recolored with their own '
+      .. 'settings, no job for another player\'s weapons, no "0 materials" line (user squad 2026-10-16)', function()
+    local w, mate, third = squad_of_three()
+    assert(mate and third and mate.loadout.sig and third.loadout.sig, 'both squadmates\' weapons planned')
+    assert(bound_by(w, mate.loadout.controller, 0x600) and bound_by(w, third.loadout.controller, 0x610),
+           'each weapon recolored by its own player\'s recolor')
+    -- the squadmate dies: no Helldiver; the game removes their avatar's row, the third's moves into row 1 and leaves
+    -- its old bytes and entity in row 2
+    local before, lines = #requests, #w.lines
+    w.space.u32(Fake.PLAYERS + 936 + 32, 0)
+    w.engine.units[0x200].alive, w.engine.units[0x600].alive = false, false
+    w.weapons.remove(0xe6)
+    w.frames(Sync.POLL_FRAMES + 4 * CHECK_FRAMES)
+    assert(weapon_requests(before) == 0, 'no weapons job: ' .. weapon_requests(before))
+    assert(third.loadout.where and third.loadout.where.index == 1 and third.loadout.moves == 1,
+           'the third\'s row followed to row 1')
+    assert(bound_by(w, third.loadout.controller, 0x610), 'the third\'s pistol still theirs')
+    assert(logged(w, 'Sync: ' .. THIRD_KEY .. ' weapons: the game moved their row (2 -> 1); found again.'), 'noted')
+    -- the squadmate respawns: a new avatar (0xe9) whose row is added last (row 2), the same rifle as a new entity
+    local record = Fake.respawn(w.space, 1, {unit = 0x99, entity = 197, avatar = 0xe9, index = 1,
+                                             units = {[{0, 0}] = 0x201}})
+    w.engine.unit(0x201, HELMET_LUT) w.engine.unit(0x620, RIFLE_LUT)
+    local row = w.weapons.add(0xe9, record)
+    w.weapons.set(1, gun(0x322, RIFLE, 0x620), row) w.weapons.hold(1, row)
+    w.frames(Sync.POLL_FRAMES + 4 * CHECK_FRAMES)
+    assert(mate.loadout.where and mate.loadout.where.avatar == 0xe9 and mate.loadout.where.index == 2,
+           'the squadmate\'s new row')
+    assert(bound_by(w, mate.loadout.controller, 0x620), 'their new rifle recolored by their own recolor')
+    assert(not bound_by(w, third.loadout.controller, 0x620), 'not by the third\'s')
+    assert(bound_by(w, third.loadout.controller, 0x610), 'the third\'s pistol still theirs')
+    assert(weapon_requests(before) == 0, 'the same weapons: bound without a job')
+    assert(logged(w, 'Sync: ' .. REMOTE_KEY .. ' new Helldiver: their weapons\' row found (2).'), 'noted')
+    -- the third picks up a support weapon: in their moved row, planned and recolored with their settings alone
+    w.engine.unit(0x630, CANNON_LUT)
+    w.weapons.set(3, gun(0x341, CANNON, 0x630), w.weapons.index(0xe7))
+    w.frames(120)
+    local last
+    for i = before + 1, #requests do if requests[i].weapons then last = requests[i] end end
+    assert(weapon_requests(before) == 1 and last.key == THIRD_KEY and last.mode == Recolor.HELMET_FROM_ARMOR,
+           'one job, the third\'s')
+    assert(bound_by(w, third.loadout.controller, 0x630), 'their support weapon recolored by their own recolor')
+    assert(bound_by(w, mate.loadout.controller, 0x620), 'the squadmate\'s rifle untouched')
+    assert(not zero_line(w, lines), 'no "0 materials" line: ' .. tostring(zero_line(w, lines)))
+    -- the squad gone: each squadmate's weapons summed up (a squad test reads these)
+    w.instance.remote.clear(w.instance.state.frame)
+    assert(logged(w, 'Sync: ' .. THIRD_KEY .. ' weapons: 2 jobs, ') and logged(w, 'their row moved 1 times, found for a '
+           .. 'new Helldiver 0 times.'), 'the third\'s summary')
+    assert(logged(w, 'Sync: ' .. REMOTE_KEY .. ' weapons: 1 jobs, '), 'the squadmate\'s summary')
+    assert(logged(w, 'found for a new Helldiver 1 times.'), 'their respawn counted')
+end)
+
+-- The calls a squadmate's recolored weapons add, idle (against a twin whose squadmate shares the same settings without
+-- Recolor Weapons): on their watch turn (1 frame in Remote.WATCH_FRAMES) the weapon in hand's binding and their row;
+-- on their binding check (1 frame in CHECK_FRAMES) one probe of their weapons' textures (2 reads) and their row still
+-- theirs (2 reads: Weapons.owned, as the game moves rows; v1.5 had the probe alone); nothing on other frames.
+check('a squadmate\'s recolored weapons, idle: 2 reads on their watch turn, 4 on their binding check (2 of them: their '
+      .. 'row still theirs), none on other frames', function()
+    local function squad(value)
+        local w = setup({weapons = true, lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID},
+                         {id = REMOTE_ID, value = value}}}})
+        w.engine.unit(0x600, RIFLE_LUT)
+        w.weapons.set(1, gun(0x321, RIFLE, 0x600), 1) w.weapons.hold(1, 1)
+        w.frames(Sync.POLL_FRAMES * 3)
+        return w
+    end
+    local w, twin = squad('v=1;m=3;f=19;s=0;'), squad('v=1;m=3;f=3;s=0;')
+    local e = w.instance.remote.entries[REMOTE_KEY]
+    assert(e.loadout and e.loadout.entry and e.loadout.where.owner, 'their weapon in hand watched, their row checked')
+    for _ = 1, 4 * CHECK_FRAMES do
+        local frame = w.instance.state.frame + 1
+        local extra = diff(w.frame(), twin.frame())
+        local expected = frame % Remote.WATCH_FRAMES == 0 and {read_into = 2}
+            or frame % CHECK_FRAMES == 1 and {read_into = 4} or {}
+        assert(helpers.same(extra, expected), 'frame ' .. frame .. ': ' .. budget.describe(extra) .. ', expected '
+               .. budget.describe(expected))
+    end
+    -- an inventory that reads differently (another game build: here a row count of 0): the row found again where it
+    -- was stops the check for it, noted; not located again on later checks, no job, the weapon still theirs
+    local before = #requests
+    w.space.u32(Fake.INVENTORY + 20, 0)
+    w.frames(6 * CHECK_FRAMES)
+    assert(e.loadout.moves == 1 and not e.loadout.where.owner, 'checked once, then no more: ' .. e.loadout.moves)
+    assert(logged(w, 'Sync: ' .. REMOTE_KEY .. ' weapons: their row read as moved but was not'), 'noted')
+    assert(weapon_requests(before) == 0 and bound_by(w, e.loadout.controller, 0x600), 'no job, still theirs')
+end)
+
+-- Hide Cape (2026-10-16, the user: "a toggle for users to hide their capes", squadmates with the mod see it hidden too,
+-- "include the option to hide everyone's cape as well"; KB match-your-colors-hide-cape). Agreed outcomes: Your Cape
+-- hides this player's cape on the ship and in missions (a respawn's new cape too) and shares flag 32; squadmates whose
+-- value carries it have theirs hidden here whatever this player's choice; Everyone's Capes hides every squadmate's;
+-- Off shows what this player hid; no recolor job for any of it; a cape the game shows again is hidden again.
+local HIDE_OFF, HIDE_YOURS, HIDE_EVERYONE = 1, 2, 3
+local Addon, Cloak = require('addon'), require('cloak')
+local LOCAL_CAPE = 0x106 -- tests/test_addon.lua setup: the local cape unit (slot 1)
+local function hide(w, value)
+    w.instance.set_option('hide_cape', value)
+end
+local function visibility_calls(w, unit)
+    local n = 0
+    for _, c in ipairs(w.engine.visibility) do if c.unit == unit then n = n + 1 end end
+    return n
+end
+-- The squadmate's cape unit (their slot 1), as the game makes it.
+local function remote_cape(w, unit)
+    w.engine.unit(unit, HELMET_LUT)
+    w.space.u32(remote_unit_at(0, 1), unit)
+end
+
+check('Hide Cape, Your Cape: this player\'s cape hidden at once (one call), a respawn\'s new cape too, flag 32 shared, '
+      .. 'a cape the game showed again hidden again, Off shows it; no recolor job', function()
+    local w = world(with_remote())
+    w.frames(Sync.POLL_FRAMES * 2) -- the squadmate recolored (their own job) first
+    local before = #requests
+    assert(not w.engine.hidden(LOCAL_CAPE), 'shown by default')
+    hide(w, HIDE_YOURS)
+    assert(w.engine.hidden(LOCAL_CAPE) and visibility_calls(w, LOCAL_CAPE) == 1, 'hidden at once, one call')
+    assert(logged(w, 'Hide Cape: your cape hidden (unit 106).'), 'noted')
+    local shared = assert(Sync.decode(w.instance.state.sync_text))
+    assert(shared.cape_hidden and shared.mode == 2 and shared.keep_sets, 'flag 32 with the other options')
+    w.frames(Sync.POLL_FRAMES)
+    assert(visibility_calls(w, LOCAL_CAPE) == 1, 'no call while nothing changes')
+    w.engine.unit(0x108, HELMET_LUT) -- another unit changes (a new helmet unit), the cape the same: no new call
+    w.space.u32(Fake.local_unit_at(0, 0), 0x108)
+    w.frames(3)
+    assert(visibility_calls(w, LOCAL_CAPE) == 1, 'the same cape: no new call')
+    -- a respawn: new units, a new cape unit
+    w.engine.unit(0x107, HELMET_LUT)
+    w.space.u32(Fake.local_unit_at(0, 1), 0x107)
+    w.frames(3)
+    assert(w.engine.hidden(0x107) and visibility_calls(w, 0x107) == 1, 'the new cape hidden, once')
+    -- a mission start: new units the game hides at once (the hellpod; live 2026-10-16) and shows again at the pod's exit,
+    -- the cape too: hidden again the next frame, however long the drop lasts
+    w.engine.unit(0x109, HELMET_LUT) w.engine.unit(0x10a, HELMET_LUT)
+    local function mask_of(unit) return 0x180000000 + unit * 16 + Fake.MESH_VISIBILITY end
+    w.space.byte(mask_of(0x109), 0)
+    w.space.u32(Fake.local_unit_at(0, 0), 0x109) w.space.u32(Fake.local_unit_at(0, 1), 0x10a)
+    w.frames(3)
+    assert(w.engine.hidden(0x10a), 'the new cape hidden')
+    w.frames(4 * Cloak.GRACE_FRAMES)
+    assert(w.instance.cloak.young_until > w.instance.state.frame, 'young while the game hides the Helldiver')
+    w.space.byte(mask_of(0x109), 0xFF) w.space.byte(mask_of(0x10a), 0xFF) -- the pod's exit
+    local f = w.frame()
+    assert(w.engine.hidden(0x10a) and f.visibility == 1 and w.instance.cloak.reshown == 1, 'hidden again the next frame')
+    assert(w.instance.cloak.young_until == 0, 'no longer young')
+    local since
+    for _, line in ipairs(w.lines) do
+        since = since or tonumber(line:match('^Hide Cape: the hellpod opened and showed your cape (%d+) frames after it '
+                                             .. 'was hidden; hidden again the next frame%.$'))
+    end
+    assert(since and since > 4 * Cloak.GRACE_FRAMES, 'noted with the frames since it was hidden: ' .. tostring(since))
+    -- shown again later (not by a pod): hidden again by the binding check (within CHECK_FRAMES frames)
+    w.space.byte(mask_of(0x10a), 0xFF)
+    w.frame()
+    assert(not w.engine.hidden(0x10a), 'not read every frame once it is not young')
+    w.frames(CHECK_FRAMES + 1)
+    assert(w.engine.hidden(0x10a) and w.instance.cloak.reshown == 2, 'hidden again by the binding check')
+    assert(logged(w, 'Hide Cape: the game showed your cape again '), 'noted as the game, not the hellpod')
+    hide(w, HIDE_OFF)
+    assert(not w.engine.hidden(0x10a) and logged(w, 'Hide Cape: your cape shown again.'), 'Off: shown')
+    assert(not Sync.decode(w.instance.state.sync_text).cape_hidden, 'the flag no longer shared')
+    w.frames(5)
+    assert(#requests == before, 'no recolor job for any of it')
+end)
+
+check('Hide Cape while the Helldiver is briefly not found (its entity not an avatar for a moment, as on the ship): '
+      .. 'the cape left hidden, no show call; found again, hidden', function()
+    local w = world(with_remote())
+    hide(w, HIDE_YOURS)
+    local entity = Fake.ENTITIES + 0xF32F18 + 24 * 194 -- the local avatar's entity record (Fake.world)
+    w.space.u32(entity, 0) w.space.u32(entity + 4, 0)
+    w.frames(Addon.VERIFY_FRAMES + 2)
+    assert(w.instance.state.identity == nil, 'lost')
+    for _, c in ipairs(w.engine.visibility) do assert(c.visible == 0, 'no show call') end
+    assert(w.engine.hidden(LOCAL_CAPE), 'still hidden')
+    w.space.u32(entity, Fake.AVATAR[1]) w.space.u32(entity + 4, Fake.AVATAR[2])
+    w.frames(Addon.RESOLVE_FRAMES + 2)
+    assert(w.instance.state.identity and w.engine.hidden(LOCAL_CAPE), 'found again, hidden')
+end)
+
+check('Hide Cape with Color Matching off: the cape hidden all the same', function()
+    local w = world(with_remote())
+    w.instance.set_option('mode', 1)
+    w.frames(5)
+    hide(w, HIDE_YOURS)
+    assert(w.engine.hidden(LOCAL_CAPE), 'hidden')
+end)
+
+check('a squadmate\'s value with flag 32 hides their cape here whatever this player\'s choice (Off included); without '
+      .. 'it, shown again; copies that predate the flag read the rest of the value as before', function()
+    local w = world({{id = LOCAL_ID}, {id = REMOTE_ID, value = 'v=1;m=2;f=35;s=0;'}})
+    remote_cape(w, 0x206)
+    w.frames(Sync.POLL_FRAMES * 2)
+    assert(w.engine.hidden(0x206) and not w.engine.hidden(LOCAL_CAPE), 'theirs hidden, this player\'s shown')
+    assert(logged(w, 'Hide Cape: player 6\'s cape hidden (unit 206).'), 'noted')
+    local o = assert(Sync.decode('v=1;m=2;f=35;s=0;'))
+    assert(o.cape_hidden and o.keep_sets and o.recolor_hoods and not o.recolor_cape, 'the other bits as before')
+    w.lobby.members[2].value = SHARED
+    w.frames(Sync.POLL_FRAMES * 2)
+    assert(not w.engine.hidden(0x206), 'their value without it: shown again')
+end)
+
+check('Everyone\'s Capes: every squadmate\'s cape hidden here, a respawn\'s new cape within a few frames; back to '
+      .. 'Your Cape, theirs shown (they share no flag), this player\'s kept hidden', function()
+    local w = world({{id = LOCAL_ID}, {id = REMOTE_ID}})
+    remote_cape(w, 0x206)
+    hide(w, HIDE_EVERYONE)
+    w.frames(Sync.POLL_FRAMES + 2)
+    assert(w.engine.hidden(0x206) and w.engine.hidden(LOCAL_CAPE), 'theirs and this player\'s hidden')
+    remote_cape(w, 0x207)
+    w.frames(2 * Remote.WATCH_FRAMES)
+    assert(w.engine.hidden(0x207) and visibility_calls(w, 0x207) == 1, 'their new cape hidden by the watch, once')
+    -- their hellpod: the game hides their Helldiver (their helmet, unit 0x200, too), then shows it at the pod's exit:
+    -- their cape hidden again on their next watch turn
+    local helmet_mask = 0x180000000 + 0x200 * 16 + Fake.MESH_VISIBILITY
+    w.space.byte(helmet_mask, 0)
+    w.frames(4 * Cloak.GRACE_FRAMES)
+    w.space.byte(helmet_mask, 0xFF) w.space.byte(0x180000000 + 0x207 * 16 + Fake.MESH_VISIBILITY, 0xFF)
+    w.frames(Remote.WATCH_FRAMES)
+    assert(w.engine.hidden(0x207) and visibility_calls(w, 0x207) == 2, 'hidden again on their watch turn')
+    hide(w, HIDE_YOURS)
+    local f = w.frame() -- the update: their cape shown, no players read (nobody's cape is to be hidden here)
+    assert((f.read_into or 0) <= 3 and f.visibility == 1, 'shown without reading the players: ' .. budget.describe(f))
+    w.frames(1)
+    assert(not w.engine.hidden(0x207) and w.engine.hidden(LOCAL_CAPE), 'theirs shown, this player\'s hidden')
+    assert(not w.instance.cloak.others[1], 'no other player watched')
+end)
+
+check('Hide Cape pauses with the addon: capes shown, as without the mod', function()
+    local w = world({{id = LOCAL_ID}, {id = REMOTE_ID}})
+    remote_cape(w, 0x206)
+    hide(w, HIDE_EVERYONE)
+    w.frames(Sync.POLL_FRAMES + 2)
+    w.instance.pause('a test')
+    assert(not w.engine.hidden(0x206) and not w.engine.hidden(LOCAL_CAPE), 'both shown')
+end)
+
+-- The calls Hide Cape adds, idle (against a twin that has it off): Your Cape, none but one 1-byte read of the hidden
+-- cape's mask on the binding check; Everyone's Capes with a squadmate, also one 120-byte read of their units on 1
+-- frame in Remote.WATCH_FRAMES (frame % 4 == 2) and the players read on the frame after each lobby poll. While a new
+-- cape is young (Cloak.GRACE_FRAMES after it was hidden, longer in a hellpod), one more read: its helmet's mask, this
+-- player's every frame.
+check('Hide Cape: a new cape\'s helmet is read every frame for its grace frames (one read), then never but on the '
+      .. 'binding check (a ship spawn: no hellpod)', function()
+    local w, twin = world({{id = LOCAL_ID}, {id = REMOTE_ID}}), world({{id = LOCAL_ID}, {id = REMOTE_ID}})
+    hide(w, HIDE_YOURS)
+    local hidden_at = w.instance.state.frame
+    for _ = 1, 3 * CHECK_FRAMES do
+        local s = w.instance.state
+        local frame = s.frame + 1
+        local check_due = frame >= s.next_check and frame < s.next_verify
+        local extra = diff(w.frame(), twin.frame())
+        local reads = (frame <= hidden_at + Cloak.GRACE_FRAMES and 1 or 0) + (check_due and 1 or 0)
+        local expected = reads > 0 and {read_into = reads} or {}
+        assert(helpers.same(extra, expected), 'frame ' .. frame .. ': ' .. budget.describe(extra) .. ', expected '
+               .. budget.describe(expected))
+    end
+end)
+
+check('Hide Cape idle: Your Cape adds one read on the binding check alone; Everyone\'s Capes adds one read on 1 frame '
+      .. 'in 4 and the players after each poll; no engine call, no write', function()
+    local function squad(value)
+        local w = world({{id = LOCAL_ID}, {id = REMOTE_ID}})
+        remote_cape(w, 0x206)
+        hide(w, value)
+        w.frames(Cloak.GRACE_FRAMES + Sync.POLL_FRAMES * 2) -- the capes no longer young
+        return w
+    end
+    for _, case in ipairs({{HIDE_YOURS, false}, {HIDE_EVERYONE, true}}) do
+        local w, twin = squad(case[1]), squad(HIDE_OFF)
+        assert(w.instance.state.frame == twin.instance.state.frame, 'in step')
+        local polls = 0
+        for _ = 1, 3 * Sync.POLL_FRAMES do
+            local s = w.instance.state
+            local frame = s.frame + 1
+            local check_due = frame >= s.next_check and frame < s.next_verify
+            local after_poll = s.cloak_due
+            local extra = diff(w.frame(), twin.frame())
+            local reads = (check_due and 1 or 0)
+            if case[2] and after_poll then
+                polls = polls + 1
+                reads = reads + 10 -- Avatar.players with two players (their unit unchanged: no resolve)
+            elseif case[2] and frame % Remote.WATCH_FRAMES == 2 then
+                reads = reads + 1
+            end
+            local expected = reads > 0 and {read_into = reads} or {}
+            assert(helpers.same(extra, expected), 'case ' .. case[1] .. ', frame ' .. frame .. ': '
+                   .. budget.describe(extra) .. ', expected ' .. budget.describe(expected))
+        end
+        assert(polls == (case[2] and 3 or 0), 'the players read after each poll: ' .. polls)
+    end
 end)
 
 print('PASS test_sync (' .. passed .. ' checks)')

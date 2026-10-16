@@ -10,7 +10,7 @@ local Avatar, Engine, Recolor, Addon = require('avatar'), require('engine'), req
 require('sheets').attach(Recolor)
 require('bindings').attach(Recolor)
 local Preview, Schemes, Sync, Remote = require('preview'), require('schemes'), require('sync'), require('remote')
-local Weapons, Loadout, Lineup = require('weapons'), require('loadout'), require('lineup')
+local Weapons, Loadout, Lineup, Cloak = require('weapons'), require('loadout'), require('lineup'), require('cloak')
 local Fake = dofile(root .. '/tests/fake_game.lua')
 local budget = dofile(root .. '/tests/frame_budget.lua')
 local passed = 0
@@ -193,7 +193,7 @@ local function setup(options)
     local memory_calls, native_calls = budget.wrap(memory), budget.wrap(engine.native)
     local lines = {}
     local m = {Avatar = Avatar, Preview = Preview, Recolor = TestRecolor, Engine = Engine, Schemes = Schemes,
-               memory = memory, native = engine.native, game = Fake.GAME, Files = options.files,
+               Cloak = Cloak, memory = memory, native = engine.native, game = Fake.GAME, Files = options.files,
                note = function(l) lines[#lines + 1] = l end}
     local weapons = options.weapons and Fake.weapons(space) or nil -- Recolor Weapons (tests/test_weapons.lua)
     if weapons then m.Weapons, m.Loadout = Weapons, Loadout end

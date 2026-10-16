@@ -11,7 +11,8 @@
 --
 -- Values, two member properties posted together (v1.5, user request 2026-10-15: no new key per new option):
 --   * KEY2 'cbmyc2': fields 'name=value;' in any order: v the format level a reader must know (LEVEL), m the mode, f
---     the flags (complete sets 1, hoods recolored 2, materials matched 4, cape recolored 8, weapons recolored 16), s
+--     the flags (complete sets 1, hoods recolored 2, materials matched 4, cape recolored 8, weapons recolored 16,
+--     cape hidden 32: Hide Cape, 2026-10-16, which squadmates' copies honor on their screens), s
 --     the paint scheme. A reader takes the fields and flag bits it knows and ignores the others, so a new option is a
 --     new bit or field that older copies skip; v rises only when an existing field changes its meaning (older copies
 --     then refuse the value, as they must).
@@ -44,7 +45,7 @@ local U64 = ffi.typeof('uint64_t')
 
 -- The options each flag bit carries; KEY's value holds the bits under LEGACY_FLAGS + 1 only.
 Sync.FLAGS = {{'keep_sets', 1}, {'recolor_hoods', 2}, {'match_materials', 4}, {'recolor_cape', 8},
-              {'recolor_weapons', 16}}
+              {'recolor_weapons', 16}, {'cape_hidden', 32}}
 local LEGACY_FLAGS = 15
 local MODES, SCHEMES = 4, 64
 

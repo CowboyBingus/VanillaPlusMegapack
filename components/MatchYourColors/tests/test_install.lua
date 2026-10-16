@@ -162,6 +162,18 @@ check('install: engine functions verified, guard on the update chain, options re
     w.menu.callbacks[Addon.OPTION_SQUAD_COLORS](3)
     assert(o.squad_colors == Addon.SQUAD_YOURS, 'a value out of the choices is ignored')
     w.menu.callbacks[Addon.OPTION_SQUAD_COLORS](Addon.SQUAD_OWN)
+    -- Hide Cape (2026-10-16): Off by default, then Your Cape and Everyone's Capes
+    local hide = w.menu.registered[Addon.OPTION_HIDE_CAPE]
+    assert(hide and hide.type == 'choice' and #hide.choices == 3 and hide.default == Addon.HIDE_OFF
+           and hide.choices[1] == 'Off' and hide.choices[2]() == 'Your Cape' and hide.choices[3]() == 'Everyone\'s Capes'
+           and hide.label() == 'Hide Cape' and o.hide_cape == Addon.HIDE_OFF and o.cape_hidden == false,
+           'Hide Cape: Off by default, then Your Cape and Everyone\'s Capes')
+    w.menu.callbacks[Addon.OPTION_HIDE_CAPE](Addon.HIDE_EVERYONE)
+    assert(o.hide_cape == Addon.HIDE_EVERYONE and o.cape_hidden == true, 'on_change applies Hide Cape (and its flag)')
+    w.menu.callbacks[Addon.OPTION_HIDE_CAPE](4)
+    assert(o.hide_cape == Addon.HIDE_EVERYONE, 'a value out of the choices is ignored')
+    w.menu.callbacks[Addon.OPTION_HIDE_CAPE](Addon.HIDE_OFF)
+    assert(o.cape_hidden == false, 'Off: the flag cleared')
     w.menu.callbacks[Addon.OPTION_CAPES](true)
     assert(o.recolor_cape == true, 'on_change applies the cape toggle')
     w.menu.callbacks[Addon.OPTION_CAPES](false)
@@ -199,6 +211,8 @@ check('refusals: another game build, a changed engine function', function()
     assert(not instance and logged(w.log, 'engine function changed: set_resource'), 'changed function refused')
     instance, w = install({changed = 'can_get'})
     assert(not instance and logged(w.log, 'engine function changed: can_get'), 'changed lookup refused')
+    instance, w = install({changed = 'visibility'}) -- Hide Cape's set_unit_visibility, checked like every other
+    assert(not instance and logged(w.log, 'engine function changed: visibility'), 'changed visibility call refused')
 end)
 
 rawset(_G, 'CowboyBingusModLoader', nil) -- lint-ok: R8 test process only

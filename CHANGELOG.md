@@ -18,6 +18,8 @@
 - Match Your Colors v1.5: on the loadout screen's squad cards your Helldiver shows your colors and each squadmate's shows theirs (or yours with Recolor Squadmates); a squadmate's card no longer takes your colors.
 - Match Your Colors v1.5: squadmates are now recolored in missions too; the mod looked for them only among your own player's records.
 - Match Your Colors v1.5: new choice Squadmates' Colors: Their Own Gear (default) or Your Colors, which gives the squadmates Recolor Squadmates recolors your colors, so the squad matches you.
+- Match Your Colors v1.5: new choice Hide Cape: Your Cape hides your cape on the ship and in missions, also for squadmates who use the mod; Everyone's Capes hides every squadmate's cape on your screen too.
+- Match Your Colors v1.5: in a squad of three or more, squadmates' weapons keep their own colors after a squadmate dies; they could swap colors or stop being recolored.
 - New option: Stratagem Hero Expanded v1.0: the ship's Stratagem Hero arcade draws from all 96 loadout stratagems and 12 common mission stratagems (108) instead of its 27 launch-era ones; themed rounds stay.
 
 # v41

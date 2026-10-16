@@ -29,20 +29,31 @@ end
 -- (the cape recolored on the avatar and the preview, its kit compared on every check); Helmet and Armor Match Cape
 -- with the UI preview shown (the cape as the source: its kit compared on every check, both items recolored); Recolor
 -- Squadmates (v1.5) with a squadmate without the mod recolored with this player's settings; Recolor Weapons (v1.5) with
--- a weapon in hand (its binding read every frame, the inventory row on 1 frame in 4).
+-- a weapon in hand (its binding read every frame, the inventory row on 1 frame in 4); a squadmate sharing Recolor
+-- Weapons with a weapon in hand (their binding and row on their watch turn, their row still theirs on their check).
 local LOCAL_ID = 'C0FFEE5EED0001'
 local CASES = {{}, {previews = true}, {ui = true}, {ui = true, shown = true},
                {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}}}},
                {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}, {id = '1234', value = 'v=1;m=2;f=3;s=0;'}}}},
                {ui = true, shown = true, capes = true}, {ui = true, shown = true, cape_source = true},
                {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}, {id = '1234'}}}, squad = 2},
-               {weapons = true}}
+               {weapons = true},
+               {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}, {id = '1234', value = 'v=1;m=3;f=19;s=0;'}}},
+                weapons = true, theirs = true},
+               -- Hide Cape (2026-10-16): Your Cape alone (its mask on the binding check); Everyone's Capes with a
+               -- squadmate (their units on 1 frame in 4; the players read the frame after each poll, counted with it)
+               {hide = 2},
+               {lobby = {local_id = LOCAL_ID, members = {{id = LOCAL_ID}, {id = '1234'}}}, hide = 3, remote_cape = true}}
+local WEAPON = {id = 0x301, name = '968211c0033dce64', unit = 0x400, units = {}, attachments = {}}
 for _, case in ipairs(CASES) do
     local w = setup({previews = case.previews, ui = case.ui, lobby = case.lobby, weapons = case.weapons})
-    if case.weapons then -- Recolor Weapons (v1.5): a weapon in hand, its binding read every frame
-        helpers.weapon_luts['968211c0033dce64'] = {'962a946e964ebc40'} -- the canned job plans this LUT
-        w.engine.unit(0x400, '962a946e964ebc40')
-        w.weapons.set(1, {id = 0x301, name = '968211c0033dce64', unit = 0x400, units = {}, attachments = {}})
+    if case.weapons then helpers.weapon_luts[WEAPON.name] = {'962a946e964ebc40'} end -- the canned job plans this LUT
+    if case.weapons then w.engine.unit(0x400, '962a946e964ebc40') end
+    if case.theirs then -- a squadmate's weapon in hand (inventory row 1)
+        w.weapons.set(1, WEAPON, 1)
+        w.weapons.hold(1, 1)
+    elseif case.weapons then -- Recolor Weapons (v1.5): a weapon in hand, its binding read every frame
+        w.weapons.set(1, WEAPON)
         w.weapons.hold(1)
         w.instance.set_option('recolor_weapons', true)
     end
@@ -53,6 +64,11 @@ for _, case in ipairs(CASES) do
     if case.capes then w.instance.set_option('recolor_cape', true) end
     if case.cape_source then w.instance.set_option('mode', 4) end -- src/recolor.lua Recolor.CAPE_SOURCE
     if case.squad then w.instance.set_option('squad', case.squad) end
+    if case.remote_cape then -- the squadmate's cape (their slot 1)
+        w.engine.unit(0x206, '962a946e964ebc40')
+        w.space.u32(Fake.AVATARS + 5532272 + 440 + 220 + 4, 0x206)
+    end
+    if case.hide then w.instance.set_option('hide_cape', case.hide) end
     w.frames(12)
     local step, state = w.instance.step, w.instance.state
     for _ = 1, 360 do step() end -- three periodic checks and polls (the value posted): one-time growth happens here
@@ -62,11 +78,14 @@ for _, case in ipairs(CASES) do
     collectgarbage('stop') -- lint-ok: R4 test process only
     local grown, polls, poll_bytes = 0, 0, 0
     for _ = 1, 2400 do -- 20 periodic checks (and 20 polls with sync on)
-        local next_sync, before = state.next_sync, collectgarbage('count') -- lint-ok: R4 test process only
+        local next_sync, after_poll = state.next_sync, state.cloak_due -- Hide Cape's players read after a poll
+        local before = collectgarbage('count') -- lint-ok: R4 test process only
         step()
         local bytes = (collectgarbage('count') - before) * 1024 -- lint-ok: R4 test process only
         if state.next_sync ~= next_sync then
             polls, poll_bytes = polls + 1, math.max(poll_bytes, bytes)
+        elseif after_poll then
+            poll_bytes = math.max(poll_bytes, bytes)
         else
             grown = grown + bytes
         end
@@ -75,13 +94,21 @@ for _, case in ipairs(CASES) do
     assert(grown == 0, string.format('2400 idle frames (case %d) allocated %.0f bytes', passed + 1, grown))
     assert(polls == (case.lobby and 20 or 0) and poll_bytes <= POLL_BYTES,
            string.format('case %d: %d polls, at most %.0f bytes each', passed + 1, polls, poll_bytes))
-    if case.weapons then assert(w.instance.loadout.entry, 'the weapon in hand watched') end
+    if case.weapons and not case.theirs then assert(w.instance.loadout.entry, 'the weapon in hand watched') end
+    if case.theirs then
+        local e = w.instance.remote.entries['0000000000001234']
+        assert(e.loadout and e.loadout.entry and e.loadout.where.owner, 'their weapon in hand watched, their row checked')
+    end
+    if case.hide then
+        assert(w.engine.hidden(0x106) and (not case.remote_cape or w.engine.hidden(0x206)), 'the capes hidden')
+    end
     if case.lobby then
-        assert(not case.lobby.members[2] or w.instance.remote.order[1], 'the other mod user is recolored')
+        assert(case.hide or not case.lobby.members[2] or w.instance.remote.order[1], 'the other mod user is recolored')
         print(string.format('  sync case %d: a lobby poll allocated at most %.0f bytes', passed + 1, poll_bytes))
     end
     passed = passed + 1
 end
 print('PASS test_idle_alloc (' .. passed .. ' checks: 2400 idle frames each, with and without a preview slot, '
     .. 'with the UI preview hidden and shown, with sync on alone and with another mod user recolored, with Recolor '
-    .. 'Cape on, with Helmet and Armor Match Cape, with Recolor Squadmates, with Recolor Weapons and a weapon in hand)')
+    .. 'Cape on, with Helmet and Armor Match Cape, with Recolor Squadmates, with Recolor Weapons and a weapon in hand, '
+    .. 'with a squadmate\'s recolored weapon in hand, with Hide Cape on Your Cape and on Everyone\'s Capes)')

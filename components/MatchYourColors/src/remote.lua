@@ -24,7 +24,9 @@ local EMPTY = {}
 -- Recolor Weapons (v1.5): a player whose settings carry it (cbmyc2 flag 16, or Recolor Squadmates' own settings) gets
 -- their weapons recolored too, a src/loadout.lua of their own: on their watch turn (1 frame in WATCH_FRAMES, round
 -- robin) their weapon in hand's LUT binding and inventory row are read (2 reads), so a reload of theirs shows their
--- weapon's own colors for up to WATCH_FRAMES frames per recolored player.
+-- weapon's own colors for up to WATCH_FRAMES frames per recolored player; on their binding check (check) and when
+-- their row changed, the row is checked to be still theirs (2 reads: the game moves rows when an avatar is removed),
+-- and a respawn finds their new avatar's row.
 function Remote.new(m)
     local Avatar, Recolor, Sync = m.Avatar, m.Recolor, m.Sync
     local self = {entries = {}, order = {}, retiring = {}, cursor = 0, served = 0, jobs = 0, rebinds = 0,
@@ -72,7 +74,7 @@ function Remote.new(m)
         end
         e.loadout = e.loadout or m.Loadout.new({Weapons = m.Weapons, Recolor = Recolor, Engine = m.Engine,
             Avatar = Avatar, memory = m.memory, native = m.native, pool = m.pool, game = m.game, read = m.read,
-            note = m.note})
+            note = m.note, follow = 'Sync: ' .. e.key})
         if e.identity then
             e.loadout.adopt(e.identity)
             e.loadout.replan()
@@ -80,11 +82,21 @@ function Remote.new(m)
         end
     end
 
+    -- The entry's weapons over its life, when it is dropped (a squad test's summary: jobs, rebinds, rows the game moved
+    -- and rows found for a new Helldiver).
+    local function weapons_summary(e)
+        local l = e.loadout
+        m.note(string.format('Sync: %s weapons: %d jobs, bound again %d times (%d reloads); their row moved %d times, '
+                             .. 'found for a new Helldiver %d times.', e.key, l.jobs, l.rebinds, l.reloads, l.moves,
+                             e.found or 0))
+    end
+
     local function drop(key, frame)
         local e = self.entries[key]
         e.controller.restore(frame)
         if e.controller.retired[1] then self.retiring[#self.retiring + 1] = e.controller end
         if e.loadout then
+            weapons_summary(e)
             e.loadout.clear(frame)
             self.retiring[#self.retiring + 1] = e.loadout.controller
         end
@@ -104,6 +116,18 @@ function Remote.new(m)
             end
         end
         return nil
+    end
+
+    -- Their weapons on a new avatar (a respawn): its own inventory row; the old one is gone or another avatar's now
+    -- (src/weapons.lua; v1.5 kept reading it, squad of 2026-10-16).
+    local function follow_weapons(e, identity)
+        local where = e.loadout and e.loadout.where
+        if not e.loadout or (where and where.avatar == identity.avatar) then return end
+        e.loadout.adopt(identity)
+        e.found = (e.found or 0) + 1
+        where = e.loadout.where
+        m.note('Sync: ' .. e.key .. ' new Helldiver: ' .. (where and 'their weapons\' row found (' .. where.index .. ').'
+               or 'no weapons row of theirs yet.'))
     end
 
     -- New units of a player whose kits and kit records are those of the applied result (a respawn): the result bound
@@ -126,6 +150,7 @@ function Remote.new(m)
         e.watch.changed() -- keeps the new units
         e.controller.apply(result, identity, nil, frame)
         self.rebinds = self.rebinds + 1
+        follow_weapons(e, identity)
         return true
     end
 
@@ -308,20 +333,30 @@ function Remote.new(m)
         return nil
     end
 
+    -- Their weapons' job's end (src/loadout.lua): a failure leaves them as they are; a result for weapons they no
+    -- longer hold is planned again, unnoted (v1.5 noted it as '0 materials'); a plan that keeps their colors noted once
+    -- per reason.
+    local function finish_weapons(e, ok, result, request, frame)
+        if not ok or not e.loadout then
+            m.note('Sync: weapons of ' .. request.key .. ' not recolored: ' .. tostring(ok and 'off' or result))
+            return
+        end
+        local count = e.loadout.finish(result, request, frame)
+        self.pending = self.pending or e.loadout.dirty
+        if not count then return end
+        if result.action == 'apply' then
+            m.note(string.format('Sync: %s weapons recolored, %d materials.', request.key, count))
+        elseif result.reason ~= e.weapons_reason then
+            m.note('Sync: ' .. request.key .. ' weapons keep their colors (' .. tostring(result.reason) .. ').')
+        end
+        e.weapons_reason = result.reason
+    end
+
     -- A job's end for request (ok: it ran without error). Applied when the entry still wants it.
     function self.finish(ok, result, request, frame)
         local e = self.entries[request.key]
         if not e then return end
-        if request.weapons then -- their weapons' job (src/loadout.lua): a failure leaves them as they are
-            if not ok or not e.loadout then
-                m.note('Sync: weapons of ' .. request.key .. ' not recolored: ' .. tostring(ok and 'off' or result))
-                return
-            end
-            local count = e.loadout.finish(result, request, frame)
-            self.pending = self.pending or e.loadout.dirty
-            m.note(string.format('Sync: %s weapons recolored, %d materials.', request.key, count))
-            return
-        end
+        if request.weapons then return finish_weapons(e, ok, result, request, frame) end
         if not ok then
             e.failures = e.failures + 1
             e.dirty = e.failures < Remote.FAILURE_LIMIT

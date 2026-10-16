@@ -49,6 +49,11 @@ return {
         ['option.squad_colors.own'] = 'Their Own Gear',
         ['option.squad_colors.yours'] = 'Your Colors',
         ['option.squad_colors.description'] = 'For the squadmates Recolor Squadmates recolors. Their Own Gear: your Color Matching on their own gear (their armor matches their own helmet, for example), so a matching set barely changes. Your Colors: their helmet and armor take your colors, those of the item your Color Matching matches (your armor, helmet or cape); a paint scheme gives everyone the scheme. Only you see it.',
+        -- The choice: Off / the two below. Your Cape is also shown to squadmates who use this mod.
+        ['option.hide_cape.label'] = 'Hide Cape',
+        ['option.hide_cape.yours'] = 'Your Cape',
+        ['option.hide_cape.everyone'] = 'Everyone\'s Capes',
+        ['option.hide_cape.description'] = 'Hides capes on the ship and in missions. Your Cape: yours, also on the screens of squadmates who use this mod. Everyone\'s Capes: yours and every squadmate\'s, on your screen. The Armory and the loadout screen still show capes, so you can still pick one. Players without this mod still see your cape.',
         ['option.capes.description'] = 'Recolors your cape too, to the same colors: the armor\'s with Helmet Matches Armor, the helmet\'s with Armor Matches Helmet, or the paint scheme\'s. A complete set left alone still gives its cape its colors. With Helmet and Armor Match Cape the cape keeps its colors (it is the one matched). Emblems and other decals keep their colors.',
         ['option.weapons.label'] = 'Recolor Weapons',
         ['option.weapons.description'] = 'Recolors your weapons too (primary, sidearm, support weapon and their attachments), to the same colors as the cape: the armor\'s, the helmet\'s, the cape\'s or the paint scheme\'s. While on, it replaces a weapon\'s own paint scheme. Lenses, lights and decals keep their colors; grenades and backpacks keep theirs.',
@@ -66,6 +71,7 @@ return {
         ['option.squad.everyone'] = 48, ['option.squad.description'] = 400, ['option.squad_colors.label'] = 64,
         ['option.squad_colors.own'] = 48, ['option.squad_colors.yours'] = 48, ['option.squad_colors.description'] = 400,
         ['option.weapons.label'] = 64,
-        ['option.weapons.description'] = 400,
+        ['option.weapons.description'] = 400, ['option.hide_cape.label'] = 64, ['option.hide_cape.yours'] = 48,
+        ['option.hide_cape.everyone'] = 48, ['option.hide_cape.description'] = 400,
     },
 }

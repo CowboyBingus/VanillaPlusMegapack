@@ -18,6 +18,7 @@ Fake.DECAL_SLOT = 0x632a8b80
 Fake.BC3 = 0x10000002 -- a cape's decal sheet copy (src/engine.lua)
 Fake.BC1, Fake.ALBEDO_SLOT = 0x10000000, 0xac652e43 -- a mod's recolored albedo (src/albedo.lua) and its slot
 Fake.AVATAR = {0x294dfa97, 0x4d1c334d}
+Fake.MESH_VISIBILITY = 0xDC -- a mesh's visibility mask (src/engine.lua Engine.MESH_VISIBILITY; Hide Cape)
 
 -- A sparse address space of byte regions.
 function Fake.space()
@@ -159,6 +160,60 @@ function Fake.world(options)
     return s
 end
 
+-- One more entry (or a new value) in the game map whose header is at `at` (made by map above): key -> value.
+function Fake.put(space, at, key, value)
+    local data, capacity = space.get32(at) + space.get32(at + 4) * HIGH, space.get32(at + 8)
+    local slot = key % capacity
+    while space.get32(data + 8 * slot) ~= 0xFFFFFFFF and space.get32(data + 8 * slot) ~= key do
+        slot = (slot + 1) % capacity
+    end
+    space.u32(data + 8 * slot, key) space.u32(data + 8 * slot + 4, value)
+end
+
+-- A byte region at `at` (size: 440 or less) unless one holds it already.
+local probe = ffi.new('uint8_t[440]')
+local function ensure(space, at, size)
+    if not space.read_into(at, size, probe) then space.region(at, size) end
+end
+
+-- Another player's Helldiver (a squad of three, a respawn): h = {unit (the player's), entity (its entity index: 194
+-- and 195 are Fake.world's), avatar (its entity id), index (its avatar index), units = {[{type, slot}] = unit}}: the
+-- unit's entity record as an avatar not owned here, the avatar map and record. Returns its entity record's address
+-- (an inventory row's entity, Fake.weapons add).
+function Fake.helldiver(space, h)
+    local E, A = Fake.ENTITIES, Fake.AVATARS
+    Fake.put(space, E + 0xF22EC8, h.unit, h.entity)
+    local at = E + 0xF32F18 + 24 * h.entity
+    ensure(space, at, 24)
+    space.u32(at, Fake.AVATAR[1]) space.u32(at + 4, Fake.AVATAR[2]) space.u32(at + 8, h.avatar) space.byte(at + 20, 0)
+    Fake.put(space, A + 248, h.avatar, h.index)
+    if space.get32(A + 0x6c) <= h.index then space.u32(A + 0x6c, h.index + 1) end
+    local record = A + 5532272 + 440 * h.index
+    ensure(space, record, 440)
+    for o = 0, 116, 4 do space.u32(record + 220 + o, 0) end
+    for key, unit in pairs(h.units or {}) do space.u32(record + 220 + 40 * key[1] + 4 * key[2], unit) end
+    return at
+end
+
+-- A third player: p = {entity (its player entity id), index (player manager), peer (low half), record
+-- (customization), helmet, armor, helldiver (Fake.helldiver's h)}. Returns its avatar's entity record address.
+function Fake.player(space, p)
+    local P, C = Fake.PLAYERS, Fake.CUSTOMIZATION
+    Fake.put(space, P + 208, p.entity, p.index)
+    space.u32(P + 712 + 56 * p.index, p.peer) space.u32(P + 716 + 56 * p.index, 0)
+    Fake.put(space, C + 2352, p.entity, p.record)
+    local kits = C + 2412 + 68 * p.record
+    space.u32(kits, 0) space.u32(kits + 4, p.helmet) space.u32(kits + 8, 0) space.u32(kits + 12, p.armor)
+    return Fake.respawn(space, p.index, p.helldiver)
+end
+
+-- Player `index`'s new Helldiver (Fake.helldiver's h): the player manager names its unit. Returns its avatar's entity
+-- record address.
+function Fake.respawn(space, index, h)
+    space.u32(Fake.PLAYERS + 936 + 32 * index, h.unit)
+    return Fake.helldiver(space, h)
+end
+
 -- Shows (or with kits nil, hides) UI preview slot `slot`: kits {helmet, armor, body}, units {[{type, slot}] = unit}.
 function Fake.show_ui(space, slot, kits, units)
     local record = Fake.UI + 49160 + 160 * slot
@@ -215,6 +270,8 @@ function Fake.engine(space, vanilla)
     function self.unit(unit, lut, count, pattern, cape_lut, decal, albedo)
         local list = {}
         local mesh = 0x180000000 + unit * 16
+        space.region(mesh + Fake.MESH_VISIBILITY, 4) -- the mesh's visibility mask: shown everywhere
+        space.byte(mesh + Fake.MESH_VISIBILITY, 0xFF)
         for _ = 1, count or 2 do
             local material = next_material
             next_material = next_material + 0x100
@@ -248,6 +305,19 @@ function Fake.engine(space, vanilla)
         return space.get32(at + 8) + space.get32(at + 12) * HIGH
     end
 
+    -- set_unit_visibility as the unit's world runs it (here at once): the mesh mask 0 hidden, 0xFF shown; calls kept.
+    self.visibility = {}
+    function native.visibility(unit, visible, children)
+        local u = units[unit]
+        assert(u and u.alive and children == 1, 'visibility of a live unit, its children included')
+        space.byte(u.mesh + Fake.MESH_VISIBILITY, visible ~= 0 and 0xFF or 0)
+        self.visibility[#self.visibility + 1] = {unit = unit, visible = visible}
+    end
+    function self.hidden(unit)
+        local b = ffi.new('uint8_t[1]')
+        assert(space.read_into(units[unit].mesh + Fake.MESH_VISIBILITY, 1, b))
+        return b[0] == 0
+    end
     function native.alive(unit) return units[unit] and units[unit].alive and 1 or 0 end
     function native.meshes(unit) return units[unit] and 1 or 0 end
     function native.mesh(unit) return units[unit].mesh end
@@ -306,22 +376,30 @@ function Fake.engine(space, vanilla)
 end
 
 -- Recolor Weapons (src/weapons.lua): the inventory [game + 0x3326738] (map +40 from the avatars 0xe5 local and 0xe6
--- remote to rows [+80] of 48 bytes), the weapon entities (map entities + 0xF1AEB0, records from index 300), the weapon
--- customization manager [game + 0x3326A38] (map +632 to records [+672] of 128 bytes, map +696 to copies [+760] of 4872
--- bytes: attachment names +0x78.., the MaterialOverride +200) and the Armory's weapon preview (UiPreviewSystem weapon
--- slot 3, the ring head +50448: with the world's ui option). Returns {set(slot, weapon or nil, avatar index),
--- hold(slot, avatar index), preview(weapon or nil), row(avatar index)}; weapon: {id, name (16 hex digits), unit,
--- units = {attachment units}, attachments = {[role 1-4] = name}, paint = {[slot key] = lut}, ids (preview: its
--- customization ids)}.
+-- remote to rows [+80] of 48 bytes, each row's entity [+64] (the avatar's entity record), the count +20), the weapon
+-- entities (map entities + 0xF1AEB0, records from index 300), the weapon customization manager [game + 0x3326A38] (map
+-- +632 to records [+672] of 128 bytes, map +696 to copies [+760] of 4872 bytes: attachment names +0x78.., the
+-- MaterialOverride +200) and the Armory's weapon preview (UiPreviewSystem weapon slot 3, the ring head +50448: with the
+-- world's ui option). Returns {set(slot, weapon or nil, row index), hold(slot, row index), preview(weapon or nil),
+-- row(row index), index(avatar) (its row index or nil), add(avatar, entity record address) (a new avatar's row, last),
+-- remove(avatar) (as the game's 0x9b2810 -> 0x9b15d0: the last row and its entity moved into the freed index, the map
+-- updated, the last row's bytes left as they were)}; weapon: {id, name (16 hex digits), unit, units = {attachment
+-- units}, attachments = {[role 1-4] = name}, paint = {[slot key] = lut}, ids (preview: its customization ids)}.
 Fake.INVENTORY, Fake.WCM = 0x1A0000000, 0x1A1000000
-local WEAPON_RECORDS, WEAPON_COPIES, INVENTORY_ROWS = 0x1A4000000, 0x1A5000000, 0x1A3000000
+local WEAPON_RECORDS, WEAPON_COPIES, INVENTORY_ROWS, INVENTORY_OWNERS = 0x1A4000000, 0x1A5000000, 0x1A3000000,
+    0x1A9000000
+local INVENTORY_CAPACITY = 8
 function Fake.weapons(space)
     local g, E = Fake.GAME, Fake.ENTITIES
     space.u64(g + 0x3326738, Fake.INVENTORY) space.u64(g + 0x3326A38, Fake.WCM)
     space.region(Fake.INVENTORY, 0x100)
     map(space, Fake.INVENTORY + 40, 0x1A2000000, {[0xe5] = 0, [0xe6] = 1})
-    space.region(INVENTORY_ROWS, 48 * 2)
-    space.u64(Fake.INVENTORY + 80, INVENTORY_ROWS)
+    space.region(INVENTORY_ROWS, 48 * INVENTORY_CAPACITY)
+    space.region(INVENTORY_OWNERS, 8 * INVENTORY_CAPACITY)
+    space.u64(Fake.INVENTORY + 80, INVENTORY_ROWS) space.u64(Fake.INVENTORY + 64, INVENTORY_OWNERS)
+    local rows = {[0] = 0xe5, 0xe6} -- the avatar of each row
+    local records = {[0xe5] = E + 0xF32F18 + 24 * 194, [0xe6] = E + 0xF32F18 + 24 * 195}
+    local count = 2
     space.region(E + 0xF1AEB0, 32)
     space.region(E + 0xF32F18 + 24 * 300, 24 * 32)
     space.region(Fake.WCM, 0x400)
@@ -349,6 +427,17 @@ function Fake.weapons(space)
         refill(0x1A7000000, ids)
         refill(0x1A8000000, ids)
     end
+    -- The inventory's map, entities and count from rows (a row past the count keeps its bytes and entity).
+    local function inventory()
+        local index = {}
+        for i = 0, count - 1 do
+            index[rows[i]] = i
+            space.u64(INVENTORY_OWNERS + 8 * i, records[rows[i]])
+        end
+        refill(0x1A2000000, index)
+        space.u32(Fake.INVENTORY + 20, count)
+    end
+    inventory()
     local function name_at(at, name)
         space.u32(at, tonumber(name:sub(9, 16), 16)) space.u32(at + 4, tonumber(name:sub(1, 8), 16))
     end
@@ -381,6 +470,26 @@ function Fake.weapons(space)
     end
     function self.hold(slot, a) space.u32(INVENTORY_ROWS + 48 * (a or 0) + 28, slot) end
     function self.row(a) return INVENTORY_ROWS + 48 * (a or 0) end
+    function self.index(avatar)
+        for i = 0, count - 1 do if rows[i] == avatar then return i end end
+        return nil
+    end
+    function self.add(avatar, record)
+        assert(count < INVENTORY_CAPACITY, 'inventory full')
+        rows[count], records[avatar], count = avatar, record, count + 1
+        for o = 0, 44, 4 do space.u32(self.row(count - 1) + o, 0) end
+        inventory()
+        return count - 1
+    end
+    function self.remove(avatar)
+        local i, last = assert(self.index(avatar)), count - 1
+        if i ~= last then
+            for o = 0, 44, 4 do space.u32(self.row(i) + o, space.get32(self.row(last) + o)) end
+            rows[i] = rows[last]
+        end
+        rows[last], count = nil, last
+        inventory()
+    end
     -- The Armory's weapon preview: slot 3 shows w (nil: none), the ring head moves.
     local preview_at = Fake.UI + 76056 + 1560 * 3
     local paired_at = preview_at + 1560 * 8 -- an underbarrel weapon's slot (src/weapons.lua paired_units)

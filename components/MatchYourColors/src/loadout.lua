@@ -13,6 +13,8 @@
 --     48-byte read of the inventory row (the weapons held, a pickup, the slot in hand);
 --   * a change: the weapons resolved again (about 15 reads each); the same weapons and paints are bound again at once
 --     (a new mission, a respawn, a pickup of the same weapon, a reload), others need a job.
+-- Another mod user's weapons (src/remote.lua) are read on their watch turn instead; as the game moves rows, their row
+-- is checked to be still theirs (2 reads) on a change and on their binding check, and found again when it moved.
 -- No allocation on frames without a change.
 local ffi = require('ffi')
 
@@ -21,13 +23,15 @@ local Loadout = {}
 Loadout.ROW_FRAMES, Loadout.ROW_PHASE = 4, 2
 local HIGH = 4294967296
 
--- m: {Weapons, Recolor, Engine, Avatar, memory, native, pool, game, read (Avatar.reader), note}.
+-- m: {Weapons, Recolor, Engine, Avatar, memory, native, pool, game, read (Avatar.reader), note, follow (another mod
+-- user's weapons, src/remote.lua: their row checked, moved below; its log name, 'Sync: <peer>')}.
 function Loadout.new(m)
     local Weapons, Engine, Avatar = m.Weapons, m.Engine, m.Avatar
     local controller = m.Recolor.controller({Engine = Engine, Avatar = Avatar, memory = m.memory, native = m.native,
         pool = m.pool, units = function(identity) return Weapons.units(identity.list) end})
     local copy = ffi.new('uint8_t[?]', Weapons.COPY_SPAN)
     local small, wide = ffi.new('uint8_t[16]'), ffi.new('uint8_t[1024]')
+    local scratch = m.follow and ffi.new('uint8_t[?]', Weapons.HEAD_BYTES) or nil
     local POINTER = ffi.typeof('const uint8_t *')
     local function read_into(address, size, out) return m.memory.read_into(ffi.cast(POINTER, address), size, out) end
     -- the Armory's weapon preview (Weapons.preview, slot 3): a controller of its own, planned for the weapon and
@@ -36,7 +40,7 @@ function Loadout.new(m)
         pool = m.pool, units = function(identity) return Weapons.units(identity.list) end})
     local self = {controller = controller, shown_controller = shown, where = nil, watch = nil, resolved = nil,
                   dirty = false, changed = false, reload = false, entry = nil, low = 0, high = 0, rebinds = 0,
-                  reloads = 0, jobs = 0, sig = nil, preview = nil, preview_dirty = false, previews = 0}
+                  reloads = 0, jobs = 0, sig = nil, preview = nil, preview_dirty = false, previews = 0, moves = 0}
 
     -- What the weapons' plan depends on: each slot's weapon name and paint (src/weapons.lua decode_copy texts).
     local function signature(resolved)
@@ -80,12 +84,40 @@ function Loadout.new(m)
         return count
     end
 
-    -- A new local Helldiver (src/addon.lua adopt): its inventory row located; the next step resolves its weapons.
+    -- A new local Helldiver (src/addon.lua adopt; another mod user's new avatar, src/remote.lua): its inventory row
+    -- located; the next step resolves its weapons.
     function self.adopt(identity)
-        self.where = Weapons.locate(m.read, Avatar.lookup, m.game, identity.avatar)
+        self.where = Weapons.locate(m.read, Avatar.lookup, m.game, identity.avatar, m.follow)
         self.watch = self.where and Weapons.watch(m.memory, self.where) or nil
         self.entry, self.changed = nil, self.watch ~= nil
         controller.prune()
+    end
+
+    -- Another mod user's row (m.follow): the game moves rows when an avatar is removed (src/weapons.lua), so the row
+    -- found at adopt can hold another player's weapons (a squad of four, 2026-10-16: five 'weapons recolored, 0
+    -- materials' jobs planned weapons other players' recolors held) while theirs change unseen elsewhere. True when it
+    -- is not their avatar's any more: located again (read on their next turn), or none while the avatar has none
+    -- (dead: their respawn adopts its new one). 2 reads (Weapons.owned). Located again where it was, the check misread
+    -- the inventory (another game build): it stops for this row, noted, so it cannot locate the row every check. Each
+    -- outcome is noted (a few lines per death in a squad: the evidence a squad test reads).
+    local function moved()
+        if not (scratch and self.where) or Weapons.owned(m.memory, self.where, scratch) then return false end
+        local before = self.where
+        self.moves = self.moves + 1
+        self.adopt(before)
+        local now = self.where
+        if not now then
+            m.note(m.follow .. ' weapons: their row is another Helldiver\'s now and they have none (dead or gone); '
+                   .. 'found again when they are back.')
+        elseif now.row == before.row and now.owner == before.owner then
+            now.owner = nil
+            m.note(m.follow .. ' weapons: their row read as moved but was not (the inventory reads differently); '
+                   .. 'it is no longer checked.')
+        else
+            m.note(string.format('%s weapons: the game moved their row (%d -> %d); found again.', m.follow,
+                                 before.index, now.index))
+        end
+        return true
     end
 
     -- Recolor Weapons off, the Helldiver lost, a pause or stop: the weapons' own colors back, nothing watched.
@@ -103,8 +135,10 @@ function Loadout.new(m)
         if self.preview then self.preview_dirty = true end
     end
 
-    -- The resolve after a change: the same weapons and paints bound again at once, others a job.
+    -- The resolve after a change: the same weapons and paints bound again at once, others a job. Another mod user's
+    -- changed row is first checked to be still theirs (moved).
     local function settle(frame)
+        if self.changed and moved() then return end
         local resolved = Weapons.resolve(m.read, Avatar.lookup, m.game, self.where, m.memory, copy)
         if not resolved then return end
         local sig = signature(resolved)
@@ -146,12 +180,13 @@ function Loadout.new(m)
         return {weapons = list, sig = self.pending_sig or signature(self.resolved)}
     end
 
-    -- A finished weapons job: applied when the weapons are still the ones planned, else a new job follows.
+    -- A finished weapons job: applied when the weapons are still the ones planned (the bindings it made), else nil and
+    -- a new job follows.
     function self.finish(result, request, frame)
         self.jobs = self.jobs + 1
         if request.sig ~= signature(self.resolved) then
             self.dirty = true
-            return 0
+            return nil
         end
         local count = controller.apply(result, {list = self.resolved.list}, nil, frame)
         self.sig = result.action == 'apply' and request.sig or nil
@@ -160,12 +195,14 @@ function Loadout.new(m)
     end
 
     -- Every CHECK_FRAMES frames: one recolored material per texture still holds its texture (an optic's spawn binds
-    -- the underbarrel's paint again two frames later; static research).
+    -- the underbarrel's paint again two frames later; static research); another mod user's row still theirs (moved:
+    -- their row moved away leaves its old bytes, which then never change).
     function self.check(frame)
         if controller.probes > 0 and not controller.check() and controller.result and self.resolved then
             rebind(frame)
         end
         if shown.probes > 0 then self.check_shown(frame) end
+        moved()
     end
 
     function self.collect(frame)
@@ -231,7 +268,8 @@ function Loadout.new(m)
     -- Everything but the per-frame step runs on changes only: interpreted (no traces in the code cache every mod
     -- shares).
     if type(jit) == 'table' and type(jit.off) == 'function' then
-        for _, fn in ipairs({signature, watch_entry, rebind, self.adopt, self.clear, self.replan, settle, self.request,
+        for _, fn in ipairs({signature, watch_entry, rebind, self.adopt, moved, self.clear, self.replan, settle,
+                             self.request,
                              self.finish, self.check, self.collect, read_into, self.preview_changed,
                              self.preview_request, self.finish_preview, check_shown}) do
             jit.off(fn, true)

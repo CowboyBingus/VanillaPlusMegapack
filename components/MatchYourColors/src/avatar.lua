@@ -405,6 +405,8 @@ function Avatar.watch(memory, identity, slot)
         if copies and copies_at and copies_changed() then changed = true end
         return changed
     end
+    -- Unit ref i (0-29: 10 * array + slot) of the last good read, without a read (Hide Cape: the cape is slot 1).
+    function self.ref(i) return kept[i] end
     return self
 end
 

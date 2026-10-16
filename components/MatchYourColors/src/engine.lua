@@ -1,6 +1,8 @@
 -- Match Your Colors: the engine calls that recolor, verified live on Steam build 25480438.
 --
--- Script C API [game.dll + 0x3326308]: Unit (+24) alive +1824, num_meshes +424, mesh +440; Mesh (+232)
+-- Script C API [game.dll + 0x3326308]: Unit (+24) alive +1824, num_meshes +424, mesh +440, set_unit_visibility +1624
+-- (Hide Cape: queues a command the unit's world runs in its update; each mesh's visibility mask at +0xDC goes 0xFF ->
+-- 0, live 2026-10-16, KB match-your-colors-hide-cape); Mesh (+232)
 -- num_materials +8, material +24, commit +32; Material (+40) set_resource +128. get_engine_api (exe 0xa4e50):
 -- 26 = RenderBufferApi (create_buffer +0x60, update_buffer +0x68, destroy_buffer +0x70, lookup_resource +0x78),
 -- 5 = ResourceManagerApi (can_get_by_id +0x30, get_by_id +0x40). Every function address is compared with its
@@ -30,6 +32,7 @@ local DECLARATIONS = [[
     typedef uint32_t (*myc1_mesh_materials)(uint64_t mesh);
     typedef uint64_t (*myc1_mesh_material)(uint64_t mesh, uint32_t index);
     typedef void (*myc1_mesh_commit)(uint64_t mesh);
+    typedef void (*myc1_unit_visibility)(uint32_t unit, uint32_t visible, uint8_t children);
     typedef void (*myc1_material_set_resource)(uint64_t material, uint32_t slot, uint64_t resource);
     typedef uint64_t (*myc1_get_engine_api)(uint32_t id);
     typedef uint32_t (*myc1_buffer_create)(uint32_t size, uint32_t validity, uint32_t view_type, const void *view,
@@ -59,11 +62,13 @@ Engine.BC3 = 0x10000002
 -- live_v15_tickets.py; refilled copies as made ones, live_v15_hatrefill.py), its slot the material's albedo ('albedo',
 -- 0xac652e43).
 Engine.BC1, Engine.ALBEDO_SLOT = 0x10000000, 0xac652e43
+Engine.MESH_VISIBILITY = 0xDC -- a mesh's visibility context mask byte: 0xFF shown everywhere, 0 hidden (Hide Cape)
 Engine.TEXTURE_VIEW = 3
 Engine.UPDATABLE = 1 -- create_buffer's validity: the texture takes update_buffer
 -- {table, slot offset, expected executable offset} for every function the mod calls.
 Engine.FUNCTIONS = {
     alive = {'unit', 1824, 0x1feeb0}, meshes = {'unit', 424, 0x200cd0}, mesh = {'unit', 440, 0x200d20},
+    visibility = {'unit', 1624, 0x205680}, -- set_unit_visibility: queues the change for the world's update (Hide Cape)
     materials = {'mesh', 8, 0x344300}, material = {'mesh', 24, 0x344350}, commit = {'mesh', 32, 0x344360},
     set_resource = {'material', 128, 0x30f2b0}, -- a jump to 0x4f3230
     create = {'buffers', 0x60, 0x1c7cc0}, update = {'buffers', 0x68, 0x1c8090}, destroy = {'buffers', 0x70, 0x1c81a0},
@@ -71,6 +76,7 @@ Engine.FUNCTIONS = {
     can_get = {'resources', 0x30, 0xa0d30}, get = {'resources', 0x40, 0xa0df0},
 }
 local TYPES = {alive = 'myc1_unit_alive', meshes = 'myc1_unit_meshes', mesh = 'myc1_unit_mesh',
+               visibility = 'myc1_unit_visibility',
                materials = 'myc1_mesh_materials', material = 'myc1_mesh_material', commit = 'myc1_mesh_commit',
                set_resource = 'myc1_material_set_resource', create = 'myc1_buffer_create',
                update = 'myc1_buffer_update', destroy = 'myc1_buffer_destroy', resource = 'myc1_buffer_resource',

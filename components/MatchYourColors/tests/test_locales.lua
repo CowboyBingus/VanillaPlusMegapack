@@ -34,7 +34,9 @@ local MENU = {['option.mod'] = 40, ['option.mode.label'] = 64, ['option.mode.hel
               ['option.squad.missing'] = 48, ['option.squad.everyone'] = 48, ['option.squad.description'] = 400,
               ['option.squad_colors.label'] = 64, ['option.squad_colors.own'] = 48,
               ['option.squad_colors.yours'] = 48, ['option.squad_colors.description'] = 400,
-              ['option.weapons.label'] = 64, ['option.weapons.description'] = 400}
+              ['option.weapons.label'] = 64, ['option.weapons.description'] = 400,
+              ['option.hide_cape.label'] = 64, ['option.hide_cape.yours'] = 48,
+              ['option.hide_cape.everyone'] = 48, ['option.hide_cape.description'] = 400}
 for _, scheme in ipairs(dofile(root .. '/src/schemes.lua').LIST) do MENU[scheme.text] = 48 end -- choices
 local menu_texts = 0
 for key, limit in pairs(MENU) do
