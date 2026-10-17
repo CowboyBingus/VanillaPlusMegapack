@@ -2,7 +2,7 @@
 
     python option_images.py [--reused <folder>]
 
-The twenty covers drawn in covers.py are rendered at 1254 px first. Mod Options Menu, Mod Bindings Menu, Sound
+The twenty-one covers drawn in covers.py are rendered at 1254 px first. Mod Options Menu, Mod Bindings Menu, Sound
 Systems Rebalanced and Foliage Pass-Through show their own repositories' covers (assets/thumbnail.png there);
 --reused names a folder holding those as <Slug>.png to remake their JPEGs the same way. Without it their
 committed JPEGs stay as they are."""

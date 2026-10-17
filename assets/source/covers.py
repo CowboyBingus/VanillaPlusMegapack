@@ -757,6 +757,53 @@ def arcade(cv, r):
         y += pitch
 
 
+@cover('HolsterYourShield', ['HOLSTER', 'YOUR'], 'SHIELD', ['SHIELD ON', 'YOUR BACK'], 'top')
+def holster(cv, r):
+    """A Helldiver in side profile, facing right: a pistol held forward and the shield slung flat on the back with a
+    strap over the shoulder. In front, in grey, where the shield was held; a yellow arrow over the head onto the back."""
+    feet = S - M
+    top = r.top + 40
+    k = (feet - top) / 560                              # the figure's scale
+    cx = 587
+    cv.line('gray', cx - 300 * k, feet + 2, cx + 420 * k, feet + 2, 4)
+
+    def shield(x0, y0):
+        """The shield's outline seen from the side, tilted a little so its face shows: a tall slab."""
+        return [(x0, y0 + 14 * k), (x0 + 92 * k, y0), (x0 + 92 * k, y0 + 300 * k), (x0, y0 + 316 * k)]
+    # The shield on the back, behind the body: its slab, with the viewport.
+    slab = shield(cx - 150 * k, top + 96 * k)
+    cv.poly('cream', slab)
+    cv.poly('cream', [(cx - 136 * k, top + 132 * k), (cx - 72 * k, top + 124 * k), (cx - 72 * k, top + 138 * k),
+                      (cx - 136 * k, top + 146 * k)], fill=0)
+    # The Helldiver, in grey, drawn over the slab's inner edge.
+    body = [(cx - 50 * k, top + 112 * k), (cx + 46 * k, top + 112 * k), (cx + 42 * k, top + 300 * k),
+            (cx - 40 * k, top + 300 * k)]
+    legs = [[(cx - 34 * k, top + 296 * k), (cx + 4 * k, top + 296 * k), (cx - 30 * k, feet), (cx - 66 * k, feet)],
+            [(cx - 6 * k, top + 296 * k), (cx + 34 * k, top + 296 * k), (cx + 70 * k, feet), (cx + 34 * k, feet)]]
+    for shape in [body] + legs:
+        cv.poly('cream', shape, fill=0)
+        cv.poly('gray', shape)
+    cv.circle('cream', cx + 4 * k, top + 56 * k, 52 * k, fill=0)
+    cv.circle('gray', cx + 4 * k, top + 56 * k, 50 * k)
+    cv.rect('gray', cx + 24 * k, top + 46 * k, cx + 56 * k, top + 66 * k, fill=0)      # the visor, facing right
+    # The strap from the shield over the shoulder and across the chest.
+    stroke(cv, 'cream', [(cx - 40 * k, top + 118 * k), (cx + 40 * k, top + 250 * k)], 12 * k)
+    # The arm held forward with the pistol.
+    hand = (cx + 200 * k, top + 176 * k)
+    stroke(cv, 'gray', [(cx + 10 * k, top + 140 * k), hand], 30 * k)
+    hx, hy = hand
+    cv.rect('cream', hx - 6 * k, hy - 22 * k, hx + 78 * k, hy - 4 * k)
+    cv.poly('cream', [(hx - 6 * k, hy - 8 * k), (hx + 18 * k, hy - 8 * k), (hx + 10 * k, hy + 34 * k),
+                      (hx - 14 * k, hy + 30 * k)])
+    # Where the shield was: held in front of the body at chest height, behind the gun arm, in grey.
+    ghost = shield(cx + 70 * k, top + 120 * k)
+    dashed(cv, 'gray', ghost + [ghost[0]], 7, 18, 12)
+    # The move: from the front, up over the head, onto the back; the arrow stops short of the slab.
+    path = bezier((cx + 116 * k, top + 96 * k), (cx + 20 * k, top - 260 * k), (cx - 110 * k, top + 72 * k))
+    dashed(cv, 'yellow', path, 7, 22, 12)
+    arrowhead(cv, 'yellow', path[-1][0], path[-1][1], heading(path), 26, 7)
+
+
 if __name__ == '__main__':
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[1] / 'covers'
     out.mkdir(parents=True, exist_ok=True)

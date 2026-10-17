@@ -2,7 +2,7 @@
 
 # Vanilla Plus Megapack
 
-Choose which of the twenty-four bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, Ship Station Hotkeys, Clickable Scrollbars, Better Lobby Management's host tools, and the Mod Options Menu and Mod Bindings Menu tabs.
+Choose which of the twenty-five bundled CowboyBingus Helldivers 2 mods to enable in one install. The pack includes gameplay repairs, Ship Station Hotkeys, Clickable Scrollbars, Better Lobby Management's host tools, and the Mod Options Menu and Mod Bindings Menu tabs.
 
 **Requires the separately built Bingus Shared Loader v18 or newer (v19 is current).** Install two ZIPs: `Vanilla-Plus-Megapack-v42.zip` and `Bingus-Shared-Loader-v19.zip`. Mod managers do not install the dependency automatically.
 
@@ -17,7 +17,7 @@ The Rows package ended with v35: Know Your Constellation v4 has a single layout.
 5. Open the Megapack's **Options** (sliders button) in Arsenal, or its mod options in HD2MM. Check each mod you want and uncheck each mod you do not want. Confirm/save the selection.
 6. **Purge / Deploy**, then launch the game normally. Close the game and repeat these steps whenever you change options.
 
-Each of the twenty-four options is independent. Select all for the complete pack, any subset for a custom pack, or none to deploy no features from the pack. Enable Mod Bindings Menu with Ship Station Hotkeys to rebind its six shortcuts, including controller buttons. Enable Mod Options Menu to set Shallow Water Diving's maximum dive depth. The option was named Galactic Menu Hotkey before v29; confirm it is still checked after updating. Review your choices after importing or updating: initial selections depend on the manager's settings.
+Each of the twenty-five options is independent. Select all for the complete pack, any subset for a custom pack, or none to deploy no features from the pack. Enable Mod Bindings Menu with Ship Station Hotkeys to rebind its six shortcuts, including controller buttons. Enable Mod Options Menu to set Shallow Water Diving's maximum dive depth. The option was named Galactic Menu Hotkey before v29; confirm it is still checked after updating. Review your choices after importing or updating: initial selections depend on the manager's settings.
 
 An unchecked option removes only the pack's copy. An enabled standalone package or another megapack can still activate that feature, so disable those copies as well. Overlapping gameplay entries run once and their callbacks do not stack. If versions differ, manager priority selects the winner.
 
@@ -53,8 +53,9 @@ The game runs every Lua mod in its own LuaJIT, whose code cache keeps its 2015 l
 | [Stratagem Hero Expanded](https://github.com/CowboyBingus/StratagemHeroExpanded) | v1.0 | The ship's Stratagem Hero arcade draws from all 96 loadout stratagems and 12 common mission stratagems (108) instead of its 27 launch-era ones; themed rounds stay. |
 | [Sound Systems Rebalanced](https://github.com/CowboyBingus/SoundSystemsRebalanced) | v1.0 | Mission music plays at the war-table volume in every mission, also when you join one in progress, and no longer goes silent on swamp, desert, oasis, deciduous and coniferous forest, hive world and active rift planets. |
 | [Foliage Pass-Through](https://github.com/CowboyBingus/FoliagePassThrough) | v1.0 | Player rockets, missiles, launcher rounds and stratagem ordnance pass through tree canopies and bushes instead of exploding in them; trunks, the ground and enemies still stop them. |
+| [Holster Your Shield](https://github.com/CowboyBingus/HolsterYourShield) | v1.0 | Press Backpack Function to put the Ballistic Shield or the Directional Shield on your back while you keep a one-handed weapon in hand; press again to take it back. |
 
-All bundled components are pinned to the source and resource hashes in `components.lock.json`. Third-party HUD mods and the reserved, unreleased Wide Angle Stratagems module are not included. Mod Bindings Menu, Mod Options Menu, Flame Damage Fixed, Better Lobby Management, Hellpod Drop Hold, Laser Sentry Cooldown, Match Your Colors, Sticky Grenade Handles, Stratagem Hero Expanded, Sound Systems Rebalanced and Foliage Pass-Through are also released on their own: use one copy of each, the standalone package or the pack option. The shared loader remains a separate dependency with its own repository and updates.
+All bundled components are pinned to the source and resource hashes in `components.lock.json`. Third-party HUD mods and the reserved, unreleased Wide Angle Stratagems module are not included. Mod Bindings Menu, Mod Options Menu, Flame Damage Fixed, Better Lobby Management, Hellpod Drop Hold, Laser Sentry Cooldown, Match Your Colors, Sticky Grenade Handles, Stratagem Hero Expanded, Sound Systems Rebalanced, Foliage Pass-Through and Holster Your Shield are also released on their own: use one copy of each, the standalone package or the pack option. The shared loader remains a separate dependency with its own repository and updates.
 
 Supported game: Steam build 25480438 / EXE 1.8.46015.0. Each bundled mod retains its behavior and compatibility checks.
 

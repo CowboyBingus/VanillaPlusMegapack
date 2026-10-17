@@ -21,5 +21,6 @@
 - New option: Stratagem Hero Expanded v1.0: the ship's Stratagem Hero arcade draws from all 96 loadout stratagems and 12 common mission stratagems (108) instead of its 27 launch-era ones; themed rounds stay.
 - New option: Sound Systems Rebalanced v1.0: mission music plays at the war-table volume in every mission, also when you join one in progress (it was 6 dB louder then), and no longer goes silent on swamp, desert, oasis, deciduous and coniferous forest, hive world and active rift planets.
 - New option: Foliage Pass-Through v1.0: player rockets, missiles, launcher rounds and stratagem ordnance pass through tree canopies and bushes instead of exploding in them; trunks, the ground and enemies still stop them.
+- New option: Holster Your Shield v1.0: press Backpack Function to put the Ballistic Shield or the Directional Shield on your back while you keep a one-handed weapon in hand; press again to take it back.
 - Each option shows its own mod's cover in Arsenal and HD2MM instead of the pack's.
 - The pack's own icon in Arsenal and HD2MM is now its code-drawn cover.

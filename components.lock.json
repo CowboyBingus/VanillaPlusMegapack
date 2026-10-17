@@ -886,5 +886,30 @@
       "tests/test_mod.lua": "FE86364F2373905A9577A9022EC251CD115AA8CC1DDE45691EF1D74BB616C132"
     },
     "source_origin": "Standalone v1.0 pre-release source for Steam build 25480438; offline checks passed; its resource is byte for byte the one in that release."
+  },
+  {
+    "slug": "HolsterYourShield",
+    "name": "Holster Your Shield",
+    "revision": "v1.0",
+    "repository": "https://github.com/CowboyBingus/HolsterYourShield",
+    "module": "mods/cowboybingus/holster_your_shield",
+    "entry": "direct",
+    "resource_sha256": "C11AF49F04482A539C45C302C9A42F133D128318BEDF3651090923869998F66D",
+    "source_sha256": {
+      "dependencies.json": "F4178E0FA2A27ABD5D5A51273FE4FD3EE57809A8731A5315431D184663003D43",
+      "scripts/build.py": "814B6763D0167AAE3E24F522DCE981CDE198AA66704BA3DBBEEE680D5D8AA416",
+      "src/bingus_memory.lua": "3973924B1C009CC4E6C863A4EAF87F166899A16DDCB579C3D77AB5465172B416",
+      "src/bingus_runtime.lua": "C4450F555F697E583916D18F876412CA96F6963EB1BF4CDAD451EBB906C2F988",
+      "src/holster_your_shield.lua": "DD68F63539BE0FFA83EA18B829ABFBFD1F51A95807658ADD0B8D1245FCBC5D0E",
+      "tests/compile_entry.lua": "2739B9525CE71CE3D5B2A45B2993D5194F2E898995DD2FF6414688946A077954",
+      "tests/fake_game.lua": "CF3E93AF9BFE5501718E1C02D88CE5C231444CB9F179E4DE5E4630D6D134D7EE",
+      "tests/frame_budget.lua": "4E1E9F47EE7FCCFD24F6C79D475103ABF77989FC344EBB527869029793654E49",
+      "tests/game_lua.py": "C6BBC5F25AB21EFFC4351436826CE89FED0440F022BED0D9C573E5EA82560CDD",
+      "tests/hostile_vm.lua": "779B1DFD0A5BB8A2CEAB53EC8729E492838FB90018490A290D1BAFB3D9F938C4",
+      "tests/test_entry.lua": "081A485B2EEC8DA06DF82BEAD7CDC180E83696B015C137A219A2C4CAB12BB8D5",
+      "tests/test_hostile.lua": "6102EFD3D09634DB1B634123119389CD6FB4220E19A08183760C5B3F6072655D",
+      "tests/test_mod.lua": "A2DF5348FD36EDD950A145423EA56F2349424CE31B4EE9ECE655AE094A9D16E8"
+    },
+    "source_origin": "Standalone v1.0 pre-release source for Steam build 25480438; offline checks passed; its resource is byte for byte the one in that release."
   }
 ]

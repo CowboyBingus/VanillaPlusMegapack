@@ -8,7 +8,7 @@ Each option shows its own mod's cover beside it in Arsenal and HD2MM: `options/<
 
 Drawn in code with Claude Opus 5.5 (Pillow and NumPy); no image generator was used. Same system as the Bingus Shared Loader, Mod Options Menu and Mod Bindings Menu art: Franklin Gothic Heavy for the title, Bahnschrift SemiBold (width 87) for everything else, ground `#121110`, cream `#f0e8d6`, yellow `#fdd00c`. Each cover's graphic shows what its mod does, in plain words, with no counts or versions.
 
-- `source/covers.py` draws twenty of them (`artlib.py` and `style.py` are byte-identical copies of the shared renderer). `cd source; python option_images.py` renders them at 1254x1254 and writes their JPEGs (full color, quality 92, no metadata).
+- `source/covers.py` draws twenty-one of them (`artlib.py` and `style.py` are byte-identical copies of the shared renderer). `cd source; python option_images.py` renders them at 1254x1254 and writes their JPEGs (full color, quality 92, no metadata).
 - Mod Options Menu, Mod Bindings Menu, Sound Systems Rebalanced and Foliage Pass-Through show their own code-drawn covers, made earlier with the same renderer, shrunk the same way (`python option_images.py --reused <folder of Slug.png>`).
 
 ## Box icon

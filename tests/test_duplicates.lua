@@ -33,10 +33,11 @@ local entries = {KnowYourConstellation = 'install.lua', ArmoryPreviewCache = 'in
                  StickyGrenadeHandles = 'sticky_grenade_handles.lua',
                  StratagemHeroExpanded = 'stratagem_hero_expanded.lua',
                  SoundSystemsRebalanced = 'sound_systems_rebalanced.lua',
-                 FoliagePassThrough = 'foliage_pass_through.lua'}
--- Laser Sentry Cooldown's, Match Your Colors', Sticky Grenade Handles', Stratagem Hero Expanded's, Sound
--- Systems Rebalanced's and Foliage Pass-Through's guards are in their assembled entries; Hellpod Drop Hold's
--- loader names the shared loader before its own guard, so all seven are named here.
+                 FoliagePassThrough = 'foliage_pass_through.lua',
+                 HolsterYourShield = 'holster_your_shield.lua'}
+-- Laser Sentry Cooldown's, Match Your Colors', Sticky Grenade Handles', Stratagem Hero Expanded's, Sound Systems
+-- Rebalanced's, Foliage Pass-Through's and Holster Your Shield's guards are in their assembled entries; Hellpod Drop
+-- Hold's loader names the shared loader before its own guard, so all eight are named here.
 local guards = {ClickableScrollbars = 'ClickableScrollbars',
                 ArcThrowerRevamped = 'ArcThrowerRevampedInstalled',
                 GalacticMenuHotkey = 'GalacticMenuHotkeyInstalled',
@@ -50,7 +51,8 @@ local guards = {ClickableScrollbars = 'ClickableScrollbars',
                 StickyGrenadeHandles = 'StickyGrenadeHandles',
                 StratagemHeroExpanded = 'StratagemHeroExpanded',
                 SoundSystemsRebalanced = 'SoundSystemsRebalanced',
-                FoliagePassThrough = 'FoliagePassThrough'}
+                FoliagePassThrough = 'FoliagePassThrough',
+                HolsterYourShield = 'HolsterYourShieldInstalled'}
 for i = 4, #arg, 2 do
     local module, slug = arg[i], assert(arg[i + 1])
     local entry = entries[slug] or 'archive_loader.lua'
@@ -80,7 +82,8 @@ local registry_cannot_see = {['mods/cowboybingus/clickable_scrollbars'] = true,
                              ['mods/cowboybingus/sticky_grenade_handles'] = true,
                              ['mods/cowboybingus/stratagem_hero_expanded'] = true,
                              ['mods/cowboybingus/sound_systems_rebalanced'] = true,
-                             ['mods/cowboybingus/foliage_pass_through'] = true}
+                             ['mods/cowboybingus/foliage_pass_through'] = true,
+                             ['mods/cowboybingus/holster_your_shield'] = true}
 -- The option selections to replay: every selection of at most two options, every one missing at most
 -- two, and 256 seeded pseudo-random ones. Interactions between options are pairwise, which the first two
 -- groups cover exactly; replaying all 2^n selections took minutes per build (65536 at sixteen options)

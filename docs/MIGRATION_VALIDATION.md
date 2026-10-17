@@ -17,6 +17,11 @@ v19, and each changed all 99 projectile types at load and still had them
 changed at shutdown. Its test build kept the change through four solo
 missions on this build; a shot passing through a tree in play has not been
 observed yet.
+v42 also adds Holster Your Shield (v1.0): its release build and the package
+with all twenty-five options ran to the ship and quit cleanly with loader v19;
+each checked the first bytes of the three game functions it calls and found the
+local Helldiver, and its release build also found it in a solo mission. A
+shield stowed or drawn in play has not been observed yet.
 v42 also gives each option its own cover: every file a manager deploys is byte
 for byte the previous v42 package's, and Arsenal 0.36.0 and HD2MM 1.3
 imported it and resolved each option's own image.
