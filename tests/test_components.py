@@ -172,10 +172,10 @@ def menu_commands(mods, build):
 
 
 def data_change_commands(mods, build):
-    """Hellpod Drop Hold, Laser Sentry Cooldown, Sticky Grenade Handles, Stratagem Hero Expanded and Sound
-    Systems Rebalanced: the suites their own scripts/build.py runs, in LuaJIT and in the game's own lua51.dll
-    (each component's tests/game_lua.py, HD2_LUA51_DLL); Sound Systems Rebalanced's bank tests read
-    HD2_MUSIC_BANKS."""
+    """Hellpod Drop Hold, Laser Sentry Cooldown, Sticky Grenade Handles, Stratagem Hero Expanded, Sound
+    Systems Rebalanced and Foliage Pass-Through: the suites their own scripts/build.py runs, in LuaJIT and in
+    the game's own lua51.dll (each component's tests/game_lua.py, HD2_LUA51_DLL); Sound Systems Rebalanced's
+    bank tests read HD2_MUSIC_BANKS."""
     hold = mods / 'HellpodDropHold'
     # test_hold.lua checks that the adapter's module hash is its host executable's.
     commands = [[hold / 'tests/test_hold.lua', hold / 'src', sha(LUA.read_bytes())],
@@ -185,6 +185,7 @@ def data_change_commands(mods, build):
     handles = mods / 'StickyGrenadeHandles'
     arcade = mods / 'StratagemHeroExpanded'
     music = mods / 'SoundSystemsRebalanced'
+    foliage = mods / 'FoliagePassThrough'
     commands.append([music / 'tests/test_biome_patch.py'])
     for vm in ([], ['game']):
         sentry_prefix = [sentry / 'tests/game_lua.py'] if vm else []
@@ -206,6 +207,10 @@ def data_change_commands(mods, build):
         commands += [[*music_prefix, music / 'tests/test_mod.lua', music],
                      [*music_prefix, music / 'tests/compile_entry.lua', build / 'SoundSystemsRebalanced/entry.lua'],
                      [*music_prefix, music / 'tests/test_entry.lua', build / 'SoundSystemsRebalanced/entry.lua']]
+        foliage_prefix = [foliage / 'tests/game_lua.py'] if vm else []
+        commands += [[*foliage_prefix, foliage / 'tests/test_mod.lua', foliage],
+                     [*foliage_prefix, foliage / 'tests/compile_entry.lua', build / 'FoliagePassThrough/entry.lua'],
+                     [*foliage_prefix, foliage / 'tests/test_entry.lua', build / 'FoliagePassThrough/entry.lua']]
     return commands
 
 

@@ -51,12 +51,13 @@ local names = {pack, 'mods/cowboybingus/better_stratagem_bounce',
     'mods/cowboybingus/flame_damage_fixed', 'mods/cowboybingus/mod_options_menu', 'mods/cowboybingus/mod_bindings_menu',
     'mods/cowboybingus/better_lobby_management', 'mods/cowboybingus/hellpod_drop_hold',
     'mods/cowboybingus/laser_sentry_cooldown', 'mods/cowboybingus/match_your_colors', 'mods/cowboybingus/sticky_grenade_handles',
-    'mods/cowboybingus/stratagem_hero_expanded', 'mods/cowboybingus/sound_systems_rebalanced'}
+    'mods/cowboybingus/stratagem_hero_expanded', 'mods/cowboybingus/sound_systems_rebalanced',
+    'mods/cowboybingus/foliage_pass_through'}
 local folders = {'', 'BetterStratagemBounce', 'HellpodSteeringUnlocked', 'ReinforcementBeaconsFixed',
     'ConsistentVaulting', 'ShallowWaterDiving', 'SentryAimRetention', 'EnemyCollisionSynchronized', 'ControllableHoverPack', 'KnowYourConstellation', 'ArmoryPreviewCache',
     'ClickableScrollbars', 'ArcThrowerRevamped', 'GalacticMenuHotkey', 'FlameDamageFixed', 'ModOptionsMenu', 'ModBindingsMenu',
     'BetterLobbyManagement', 'HellpodDropHold', 'LaserSentryCooldown', 'MatchYourColors', 'StickyGrenadeHandles',
-    'StratagemHeroExpanded', 'SoundSystemsRebalanced'}
+    'StratagemHeroExpanded', 'SoundSystemsRebalanced', 'FoliagePassThrough'}
 -- Resources an option ships beside its module: Hellpod Drop Hold's entry requires its compiled implementation.
 -- Each is available exactly when its owner is (they share one option archive).
 local extras = {['mods/cowboybingus/hellpod_drop_hold'] = {'mods/cowboybingus/hellpod_drop_hold_impl'}}
@@ -70,7 +71,7 @@ local registry_cannot_see = {['mods/cowboybingus/clickable_scrollbars'] = true, 
     ['mods/cowboybingus/better_lobby_management'] = true, ['mods/cowboybingus/hellpod_drop_hold'] = true,
     ['mods/cowboybingus/laser_sentry_cooldown'] = true, ['mods/cowboybingus/match_your_colors'] = true,
     ['mods/cowboybingus/sticky_grenade_handles'] = true, ['mods/cowboybingus/stratagem_hero_expanded'] = true,
-    ['mods/cowboybingus/sound_systems_rebalanced'] = true}
+    ['mods/cowboybingus/sound_systems_rebalanced'] = true, ['mods/cowboybingus/foliage_pass_through'] = true}
 local function read(path)
     local file = assert(io.open(path, 'rb'))
     local bytes = file:read('*a'); file:close(); return bytes

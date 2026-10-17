@@ -43,6 +43,7 @@ OPTION_DESCRIPTIONS = {
     'StickyGrenadeHandles': 'The G-123 Thermite and the sticky stun grenade stick when their handle hits first, instead of bouncing off.',
     'StratagemHeroExpanded': 'The ship\'s Stratagem Hero arcade draws from every loadout stratagem and the common mission stratagems (108) instead of its 27 launch-era ones. Themed rounds stay.',
     'SoundSystemsRebalanced': 'Mission music plays at the war-table volume in every mission, also when you join one in progress (it was 6 dB louder then), and no longer goes silent on swamp, desert and the other planet types the music had no version for.',
+    'FoliagePassThrough': 'Player rockets, missiles, launcher rounds and stratagem ordnance pass through tree canopies and bushes instead of exploding in them. Trunks, the ground and enemies still stop them; enemy projectiles are unchanged.',
 }
 
 
@@ -137,7 +138,8 @@ def write_entry(component, body, build):
 # Their standalone builds pass it through the loader's entry_source, which keeps such an entry as it is, so the
 # option ships the same bytes.
 BUILD_ASSEMBLED = {'FlameDamageFixed': (), 'LaserSentryCooldown': (False,), 'MatchYourColors': (False,),
-                   'StickyGrenadeHandles': (), 'StratagemHeroExpanded': (), 'SoundSystemsRebalanced': ()}
+                   'StickyGrenadeHandles': (), 'StratagemHeroExpanded': (), 'SoundSystemsRebalanced': (),
+                   'FoliagePassThrough': ()}
 # Resources a component ships beside its module (Hellpod Drop Hold's compiled implementation), by slug:
 # {resource hash: payload}. The lock pins each one in the component's extra_resources.
 EXTRA = {}
@@ -341,7 +343,7 @@ def main():
                         'Include': [folder], 'Image': 'images/' + component['slug'] + '.jpg'})
     report = {
         'name': 'Vanilla Plus Megapack', 'slug': 'VanillaPlusMegapack', 'revision': REVISION, 'guid': GUID,
-        'description': 'Choose any of the twenty-three bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v18. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. With default Arsenal priority put the loader last.',
+        'description': 'Choose any of the twenty-four bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v18. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. With default Arsenal priority put the loader last.',
         'requires': [{'name': 'Bingus Shared Loader', 'guid': '612eaf70-d682-43c7-9efd-16dcc695f977', 'api': 1, 'revision': 'loader-v18'}],
         'game_exe_sha256': EXE_SHA, 'game_dll_sha256': GAME_DLL_SHA,
         'deployment_files': files, 'options': options,

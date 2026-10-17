@@ -32,6 +32,7 @@ local pack = {
         'mods/cowboybingus/sticky_grenade_handles',
         'mods/cowboybingus/stratagem_hero_expanded',
         'mods/cowboybingus/sound_systems_rebalanced',
+        'mods/cowboybingus/foliage_pass_through',
     },
 }
 loader.megapack = pack

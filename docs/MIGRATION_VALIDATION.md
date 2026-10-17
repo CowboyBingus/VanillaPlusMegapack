@@ -11,6 +11,12 @@ v42 also adds Sound Systems Rebalanced (v1.0): its release build and the package
 with all twenty-three options ran to the ship and quit cleanly with loader
 v19, its patched music bank loaded (the ship's music played), and its
 release build played its fallback music on a swamp planet in a solo mission.
+v42 also adds Foliage Pass-Through (v1.0): its release build and the package
+with all twenty-four options ran to the ship and quit cleanly with loader
+v19, and each changed all 99 projectile types at load and still had them
+changed at shutdown. Its test build kept the change through four solo
+missions on this build; a shot passing through a tree in play has not been
+observed yet.
 v42 also gives each option its own cover: every file a manager deploys is byte
 for byte the previous v42 package's, and Arsenal 0.36.0 and HD2MM 1.3
 imported it and resolved each option's own image.

@@ -862,5 +862,29 @@
       "tests/test_mod.lua": "E5ECF5414643DD0C0CF137C65361654FF1E7538C7CAA94CCF1428AA83796B751"
     },
     "source_origin": "Standalone v1.0 pre-release source for Steam build 25480438; offline checks passed; its resource and its music bank archive are byte for byte the ones in that release."
+  },
+  {
+    "slug": "FoliagePassThrough",
+    "name": "Foliage Pass-Through",
+    "revision": "v1.0",
+    "repository": "https://github.com/CowboyBingus/FoliagePassThrough",
+    "module": "mods/cowboybingus/foliage_pass_through",
+    "entry": "direct",
+    "resource_sha256": "E9C83C14FD2DB612DA3E756835659AC7F439ED0F5DA001D7D8A0B4D73058D6AC",
+    "source_sha256": {
+      "scripts/build.py": "9401C2760D73A0EF258B0077F58AA49E837BA79C70F05AE8E8B7F32C5BDC3FF1",
+      "src/bingus_memory.lua": "3973924B1C009CC4E6C863A4EAF87F166899A16DDCB579C3D77AB5465172B416",
+      "src/bingus_runtime.lua": "C4450F555F697E583916D18F876412CA96F6963EB1BF4CDAD451EBB906C2F988",
+      "src/bingus_write.lua": "9A0A217811D109418FAEBB2AF8804BFB8301B0EEEB1E6B5BC020FDACBD596160",
+      "src/foliage_pass_through.lua": "43D657A91D7111A1DDD0B9464DB7756D4EC4AAA408505F370BAE3ADACD7873E1",
+      "src/foliage_targets.lua": "ABBADB0747A9F190417639C4F9635A5B753E4364BC9F117D7E5754E346CDB592",
+      "tests/compile_entry.lua": "F43910D6C6742AD10DDF0E67772CEFB0FFEE4754E9A3386F7DA7F115C7DB1662",
+      "tests/frame_budget.lua": "4E1E9F47EE7FCCFD24F6C79D475103ABF77989FC344EBB527869029793654E49",
+      "tests/game_lua.py": "C6BBC5F25AB21EFFC4351436826CE89FED0440F022BED0D9C573E5EA82560CDD",
+      "tests/hostile_vm.lua": "779B1DFD0A5BB8A2CEAB53EC8729E492838FB90018490A290D1BAFB3D9F938C4",
+      "tests/test_entry.lua": "6E9D966393EA9155231F159BE9D4DE0F7A606EAF8A3CDF794BBBBC8876E46C2A",
+      "tests/test_mod.lua": "FE86364F2373905A9577A9022EC251CD115AA8CC1DDE45691EF1D74BB616C132"
+    },
+    "source_origin": "Standalone v1.0 pre-release source for Steam build 25480438; offline checks passed; its resource is byte for byte the one in that release."
   }
 ]
