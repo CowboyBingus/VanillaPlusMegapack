@@ -30,6 +30,11 @@ def package_release(root: Path, build: Path, report: dict) -> Path:
     thumbnail = root / 'assets/thumbnail.png'
     if thumbnail.is_file():
         files['thumbnail.png'] = thumbnail.read_bytes()
+    options = [dict(option) for option in report['options']]
+    for option in options:
+        # Each option's own cover, outside every Include folder so no manager deploys it.
+        if 'Image' in option:
+            files[option['Image']] = (root / 'assets/options' / Path(option['Image']).name).read_bytes()
     provenance = {
         'name': report['name'], 'revision': report['revision'], 'display_version': release_version,
         'steam_build': 25480438, 'exe_version': '1.8.46015.0',
@@ -42,13 +47,12 @@ def package_release(root: Path, build: Path, report: dict) -> Path:
         if key in report:
             provenance[key] = report[key]
     files[slug + '-manifest.json'] = (json.dumps(provenance, indent=2) + '\n').encode()
-    options = [dict(option) for option in report['options']]
     manager = {'Version': 1, 'Guid': report['guid'], 'Name': display_name,
                'Description': report['description'], 'Options': options}
     if thumbnail.is_file():
         manager['IconPath'] = 'thumbnail.png'
         for option in options:
-            option['Image'] = 'thumbnail.png'
+            option.setdefault('Image', 'thumbnail.png')
     files['manifest.json'] = (json.dumps(manager, indent=2) + '\n').encode()
     release = release_directory(root) / (release_stem + '.zip')
     release.parent.mkdir(exist_ok=True)

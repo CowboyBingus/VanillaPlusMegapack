@@ -1,3 +1,4 @@
 * text=auto eol=lf
 *.png binary
 components/** -text whitespace=cr-at-eol
+*.jpg binary

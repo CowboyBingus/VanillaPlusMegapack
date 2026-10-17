@@ -11,6 +11,9 @@ v42 also adds Sound Systems Rebalanced (v1.0): its release build and the package
 with all twenty-three options ran to the ship and quit cleanly with loader
 v19, its patched music bank loaded (the ship's music played), and its
 release build played its fallback music on a swamp planet in a solo mission.
+v42 also gives each option its own cover: every file a manager deploys is byte
+for byte the previous v42 package's, and Arsenal 0.36.0 and HD2MM 1.3
+imported it and resolved each option's own image.
 v41 updates Match
 Your Colors to v1.4, whose release build was played on this build on the ship
 and in the Armory. v40 updates Match

@@ -32,6 +32,20 @@ def music_bank(data):
     return {key: data[offset:offset + size]}
 
 
+def jpeg_size(data):
+    """Width and height from a baseline or progressive JPEG's frame header."""
+    assert data[:3] == b'\xff\xd8\xff'
+    offset = 2
+    while offset + 4 <= len(data):
+        assert data[offset] == 0xFF
+        marker, length = data[offset + 1], struct.unpack_from('>H', data, offset + 2)[0]
+        if marker in (0xC0, 0xC1, 0xC2):
+            height, width = struct.unpack_from('>HH', data, offset + 5)
+            return width, height
+        offset += 2 + length
+    raise AssertionError('no JPEG frame header')
+
+
 def extras(component):
     """The resource hashes a component ships beside its module (its pinned extra_resources)."""
     return {resource_hash(name) for name in component.get('extra_resources', {})}
@@ -73,6 +87,7 @@ def main():
                      for s in ('', '.stream', '.gpu_resources')}
         expected |= {f'options/{c["slug"]}/{MUSIC_ARCHIVE}{s}' for c in components if c.get('music_archive_sha256')
                      for s in ('', '.stream', '.gpu_resources')}
+        expected |= {f'images/{c["slug"]}.jpg' for c in components}
         expected |= {'manifest.json', 'thumbnail.png', slug+'-manifest.json', slug+'-README.txt'}
         assert len(package.namelist()) == len(expected) and set(package.namelist()) == expected
         manager = json.loads(package.read('manifest.json'))
@@ -91,12 +106,17 @@ def main():
         assert len(report['components']) == len(components)
         for name, digest in report['files'].items():
             assert sha(package.read(name)) == digest
-        payloads, choices = {}, []
+        payloads, choices, images = {}, [], set()
         for component, option in zip(components, manager['Options']):
             folder = 'options/' + component['slug']
             assert option['Name'] == component['name']
             assert option['Description'] and option['Include'] == [folder]
-            assert option['Image'] == 'thumbnail.png' and 'SubOptions' not in option
+            # Each option shows its own mod's cover, byte for byte the repository's, kept outside the Include folders.
+            assert option['Image'] == f'images/{component["slug"]}.jpg' and 'SubOptions' not in option
+            image = package.read(option['Image'])
+            assert image == (ROOT / 'assets/options' / (component['slug'] + '.jpg')).read_bytes()
+            assert jpeg_size(image) == (512, 512) and sha(image) not in images
+            images.add(sha(image))
             choice = resources(package.read(folder + '/' + ARCHIVE), extras(component))
             assert set(choice) == {resource_hash(MODULE), resource_hash(component['module'])} | extras(component)
             assert choice[resource_hash(MODULE)] == (build / 'entry.lua.main').read_bytes()

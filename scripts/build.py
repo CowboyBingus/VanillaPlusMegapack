@@ -338,7 +338,7 @@ def main():
                 path.write_bytes(data)
                 files[folder + '/' + path.name] = path.relative_to(ROOT).as_posix()
         options.append({'Name': component['name'], 'Description': OPTION_DESCRIPTIONS[component['slug']],
-                        'Include': [folder]})
+                        'Include': [folder], 'Image': 'images/' + component['slug'] + '.jpg'})
     report = {
         'name': 'Vanilla Plus Megapack', 'slug': 'VanillaPlusMegapack', 'revision': REVISION, 'guid': GUID,
         'description': 'Choose any of the twenty-three bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v18. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. With default Arsenal priority put the loader last.',

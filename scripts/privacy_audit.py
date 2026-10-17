@@ -83,6 +83,22 @@ def png(data):
     assert offset == len(data) and kinds[0] == b'IHDR' and kinds[-1] == b'IEND'
     return struct.unpack_from('>II', data, 16)
 
+def jpeg(data):
+    """Only image segments before the scan (a bare JFIF header, tables, the frame): no EXIF, comment or other metadata.
+    The entropy-coded scan after it is image data, not text."""
+    assert data[:2] == b'\xff\xd8' and data[-2:] == b'\xff\xd9'
+    offset = 2
+    while True:
+        assert data[offset] == 0xFF
+        marker, size = data[offset + 1], struct.unpack_from('>H', data, offset + 2)[0]
+        if marker == 0xE0:
+            assert size == 16 and data[offset + 4:offset + 9] == b'JFIF\x00', 'Unreviewed JPEG metadata'
+        else:
+            assert marker in (0xDB, 0xC0, 0xC2, 0xC4, 0xDD, 0xDA), 'Unreviewed JPEG metadata'
+        if marker == 0xDA:
+            return
+        offset += 2 + size
+
 def git(*args):
     return subprocess.check_output(['git', *args], cwd=ROOT)
 
@@ -92,6 +108,7 @@ def audit(packages=(), history=False):
     findings, inventory, archives = [], [], []
     def inspect(data, label):
         if label.endswith('.png'): png(data)
+        elif label.endswith('.jpg'): jpeg(data)
         else: findings.extend(scan(data, label))
     for name in allowed:
         path = ROOT / name
@@ -134,9 +151,12 @@ def audit(packages=(), history=False):
                 assert option['Include'] == [folder]
                 expected |= {folder + '/9ba626afa44a3aa3.patch_0' + s
                              for s in ('', '.stream', '.gpu_resources')}
-                if component.get('input_archive_sha256'):  # Mod Bindings Menu's input actions
+                if component.get('input_archive_sha256') or component.get('music_archive_sha256'):
+                    # Mod Bindings Menu's input actions, Sound Systems Rebalanced's music bank
                     expected |= {folder + '/9ba626afa44a3aa3.patch_1' + s
                                  for s in ('', '.stream', '.gpu_resources')}
+                assert option['Image'] == 'images/' + component['slug'] + '.jpg'
+                expected.add(option['Image'])
             assert set(names) == expected
             provenance = json.loads(archive.read(provenance_name))
             for name, digest in provenance['files'].items(): assert sha(archive.read(name)) == digest
