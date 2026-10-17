@@ -829,5 +829,38 @@
       "tests/vanilla_tables.lua": "0060779912BA8E1C1D7D939892B173B581400B80B12677384A9419D1DCABF5F8"
     },
     "source_origin": "Standalone v1.0 pre-release source for Steam build 25480438; offline checks passed; its resource is byte for byte the one in that release."
+  },
+  {
+    "slug": "SoundSystemsRebalanced",
+    "name": "Sound Systems Rebalanced",
+    "revision": "v1.0",
+    "repository": "https://github.com/CowboyBingus/SoundSystemsRebalanced",
+    "module": "mods/cowboybingus/sound_systems_rebalanced",
+    "entry": "direct",
+    "resource_sha256": "CCF1E06FCF4278AB12D96B05226C89A81A428929E805A57F3B3FD65532AF5CF9",
+    "music_banks_sha256": {
+      "music_init": "A207AC1196A47EE6923DE1E051954AF5CD1A7C7AFC208E801A9715D2018ECA09",
+      "music_mission_bot": "C2F50B796590F0839A86EAF214094BE2C1D571A9EAB9B2EE18AD5BC5A19A14EB",
+      "music_mission_bug": "AF9CF1643D28C5D3E7DA1AA7BAE75766DBCEC410D5A81C9A2147F70BB016B48C",
+      "music_mission_bug_hiveworld": "CF565E9661BEBEBE13E5A165E369842DEA1CEC2B4671E96A2D1028AB00AA403F",
+      "music_mission_illuminate": "043CE4B5CFB54B7E2D84BD72DE8DFC14DA1754A8AC5CACF5CDF48EA1114A032E"
+    },
+    "music_archive_sha256": "F16873AEC5A4B7762CC5BAE3BB978CDDBC2DBEAF679D91CD45C7578A04D2BDA3",
+    "source_sha256": {
+      "scripts/biome_patch.py": "95F3EC2D138BEB761C7D2BA3D78D2367961285E3F748C9CF25B7B7CC0B3ADD15",
+      "scripts/build.py": "CA67F7DB50B23D68603F7280C1EAEDF3CB2BDCD1B9C50D74D035644B3237AD3A",
+      "scripts/wwise_bank.py": "BA6CF85CD08459689C4C67F24B9D41564BC0B2C5C30A3735C4959A04E7866054",
+      "src/bingus_memory.lua": "3973924B1C009CC4E6C863A4EAF87F166899A16DDCB579C3D77AB5465172B416",
+      "src/bingus_runtime.lua": "C4450F555F697E583916D18F876412CA96F6963EB1BF4CDAD451EBB906C2F988",
+      "src/sound_systems_rebalanced.lua": "ABD09A47D9DF697A9C2B119E4AB5489D508DEE0D1DFD3C251AF5160DF7A2B2F7",
+      "tests/compile_entry.lua": "F43910D6C6742AD10DDF0E67772CEFB0FFEE4754E9A3386F7DA7F115C7DB1662",
+      "tests/frame_budget.lua": "4E1E9F47EE7FCCFD24F6C79D475103ABF77989FC344EBB527869029793654E49",
+      "tests/game_lua.py": "C6BBC5F25AB21EFFC4351436826CE89FED0440F022BED0D9C573E5EA82560CDD",
+      "tests/hostile_vm.lua": "779B1DFD0A5BB8A2CEAB53EC8729E492838FB90018490A290D1BAFB3D9F938C4",
+      "tests/test_biome_patch.py": "AD5AAE29516269CCE44D6793B61581B82CCD00BFA5250C18F2B89FC02F1945AA",
+      "tests/test_entry.lua": "7EFF0C6E594C67A683BDA25225B33FA43D9AA9A7FE3028A1757F7594BC171227",
+      "tests/test_mod.lua": "E5ECF5414643DD0C0CF137C65361654FF1E7538C7CAA94CCF1428AA83796B751"
+    },
+    "source_origin": "Standalone v1.0 pre-release source for Steam build 25480438; offline checks passed; its resource and its music bank archive are byte for byte the ones in that release."
   }
 ]

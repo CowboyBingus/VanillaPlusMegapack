@@ -18,6 +18,7 @@ VERSION = '42'
 REVISION = f'megapack-v{VERSION}'
 GUID = '876060ae-0640-4ac5-95b6-ec7c9a0567d3'
 INPUT_ARCHIVE = ARCHIVE.replace('patch_0', 'patch_1')  # Mod Bindings Menu's input actions, beside its addon
+MUSIC_ARCHIVE = INPUT_ARCHIVE  # Sound Systems Rebalanced's patched music_init, beside its addon in its own option
 OPTION_DESCRIPTIONS = {
     'ArcThrowerRevamped': 'Hold the fire button to keep the Arc Thrower firing.',
     'ArmoryPreviewCache': 'Caches equipment thumbnails and preloads assets in Armory and mission briefing.',
@@ -41,6 +42,7 @@ OPTION_DESCRIPTIONS = {
     'MatchYourColors': 'Your helmet takes your armor\'s colors, or your armor takes your helmet\'s, or both take your cape\'s or one of the game\'s weapon paint schemes; your cape can follow (Mod Options Menu). Squadmates who use the mod see your colors too.',
     'StickyGrenadeHandles': 'The G-123 Thermite and the sticky stun grenade stick when their handle hits first, instead of bouncing off.',
     'StratagemHeroExpanded': 'The ship\'s Stratagem Hero arcade draws from every loadout stratagem and the common mission stratagems (108) instead of its 27 launch-era ones. Themed rounds stay.',
+    'SoundSystemsRebalanced': 'Mission music plays at the war-table volume in every mission, also when you join one in progress (it was 6 dB louder then), and no longer goes silent on swamp, desert and the other planet types the music had no version for.',
 }
 
 
@@ -135,7 +137,7 @@ def write_entry(component, body, build):
 # Their standalone builds pass it through the loader's entry_source, which keeps such an entry as it is, so the
 # option ships the same bytes.
 BUILD_ASSEMBLED = {'FlameDamageFixed': (), 'LaserSentryCooldown': (False,), 'MatchYourColors': (False,),
-                   'StickyGrenadeHandles': (), 'StratagemHeroExpanded': ()}
+                   'StickyGrenadeHandles': (), 'StratagemHeroExpanded': (), 'SoundSystemsRebalanced': ()}
 # Resources a component ships beside its module (Hellpod Drop Hold's compiled implementation), by slug:
 # {resource hash: payload}. The lock pins each one in the component's extra_resources.
 EXTRA = {}
@@ -256,6 +258,22 @@ def input_actions_archive(component):
     return archive
 
 
+def music_archive(component):
+    """Sound Systems Rebalanced's patched music_init sound bank, built by its own pinned scripts/biome_patch.py from the
+    builder's five unmodified vanilla music banks (HD2_MUSIC_BANKS), exactly as its standalone release."""
+    folder = os.environ.get('HD2_MUSIC_BANKS')
+    if not folder:
+        raise ValueError('Set HD2_MUSIC_BANKS to a folder holding the five unmodified music banks (CONTRIBUTING.md)')
+    banks = {name: sha((Path(folder) / (name + '.wwise_bank')).read_bytes()) for name in component['music_banks_sha256']}
+    if banks != component['music_banks_sha256']:
+        raise ValueError('HD2_MUSIC_BANKS does not hold the unmodified music banks of Steam build 25480438')
+    module = load_script(ROOT / 'components' / component['slug'], 'scripts/biome_patch.py', 'music_patch')
+    archive, _ = module.build(Path(folder))
+    if sha(archive) != component['music_archive_sha256']:
+        raise ValueError('Music bank resource differs from the verified standalone release')
+    return archive
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--desktop-capture', action='store_true',
@@ -312,11 +330,18 @@ def main():
                 path = directory / (INPUT_ARCHIVE + suffix)
                 path.write_bytes(data)
                 files[folder + '/' + path.name] = path.relative_to(ROOT).as_posix()
+        if component.get('music_archive_sha256'):
+            # Sound Systems Rebalanced also ships its patched music_init sound bank, as a second archive in the same
+            # option, like its standalone release.
+            for suffix, data in [('', music_archive(component)), ('.stream', b''), ('.gpu_resources', b'')]:
+                path = directory / (MUSIC_ARCHIVE + suffix)
+                path.write_bytes(data)
+                files[folder + '/' + path.name] = path.relative_to(ROOT).as_posix()
         options.append({'Name': component['name'], 'Description': OPTION_DESCRIPTIONS[component['slug']],
                         'Include': [folder]})
     report = {
         'name': 'Vanilla Plus Megapack', 'slug': 'VanillaPlusMegapack', 'revision': REVISION, 'guid': GUID,
-        'description': 'Choose any of the twenty-two bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v18. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. With default Arsenal priority put the loader last.',
+        'description': 'Choose any of the twenty-three bundled mods in this pack\'s Options menu in Arsenal or HD2MM. Requires the separate Bingus Shared Loader v18. Disable standalone copies of features you want turned off. Close the game, select your options, then Purge / Deploy. With default Arsenal priority put the loader last.',
         'requires': [{'name': 'Bingus Shared Loader', 'guid': '612eaf70-d682-43c7-9efd-16dcc695f977', 'api': 1, 'revision': 'loader-v18'}],
         'game_exe_sha256': EXE_SHA, 'game_dll_sha256': GAME_DLL_SHA,
         'deployment_files': files, 'options': options,

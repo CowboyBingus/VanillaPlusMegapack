@@ -31,10 +31,11 @@ local entries = {KnowYourConstellation = 'install.lua', ArmoryPreviewCache = 'in
                  LaserSentryCooldown = 'laser_sentry_cooldown.lua',
                  MatchYourColors = 'addon.lua',
                  StickyGrenadeHandles = 'sticky_grenade_handles.lua',
-                 StratagemHeroExpanded = 'stratagem_hero_expanded.lua'}
--- Laser Sentry Cooldown's, Match Your Colors', Sticky Grenade Handles' and Stratagem Hero Expanded's guards are
--- in their assembled entries; Hellpod Drop Hold's loader names the shared loader before its own guard, so all
--- five are named here.
+                 StratagemHeroExpanded = 'stratagem_hero_expanded.lua',
+                 SoundSystemsRebalanced = 'sound_systems_rebalanced.lua'}
+-- Laser Sentry Cooldown's, Match Your Colors', Sticky Grenade Handles', Stratagem Hero Expanded's and Sound
+-- Systems Rebalanced's guards are in their assembled entries; Hellpod Drop Hold's loader names the shared loader
+-- before its own guard, so all six are named here.
 local guards = {ClickableScrollbars = 'ClickableScrollbars',
                 ArcThrowerRevamped = 'ArcThrowerRevampedInstalled',
                 GalacticMenuHotkey = 'GalacticMenuHotkeyInstalled',
@@ -46,7 +47,8 @@ local guards = {ClickableScrollbars = 'ClickableScrollbars',
                 LaserSentryCooldown = 'LaserSentryCooldownInstalled',
                 MatchYourColors = 'MatchYourColorsInstalled',
                 StickyGrenadeHandles = 'StickyGrenadeHandles',
-                StratagemHeroExpanded = 'StratagemHeroExpanded'}
+                StratagemHeroExpanded = 'StratagemHeroExpanded',
+                SoundSystemsRebalanced = 'SoundSystemsRebalanced'}
 for i = 4, #arg, 2 do
     local module, slug = arg[i], assert(arg[i + 1])
     local entry = entries[slug] or 'archive_loader.lua'
@@ -74,7 +76,8 @@ local registry_cannot_see = {['mods/cowboybingus/clickable_scrollbars'] = true,
                              ['mods/cowboybingus/laser_sentry_cooldown'] = true,
                              ['mods/cowboybingus/match_your_colors'] = true,
                              ['mods/cowboybingus/sticky_grenade_handles'] = true,
-                             ['mods/cowboybingus/stratagem_hero_expanded'] = true}
+                             ['mods/cowboybingus/stratagem_hero_expanded'] = true,
+                             ['mods/cowboybingus/sound_systems_rebalanced'] = true}
 -- The option selections to replay: every selection of at most two options, every one missing at most
 -- two, and 256 seeded pseudo-random ones. Interactions between options are pairwise, which the first two
 -- groups cover exactly; replaying all 2^n selections took minutes per build (65536 at sixteen options)

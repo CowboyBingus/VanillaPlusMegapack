@@ -7,6 +7,10 @@ game in the Armory, on the ship and in one solo mission. v42 also adds
 Stratagem Hero Expanded (v1.0): its release build and the refreshed package
 ran to the ship and quit cleanly with loader v19, the package with all
 twenty-two options; its tables were written at load and held at shutdown.
+v42 also adds Sound Systems Rebalanced (v1.0): its release build and the package
+with all twenty-three options ran to the ship and quit cleanly with loader
+v19, its patched music bank loaded (the ship's music played), and its
+release build played its fallback music on a swamp planet in a solo mission.
 v41 updates Match
 Your Colors to v1.4, whose release build was played on this build on the ship
 and in the Armory. v40 updates Match

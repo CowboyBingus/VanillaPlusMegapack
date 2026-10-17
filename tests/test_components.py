@@ -172,9 +172,10 @@ def menu_commands(mods, build):
 
 
 def data_change_commands(mods, build):
-    """Hellpod Drop Hold, Laser Sentry Cooldown, Sticky Grenade Handles and Stratagem Hero Expanded: the suites
-    their own scripts/build.py runs, in LuaJIT and in the game's own lua51.dll (each component's
-    tests/game_lua.py, HD2_LUA51_DLL)."""
+    """Hellpod Drop Hold, Laser Sentry Cooldown, Sticky Grenade Handles, Stratagem Hero Expanded and Sound
+    Systems Rebalanced: the suites their own scripts/build.py runs, in LuaJIT and in the game's own lua51.dll
+    (each component's tests/game_lua.py, HD2_LUA51_DLL); Sound Systems Rebalanced's bank tests read
+    HD2_MUSIC_BANKS."""
     hold = mods / 'HellpodDropHold'
     # test_hold.lua checks that the adapter's module hash is its host executable's.
     commands = [[hold / 'tests/test_hold.lua', hold / 'src', sha(LUA.read_bytes())],
@@ -183,6 +184,8 @@ def data_change_commands(mods, build):
     sentry = mods / 'LaserSentryCooldown'
     handles = mods / 'StickyGrenadeHandles'
     arcade = mods / 'StratagemHeroExpanded'
+    music = mods / 'SoundSystemsRebalanced'
+    commands.append([music / 'tests/test_biome_patch.py'])
     for vm in ([], ['game']):
         sentry_prefix = [sentry / 'tests/game_lua.py'] if vm else []
         commands += [[*sentry_prefix, sentry / 'tests/test_cooldown.lua', sentry],
@@ -199,6 +202,10 @@ def data_change_commands(mods, build):
         commands += [[*arcade_prefix, arcade / 'tests/test_mod.lua', arcade],
                      [*arcade_prefix, arcade / 'tests/compile_entry.lua', build / 'StratagemHeroExpanded/entry.lua'],
                      [*arcade_prefix, arcade / 'tests/test_entry.lua', build / 'StratagemHeroExpanded/entry.lua']]
+        music_prefix = [music / 'tests/game_lua.py'] if vm else []
+        commands += [[*music_prefix, music / 'tests/test_mod.lua', music],
+                     [*music_prefix, music / 'tests/compile_entry.lua', build / 'SoundSystemsRebalanced/entry.lua'],
+                     [*music_prefix, music / 'tests/test_entry.lua', build / 'SoundSystemsRebalanced/entry.lua']]
     return commands
 
 

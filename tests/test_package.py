@@ -6,9 +6,10 @@ import struct
 import sys
 import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from build import ARCHIVE, ASSEMBLED, BUILD, GUID, INPUT_ARCHIVE, MODULE, VERSION, REVISION, ROOT, load_components, resource_hash, sha
+from build import ARCHIVE, ASSEMBLED, BUILD, GUID, INPUT_ARCHIVE, MODULE, MUSIC_ARCHIVE, VERSION, REVISION, ROOT, load_components, resource_hash, sha
 
 INPUT, CONFIG = resource_hash('content/input'), resource_hash('config')
+MUSIC, BANK = resource_hash('content/audio/music_init'), resource_hash('wwise_bank')
 
 
 def input_actions(data):
@@ -17,6 +18,17 @@ def input_actions(data):
     key, kind, offset = struct.unpack_from('<7Q6I', data, 104)[:3]
     size = struct.unpack_from('<7Q6I', data, 104)[7]
     assert key == INPUT and kind == CONFIG and offset % 16 == 0 and offset + size <= len(data)
+    return {key: data[offset:offset + size]}
+
+
+def music_bank(data):
+    """Sound Systems Rebalanced's second archive: exactly one wwise_bank resource, content/audio/music_init, without stream
+    or GPU parts."""
+    assert struct.unpack_from('<III', data) == (0xF0000011, 1, 1) and struct.unpack_from('<I', data, 88)[0] == 1
+    entry = struct.unpack_from('<7Q6I', data, 104)
+    key, kind, offset, size = entry[0], entry[1], entry[2], entry[7]
+    assert key == MUSIC and kind == BANK and offset % 16 == 0 and offset + size <= len(data)
+    assert entry[8] == 0 and entry[9] == 0
     return {key: data[offset:offset + size]}
 
 
@@ -59,11 +71,13 @@ def main():
                     for s in ('', '.stream', '.gpu_resources')}
         expected |= {f'options/{c["slug"]}/{INPUT_ARCHIVE}{s}' for c in components if c.get('input_archive_sha256')
                      for s in ('', '.stream', '.gpu_resources')}
+        expected |= {f'options/{c["slug"]}/{MUSIC_ARCHIVE}{s}' for c in components if c.get('music_archive_sha256')
+                     for s in ('', '.stream', '.gpu_resources')}
         expected |= {'manifest.json', 'thumbnail.png', slug+'-manifest.json', slug+'-README.txt'}
         assert len(package.namelist()) == len(expected) and set(package.namelist()) == expected
         manager = json.loads(package.read('manifest.json'))
         assert manager['Version'] == 1 and manager['Name'] == name+f' - v{VERSION}' and manager['Guid'] == GUID
-        assert len(manager['Options']) == len(components) == 22
+        assert len(manager['Options']) == len(components) == 23
         assert manager['IconPath'] == 'thumbnail.png'
         png = package.read('thumbnail.png')
         assert png[:8] == b'\x89PNG\r\n\x1a\n'
@@ -105,6 +119,16 @@ def main():
                 choice = {**choice, **extra}
                 for suffix in ('.stream', '.gpu_resources'):
                     assert package.read(folder + '/' + INPUT_ARCHIVE + suffix) == b''
+            if component.get('music_archive_sha256'):
+                # The music option also carries its patched music_init, byte for byte its standalone archive.
+                data = package.read(folder + '/' + MUSIC_ARCHIVE)
+                assert sha(data) == component['music_archive_sha256']
+                extra = music_bank(data)
+                assert not set(extra) & set(payloads)
+                payloads.update(extra)
+                choice = {**choice, **extra}
+                for suffix in ('.stream', '.gpu_resources'):
+                    assert package.read(folder + '/' + MUSIC_ARCHIVE + suffix) == b''
             choices.append(choice)
         # Checkbox combinations: none, all, each of at most two options or missing at most two, and 256
         # seeded random ones (tests/test_loader.lua's selections). No disabled feature may leak into an
@@ -119,10 +143,12 @@ def main():
                     wanted |= extras(component)
                     if component.get('input_archive_sha256'):
                         wanted.add(INPUT)
+                    if component.get('music_archive_sha256'):
+                        wanted.add(MUSIC)
             if mask:
                 wanted.add(resource_hash(MODULE))
             assert set(selected) == wanted
-        assert set(payloads) == ({resource_hash(c['module']) for c in components} | {resource_hash(MODULE), INPUT}
+        assert set(payloads) == ({resource_hash(c['module']) for c in components} | {resource_hash(MODULE), INPUT, MUSIC}
                                  | {key for c in components for key in extras(c)})
         for component in components:
             original = (build / component['slug'] / 'mod.lua.main').read_bytes()
@@ -155,12 +181,13 @@ def main():
             original = (build / component['slug'] / 'mod.lua.main').read_bytes()
             assert bytecode == original[8:] and bytecode[:5] == b'\x1bLJ\x02\x02'
         assert [c['slug'] for c in components if c.get('input_archive_sha256')] == ['ModBindingsMenu']
+        assert [c['slug'] for c in components if c.get('music_archive_sha256')] == ['SoundSystemsRebalanced']
         assert resource_hash('boot') not in payloads
         assert resource_hash('core/wwise/lua/wwise_flow_callbacks') not in payloads
         for name in package.namelist():
             data = package.read(name).lower()
             assert b'users\\' not in data and b'users/' not in data
-    print(f'PASS: {len(components)} independent options, {len(masks)} of the {1 << len(components)} selections, exact pinned payloads, bindings input actions only in their option, no boot or shared loader')
+    print(f'PASS: {len(components)} independent options, {len(masks)} of the {1 << len(components)} selections, exact pinned payloads, bindings input actions and the music bank only in their options, no boot or shared loader')
 
 
 def selections(n):

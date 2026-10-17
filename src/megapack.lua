@@ -31,6 +31,7 @@ local pack = {
         'mods/cowboybingus/match_your_colors',
         'mods/cowboybingus/sticky_grenade_handles',
         'mods/cowboybingus/stratagem_hero_expanded',
+        'mods/cowboybingus/sound_systems_rebalanced',
     },
 }
 loader.megapack = pack
