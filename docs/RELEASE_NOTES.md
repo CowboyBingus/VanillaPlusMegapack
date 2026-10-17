@@ -4,11 +4,8 @@
 - Match Your Colors v1.5: new Recolor Squadmates option: squadmates without the mod, or every squadmate, are recolored with your settings, on your screen only.
 - Match Your Colors v1.5: Match Materials now also turns a painted hard part into the metal it takes, such as the B-22 Model Citizen's chrome or the Eye of Liberty cape's gold; cloth never turns into metal.
 - Match Your Colors v1.5: with Helmet and Armor Match Cape your gear matches the cape as it looks in the game, so the default black capes give a black armor, not a grey one.
-- Match Your Colors v1.5: an armor that would turn one solid color, such as the SA-25 Steel Trooper, takes the helmet's or cape's own second, dark and accent colors on its clothing, straps and trims.
-- Match Your Colors v1.5: a vivid helmet or armor color covering a tenth of it or more, but less than its main color, reaches the other item's parts, and clothing never takes a colored metal's flat paint.
-- Match Your Colors v1.5: brown leather, tan and khaki parts no longer turn into a helmet's accent color, such as bright red gloves and boots from the PH-9 Predator's beret.
-- Match Your Colors v1.5: an armor no longer stays one solid color when a band of its plates takes the helmet's main color, such as the SA-04 Combat Technician with the CE-35 Trench Engineer.
-- Match Your Colors v1.5: a helmet's lighter minor color no longer covers most of an armor's clothing.
+- Match Your Colors v1.5: an armor that would turn one solid color, such as the SA-25 Steel Trooper or the SA-04 Combat Technician with the CE-35 Trench Engineer, takes the helmet's or cape's own second, dark and accent colors on its clothing, straps and trims.
+- Match Your Colors v1.5: a vivid helmet or armor color covering a tenth of it or more, but less than its main color, reaches the other item's parts, brown leather, tan and khaki parts never take a vivid accent such as the PH-9 Predator's red beret, and clothing never takes a colored metal's flat paint.
 - Match Your Colors v1.5: modded gear that paints its colors into its texture instead of the game's color table, such as the Cowboy Hat mod, now gives its colors and takes yours.
 - Match Your Colors v1.5: cape designs drawn light on dark keep a readable contrast on their new colors (Proof of Faultless Virtue, Botslayer), and a recolored design sheet is only reused for one of the same layout.
 - Match Your Colors v1.5: new Recolor Weapons option (Off by default): your primary, sidearm and support weapon take your colors the way the game's weapon paint schemes repaint a weapon; with one of those schemes picked as Paint Scheme they wear it exactly as the game paints it.
@@ -17,7 +14,6 @@
 - Match Your Colors v1.5: squadmates are now recolored in missions too; the mod looked for them only among your own player's records.
 - Match Your Colors v1.5: new choice Squadmates' Colors: Their Own Gear (default) or Your Colors, which gives the squadmates Recolor Squadmates recolors your colors, so the squad matches you.
 - Match Your Colors v1.5: new choice Hide Cape: Your Cape hides your cape on the ship and in missions, also for squadmates who use the mod; Everyone's Capes hides every squadmate's cape on your screen too.
-- Match Your Colors v1.5: in a squad of three or more, squadmates' weapons keep their own colors after a squadmate dies; they could swap colors or stop being recolored.
 - New option: Stratagem Hero Expanded v1.0: the ship's Stratagem Hero arcade draws from all 96 loadout stratagems and 12 common mission stratagems (108) instead of its 27 launch-era ones; themed rounds stay.
 - New option: Sound Systems Rebalanced v1.0: mission music plays at the war-table volume in every mission, also when you join one in progress (it was 6 dB louder then), and no longer goes silent on swamp, desert, oasis, deciduous and coniferous forest, hive world and active rift planets.
 - New option: Foliage Pass-Through v1.0: player rockets, missiles, launcher rounds and stratagem ordnance pass through tree canopies and bushes instead of exploding in them; trunks, the ground and enemies still stop them.
