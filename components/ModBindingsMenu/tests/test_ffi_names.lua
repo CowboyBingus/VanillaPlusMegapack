@@ -122,6 +122,21 @@ _G.update = function() end
 dofile(root .. '/src/mod_bindings_menu.lua')
 assert(rawget(_G, 'ModBindingsMenu'), 'Mod Bindings Menu loaded')
 
+-- No source file names VirtualProtect: Mod Bindings Menu never changes page
+-- protection. SOURCES is every file in src/; each one the addon loaded must
+-- be in it.
+local SOURCES = {'assignments', 'bingus_memory', 'bingus_runtime', 'bingus_text', 'capture', 'extended',
+                 'extended_store', 'mod_bindings_menu', 'panel', 'poll', 'sweep'}
+local listed = {}
+for _, name in ipairs(SOURCES) do
+    listed[name] = true
+    local file = assert(io.open(root .. '/src/' .. name .. '.lua', 'rb'))
+    local text = file:read('*a')
+    file:close()
+    assert(not text:find('VirtualProtect', 1, true), 'src/' .. name .. '.lua names VirtualProtect')
+end
+for name in pairs(mbm_files) do assert(listed[name], 'src/' .. name .. '.lua is missing from SOURCES') end
+
 if order == 'mbm-first' then
     -- Mod Bindings Menu declared none of the plain names, so the other mod's
     -- declarations, struct tags and type names all go through and win.
@@ -164,29 +179,44 @@ assert(read(address, 4) == '\1\2\3\4' and read(1, 4) == nil, 'read')
 assert(read_words(address, 8) and words[0] == 0x04030201 and words[1] == 0x08070605, 'read_words')
 assert(not read_words(1, 8), 'read_words refuses an unreadable address')
 
--- Writes: directly into writable memory; through the protection fallback on a
--- read-only page, whose protection comes back; refused (false, never raised)
--- on reserved memory and when the fallback fails.
+-- Writes: directly into writable memory. Mod Bindings Menu never changes page
+-- protection: a write to a read-only page, to reserved memory or across the
+-- end of a writable region returns false (never raises), writes nothing, keeps
+-- the page's protection and logs one line per address, at most four.
 local target = ffi.new('uint32_t[2]')
 assert(write_memory(tonumber(ffi.cast('uintptr_t', target)), 4, function() target[0] = 0x11223344 end) == true
        and target[0] == 0x11223344, 'direct write')
 local PAGE = 4096
-local region = test_kernel.mbm_test_VirtualAlloc(nil, 2 * PAGE, 0x2000, 0x01) -- reserved, no access
-assert(region ~= nil and test_kernel.mbm_test_VirtualAlloc(region, PAGE, 0x1000, 0x02) ~= nil) -- page 0 read-only
+local region = test_kernel.mbm_test_VirtualAlloc(nil, 3 * PAGE, 0x2000, 0x01) -- reserved, no access
+assert(region ~= nil and test_kernel.mbm_test_VirtualAlloc(region, PAGE, 0x1000, 0x04) ~= nil) -- page 0 writable
 local page = tonumber(ffi.cast('uintptr_t', region))
+assert(test_kernel.mbm_test_VirtualAlloc(ffi.cast('void *', page + PAGE), PAGE, 0x1000, 0x02) ~= nil) -- 1 read-only
 local cells = ffi.cast('uint32_t *', region)
-assert(write_memory(page + 16, 4, function() cells[4] = 0x55667788 end) == true and cells[4] == 0x55667788,
-       'write through the protection fallback')
 local info = ffi.new('mbm_test_region')
-assert(test_kernel.mbm_test_VirtualQuery(region, info, ffi.sizeof(info)) ~= 0 and info.protection == 0x02,
-       'page protection restored')
-local called = false
-assert(write_memory(page + PAGE, 4, function() called = true end) == false and not called, 'reserved memory refused')
-local before = #lines
-assert(write_memory(page + PAGE - 2, 4, function() called = true end) == false and not called,
-       'a write the fallback cannot cover is refused')
-assert(#lines == before + 1 and lines[#lines]:find('Write refused', 1, true)
-       and lines[#lines]:find('error 487', 1, true), 'the refusal names the Windows error: ' .. tostring(lines[#lines]))
+local function protection_of(address)
+    assert(test_kernel.mbm_test_VirtualQuery(ffi.cast('void *', address), info, ffi.sizeof(info)) ~= 0)
+    return info.protection
+end
+local function writes_nothing(address, label, protection)
+    local called, before = false, #lines
+    assert(write_memory(address, 4, function() called = true end) == false and not called, label .. ': refused')
+    assert(#lines == before + 1 and lines[#lines]:find('Write skipped at game.dll+0x', 1, true)
+           and lines[#lines]:find(string.format('page not writable (protection 0x%x)', protection), 1, true),
+           label .. ': one log line: ' .. tostring(lines[#lines]))
+    assert(write_memory(address, 4, function() called = true end) == false and not called and #lines == before + 1,
+           label .. ': a second refusal at the same address logs nothing more')
+end
+assert(write_memory(page + 16, 4, function() cells[4] = 0x55667788 end) == true and cells[4] == 0x55667788,
+       'write into a committed writable page')
+writes_nothing(page + PAGE + 16, 'read-only page', 0x02)
+assert(cells[PAGE / 4 + 4] == 0 and protection_of(page + PAGE) == 0x02, 'read-only page unchanged')
+writes_nothing(page + PAGE - 2, 'a write across the end of the writable region', 0x04)
+assert(cells[PAGE / 4 - 1] == 0 and protection_of(page) == 0x04, 'writable page unchanged')
+writes_nothing(page + 2 * PAGE, 'reserved memory', 0x0)
+writes_nothing(page + PAGE + 32, 'another read-only address', 0x02)
+local called, before = false, #lines
+assert(write_memory(page + PAGE + 48, 4, function() called = true end) == false and not called
+       and #lines == before, 'a fifth refused address writes nothing and logs nothing (four lines per session)')
 assert(test_kernel.mbm_test_VirtualFree(region, 0, 0x8000) ~= 0)
 
 -- Module hashing through the runtime (GetModuleFileNameW, CreateFileW,
@@ -240,6 +270,6 @@ if order ~= 'hostile-first' then
     local previous = ffi.new('DWORD[1]')
     assert(k.VirtualProtect(target, 4, 0x04, previous) ~= 0 and bit.band(previous[0], 0xff) == 0x04)
 end
-print('PASS: FFI names, ' .. order .. ': reads, writes (direct, protection fallback, refusals), module hashing and '
-      .. 'the build check work through private names' .. (order == 'hostile-first' and '' or
+print('PASS: FFI names, ' .. order .. ': reads, writes (direct; skipped on pages that are not writable, '
+      .. 'protection unchanged), module hashing and the build check work through private names' .. (order == 'hostile-first' and '' or
       ', and the other mod\'s SDK declarations keep working'))

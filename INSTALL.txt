@@ -17,8 +17,8 @@ Enable the Mod Bindings Menu option to rebind Ship Station Hotkeys on the MODS
 tab of Mouse & Keyboard or Controller. Without it, the shortcuts use Tab, F1
 and F5-F8 aboard the ship while no menu is open. The option was named Galactic
 Menu Hotkey before v29; confirm it is still checked after updating. Mod
-Bindings Menu ships its own content/input.config override; another mod that
-replaces that resource must be merged with it.
+Bindings Menu replaces no game file: its keyboard defaults are added while the
+game runs.
 
 Updating preserves your existing custom bindings. If mission selection still
 immediately deselects with Ship Station Hotkeys after updating, open the MODS

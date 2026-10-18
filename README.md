@@ -65,7 +65,7 @@ Know Your Constellation, Better Lobby Management, Mod Options Menu, Mod Bindings
 
 ## Compatibility and updates
 
-The pack preserves all public gameplay resource names and embeds the exact pinned bytecode inside plaintext discovery entries. It contains no shared startup loader, `boot` replacement or Wwise callback replacement. The Mod Bindings Menu option is the only one that also replaces a game resource: its `content/input.config` override with the native input actions, byte for byte the standalone release's. Another mod that replaces that resource must be merged with it. Existing HUD+ and supported HUD Ballistic Trajectory Overlay compatibility is handled by Bingus Shared Loader. Give the loader winning priority over the supported overlay as described in its instructions.
+The pack preserves all public gameplay resource names and embeds the exact pinned bytecode inside plaintext discovery entries. It contains no shared startup loader, `boot` replacement or Wwise callback replacement. The Sound Systems Rebalanced option is the only one that also replaces a game resource: its patched `music_init` sound bank, byte for byte the standalone release's. The Mod Bindings Menu option replaces none: its keyboard defaults are added while the game runs. Existing HUD+ and supported HUD Ballistic Trajectory Overlay compatibility is handled by Bingus Shared Loader. Give the loader winning priority over the supported overlay as described in its instructions.
 
 Replace the megapack ZIP to update its bundled gameplay versions. Updating an individual mod repository does not silently change this pinned pack. The loader can be updated separately.
 

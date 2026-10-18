@@ -299,10 +299,10 @@ state.buckets = {}
 assert(host.is_down('map') == nil)
 print('Restored developer defaults removed before is_down answers OK')
 
--- The game can refuse page-protection changes mid-session. Pages that are not
--- currently writable and a failing VirtualProtect must degrade the MODS tab,
--- never leave the previous tab's rows (or raise), and never free a buffer the
--- game can still see.
+-- Mod Bindings Menu never changes page protection. Pages that are not
+-- writable must degrade the MODS tab, never leave the previous tab's rows (or
+-- raise), and never free a buffer the game can still see. The kernel here has
+-- no VirtualProtect (or GetLastError): reaching for one fails the test.
 put64(base + 0x347cf18, owner_address)
 state.buckets = {}
 local claim_label = upvalue(upvalue(upvalue(fill_tab, 'tab_layout'), 'mods_layout'), 'claim_label')
@@ -315,9 +315,10 @@ local fake_kernel32 = setmetatable({
         if refuse then info.Protect = 0x02 end -- PAGE_READONLY
         return found
     end,
-    MBM_VirtualProtect = function(...) if refuse then return 0 end return real_kernel32.MBM_VirtualProtect(...) end,
-    MBM_GetLastError = function() return 5 end,
-}, {__index = function(_, key) return real_kernel32[key] end})
+}, {__index = function(_, key)
+    if key:find('VirtualProtect', 1, true) or key:find('GetLastError', 1, true) then error('kernel32.' .. key) end
+    return real_kernel32[key]
+end})
 for index = 1, 60 do
     local name = debug.getupvalue(write_memory, index)
     if name == 'kernel32' then debug.setupvalue(write_memory, index, fake_kernel32) break end
@@ -763,8 +764,8 @@ remove_assignments()
 -- PerformanceBaseline/frame_budget.lua). A fresh instance on the simulated game
 -- holds Ship Station Hotkeys' six bindings; its Windows calls and its native
 -- list calls are counted through one api table. In game a ReadProcessMemory
--- costs about 1-2 us and a VirtualQuery about 0.29 ms; VirtualProtect runs only
--- when a page is not writable (never here). Ship Station Hotkeys calls is_down
+-- costs about 1-2 us and a VirtualQuery about 0.29 ms; the addon has no
+-- VirtualProtect (the kernel below raises for one). Ship Station Hotkeys calls is_down
 -- for each of its six bindings on every frame aboard the ship while the game
 -- is focused.
 do
@@ -807,14 +808,14 @@ do
             return real_kernel.MBM_ReadProcessMemory(process, address, ...)
         end,
         VirtualQuery = function(...) return real_kernel.MBM_VirtualQuery(...) end,
-        VirtualProtect = function(...) return real_kernel.MBM_VirtualProtect(...) end,
         build_rows = state.build_rows, set_tab_labels = state.set_tab_labels, reset_list = state.reset_list,
     }
     local counts = budget.wrap(api)
     -- Mod Bindings Menu's private FFI names, counted under the Windows names.
     local counted = {MBM_read_at = 'ReadProcessMemory', MBM_ReadProcessMemory = 'ReadProcessMemory',
-                     MBM_VirtualQuery = 'VirtualQuery', MBM_VirtualProtect = 'VirtualProtect'}
+                     MBM_VirtualQuery = 'VirtualQuery'}
     debug.setupvalue(kernel_holder, kernel_index, setmetatable({}, {__index = function(_, name)
+        if name:find('VirtualProtect', 1, true) then error('kernel32.' .. name) end
         return counted[name] and api[counted[name]] or real_kernel[name]
     end}))
     st.build_rows = function(...) return api.build_rows(...) end

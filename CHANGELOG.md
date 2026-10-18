@@ -8,6 +8,8 @@
 - Mod Bindings Menu v2.3: prevent Revert from restoring hidden developer mouse and controller inputs that could make mission-selection clicks reopen the Galactic Map with Ship Station Hotkeys.
 - Mod Bindings Menu v2.3: the MODS tab's first section header is no longer blank in game languages other than English, Japanese and Simplified Chinese.
 - Mod Bindings Menu v2.3: every game text ID it borrows now exists in all of the game's languages; up to 59 different texts show on the MODS tab at once, down from 65.
+- Mod Bindings Menu v2.3: never changes the game's memory protection; a write to a page that is not writable is skipped and logged.
+- Mod Bindings Menu v2.3: no longer replaces the game's input configuration; its six keyboard defaults are added while the game runs, only on a supported game build.
 - Match Your Colors v1.5: new Recolor Squadmates option: squadmates without the mod, or every squadmate, are recolored with your settings, on your screen only.
 - Match Your Colors v1.5: Match Materials now also turns a painted hard part into the metal it takes, such as the B-22 Model Citizen's chrome or the Eye of Liberty cape's gold; cloth never turns into metal.
 - Match Your Colors v1.5: with Helmet and Armor Match Cape your gear matches the cape as it looks in the game, so the default black capes give a black armor, not a grey one.

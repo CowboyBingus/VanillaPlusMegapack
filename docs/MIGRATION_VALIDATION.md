@@ -34,6 +34,13 @@ options ran to the ship, into a solo mission and back, and quit cleanly with
 loader v19; Arc Thrower Revamped logged that it initialised on game build
 25480438 and Clickable Scrollbars reported running, both without errors. Their
 refusal on another game build is checked by their tests only.
+v42 then updates Mod Bindings Menu v2.3 so that it never changes the game's
+memory protection and no longer replaces content/input: the package with all
+twenty-five options ran to the ship, into a solo mission and back, and quit
+cleanly with loader v20; no deployed archive held content/input, and Mod
+Bindings Menu reported version 4, its guard ran without errors and it logged
+that it added its keyboard defaults to 12 binding records. Rebinding them in
+the binding pages has not been checked in game yet.
 v42 also gives each option its own cover: every file a manager deploys is byte
 for byte the previous v42 package's, and Arsenal 0.36.0 and HD2MM 1.3
 imported it and resolved each option's own image.

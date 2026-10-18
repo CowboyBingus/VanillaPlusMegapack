@@ -6,19 +6,10 @@ import struct
 import sys
 import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from build import ARCHIVE, ASSEMBLED, BUILD, GUID, INPUT_ARCHIVE, MODULE, MUSIC_ARCHIVE, VERSION, REVISION, ROOT, load_components, resource_hash, sha
+from build import ARCHIVE, ASSEMBLED, BUILD, GUID, MODULE, MUSIC_ARCHIVE, VERSION, REVISION, ROOT, load_components, resource_hash, sha
 
-INPUT, CONFIG = resource_hash('content/input'), resource_hash('config')
+INPUT = resource_hash('content/input')  # the game's input configuration: no option ships it
 MUSIC, BANK = resource_hash('content/audio/music_init'), resource_hash('wwise_bank')
-
-
-def input_actions(data):
-    """Mod Bindings Menu's second archive: exactly one config resource, content/input."""
-    assert struct.unpack_from('<III', data) == (0xF0000011, 1, 1) and struct.unpack_from('<I', data, 88)[0] == 1
-    key, kind, offset = struct.unpack_from('<7Q6I', data, 104)[:3]
-    size = struct.unpack_from('<7Q6I', data, 104)[7]
-    assert key == INPUT and kind == CONFIG and offset % 16 == 0 and offset + size <= len(data)
-    return {key: data[offset:offset + size]}
 
 
 def music_bank(data):
@@ -83,8 +74,6 @@ def main():
     with zipfile.ZipFile(sys.argv[1]) as package:
         expected = {f'options/{c["slug"]}/{ARCHIVE}{s}' for c in components
                     for s in ('', '.stream', '.gpu_resources')}
-        expected |= {f'options/{c["slug"]}/{INPUT_ARCHIVE}{s}' for c in components if c.get('input_archive_sha256')
-                     for s in ('', '.stream', '.gpu_resources')}
         expected |= {f'options/{c["slug"]}/{MUSIC_ARCHIVE}{s}' for c in components if c.get('music_archive_sha256')
                      for s in ('', '.stream', '.gpu_resources')}
         expected |= {f'images/{c["slug"]}.jpg' for c in components}
@@ -129,16 +118,6 @@ def main():
                 payloads[key] = value
             for suffix in ('.stream', '.gpu_resources'):
                 assert package.read(folder + '/' + ARCHIVE + suffix) == b''
-            if component.get('input_archive_sha256'):
-                # The bindings option also carries its input actions, byte for byte its standalone archive.
-                data = package.read(folder + '/' + INPUT_ARCHIVE)
-                assert sha(data) == component['input_archive_sha256']
-                extra = input_actions(data)
-                assert not set(extra) & set(payloads)
-                payloads.update(extra)
-                choice = {**choice, **extra}
-                for suffix in ('.stream', '.gpu_resources'):
-                    assert package.read(folder + '/' + INPUT_ARCHIVE + suffix) == b''
             if component.get('music_archive_sha256'):
                 # The music option also carries its patched music_init, byte for byte its standalone archive.
                 data = package.read(folder + '/' + MUSIC_ARCHIVE)
@@ -161,14 +140,12 @@ def main():
                     selected.update(choice)
                     wanted.add(resource_hash(component['module']))
                     wanted |= extras(component)
-                    if component.get('input_archive_sha256'):
-                        wanted.add(INPUT)
                     if component.get('music_archive_sha256'):
                         wanted.add(MUSIC)
             if mask:
                 wanted.add(resource_hash(MODULE))
             assert set(selected) == wanted
-        assert set(payloads) == ({resource_hash(c['module']) for c in components} | {resource_hash(MODULE), INPUT, MUSIC}
+        assert set(payloads) == ({resource_hash(c['module']) for c in components} | {resource_hash(MODULE), MUSIC}
                                  | {key for c in components for key in extras(c)})
         for component in components:
             original = (build / component['slug'] / 'mod.lua.main').read_bytes()
@@ -200,14 +177,16 @@ def main():
             bytecode = bytes(int(x) for x in re.findall(rb'\\([0-9]{3})', match[1]))
             original = (build / component['slug'] / 'mod.lua.main').read_bytes()
             assert bytecode == original[8:] and bytecode[:5] == b'\x1bLJ\x02\x02'
-        assert [c['slug'] for c in components if c.get('input_archive_sha256')] == ['ModBindingsMenu']
+        # Mod Bindings Menu v2.3 adds its keyboard defaults while the game runs: no option replaces content/input.
+        assert INPUT not in payloads
+        assert not any(key in c for c in components for key in ('input_archive_sha256', 'input_config_sha256'))
         assert [c['slug'] for c in components if c.get('music_archive_sha256')] == ['SoundSystemsRebalanced']
         assert resource_hash('boot') not in payloads
         assert resource_hash('core/wwise/lua/wwise_flow_callbacks') not in payloads
         for name in package.namelist():
             data = package.read(name).lower()
             assert b'users\\' not in data and b'users/' not in data
-    print(f'PASS: {len(components)} independent options, {len(masks)} of the {1 << len(components)} selections, exact pinned payloads, bindings input actions and the music bank only in their options, no boot or shared loader')
+    print(f'PASS: {len(components)} independent options, {len(masks)} of the {1 << len(components)} selections, exact pinned payloads, the music bank only in its option, no content/input, no boot or shared loader')
 
 
 def selections(n):

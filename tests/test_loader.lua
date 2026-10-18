@@ -142,8 +142,8 @@ for _, scenario in ipairs(scenarios) do
             for i = 2, #names do
                 if available[names[i]] then
                     archives[#archives + 1] = build .. '/options/' .. folders[i] .. '/9ba626afa44a3aa3.patch_0'
-                    -- The bindings option also deploys its input actions (a config archive): discovery must skip it.
-                    if folders[i] == 'ModBindingsMenu' then
+                    -- The music option also deploys its sound bank (a wwise_bank archive): discovery must skip it.
+                    if folders[i] == 'SoundSystemsRebalanced' then
                         archives[#archives + 1] = build .. '/options/' .. folders[i] .. '/9ba626afa44a3aa3.patch_1'
                     end
                 end

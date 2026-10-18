@@ -507,13 +507,13 @@ local api = {
         return real_kernel.MBM_ReadProcessMemory(process, address, ...)
     end,
     VirtualQuery = function(...) return real_kernel.MBM_VirtualQuery(...) end,
-    VirtualProtect = function(...) return real_kernel.MBM_VirtualProtect(...) end,
     consume = real_consume,
 }
 local counts = budget.wrap(api)
 local counted = {MBM_read_at = 'ReadProcessMemory', MBM_ReadProcessMemory = 'ReadProcessMemory',
-                 MBM_VirtualQuery = 'VirtualQuery', MBM_VirtualProtect = 'VirtualProtect'}
+                 MBM_VirtualQuery = 'VirtualQuery'}
 debug.setupvalue(kernel_holder, kernel_index, setmetatable({}, {__index = function(_, name)
+    if name:find('VirtualProtect', 1, true) then error('kernel32.' .. name) end
     return counted[name] and api[counted[name]] or real_kernel[name]
 end}))
 mbm.consume_action = function(...) return api.consume(...) end

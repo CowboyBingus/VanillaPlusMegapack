@@ -521,6 +521,7 @@
   "components/ModBindingsMenu/tests/test_ffi_names.lua",
   "components/ModBindingsMenu/tests/test_ffi_names_hostile_first.lua",
   "components/ModBindingsMenu/tests/test_ffi_names_mbm_first.lua",
+  "components/ModBindingsMenu/tests/test_keyboard_defaults.lua",
   "components/ModBindingsMenu/tests/test_mods_tab.lua",
   "components/ModBindingsMenu/tests/test_panel.lua",
   "components/ModBindingsMenu/tests/test_poll.lua",

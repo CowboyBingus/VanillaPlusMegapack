@@ -156,7 +156,7 @@ def menu_commands(mods, build):
                             ('test_ffi_names', []), ('test_ffi_names_hostile_first', []),
                             ('test_ffi_names_mbm_first', []), ('test_extended', [bindings_source]),
                             ('test_extended_store', [bindings_source]), ('test_capture', [bindings_source]),
-                            ('test_panel', [bindings_source])):
+                            ('test_panel', [bindings_source]), ('test_keyboard_defaults', [])):
         commands.append([bindings / 'tests' / (name + '.lua'), *arguments])
     for slug in ('ModOptionsMenu', 'ModBindingsMenu', 'GalacticMenuHotkey'):
         commands.append([mods / slug / 'tests/test_bingus_text.lua', mods / slug / 'src'])

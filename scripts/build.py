@@ -17,7 +17,7 @@ MODULE = 'mods/cowboybingus/vanilla_plus_megapack'
 VERSION = '42'
 REVISION = f'megapack-v{VERSION}'
 GUID = '876060ae-0640-4ac5-95b6-ec7c9a0567d3'
-INPUT_ARCHIVE = ARCHIVE.replace('patch_0', 'patch_1')  # Mod Bindings Menu's input actions, beside its addon
+INPUT_ARCHIVE = ARCHIVE.replace('patch_0', 'patch_1')  # an option's second archive, beside its addon
 MUSIC_ARCHIVE = INPUT_ARCHIVE  # Sound Systems Rebalanced's patched music_init, beside its addon in its own option
 OPTION_DESCRIPTIONS = {
     'ArcThrowerRevamped': 'Hold the fire button to keep the Arc Thrower firing.',
@@ -236,31 +236,6 @@ def build_component(component, build=BUILD):
     return payload
 
 
-def input_actions_archive(component):
-    """Mod Bindings Menu's native input actions (content/input), built by its own pinned build script from
-    the builder's unmodified content/input.config (HD2_INPUT_CONFIG), exactly as its standalone release."""
-    import importlib.util
-    import types
-    config = os.environ.get('HD2_INPUT_CONFIG')
-    if not config:
-        raise ValueError('Set HD2_INPUT_CONFIG to your extracted, unmodified content/input.config (CONTRIBUTING.md)')
-    # The script's own packaging imports the shared loader's build_addon; only its config functions run here.
-    if 'build_addon' not in sys.modules:
-        stub = types.ModuleType('build_addon')
-        stub.entry_source = None
-        sys.modules['build_addon'] = stub
-    spec = importlib.util.spec_from_file_location('bindings_build', ROOT / 'components' / component['slug'] / 'scripts/build.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    vanilla = Path(config).read_bytes()
-    if sha(vanilla) != component['input_config_sha256'] or module.CONFIG_SHA256 != component['input_config_sha256']:
-        raise ValueError('HD2_INPUT_CONFIG is not the unmodified content/input.config of Steam build 25480438')
-    archive = module.typed_archive(module.CONFIG_NAME, module.CONFIG_TYPE, module.extend_input_config(vanilla))
-    if sha(archive) != component['input_archive_sha256']:
-        raise ValueError('Input action resource differs from the verified standalone release')
-    return archive
-
-
 def music_archive(component):
     """Sound Systems Rebalanced's patched music_init sound bank, built by its own pinned scripts/biome_patch.py from the
     builder's five unmodified vanilla music banks (HD2_MUSIC_BANKS), exactly as its standalone release."""
@@ -326,13 +301,6 @@ def main():
             path = directory / (ARCHIVE + suffix)
             path.write_bytes(data)
             files[folder + '/' + path.name] = path.relative_to(ROOT).as_posix()
-        if component.get('input_archive_sha256'):
-            # Mod Bindings Menu also ships its input actions, as a second archive
-            # in the same option, like its standalone release.
-            for suffix, data in [('', input_actions_archive(component)), ('.stream', b''), ('.gpu_resources', b'')]:
-                path = directory / (INPUT_ARCHIVE + suffix)
-                path.write_bytes(data)
-                files[folder + '/' + path.name] = path.relative_to(ROOT).as_posix()
         if component.get('music_archive_sha256'):
             # Sound Systems Rebalanced also ships its patched music_init sound bank, as a second archive in the same
             # option, like its standalone release.

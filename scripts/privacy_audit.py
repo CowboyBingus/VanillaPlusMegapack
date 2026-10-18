@@ -151,8 +151,8 @@ def audit(packages=(), history=False):
                 assert option['Include'] == [folder]
                 expected |= {folder + '/9ba626afa44a3aa3.patch_0' + s
                              for s in ('', '.stream', '.gpu_resources')}
-                if component.get('input_archive_sha256') or component.get('music_archive_sha256'):
-                    # Mod Bindings Menu's input actions, Sound Systems Rebalanced's music bank
+                if component.get('music_archive_sha256'):
+                    # Sound Systems Rebalanced's music bank
                     expected |= {folder + '/9ba626afa44a3aa3.patch_1' + s
                                  for s in ('', '.stream', '.gpu_resources')}
                 assert option['Image'] == 'images/' + component['slug'] + '.jpg'

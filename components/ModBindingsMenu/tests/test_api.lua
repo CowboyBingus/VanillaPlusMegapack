@@ -345,9 +345,10 @@ remove_assignments()
 -- game.dll, so the real build check hashes both module files and finds no
 -- match. The first frame stops the update for the session, the family's
 -- refusal: BingusRuntime.statuses shows "stopped: unsupported game build", the
--- log has that stop line and the warning that the input.config replacement
--- shipped with the addon is still deployed, and no step runs afterwards (no
--- read, no log line per frame). The bindings stay inert. In a plain test
+-- log has that stop line and a note that nothing in the game was changed, and
+-- no step runs afterwards (no read, no log line per frame). Not one read is
+-- made, so nothing is written either: the fixed slots' keyboard defaults are
+-- added only after the build check passes. The bindings stay inert. In a plain test
 -- process, without game.dll, the reason is "game modules unavailable".
 do
     local function set_upvalue(fn, wanted, value)
@@ -390,17 +391,17 @@ do
     assert(status.state == 'stopped: unsupported game build', status.state)
     assert(#lines == before + 2 and lines[before + 1] == 'ModBindingsMenu stopped: unsupported game build\n',
            lines[before + 1])
-    local warning = lines[before + 2]
-    for _, words in ipairs({'WARNING', 'input.config replacement is still deployed', 'Remove Mod Bindings Menu',
-                            'update it'}) do
-        assert(warning:find(words, 1, true), warning)
+    local inactive = lines[before + 2]
+    for _, words in ipairs({'inactive on this game build', 'changes nothing in the game', 'no keyboard defaults added',
+                            'Update it'}) do
+        assert(inactive:find(words, 1, true), inactive)
     end
     for _ = 1, 30 do wrapper(0.016) end
     assert(steps == 1 and reads == 0 and #lines == before + 2, 'no step, read or log line after the refusal')
     assert(inert.register_binding('inert', 'Inert', 1) and inert.is_down('inert') == nil and not inert.ready())
     local logged = #lines
     initialize()
-    assert(#lines == logged, 'the build check and its warning run once')
+    assert(#lines == logged, 'the build check and its note run once')
     set_upvalue(read, 'kernel32', kernel32)
     local _, plain, plain_status = fresh()
     before = #lines
@@ -409,6 +410,6 @@ do
            and lines[before + 1] == 'ModBindingsMenu stopped: game modules unavailable\n', plain_status.state)
     _G.CowboyBingusModLoader = {log_directory = directory}
 end
-print('An unsupported game build stops the update, the guard\'s refusal: one stop line and the input.config '
-      .. 'warning, no step, read or log line afterwards, inert bindings OK')
+print('An unsupported game build stops the update, the guard\'s refusal: one stop line and a note that nothing '
+      .. 'was changed, no read or write at all, no step or log line afterwards, inert bindings OK')
 remove_assignments()

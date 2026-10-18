@@ -1,15 +1,14 @@
-"""Test and build the native input action resource and discoverable menu addon.
+"""Test and build the discoverable menu addon: one Lua resource, no replaced game file (the fixed slots' keyboard
+defaults are added while the game runs, src/sweep.lua).
 
-Needs a Bingus Shared Loader checkout beside this repository (or its path in BINGUS_SHARED_LOADER), the unmodified
-content/input.config of Steam build 25480438 (HD2_INPUT_CONFIG), a LuaJIT (HD2_LUAJIT; default: the workspace build in
-tools/src/LuaJIT/src of a folder above this repository, else `luajit` on PATH) and the installed game's bin/lua51.dll
-(HD2_LUA51_DLL). build() runs every test in both before it packages anything, and stops at the first one that fails.
-Importing this file runs nothing else: the Vanilla Plus Megapack build takes its input.config functions from it.
+Needs a Bingus Shared Loader checkout beside this repository (or its path in BINGUS_SHARED_LOADER), a LuaJIT
+(HD2_LUAJIT; default: the workspace build in tools/src/LuaJIT/src of a folder above this repository, else `luajit` on
+PATH) and the installed game's bin/lua51.dll (HD2_LUA51_DLL). build() runs every test in both before it packages
+anything, and stops at the first one that fails. Importing this file runs nothing else.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,118 +32,10 @@ import translations  # noqa: E402
 
 
 HERE = Path(__file__).resolve().parents[1]
-BASE_CONFIG = Path(os.environ.get("HD2_INPUT_CONFIG", str(HERE / "research" / "input.config")))
 VERSION = "2.3"
-CONFIG_SHA256 = "E509D85AC3603721E5AFE5686C7041798587A108AA86E2DA961A2EA451881A1B"
-CONFIG_NAME = resource_hash("content/input")
-CONFIG_TYPE = resource_hash("config")
 LUA_NAME = "mods/cowboybingus/mod_bindings_menu"
 GUID = "e40fc537-c2a2-493b-ad0f-2255c6a0174e"
 SLOTS = 7
-DEFAULT_ACTIONS = (
-    (13, 0, "Select", "tab"),
-    (11, 0, "AddNewKeyframeAtFront", "f1"),
-    (11, 1, "UpdateEditKeyframeBlendTimeIncrement", "f5"),
-    (11, 2, "UpdateEditKeyframeBlendCurveCycle", "f6"),
-    (11, 3, "PlaybackReset", "f7"),
-    (11, 4, "UpdateEditKeyframeEaseTypeCycle", "f8"),
-)
-
-
-def u32(data: bytes | bytearray, offset: int) -> int:
-    return struct.unpack_from("<I", data, offset)[0]
-
-
-def put_u32(data: bytearray, offset: int, value: int) -> None:
-    struct.pack_into("<I", data, offset, value)
-
-
-def padded_string(data: bytearray, value: str) -> int:
-    offset = len(data)
-    data.extend(value.encode("utf-8") + b"\0")
-    data.extend(b"\0" * (-len(data) % 4))
-    return offset
-
-
-def patch_keyboard_action(data: bytearray, base: bytes, group_index: int,
-                          action_index: int, action_name: str, key_name: str) -> None:
-    group_key, group_kind, group = struct.unpack_from(
-        "<III", base, 12 + group_index * 12)
-    assert group_kind == 6 and base[group_key:base.index(0, group_key)] in (
-        b"Debugmenu", b"CinematicCamera")
-    assert action_index < u32(base, group)
-    descriptor = group + 4 + action_index * 12
-    name, kind, value = struct.unpack_from("<III", base, descriptor)
-    assert base[name:base.index(0, name)].decode() == action_name and kind == 5
-    assert u32(base, value) == 6
-    retained = []
-    keyboard = None
-    for index in range(u32(base, value + 4)):
-        mapping = u32(base, value + 8 + index * 4)
-        assert u32(base, mapping) == 5
-        fields = {
-            base[field_key:base.index(0, field_key)].decode():
-                (field_kind, field_value, mapping + 4 + field * 12)
-            for field in range(5)
-            for field_key, field_kind, field_value in
-            [struct.unpack_from("<III", base, mapping + 4 + field * 12)]
-        }
-        device = fields["device_type"][1]
-        is_keyboard = base[device:device + 9] == b"Keyboard\0"
-        if is_keyboard:
-            assert fields["input_type"][0] == 4
-            if keyboard is None:
-                keyboard = mapping
-                retained.append(None)
-        else:
-            retained.append(mapping)
-    assert keyboard is not None, f"{action_name} has no keyboard mapping"
-    key = padded_string(data, key_name)
-    # Some developer actions repeat while held (RepeatInterval), which the
-    # bindings page cannot display or change; mod defaults always use Press.
-    press = padded_string(data, "Press")
-    cloned = len(data)
-    data.extend(base[keyboard:keyboard + 64])
-    patched = set()
-    for field in range(5):
-        descriptor_offset = cloned + 4 + field * 12
-        field_key = u32(data, descriptor_offset)
-        for name, value in ((b"input\0", key), (b"trigger\0", press)):
-            if base[field_key:field_key + len(name)] == name:
-                assert u32(data, descriptor_offset + 4) == 4, f"{action_name} {name!r} not a string"
-                put_u32(data, descriptor_offset + 8, value)
-                patched.add(name)
-    assert patched == {b"input\0", b"trigger\0"}, f"{action_name} mapping lacks input or trigger"
-    action_value = len(data)
-    data.extend(struct.pack("<II", 6, len(retained)))
-    for mapping in retained:
-        data.extend(struct.pack("<I", cloned if mapping is None else mapping))
-    put_u32(data, descriptor + 8, action_value)
-
-
-def extend_input_config(base: bytes) -> bytes:
-    data = bytearray(base)
-    assert len(base) == 52128, "input.config size changed"
-    assert u32(base, 0) == 6 and u32(base, 8) == 14, "input.config root changed"
-    # Keep Debugmenu.Open unchanged for the existing third-party slot. The
-    # camera actions are dormant in normal play and already have native IDs.
-    for group, action, name, key in DEFAULT_ACTIONS:
-        patch_keyboard_action(data, base, group, action, name, key)
-    return bytes(data)
-
-
-def typed_archive(name_hash: int, type_hash: int, payload: bytes) -> bytes:
-    # One resource per archive keeps the Stingray patch type directory simple.
-    count = 1
-    offset = (104 + 80 * count + 15) & ~15
-    final_size = (offset + len(payload) + 15) & ~15
-    header = struct.pack("<III20sQQ24s", 0xF0000011, 1, count,
-                         b"", final_size, 0, b"")
-    type_record = struct.pack("<IIQIIII", 0, 0, type_hash, count, 0, 16, 16)
-    entry = struct.pack("<7Q6I", name_hash, type_hash, offset, 0, 0, 0, 0,
-                        len(payload), 0, 0, 16, 16, 0)
-    body = header + type_record + entry + b"\0" * (offset - 184) + payload
-    return body + b"\0" * (-len(body) % 16)
 
 
 WORKSPACE_LUAJIT = Path("tools/src/LuaJIT/src/luajit.exe")
@@ -171,7 +62,7 @@ def suites() -> list[tuple[str, list]]:
             ("test_ffi_names_hostile_first.lua", []), ("test_ffi_names_mbm_first.lua", []),
             ("test_bingus_text.lua", [HERE / "src"]), ("test_extended.lua", [source]),
             ("test_extended_store.lua", [source]), ("test_capture.lua", [source]),
-            ("test_panel.lua", [source])]
+            ("test_panel.lua", [source]), ("test_keyboard_defaults.lua", [])]
 
 
 def run(label: str, command: list) -> list[str]:
@@ -201,11 +92,6 @@ def run_tests() -> list[str]:
 
 
 def build(output: Path) -> Path:
-    base = BASE_CONFIG.read_bytes()
-    digest = hashlib.sha256(base).hexdigest().upper()
-    if digest != CONFIG_SHA256:
-        raise ValueError(f"Unexpected input.config SHA256 {digest}")
-    config = extend_input_config(base)
     # Bundled translations must be data only and free of errors.
     for path in locale_files(HERE)[1:]:
         problems = translations.check(HERE / "locales", path.stem, out=lambda line: None)
@@ -225,12 +111,9 @@ def build(output: Path) -> Path:
         "INSTALL.txt": (HERE / "INSTALL.txt").read_bytes(),
         "thumbnail.png": (HERE / "assets" / "thumbnail.png").read_bytes(),
         "manifest.json": (json.dumps(manifest, indent=2) + "\n").encode(),
-        "Addon/" + ARCHIVE: typed_archive(CONFIG_NAME, CONFIG_TYPE, config),
+        "Addon/" + ARCHIVE: make_archive({resource_hash(LUA_NAME): lua}),
         "Addon/" + ARCHIVE + ".stream": b"",
         "Addon/" + ARCHIVE + ".gpu_resources": b"",
-        "Addon/9ba626afa44a3aa3.patch_1": make_archive({resource_hash(LUA_NAME): lua}),
-        "Addon/9ba626afa44a3aa3.patch_1.stream": b"",
-        "Addon/9ba626afa44a3aa3.patch_1.gpu_resources": b"",
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as package:
