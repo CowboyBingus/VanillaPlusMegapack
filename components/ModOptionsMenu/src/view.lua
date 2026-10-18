@@ -295,6 +295,13 @@ local function enter_view(screen)
     -- visual pass follows the tab instead: update_visuals).
     put32(screen + SHOWN_CONTENT, OPTIONS_TAB)
     native.set_content_hidden(content, 0, 1)
+    -- The escape menu's init only marks its layout dirty, and the first visual
+    -- pass of an open places the category buttons visible then. A button MODS
+    -- hides in that pass keeps (0, 0) until the menu opens again, so after
+    -- GAME, straight to MODS, then OPTIONS, those buttons drew over GAMEPLAY
+    -- (reported 2026-10-18). The native column is laid out first, all nine
+    -- buttons visible; a button laid out once keeps its place while hidden.
+    native.options_visual(content, 0)
     label_categories(view)
     if shown ~= 0 then select_category(content, shown, 0) end
     state.view = view

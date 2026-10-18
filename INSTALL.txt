@@ -59,7 +59,7 @@ Included revisions:
 - Arc Thrower Revamped v1.7.1
 - Ship Station Hotkeys v1.9.1
 - Flame Damage Fixed v1.2
-- Mod Options Menu v1.2
+- Mod Options Menu v1.2.1
 - Mod Bindings Menu v2.3
 - Better Lobby Management v1.2.1
 - Hellpod Drop Hold v1.2.1
@@ -80,6 +80,7 @@ reset fix and measurement of its added binding-page and periodic checks are
 pending. Its binding polling is unchanged.
 Twenty bundled mods were updated to do less work on idle frames; their
 release builds were checked offline only.
+Mod Options Menu v1.2.1's category layout fix was checked offline only.
 Match Your Colors v1.5 was checked in the game in the Armory, on the ship and
 in one solo mission, and its Recolor Weapons option against the game's own
 weapon paint schemes in the Armory; its per-frame cost in real play is not

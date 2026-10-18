@@ -34,7 +34,7 @@ import translations  # noqa: E402
 
 
 HERE = Path(__file__).resolve().parents[1]
-VERSION = "1.2"
+VERSION = "1.2.1"
 LUA_NAME = "mods/cowboybingus/mod_options_menu"
 GUID = "95ef276a-6287-465f-ac5b-8512d2227b74"
 TEST_NAME = "mods/cowboybingus/mod_options_test"

@@ -47,6 +47,8 @@ release builds and this package have not been run in the game.
 v42 also gives each option its own cover: every file a manager deploys is byte
 for byte the previous v42 package's, and Arsenal 0.36.0 and HD2MM 1.3
 imported it and resolved each option's own image.
+v42 then updates Mod Options Menu to v1.2.1, checked offline by its own suites
+and the pack's; its category layout fix has not been checked in the game.
 v41 updates Match
 Your Colors to v1.4, whose release build was played on this build on the ship
 and in the Armory. v40 updates Match

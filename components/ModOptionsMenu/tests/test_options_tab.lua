@@ -224,9 +224,21 @@ end
 -- The OPTIONS visual pass, as far as MOM depends on it: set_description for
 -- the current panel's selected row. Setting 139 (MOM rows) and 156 (none)
 -- have no description; other settings show their own labels.
+-- Its layout part: the escape menu's init marks the layout dirty, and the
+-- first pass after it places each visible category button at (0, -64 i) (y at
+-- +8, read live); a hidden button keeps its place, (0, 0) after an init.
+local layout = {dirty = true}
+local function category_y(index) return getf(content + 816 + 14920 * index + 8) end
 function native.options_visual(target, dt)
     assert(address(target) == content and get8(content + 1319445) == 0)
     calls.visual[#calls.visual + 1] = dt
+    if layout.dirty then
+        for index = 0, 8 do
+            local button = content + 816 + 14920 * index
+            if visible(button) then putf(button + 8, -64 * index) end
+        end
+        layout.dirty = false
+    end
     -- An opening dialog finishes opening inside the pass.
     if get32(dialog + 19752) == 1 then put32(dialog + 19752, 2) end
     local category, setting = get32(content + 1318488), 156
@@ -445,9 +457,14 @@ assert(#children(panel(0) + 544) == 15 and released == 32)
 -- The screen skips the OPTIONS visual pass on tab 3, so MOM runs it with the
 -- frame time in the step that built the page: the first MODS frame is laid
 -- out. The game hides the box for setting 139; row 0 is selected, so MOM
--- then shows its description with the game's layout.
-assert(#calls.visual == 1 and math.abs(calls.visual[1] - 0.016) < 1e-6)
-assert(#calls.box == 2 and calls.box[1][1] == 1 and calls.box[2][1] == 0 and calls.box[2][2] == 1)
+-- then shows its description with the game's layout. Before hiding any
+-- category button MOM runs the pass once more with dt 0 and the native column
+-- shown, which lays out all nine buttons and describes OPTIONS' selected row
+-- (setting 700) first.
+assert(#calls.visual == 2 and calls.visual[1] == 0 and math.abs(calls.visual[2] - 0.016) < 1e-6)
+assert(#calls.box == 3 and calls.box[1][1] == 0 and calls.box[2][1] == 1)
+assert(calls.box[3][1] == 0 and calls.box[3][2] == 1)
+for index = 0, 8 do assert(category_y(index) == -64 * index, 'category ' .. index .. ' not laid out') end
 assert(get8(box + 2672) == 0 and shown(title) == 'Show Hints' and shown(body) == HINTS)
 assert(getf(body + 4) == 14 and getf(body + 8) == -20 - 24 and getf(body + 68) == 1)
 assert(getf(frame + 12) == 450 and getf(frame + 16) == 20 + 20 + 7 + 72)
@@ -462,7 +479,7 @@ putf(row(3) + 31408, 0.7500001)
 step(0.016)
 assert(menu.get('alpha.hints') == true and menu.get('alpha.mode') == 2 and menu.get('alpha.volume') == 0.5)
 assert(#changes == 0 and shown(row(1) + 16832) == 'AUTO' and get8(UNAPPLIED) == 1)
-assert(#calls.visual == 2 and #calls.box == 2) -- same selection: no description work
+assert(#calls.visual == 3 and #calls.box == 3) -- same selection: no description work
 -- The apply action (Tab) applies them in registration order, saves at once
 -- and plays the game's apply sound.
 press(APPLY); step(0.016); release_keys()
@@ -704,7 +721,7 @@ put32(bar + 57452, 3)
 put32(screen + 8, 3)
 step(0.016)
 assert(state.view and state.view.page.index == 0 and get32(panel(0) + 2832) == 15)
-assert(#calls.visual == visual_calls + 1 and get8(box + 2672) == 0 and shown(body) == MODE)
+assert(#calls.visual == visual_calls + 2 and get8(box + 2672) == 0 and shown(body) == MODE)
 assert(get32(row(5) + 29068) == 1) -- the applied Extra 1
 -- Closing the escape menu drops the view and any unapplied edit with it;
 -- reopening re-initialises widgets.
@@ -719,7 +736,7 @@ native.set_slider = function(...) row_writes = row_writes + 1; return set_slider
 row_writes = 0
 assert(menu.set('alpha.extra3', true) and menu.set('alpha.count', 2) and row_writes == 0)
 step(0.016)
-assert(not state.view and #calls.visual == visual_calls + 2 and row_writes == 0)
+assert(not state.view and #calls.visual == visual_calls + 3 and row_writes == 0)
 native.set_choice, native.set_slider = set_choice_native, set_slider_native
 assert(state.pending_count == 0 and menu.get('alpha.extra2') == false)
 
@@ -730,8 +747,67 @@ do
     local reads, garbage = measure(200)
     assert(reads == 1, 'idle frame reads: ' .. reads)
     assert(garbage < 0.5, string.format('idle frames allocated %.2f KB', garbage))
-    assert(#calls.visual == visual_calls + 2, 'idle frames ran the visual pass')
+    assert(#calls.visual == visual_calls + 3, 'idle frames ran the visual pass')
 end
+
+-- Reported 2026-10-18 (screenshot): escape menu opened on GAME, straight to
+-- MODS, then OPTIONS: GAMEPLAY with five category labels drawn over it, DISPLAY
+-- and GRAPHICS in place. The menu's init marks its layout dirty, and the first
+-- visual pass ran on MODS with buttons 3-8 hidden, so they kept (0, 0) and
+-- showed there once MODS gave them back. Agreed outcome: every category in its
+-- own place on OPTIONS. Run both ways: without MOM's layout pass before hiding
+-- (the report reproduced), then as released.
+local function game_then_mods_then_options(skip_layout_first)
+    -- The escape menu opens on GAME: its init re-creates the three native tabs,
+    -- the category labels, and an unlaid layout.
+    set_stack({1})
+    put32(bar + 57448, 3)
+    put32(bar + 57452, 0)
+    for index = 1, 3 do put32(bar + 57320 + 4 * (index - 1), TAB_LABELS[index]) end
+    put32(screen + 8, 0)
+    put8(content + 1319445, 1)
+    for index = 0, 8 do
+        local button = content + 816 + 14920 * index
+        set_visible(button, true)
+        text_init(button + 1928)
+        put32(button + 1928 + 272, CATEGORY_LABELS[index + 1])
+        putf(button + 8, 0)
+    end
+    layout.dirty = true
+    step(0.016)
+    assert(not state.view and get32(bar + 57448) == 4)
+    local visual = native.options_visual
+    if skip_layout_first then
+        native.options_visual = function(target, dt) if dt ~= 0 then return visual(target, dt) end end
+    end
+    -- Straight to MODS (E three times), a few frames there, then Q to OPTIONS;
+    -- the game runs its own OPTIONS visual pass from then on.
+    put32(bar + 57452, 3); put32(screen + 8, 3)
+    step(0.016)
+    assert(state.view)
+    for index = 3, 8 do assert(not visible(content + 816 + 14920 * index)) end
+    for _ = 1, 3 do step(0.016) end
+    put32(bar + 57452, 2)
+    step(0.016)
+    assert(not state.view)
+    visual(ffi.cast('void *', content), 0.016)
+    native.options_visual = visual
+    local placed = {}
+    for index = 0, 8 do
+        local button = content + 816 + 14920 * index
+        assert(visible(button) and get32(button + 1928 + 272) == CATEGORY_LABELS[index + 1])
+        placed[index] = category_y(index) == -64 * index
+    end
+    set_stack({}); step(0.016)
+    return placed
+end
+local placed = game_then_mods_then_options(true)
+for index = 0, 2 do assert(placed[index], 'category ' .. index) end
+for index = 3, 8 do assert(not placed[index], 'the report should reproduce without the layout pass') end
+placed = game_then_mods_then_options(false)
+for index = 0, 8 do assert(placed[index], 'category ' .. index .. ' drawn out of place after MODS') end
+print('PASS: escape menu opened on GAME, straight to MODS, then OPTIONS: all nine categories in place '
+      .. '(without the layout pass before hiding, categories 3-8 stay on GAMEPLAY, as reported)')
 
 -- A second instance reads the saved values.
 _G.ModOptionsMenu, _G.update, _G.BingusRuntime = nil, function() end, nil
