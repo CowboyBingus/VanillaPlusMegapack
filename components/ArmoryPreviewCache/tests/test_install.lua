@@ -52,6 +52,9 @@ local function scenario(mode)
         assert(a==image_adapter)
         return {enabled=true,status='fixture',textures={},
             before=function()image_restores=image_restores+1 end,
+            -- Bindings always exist: before() runs every frame and the idle
+            -- gate never passes.
+            bound=function()return true end,quiet=function()return false end,
             clear=function()image_clears=image_clears+1 end,
             tick=function()image_ticks=image_ticks+1 end}
     end}
@@ -196,6 +199,7 @@ do
         end}
         local images={new=function()return {enabled=true,status='fixture',textures={},
             before=function()h.befores=h.befores+1;h.before_caller=debug.getinfo(2,'f').func end,
+            bound=function()return true end,quiet=function()return false end,
             tick=function()end,clear=function()
                 h.image_clears=h.image_clears+1;if h.raise_cleanup then error('image cleanup failed')end
             end}end}

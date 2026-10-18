@@ -25,7 +25,7 @@ from build_addon import build_addon  # noqa: E402
 from entry import entry_text, locale_files  # noqa: E402
 import translations  # noqa: E402
 
-VERSION = "1.9"
+VERSION = "1.9.1"
 WORKSPACE_LUAJIT = Path("tools/src/LuaJIT/src/luajit.exe")
 
 

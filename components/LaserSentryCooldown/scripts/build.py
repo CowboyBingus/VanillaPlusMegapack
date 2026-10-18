@@ -38,7 +38,7 @@ sys.path.insert(0, str(loader_checkout() / 'scripts'))
 from archive import ARCHIVE, make_archive, resource_hash  # noqa: E402
 from build_addon import entry_source  # noqa: E402
 
-VERSION = '1.1'
+VERSION = '1.1.1'
 LUA_NAME = 'mods/cowboybingus/laser_sentry_cooldown'
 GUID = 'e13da4a7-0d70-4ddf-a7d0-d172a96caa57'
 TITLE = 'Laser Sentry Cooldown v' + VERSION
@@ -131,6 +131,7 @@ def test() -> list[str]:
         results.append(run(vm + [HERE / 'tests/test_cooldown.lua', HERE]))
         results.append(run(vm + [HERE / 'tests/test_hooks.lua', HERE]))
         results.append(run(vm + [HERE / 'tests/test_turret.lua', HERE]))
+        results.append(run(vm + [HERE / 'tests/test_equivalence.lua', HERE]))
         for mode in ADAPTER_MODES:
             results.append(run(vm + [HERE / 'tests/test_adapter.lua', HERE, mode]))
         for kind, entry in entries.items():

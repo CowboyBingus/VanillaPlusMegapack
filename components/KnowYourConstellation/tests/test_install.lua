@@ -19,6 +19,8 @@ local tags,difficulty = {1},10
 local published = {}
 local source_object = {}
 function source_object:screen() return screen end
+-- The idle gate's read of the kept screen stack.
+function source_object:quiet() return screen == nil end
 function source_object:descriptor()
     assert(valid,'Unavailable')
     if descriptor_pending then return nil,hovered end

@@ -1,5 +1,5 @@
 -- HD2-Addon: mods/cowboybingus/laser_sentry_cooldown
--- Laser Sentry Cooldown v1.1 for Helldivers 2 Steam build 25480438.
+-- Laser Sentry Cooldown v1.1.1 for Helldivers 2 Steam build 25480438.
 --
 -- The A/LAS-98 Laser Sentry builds heat while it fires. At max heat the base game loses it, through two
 -- entries of its heat record:
@@ -30,7 +30,7 @@
 -- and reads the bytes back. After that it only counts frames, and looks once every 120 frames for Laser Sentries
 -- cooling down: 1 to 3 reads while none is, no allocation. A pause (an update below this addon failed) or a stop puts the original bytes back; a
 -- resume writes them again.
-local Cooldown = {VERSION = '1.1'}
+local Cooldown = {VERSION = '1.1.1'}
 Cooldown.REVISION = 'v' .. Cooldown.VERSION
 
 local ffi = require('ffi')
@@ -676,7 +676,11 @@ end
 -- frames only (startup, a pause, a stop, a turret repair). All of it stays interpreted: the functions defined
 -- inside it, the helpers it calls and the adapter's calls included. Otherwise a helper the interpreted look
 -- calls would turn hot over a session and become a trace of its own in the LuaJIT code cache the game and every
--- mod share. Only the step, a frame counter, is left to the compiler.
+-- mod share. The step, a frame counter of about 10 bytecodes, stays interpreted too: the guard calls it under
+-- pcall, and in the game's lua51.dll a trace started in it aborts when it returns into that pcall frame ("NYI:
+-- return to lower frame", after 9 bytecodes). Left to the compiler it never became a trace, only a trace start
+-- that kept aborting (28 aborts in a game-shaped replay of the standard tape, median of 3; KB
+-- lsc-idle-gate-2026-10-17).
 local HELPERS = {f32_value, u32, unsigned, valid_address, holds, span, private_protection, write_edits,
                  write_read_only, reads_back, qword, power_of_two, map_value}
 local function interpreted(functions)
@@ -686,14 +690,13 @@ local function interpreted(functions)
     end
 end
 interpreted({interpreted})
--- The whole module but the instance's step: every function above, the instance's (Cooldown.new, recursively,
--- then the step back on its own) and the adapter's.
-local function interpreted_but_step(instance, note)
+-- The whole module: every function above, the instance's (Cooldown.new, recursively, the step included) and the
+-- adapter's.
+local function interpreted_all(instance, note)
     interpreted(HELPERS)
     interpreted(Cooldown)
     interpreted(instance.api)
     interpreted({note})
-    if type(jit) == 'table' and type(jit.on) == 'function' then pcall(jit.on, instance.step) end
 end
 
 -- Builds the instance and installs Bingus Shared Runtime's update guard (bingus_runtime.lua, bundled by the
@@ -729,7 +732,7 @@ function Cooldown.install(runtime, memory, options)
         note('Disabled: ' .. tostring(instance))
         return nil
     end
-    interpreted_but_step(instance, note)
+    interpreted_all(instance, note)
     local env = options.env or _G
     local guard = runtime.guard({name = 'LaserSentryCooldown', step = instance.step, stop = instance.stopped,
                                  pause = instance.pause, log = note, env = env}).install()

@@ -31,8 +31,8 @@ from run_game_lua import run  # noqa: E402
 from entry import EXE_SHA, GAME_DLL_SHA, NAME, entry_text, locale_files  # noqa: E402
 import translations  # noqa: E402
 
-VERSION = '1.2'
-DIAG_VERSION = '1.2-diag1'
+VERSION = '1.2.1'
+DIAG_VERSION = '1.2.1-diag1'
 GUID = 'cf5dfdc5-661d-477c-8ad5-1ae975625f7a'
 TITLE = 'Better Lobby Management'
 DESCRIPTION = ('Host tools in the escape menu: DISBAND SQUAD kicks every other player back to their own ship; '
@@ -78,7 +78,7 @@ def run_tests(entry, version):
               ('test_sos.lua', [source]), ('test_diag.lua', [source]),
               ('test_windows_api.lua', [source, lua51]),
               ('test_ffi_names.lua', [source, 'sdk', lua51]), ('test_ffi_names.lua', [source, 'hostile', lua51]),
-              ('test_ffi_names.lua', [source, 'mod-first', lua51]), ('test_addon.lua', [source]),
+              ('test_ffi_names.lua', [source, 'mod-first', lua51]), ('test_addon.lua', [source]), ('test_idle_gate.lua', [source]),
               ('test_entry.lua', [str(entry), 'v' + version])]
     output = []
     for name, args in suites:

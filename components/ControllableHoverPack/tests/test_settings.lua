@@ -156,7 +156,12 @@ count=#writes;tick();tick()
 assert(e.HoverPackCancel.status=='restore_pending' and e.HoverPackCancel.lease and #writes==count)
 api.read=read;tick()
 assert(not e.HoverPackCancel.lease and duration(api,D)==6)
-sample=target;target.key='second-mission';tick()
+-- Outside a mission with no lease left, the idle gate answers 59 frames with
+-- no read: the next mission is seen at the full check after them.
+assert(e.HoverPackCancel.status=='waiting_for_mission')
+sample=target;target.key='second-mission'
+for _=1,59 do tick()end;assert(e.HoverPackCancel.status=='waiting_for_mission')
+tick();assert(e.HoverPackCancel.status=='watching_hover')
 assert(e.HoverPackCancel.cancellations==1,'held activation cancelled the new mission flight')
 target.down=false;tick();target.down=true;tick()
 assert(e.HoverPackCancel.cancellations==2 and e.HoverPackCancel.lease)

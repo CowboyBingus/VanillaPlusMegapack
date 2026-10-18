@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from build import ROOT, BUILD, LUA, load_components, run, sha
+from build import ROOT, BUILD, LUA, load_components, load_script, run, sha
 import translations  # noqa: E402  (scripts/translations.py, the translators' tool)
 
 
@@ -44,6 +44,7 @@ def gameplay_commands(mods, build):
     commands = [
         [bounce / 'tests/test_archive.lua', bounce / 'src', build / 'BetterStratagemBounce/mod.ljbc', digest],
         [steering / 'tests/test_data.lua', steering / 'src', build / 'HellpodSteeringUnlocked', digest, bounce / 'src'],
+        [steering / 'tests/test_idle_gate.lua', steering / 'src', steering / 'tests/reference'],
     ]
     for order in ('hellpod-ball', 'ball-hellpod'):
         commands.append([bounce / 'tests/test_windows_interop.lua', bounce / 'src', steering / 'src', order,
@@ -54,15 +55,17 @@ def gameplay_commands(mods, build):
         'KnowYourConstellation': [(n, None) for n in ('test_bingus_text', 'test_locales', 'test_resolve', 'test_roster',
                                                       'test_panel', 'test_install', 'test_update_chain', 'test_mission',
                                                       'test_presentation', 'test_budget', 'test_panel_budget',
-                                                      'test_pending')],
+                                                      'test_pending', 'test_idle')],
         'ControllableHoverPack': [(n, None) for n in ('test_cancel', 'test_snapshot', 'test_settings', 'test_loader',
-                                                      'test_replay', 'test_windows_api')],
-        'ReinforcementBeaconsFixed': [('test_data', 'solo_scenarios')],
+                                                      'test_replay', 'test_windows_api', 'test_idle_gate')],
+        'ReinforcementBeaconsFixed': [('test_data', 'solo_scenarios'), ('test_idle_equivalence', None)],
         'ConsistentVaulting': [(n, None) for n in ('test_vault', 'test_geometry', 'test_raised_approach', 'test_slope',
                                                    'test_loader')],
-        'ShallowWaterDiving': [('test_bingus_text', None), ('test_dive', None), ('test_loader', None)],
+        'ShallowWaterDiving': [('test_bingus_text', None), ('test_dive', None), ('test_loader', None),
+                               ('test_idle_equivalence', None)],
         'SentryAimRetention': [('test_aim', 'gatling_target_loss'), ('test_firing', 'firing_sweeps'),
-                               ('test_loader', None), ('test_snapshot', None), ('test_windows_api', None),
+                               ('test_loader', None), ('test_snapshot', None), ('test_idle_gate', None),
+                               ('test_windows_api', None),
                                ('test_current_game', None)],
         'EnemyCollisionSynchronized': [(n, None) for n in ('test_snapshot', 'test_loader', 'test_ffi_names',
                                                            'test_profiler', 'test_profiler_detail')],
@@ -108,11 +111,19 @@ def tool_commands(mods, build):
     for mode in ('normal', 'slow'):
         for scenario in ARC_RECOVERY:
             commands.append([arc / 'tests/test_work_budget.lua', arc_entry, mode, scenario])
+    # tests/test_equivalence.lua runs the entry beside the same entry assembled with the v1.7.1 update it replaces
+    # (tests/reference), in both of its modes, as check.py's check_equivalence does.
+    reference = build / 'ArcThrowerRevamped/reference-entry.lua'
+    entry_script = load_script(arc, 'scripts/entry.py', 'ArcThrowerRevamped_reference_entry')
+    reference.write_bytes(entry_script.entry_text(arc, arc / 'tests/reference/arc_thrower_auto.lua'))
+    for mode in ([], ['traces']):
+        commands.append([arc / 'tests/test_equivalence.lua', arc_entry, reference, *mode])
     armory = mods / 'ArmoryPreviewCache'
     for name in ('test_policy', 'test_install', 'test_images', 'test_partial_images', 'test_image_keys',
                  'test_v10_images', 'test_v10_policy', 'test_material_synthetic', 'test_prewarm_recency',
                  'test_render_refresh', 'test_current_ui', 'test_visible_handoff', 'test_visible_adapter',
-                 'test_platform_reads', 'test_gate_equivalence', 'test_policy_gate', 'test_frame_budget'):
+                 'test_platform_reads', 'test_gate_equivalence', 'test_policy_gate', 'test_idle_gate',
+                 'test_lease_table', 'test_frame_budget'):
         commands.append([armory / 'tests' / (name + '.lua'), armory])
     for mode in ('hostile', 'sdk', 'after'):
         commands.append([armory / 'tests/test_ffi_names.lua', armory, mode])
@@ -156,14 +167,15 @@ def menu_commands(mods, build):
                             ('test_ffi_names', []), ('test_ffi_names_hostile_first', []),
                             ('test_ffi_names_mbm_first', []), ('test_extended', [bindings_source]),
                             ('test_extended_store', [bindings_source]), ('test_capture', [bindings_source]),
-                            ('test_panel', [bindings_source]), ('test_keyboard_defaults', [])):
+                            ('test_panel', [bindings_source]), ('test_keyboard_defaults', []),
+                            ('test_idle_gate', [])):
         commands.append([bindings / 'tests' / (name + '.lua'), *arguments])
     for slug in ('ModOptionsMenu', 'ModBindingsMenu', 'GalacticMenuHotkey'):
         commands.append([mods / slug / 'tests/test_bingus_text.lua', mods / slug / 'src'])
     blm = mods / 'BetterLobbyManagement'
     lua51 = lua51_sha256()
     for name in ('test_bingus_text', 'test_locales', 'test_game', 'test_lobby', 'test_region', 'test_menu', 'test_chat',
-                 'test_scanner', 'test_sos', 'test_diag', 'test_addon'):
+                 'test_scanner', 'test_sos', 'test_diag', 'test_addon', 'test_idle_gate'):
         commands.append([blm / 'tests' / (name + '.lua'), blm / 'src'])
     # The native suites check the lua51.dll they run in, so they run in the game's own (tests/run_game_lua.py).
     for arguments in (['test_windows_api', lua51], ['test_ffi_names', 'sdk', lua51],
@@ -197,6 +209,7 @@ def data_change_commands(mods, build):
         commands += [[*sentry_prefix, sentry / 'tests/test_cooldown.lua', sentry],
                      [*sentry_prefix, sentry / 'tests/test_hooks.lua', sentry],
                      [*sentry_prefix, sentry / 'tests/test_turret.lua', sentry],
+                     [*sentry_prefix, sentry / 'tests/test_equivalence.lua', sentry],
                      *[[*sentry_prefix, sentry / 'tests/test_adapter.lua', sentry, mode]
                        for mode in ('plain', 'hostile', 'sdk')],
                      [*sentry_prefix, sentry / 'tests/compile_entry.lua', build / 'LaserSentryCooldown/entry.lua']]
@@ -235,7 +248,8 @@ def colour_commands(mods, build):
     for vm in ([], ['game']):
         prefix = [colours / 'tests/game_lua.py'] if vm else []
         for name in ('test_units', 'test_addon', 'test_install', 'test_idle_alloc', 'test_bingus_text', 'test_locales',
-                     'test_cache', 'test_job', 'test_sync', 'test_patches'):
+                     'test_cache', 'test_job', 'test_sync', 'test_patches', 'test_weapons',
+                     'test_idle_equivalence'):
             # The shared translation test takes the folder holding bingus_text.lua.
             target = colours / 'src' if name == 'test_bingus_text' else colours
             commands.append([*prefix, colours / 'tests' / (name + '.lua'), target])

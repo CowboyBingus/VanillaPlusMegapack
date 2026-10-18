@@ -167,7 +167,7 @@ function M.state(api,game)
     -- and lease table pointers. Returns the UI and POLICY write positions.
     local function read_globals()
         local w,p=REGION[UI],REGION[POLICY]
-        local ok=read(base+0x347cd80,0x138,G,0)
+        local ok=self.probed or read(base+0x347cd80,0x138,G,0)
         self.g_ok=ok==true;cur[w]=ok and 1 or 2;w=w+1
         local tm,ui,sm,preview,lease
         if ok then
@@ -183,7 +183,7 @@ function M.state(api,game)
     local function read_stack(w)
         self.stack_ok,self.depth,self.top=false,nil,nil
         if not self.sm then return w end
-        local ok=read(self.sm+0x429c,24,STACK,0)
+        local ok=self.probed or read(self.sm+0x429c,24,STACK,0)
         self.stack_ok=ok==true;cur[w]=ok and 1 or 2;w=w+1
         if not ok then return w end
         local depth=STACK.u32[5]
@@ -409,6 +409,7 @@ function M.state(api,game)
         local w,p=read_globals()
         local kind,world
         w,kind=read_stack(w)
+        self.probed=false
         w,p,world=read_ui(w,p)
         clen[UI]=w-REGION[UI]
         self.kind,self.world=kind,world
@@ -426,6 +427,29 @@ function M.state(api,game)
         clen[POLICY]=p-REGION[POLICY]
         return count_versions()
     end
+    -- The idle gate's check (install.lua): the globals block and the state
+    -- stack, the first two reads of a refresh, into the view's buffers (the
+    -- signature stays as the last refresh left it). 2 reads, nothing
+    -- allocated. When the frame is not idle, the next refresh in the same
+    -- callback uses these two reads instead of making them again; unprobe()
+    -- (before the game update) drops them. Returns the thumbnail manager
+    -- pointer (0 when none), the stack depth and its top (-1 outside depth
+    -- 1..5), or nil when a read fails or there is no state machine.
+    function self:probe()
+        self.probed=false
+        if not read(base+0x347cd80,0x138,G,0)then return nil end
+        local sm=pointer(G,42)
+        if not sm or not read(sm+0x429c,24,STACK,0)then return nil end
+        self.probed=true
+        local depth=STACK.u32[5]
+        local top=depth>=1 and depth<=5 and STACK.u32[depth-1] or -1
+        return pointer(G,0) or 0,depth,top
+    end
+    function self:unprobe()self.probed=false end
+    -- Interpreted, like the gate that calls it (install.lua).
+    local loaded=rawget(_G,'package') and package.loaded
+    local jit_module=rawget(_G,'jit') or (loaded and loaded.jit)
+    if jit_module and jit_module.off then jit_module.off(self.probe)end
     -- The lease table owner (header and allocator), read by the policy step
     -- only: 2 reads, own version.
     function self:refresh_lease()
@@ -603,6 +627,11 @@ function M.new(api,game,exe,signatures,test_calls,state) -- lint-ok: R10 ported 
     -- verified says the bindings were checked against that state; dropped says
     -- a prune released a binding since, which the next tick must follow up.
     local reference,verified,dropped
+    -- Whether prune() has bindings to check before the game update.
+    function self:bound()return next(bindings)~=nil end
+    -- The idle gate (install.lua): no binding to check, no retired texture to
+    -- drain and no released binding the next tick must follow up.
+    function self:quiet()return next(bindings)==nil and #retired==0 and not dropped end
     -- Before the game update. The bindings depend only on state the refresh
     -- covers, so they are checked on the first prune after a full snapshot (a
     -- remap there can leave a binding whose new item has no crop; this prune

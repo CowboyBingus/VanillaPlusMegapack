@@ -671,15 +671,19 @@ function module.install(create_platform, environment)
     -- Runs once per game update (the guard's step; render never calls it). Every
     -- update is a frame: v2.1 also ran it from render and skipped a frame whose
     -- clock equalled the last one, which above ~64 FPS dropped whole updates.
-    local function frame()
+    -- reading: the button as step's idle check already read it (a press), so
+    -- the frame does not ask again; nil reads it here.
+    local function frame(reading)
         -- The clock serves only the log's frame interval and frame time, so it is
         -- read on an idle frame only while diagnostics are on.
         local diagnostics = state.settings.diagnostics == 1
         local started = diagnostics and platform.now()
         if started then measure_interval(started) end
-        state.frames = state.frames + 1
+        -- With a reading, the idle check has counted this frame already.
+        if reading == nil then state.frames = state.frames + 1 end
         state.last_key = diagnostics and platform.key_state and platform.key_state() or 0
-        local down = platform.pressed()
+        local down = reading
+        if down == nil then down = platform.pressed() end
         local was_down, pressed = last_button, false
         if down then
             state.down_frames = state.down_frames + 1
@@ -695,7 +699,10 @@ function module.install(create_platform, environment)
             track_gesture(started, down, pressed)
         end
         if started then measure_frame_time(started) end
-        log(false)
+        -- log() answers at once without diagnostics. It is not entered then:
+        -- its pcall'd closure (UCLO before each early return) aborts every trace
+        -- that reaches it.
+        if diagnostics then log(false) end
     end
 
     -- The JIT never compiles frame(): every trace through it aborts in log(), which
@@ -716,10 +723,32 @@ function module.install(create_platform, environment)
     local frame_error, clean_frames = false, 0
     local guard
 
+    -- The idle check, before frame(): with no gesture, no settings
+    -- capture and diagnostics off, a frame without a new press needs only the
+    -- button (the trigger; in game about 0.7 us, measured by the ledger probe)
+    -- and the counters frame() keeps: 'idle'. A new press ('press') runs the full
+    -- frame with this reading; nil (a gesture, a capture or diagnostics) runs it
+    -- as v2.15 did.
+    local function idle()
+        if drag or settings_capture or state.drag_active or state.settings.diagnostics == 1 then return nil end
+        state.frames = state.frames + 1
+        local down = platform.pressed()
+        if down and not last_button then return 'press' end
+        if down then state.down_frames = state.down_frames + 1 end
+        last_button = down
+        return 'idle'
+    end
+
     local function step()
         frame_error = false
-        local ok, reason = pcall(frame)
-        if ok then return end
+        -- The idle check is under pcall too: a failing button query is a frame
+        -- error, as it was inside frame() in v2.15.
+        local ok, reason = pcall(idle)
+        if ok then
+            if reason == 'idle' then return end
+            ok, reason = pcall(frame, reason == 'press' or nil)
+            if ok then return end
+        end
         frame_error = true
         local text = tostring(reason)
         state.errors = state.errors + 1
@@ -760,6 +789,11 @@ function module.install(create_platform, environment)
                                if line:find(' error: ', 1, true) then log(true) end
                            end}).install()
     state.guard = guard.status
+    -- The guard calls step and after under pcall every frame: compiled, a trace
+    -- started at their entry aborts returning into it ("return to lower frame",
+    -- 128 aborts in the v2.15 ledger replay), so they stay in the interpreter
+    -- with the idle check.
+    keep_interpreted({step, after, idle})
 
     -- Only update owns input processing. Running it again from render can
     -- double the native reads and log work within a single displayed frame.

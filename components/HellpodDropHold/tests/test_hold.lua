@@ -593,13 +593,42 @@ do
     assert(factor_of(w, index) == 1, 'paused: nothing runs')
     for _ = 1, 30 do update(1 / 60) end
     assert(close(factor_of(w, index), T_HOLD), 'resumed afresh: held again while the screen is up')
+    -- No trace that starts in the mod's own code aborts (holding, release, watch, idle), JIT on: each such
+    -- start kept retrying and held one of LuaJIT's 64 failed-start slots (step and frame before 2026-10-17).
+    -- Traces this loop starts are the test's own: in game a C caller runs update.
+    do
+        local util = require('jit.util')
+        local own, started, lines, aborted = {}, {}, {}, {}
+        for _, file in ipairs({'archive_loader.lua', 'drop_hold.lua', 'windows_api.lua'}) do own[file] = true end
+        local function file_of(func)
+            local info = util.funcinfo(func)
+            return info.source and info.source:match('([^/\\]+)$')
+        end
+        local function on_trace(what, trace, func, _, code)
+            if what == 'start' then started[trace], lines[trace] = file_of(func), util.funcinfo(func).linedefined end
+            if what == 'abort' and own[started[trace]] then
+                aborted[#aborted + 1] = started[trace] .. ':' .. lines[trace] .. ' code ' .. tostring(code)
+            end
+        end
+        jit.attach(on_trace, 'trace')
+        for _ = 1, 600 do update(1 / 60) end   -- holding while the screen is up
+        screens(w, {})
+        for _ = 1, 3000 do update(1 / 60) end  -- release, the 30 s watch, then idle
+        assert(factor_of(w, index) == 1, 'released when the screen left')
+        screens(w, {2})
+        for _ = 1, 600 do update(1 / 60) end   -- a new loading screen holds the pod again
+        jit.attach(on_trace)
+        assert(close(factor_of(w, index), T_HOLD), 'held again on the next loading screen')
+        assert(#aborted == 0, 'aborted traces started in the mod: ' .. table.concat(aborted, ', '))
+    end
     shutdown()
     assert(close(factor_of(w, index), T_HOLD), 'shutdown writes nothing')
     local log = table.concat(logs['HellpodDropHold.log'] or {}, '')
     assert(log:find('test\n') and log:find('holding initial spawn pod'), log)
     _G.HellpodDropHold = nil
     _G.update, _G.shutdown, _G.CowboyBingusModLoader = previous.update, previous.shutdown, previous.loader
-    pass('loader: refuses other builds, holds through the guard, releases on pause, writes nothing at shutdown')
+    pass('loader: refuses other builds, holds through the guard, releases on pause, writes nothing at shutdown, '
+        .. 'no aborting trace starts in the mod')
 end
 
 print(count .. ' offline checks passed')

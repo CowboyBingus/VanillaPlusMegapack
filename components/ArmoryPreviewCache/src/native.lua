@@ -2,6 +2,7 @@
 -- All thumbnail cards, render targets, queues and executable bytes remain owned
 -- and updated by the game. Layouts are specific to the fingerprinted build.
 local ffi=require('ffi')
+local bit=require('bit')
 local M={}
 local word=ffi.new('uint32_t[1]')
 local pointer_value=ffi.new('uintptr_t[1]')
@@ -18,7 +19,13 @@ local function unhex(s)
 end
 M.hex,M.unhex=hex,unhex
 
-function M.new(api,game,exe,signatures,dependencies)
+-- The lease table's 1024 rows (16 bytes each: identifier, 64-bit count), read
+-- into one reused buffer and decoded in place.
+local LEASE_ROWS=ffi.new('uint32_t[4096]')
+local LEASE_BUFFER={address=tonumber(ffi.cast('uintptr_t',LEASE_ROWS)),size=16384}
+-- test_calls: {acquire=fn,release=fn} stand-ins for the two native lease
+-- functions (tests only).
+function M.new(api,game,exe,signatures,dependencies,test_calls)
     local function read(p,n)
         assert(n>0 and n<=32768,'Read exceeds bound')
         local bytes=api.read(p,n);assert(bytes,'Native data unavailable');return bytes
@@ -34,8 +41,9 @@ function M.new(api,game,exe,signatures,dependencies)
     assert(root_api==exe+0x27c8d80,'Unexpected script API')
     local app=ptr(root_api+16)
     assert(ptr(app+752)==exe+0x320dd0 and ptr(app+768)==exe+0x321030,'Unexpected package API')
-    local acquire=ffi.cast('void (*)(void *,const uint64_t *,uint32_t)',game+0x12fe350)
-    local release=ffi.cast('void (*)(void *,const uint64_t *,uint32_t)',game+0x12fe4e0)
+    local calls=test_calls or {}
+    local acquire=calls.acquire or ffi.cast('void (*)(void *,const uint64_t *,uint32_t)',game+0x12fe350)  -- lint-ok: R2 once per session in native.new (v23 cast; only the test stand-in is new)
+    local release=calls.release or ffi.cast('void (*)(void *,const uint64_t *,uint32_t)',game+0x12fe4e0)  -- lint-ok: R2 once per session in native.new (v23 cast; only the test stand-in is new)
     local argument=ffi.new('uint64_t[1]')
     local self={api=api}
     local dependency=dependencies and dependencies.new(api,game)
@@ -50,40 +58,64 @@ function M.new(api,game,exe,signatures,dependencies)
         local allocator=ptr(p+16416)
         return pointer_key(p)..pointer_key(allocator),p
     end
+    -- Package identifiers as hex text, made once per identifier and session
+    -- (bounded: the cache restarts past 8192 identifiers).
+    local hex_ids,hex_count={},0
+    local function hex_of(low,high)
+        local row=hex_ids[high]
+        local text=row and row[low]
+        if text then return text end
+        if hex_count>=8192 then hex_ids,hex_count={},0 end
+        row=hex_ids[high];if not row then row={};hex_ids[high]=row end
+        text=bit.tohex(high,8)..bit.tohex(low,8)
+        row[low]=text;hex_count=hex_count+1
+        return text
+    end
+    -- One reused table of the table's rows (identifier -> count) and the
+    -- identifiers it holds: the next decode replaces it, so callers read the
+    -- counts they need before decoding again.
+    local rows,listed,row_ids={},0,{}
     function self:references()
-        local owner,p=self:owner();local bytes=read(p+32,16384);local rows,n={},0
-        for i=0,1023 do
-            local id=raw64(bytes,i*16)
-            if id~=zero then
+        local owner,p=self:owner()
+        for i=1,listed do rows[row_ids[i]]=nil end
+        listed=0
+        assert(api.read(tonumber(ffi.cast('uintptr_t',p))+32,16384,LEASE_BUFFER,0),'Native data unavailable')
+        local w=LEASE_ROWS
+        for i=0,4092,4 do
+            local low,high=w[i],w[i+1]
+            if low~=0 or high~=0 then
                 -- Counts are 64-bit natively; reject high-word or implausible values.
-                assert(u32(bytes,i*16+12)==0,'Invalid package reference count')
-                local count=u32(bytes,i*16+8);assert(count>0 and count<1000000,'Invalid package references')
-                rows[hex(id)]=count;n=n+1
+                assert(w[i+3]==0,'Invalid package reference count')
+                local count=w[i+2];assert(count>0 and count<1000000,'Invalid package references')
+                local id=hex_of(low,high)
+                rows[id]=count;listed=listed+1;row_ids[listed]=id
             end
         end
-        return rows,n,owner,p
+        return rows,listed,owner,p
     end
     function self:valid_leases(leases,owner)
-        local rows,_,current=self:references()
+        local current_rows,_,current=self:references()
         if current~=owner then return false end
-        for id in pairs(leases)do if not rows[id]then return false end end
+        for id in pairs(leases)do if not current_rows[id]then return false end end
         return true
     end
     function self:acquire(id,owner)
-        local rows,n,current,p=self:references()
-        if current~=owner or (not rows[id] and n>=1008)then return false end
+        local before,n,current,p=self:references()
+        if current~=owner or (not before[id] and n>=1008)then return false end
+        local count=before[id] or 0
         ffi.copy(argument,unhex(id),8);acquire(p,argument,1)
         local after,_,check=self:references()
-        assert(check==owner and after[id]==(rows[id] or 0)+1,'Package acquire did not balance')
+        assert(check==owner and after[id]==count+1,'Package acquire did not balance')
         return true
     end
     function self:release(id,owner)
-        local rows,_,current,p=self:references()
+        local before,_,current,p=self:references()
         -- A reset manager has already retired its own package references.
-        if current~=owner or not rows[id]then return false end
+        if current~=owner or not before[id]then return false end
+        local count=before[id]
         ffi.copy(argument,unhex(id),8);release(p,argument,1)
         local after,_,check=self:references()
-        assert(check==owner and (after[id] or 0)==rows[id]-1,'Package release did not balance')
+        assert(check==owner and (after[id] or 0)==count-1,'Package release did not balance')
         return true
     end
     local function catalog()

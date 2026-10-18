@@ -23,7 +23,8 @@ SOURCE_FILES = (
     'src/archive_loader.lua', 'src/bingus_memory.lua', 'src/bingus_runtime.lua', 'src/bingus_text.lua',
     'src/bingus_write.lua', 'src/dive_data.lua', 'src/windows_api.lua',
     'tests/frame_budget.lua', 'tests/hostile_vm.lua', 'tests/test_bingus_text.lua', 'tests/test_dive.lua',
-    'tests/test_loader.lua', 'tests/test_package.py',
+    'tests/test_loader.lua', 'tests/test_package.py', 'tests/test_idle_equivalence.lua',
+    'tests/reference/archive_loader.lua', 'tests/reference/dive_data.lua',
 )
 PATTERNS = {
     'personal_home_path': r'(?i)(?:[a-z]:[\\/]Users[\\/][^\s\\/]+|/(?:home|Users)/[a-z0-9_.-]+)',

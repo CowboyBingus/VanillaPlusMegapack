@@ -167,6 +167,77 @@ test('no garbage and no C types per frame, idle and in a mission', function()
     end
 end)
 
+-- Equivalence with the v1.0 pre-release (tests/reference, origin/main at 6f995e5): both watchers read the same
+-- synthetic game over 6,000 scripted frames (ship, loading, mission and back, a stale state, a missing, moved and
+-- unreadable game object, updates below that fail, frames without dt) and must make the same calls, set the same
+-- room and write the same log lines on every frame.
+test('every frame matches the v1.0 pre-release (calls, room settings, log lines, status)', function()
+    local Reference = dofile(root .. '/tests/reference/sound_systems_rebalanced.lua')
+    local g = fake_game(3)
+    local other = ffi.new('uint8_t[?]', 0x80)            -- the game object after a move
+    local function side(M)
+        local s = {calls = {}, lines = {}, state = {missions = 0, status = 'test'}, api = memory.new(runtime)}
+        s.counts = budget.wrap(s.api)
+        s.instance = M.new(s.api, g.module, function(group, value) s.calls[#s.calls + 1] = group .. '=' .. value end,
+            function(line) s.lines[#s.lines + 1] = line end, s.state, LAYOUT)
+        return s
+    end
+    local old, new = side(Reference), side(Mod)
+    local seed = 12345
+    local function roll(n) seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n end
+    local states = {3, 3, 3, 5, 6, 4, 4, 2, 1, 0xFFFFFFFF, 65, 64, 6, 4}
+    local dts = {DT, DT, 1 / 60, 1 / 30, 0.5, false, '0.1', 0}  -- false: no dt (fallback); 0: no time passes
+    for i = 1, 6000 do
+        local r = roll(100)
+        if r < 6 then g.state(states[roll(#states) + 1])
+        elseif r == 6 then g.point(0)                                        -- object not created yet
+        elseif r == 7 then g.point(0x7FFF00000000)                           -- unreadable object
+        elseif r == 8 then g.point(ffi.cast('uint64_t', ffi.cast('uintptr_t', other)))
+            ffi.cast('uint32_t *', other + LAYOUT.state_offset)[0] = states[roll(#states) + 1]
+        elseif r == 9 then g.point_at_object()
+        elseif r == 10 then old.instance.pause(); new.instance.pause() end   -- an update below raised
+        local dt = dts[roll(#dts) + 1]
+        local a = budget.frame(old.counts, old.instance.step, dt)
+        local b = budget.frame(new.counts, new.instance.step, dt)
+        assert(same(a, b), 'frame ' .. i .. ': calls ' .. budget.describe(b) .. ', v1.0 ' .. budget.describe(a))
+        assert(#old.calls == #new.calls and old.calls[#old.calls] == new.calls[#new.calls], 'frame ' .. i .. ': room')
+        assert(#old.lines == #new.lines and old.lines[#old.lines] == new.lines[#new.lines], 'frame ' .. i .. ': log')
+        assert(old.state.missions == new.state.missions and old.state.status == new.state.status, 'frame ' .. i)
+    end
+    assert(#new.calls >= 20, 'the script entered only ' .. #new.calls .. ' missions')
+    old.instance.stopped('test'); new.instance.stopped('test')
+    assert(old.lines[#old.lines] == new.lines[#new.lines] and old.state.status == new.state.status, 'stopped')
+end)
+
+-- The guard calls the step under pcall from C (here: an interpreted driver), so a trace started at the step's entry
+-- would abort where it returns ("NYI: return to lower frame"). The step runs interpreted: no aborts at all, while
+-- the read path below it may still compile. Control: the same step with the JIT on aborts.
+test('a guarded step starts no trace that aborts', function()
+    if not (jit and jit.attach and jit.off and jit.status()) then return end
+    local function aborts(enable)
+        local g = fake_game(3)
+        local Fresh = dofile(root .. '/src/sound_systems_rebalanced.lua')  -- new prototypes: no earlier penalties
+        local instance = Fresh.new(memory.new(runtime), g.module, function() end, function() end,
+            {missions = 0, status = 'test'}, LAYOUT)
+        local step = instance.step
+        if enable then jit.on(step) end
+        local function update(...) local ok = pcall(step, ...) return ok end
+        local function drive() for _ = 1, 3000 do update(DT) end end
+        jit.off(update); jit.off(drive)
+        local count = 0
+        local function on_trace(what) if what == 'abort' then count = count + 1 end end
+        jit.attach(on_trace, 'trace')
+        local ok, err = pcall(drive)
+        jit.attach(on_trace)
+        assert(ok, err)
+        return count
+    end
+    local count = aborts(false)
+    local control = aborts(true)
+    assert(control > 0, 'control: a compiled step did not abort, so this test proves nothing')
+    assert(count == 0, count .. ' trace aborts from a guarded step (control: ' .. control .. ')')
+end)
+
 -- A memory api whose build check passes and whose game.dll is the synthetic one.
 local function game_api(g)
     local api = memory.new(runtime)

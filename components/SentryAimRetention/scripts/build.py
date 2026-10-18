@@ -12,7 +12,7 @@ from package import package_release
 
 MODULE='mods/cowboybingus/sentry_aim_retention'
 REVISION='data-v8.6'
-VERSION='1.1.0'
+VERSION='1.1.1'
 def run(args,**kwargs):
     p=subprocess.run(list(map(str,args)),capture_output=True,text=True,**kwargs)
     if p.returncode: raise RuntimeError(p.stdout+p.stderr)
@@ -32,6 +32,7 @@ def main():
     tests+=run([LUA,ROOT/'tests/test_firing.lua',ROOT/'src',ROOT/'tests/firing_sweeps.lua'],env=env)
     tests+=run([LUA,ROOT/'tests/test_loader.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_snapshot.lua',ROOT/'src'],env=env)
+    tests+=run([LUA,ROOT/'tests/test_idle_gate.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_windows_api.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_current_game.lua',ROOT/'src'],env=env)
     resources=build_module(ROOT,build,MODULE,'aim_data.lua',REVISION)

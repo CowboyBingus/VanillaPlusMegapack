@@ -181,20 +181,24 @@ do
     end
     -- Every read is one ReadProcessMemory: read_into fills a buffer the mod
     -- keeps (no string per read), pointer_at decodes an address from it, and
-    -- api.read remains only for the write's read-back. The mode is read first,
-    -- so the ship stops after two reads; the price is that a missing player
-    -- manager during a gameplay mode (this fixture) costs 3 reads instead of 1.
+    -- api.read remains only for the write's read-back. Between deaths only the
+    -- idle gate runs: the player manager global, then (when it is set) the
+    -- local spawn state, whose address is made once per manager (no
+    -- pointer_at while the manager is unchanged).
     pointer(globals[0x3326468],0,0)
-    check('loading',{read_into=3,pointer_at=1},'waiting_for_game_data')
+    check('loading',{read_into=1},'waiting_for_game_data')
     pointer(globals[0x3326468],0,pm);integer(m,8,0)
-    check('on the ship',{read_into=2,pointer_at=1},'waiting_for_reinforcement')
-    -- Alive with one beacon out: the beacon records are still read, because a
-    -- 3 -> 2 transition compares against their use bits; their positions only
-    -- in states 1 and 2.
+    check('on the ship',{read_into=2},'waiting_for_reinforcement')
+    -- Alive with one beacon out: nothing but the gate. The beacons are read
+    -- only once the local player is queued or pending.
     integer(m,8,1);integer(p,0x84,2);integer(p,0x88,2);integer(r,12,1);integer(us,0,0)
-    check('alive in a mission',{read_into=10,pointer_at=7},'waiting_for_reinforcement')
+    check('alive in a mission',{read_into=2},'waiting_for_reinforcement')
+    -- The death's frame: the gate's 2 reads, then the full snapshot it starts
+    -- (14) and the repeat after the game update (14). Once per death; the
+    -- frames after it are 28 again.
     integer(p,0x2e0,1)
-    check('reinforcement queued',{read_into=28,pointer_at=20},'waiting_for_reinforcement')
+    check('reinforcement queued',{read_into=30,pointer_at=20},'waiting_for_reinforcement')
+    check('reinforcement still queued',{read_into=28,pointer_at=20},'waiting_for_reinforcement')
     -- Snapshot, fresh re-read, the write with its one protection query (the
     -- fixture's write makes it, as the real adapter does), read-back; then the
     -- repeat check. A separate check before the write made it two queries.
@@ -202,27 +206,39 @@ do
     check('correction write',{read_into=42,read=1,pointer_at=30,writable_data=1,write=1},
         'reinforcement_already_centered',1)
     check('correction held',{read_into=28,pointer_at=20},'reinforcement_already_centered')
+    -- Landed: this check still reads in full (the last snapshot was pending),
+    -- sees the spawn alive and returns to the gate.
     integer(p,0x84,1);integer(p,0x88,1);integer(p,0x2e0,3);integer(r,12,0)
-    check('alive solo',{read_into=9,pointer_at=5},'waiting_for_reinforcement')
+    check('landed solo',{read_into=9,pointer_at=5},'waiting_for_reinforcement')
+    check('alive solo',{read_into=2},'waiting_for_reinforcement')
     -- Solo death: the source position (here the fallback, 3 reads) is read
     -- only in the check that captures a new automatic anchor, then never again
-    -- for that anchor.
+    -- for that anchor. This death's frame starts at the gate (2 reads).
     integer(p,0x2e0,1);integer(stratagems,0x34,1);integer(rows,12,0x7c)
     number(rows,16,90);number(rows,20,100);number(rows,24,30)
-    check('solo anchor captured',{read_into=23,pointer_at=14},'waiting_for_reinforcement')
+    check('solo anchor captured',{read_into=25,pointer_at=14},'waiting_for_reinforcement')
     assert(env.ReinforcementBeaconFixData.anchor and env.ReinforcementBeaconFixData.anchor.source[1]==500)
     check('solo anchor held',{read_into=20,pointer_at=12},'waiting_for_reinforcement')
     integer(p,0x2e0,3);integer(stratagems,0x34,0);update()
 end
 completed_writes=writes
+-- The player layout is read in full only once the local player is queued or
+-- pending (the idle gate reads the spawn state alone), so the unsupported
+-- layout is met at the death.
 integer(p,0x84,99);update()
+assert(not env.ReinforcementBeaconFixData.status:find('Unsupported player layout',1,true),'the gate read the layout')
+integer(p,0x2e0,1);update()
 assert(env.ReinforcementBeaconFixData.status:find('Unsupported player layout',1,true))
 integer(p,0x84,2);integer(p,0x2e0,1);integer(us,0,0);update()
 integer(p,0x2e0,2);integer(us,0,1);update();assert(writes==completed_writes)
 pointer(globals[0x3326468],0,1)
 local ok,message=pcall(patch.snapshot,api,game,exe)
 assert(not ok and tostring(message):find('Invalid spawn data pointer',1,true),'Invalid non-null pointer treated as startup')
-print('PASS: per-frame call budget: no protection query outside the correction frame; 10 reads alive in a mission')
+-- The idle gate refuses the same invalid manager pointer.
+ok,message=pcall(patch.apply,api,game,exe,{})
+assert(not ok and tostring(message):find('Invalid spawn data pointer: player_manager',1,true),
+    'The gate treated an invalid non-null pointer as startup')
+print('PASS: per-frame call budget: no protection query outside the correction frame; 2 reads alive in a mission')
 print('PASS: null startup, staged initialization, unreadable transition, correction, mission reload and fatal-layout protection')
 -- The update chain on the runtime guard, through fresh installs over the same
 -- fixture. An error below pauses the mod: a pending correction that still holds
@@ -438,6 +454,128 @@ do
 end
 print('PASS: under the game\'s tostring, a changed player manager is noticed against the previous snapshot '
     ..'and before the write')
+-- The idle gate's transitions through the real reader, one check per call.
+-- Between deaths only the spawn state is read, so what the plan compares the
+-- death's first snapshot with is the gate's baseline: the state the gate saw
+-- last, no beacons, and the anchor rows of the last solo landing.
+do
+    local function mission(players)
+        pointer(globals[0x3326468],0,pm);integer(m,8,1);integer(m,0x40,1)
+        integer(p,0x84,players);integer(p,0x88,players);integer(p,0x3a8,0x7fff);number(p,0x12c,5)
+        pointer(p,0xe8,entity);pointer(es,0,entity);integer(e,8,77);e[20]=1
+        number(xyz,0,11);number(xyz,4,22);number(xyz,8,33)
+        integer(r,12,0);integer(us,0,0);integer(stratagems,0x34,0)
+        number(p,0x10c,50);number(p,0x110,60)
+    end
+    local function xy() return ffi.cast('float*',p+0x10c)[0],ffi.cast('float*',p+0x110)[0] end
+    local function check(t,spawn,expected,label)
+        integer(p,0x2e0,spawn)
+        local before=writes
+        local ok,reason=patch.apply(api,game,exe,t)
+        assert(ok and reason==expected,label..': '..tostring(reason))
+        return writes-before
+    end
+    -- An automatic-reinforcement row (type 0x7C) at row index i.
+    local function row(i,x,y)
+        integer(rows,64*i+12,0x7c);number(rows,64*i+16,x);number(rows,64*i+20,y);number(rows,64*i+24,30)
+    end
+    -- The beacon the solo queue placed at x, y, used by the local player, and
+    -- the pending pod scattered around it.
+    local function queued_at(x,y)
+        integer(r,12,1);integer(us,0,1);number(xyz,0,x);number(xyz,4,y)
+        number(p,0x10c,120);number(p,0x110,130)
+    end
+
+    -- Initial deployment (0 -> 2) stays excluded although no alive snapshot exists.
+    mission(2)
+    local t={}
+    check(t,0,'waiting_for_reinforcement','before deployment')
+    check(t,0,'waiting_for_reinforcement','before deployment, at the gate')
+    integer(r,12,1);integer(us,0,1)
+    assert(check(t,2,'initial_deployment_unchanged','initial deployment')==0)
+    assert(check(t,2,'beacon_association_unavailable','initial deployment, next check')==0)
+
+    -- Alive straight to pending (3 -> 2): the beacons' use bits before it were
+    -- never read, so it is skipped.
+    mission(2)
+    t={}
+    check(t,3,'waiting_for_reinforcement','alive')
+    check(t,3,'waiting_for_reinforcement','alive, at the gate')
+    integer(r,12,1);integer(us,0,1)
+    assert(check(t,2,'pending_without_queue_skipped','alive to pending')==0)
+    assert(check(t,2,'beacon_association_unavailable','alive to pending, next check')==0)
+
+    -- Co-op 3 -> 1 -> 2 through the gate: corrected once.
+    mission(2)
+    t={}
+    check(t,3,'waiting_for_reinforcement','co-op alive')
+    check(t,3,'waiting_for_reinforcement','co-op alive, at the gate')
+    check(t,1,'waiting_for_reinforcement','co-op dead')
+    integer(r,12,1);integer(us,0,1)
+    assert(check(t,2,'beacon_spawn_centered','co-op pending')==1)
+    local x,y=xy();assert(x==11 and y==22)
+
+    -- Solo, the anchor row appearing in the death's own frame: captured.
+    mission(1)
+    t={}
+    number(cam,0x3c,11);number(cam,0x40,22)
+    check(t,3,'waiting_for_reinforcement','solo alive')
+    check(t,3,'waiting_for_reinforcement','solo alive, at the gate')
+    integer(stratagems,0x34,1);row(0,90,100)
+    check(t,1,'waiting_for_reinforcement','solo death, row in the same frame')
+    assert(t.anchor and t.anchor.source[1]==11,'the death\'s lone row was not captured')
+    number(cam,0x3c,300);number(cam,0x40,200)
+    queued_at(90,100)
+    assert(check(t,2,'solo_spawn_centered','solo pending')==1)
+    x,y=xy();assert(x==11 and y==22,'solo correction did not use the frozen source')
+    -- Landed, with the first death's row still listed.
+    integer(r,12,0);integer(us,0,0)
+    check(t,3,'waiting_for_reinforcement','solo landed, old row listed')
+    assert(t.landed and #t.landed==1 and not t.previous)
+    check(t,3,'waiting_for_reinforcement','solo alive again, at the gate')
+    -- Two deaths close together: the first death's row is still listed when
+    -- the second death's row appears. The landing's rows are the baseline, so
+    -- only the new row is the anchor (as when alive frames were read).
+    integer(stratagems,0x34,2);row(1,190,200)
+    check(t,1,'waiting_for_reinforcement','second solo death, old and new rows')
+    assert(t.anchor and t.anchor.key==ffi.string(rows+64+16,12) and t.anchor.source[1]==300,
+        'the second death did not capture its own row')
+    queued_at(190,200)
+    assert(check(t,2,'solo_spawn_centered','second solo pending')==1)
+    x,y=xy();assert(x==300 and y==200,'second solo correction did not use its own source')
+
+    -- Solo with no landing seen on this player manager (a fresh tracker) and
+    -- two rows listed at the death: which one is the death's is unknown, so
+    -- none is captured and the spawn is left unchanged.
+    mission(1)
+    t={}
+    number(cam,0x3c,11);number(cam,0x40,22)
+    check(t,3,'waiting_for_reinforcement','fresh solo alive')
+    check(t,3,'waiting_for_reinforcement','fresh solo alive, at the gate')
+    integer(stratagems,0x34,2);row(0,90,100);row(1,190,200)
+    check(t,1,'waiting_for_reinforcement','fresh solo death, two rows')
+    assert(not t.anchor,'an ambiguous row was captured')
+    queued_at(190,200)
+    assert(check(t,2,'solo_anchor_unavailable','fresh solo pending, two rows')==0)
+
+    -- A row appearing in a later dead frame than the death's: captured against
+    -- that frame's full snapshot, as before.
+    mission(1)
+    t={}
+    check(t,3,'waiting_for_reinforcement','late row alive')
+    check(t,3,'waiting_for_reinforcement','late row alive, at the gate')
+    integer(stratagems,0x34,1);integer(rows,12,0x55)
+    check(t,1,'waiting_for_reinforcement','late row death')
+    assert(not t.anchor)
+    integer(stratagems,0x34,2);row(1,190,200)
+    check(t,1,'waiting_for_reinforcement','late row appears')
+    assert(t.anchor and t.anchor.source[1]==11)
+    queued_at(190,200)
+    assert(check(t,2,'solo_spawn_centered','late row pending')==1)
+    integer(stratagems,0x34,0)
+end
+print('PASS: idle gate: initial deployment excluded, alive-to-pending skipped, co-op and solo corrected through it; '
+    ..'an earlier death\'s row still listed is not the new anchor; two rows with no landing seen capture nothing')
 -- The real Windows adapter over the vendored runtime, in this process only:
 -- module hashes read once per session, refused module pages, an eight-byte
 -- write and read-back in Lua-owned memory, pointer decoding and distance.

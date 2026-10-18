@@ -31,13 +31,16 @@ return function(create_api, patch, build)
         -- A later mod may still own the outer update callback.
         if update == callback then update = original_update or function() end end
     end
+    -- Below a later mod's update the hook stays in the chain: later frames test
+    -- `attempted` here and never enter initialize, whose early return is a UCLO
+    -- (it owns a closure) that LuaJIT cannot record and aborted every trace.
     local function forward(...)
-        initialize()
+        if not attempted then initialize() end
         return ...
     end
     callback = function(dt, ...)
         if original_update then return forward(original_update(dt, ...)) end
-        initialize()
+        if not attempted then initialize() end
     end
     update = callback
 end

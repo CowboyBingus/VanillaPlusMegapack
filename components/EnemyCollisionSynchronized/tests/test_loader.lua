@@ -98,22 +98,36 @@ for _,diagnostics in ipairs({false,true,'true',1}) do
     local P=setfenv(assert(loadfile(source..'/profiler.lua')),e)()
     local create=P.new
     P.new=function(...)created=created+1;return create(...)end
-    local patch={interval=1/30,apply=function()return true,'waiting_for_mission',false end,profiler=P}
+    local patch={interval=3/64,apply=function()return true,'waiting_for_mission',false end,profiler=P} -- M.interval
     loader_in(e,api)(function()return api end,patch,{revision='fixture',game_sha256='hash',exe_sha256='hash'})
     local startup=opens
     local enabled=diagnostics==true
     assert((api.read~=original_read)==enabled,'no timed reads by default')
     if not enabled then
-        -- The loader's own calls per frame, polling or not: one api.time for
-        -- the poll clock. The patch's calls are pinned in test_performance.lua
-        -- (this stub makes none).
+        -- The loader's own calls per frame, polling or not: none. The poll
+        -- clock is the frame time update receives (it was one api.time per
+        -- frame). The patch's calls are pinned in test_performance.lua (this
+        -- stub makes none).
         local budget=dofile(arg[0]:gsub('[%w_]+%.lua$','')..'frame_budget.lua')
         local counts=budget.wrap(api)
+        local polls=e.CorpseCollisionRepair.polls
         now=1/120;local polled=budget.frame(counts,e.update,1/120)
+        assert(e.CorpseCollisionRepair.polls==polls+1,'the first frame polls')
         now=1/60;local quiet=budget.frame(counts,e.update,1/60)
-        budget.check(polled,{time=1},'loader frame with a poll')
-        budget.check(quiet,{time=1},'loader frame without a poll')
-        assert(budget.describe(polled)=='time=1' and budget.describe(quiet)=='time=1','exactly one call per frame')
+        assert(e.CorpseCollisionRepair.polls==polls+1,'a frame within the interval does not poll')
+        assert(budget.describe(polled)=='no api calls' and budget.describe(quiet)=='no api calls','no call per frame')
+        -- Polls come every M.interval of frame time: every third frame at
+        -- 60 FPS, every other at 30 FPS, every seventh at 144 FPS. Without a
+        -- number frame time the loader falls back to one api.time per frame.
+        for _,rate in ipairs({{60,3},{30,2},{144,7}}) do
+            local fps,every=rate[1],rate[2]
+            for _=1,10 do e.update(1/fps) end
+            local before=e.CorpseCollisionRepair.polls
+            for _=1,every*20 do e.update(1/fps) end
+            assert(e.CorpseCollisionRepair.polls-before==20,fps..' FPS: one poll every '..every..' frames')
+        end
+        local frame=budget.frame(counts,e.update)
+        assert(budget.describe(frame)=='time=1','without a frame time: one api.time')
     end
     for i=1,600 do now=i/60;local a,b,c=e.update(1/60);assert(a==1 and b==nil and c==3)end
     assert(created==(enabled and 1 or 0) and (api.profiler~=nil)==enabled,'the profiler starts only with diagnostics')
@@ -357,7 +371,7 @@ do -- (g) with the real patch through 30 s of a busy mission (realignments, a ve
         for frame=1,1800 do
             if frame%120==0 then f.matrix(f.bodies[f.units[3]][16],2+frame%7) end
             if frame==600 then for _,body in ipairs(f.bodies[f.units[1]]) do f.matrix(body,3) end end
-            failing=frame>=900 and frame<906
+            failing=frame>=900 and frame<909 -- three polls at M.interval (every third frame at 60 FPS)
             now=now+1/60;f.tick(now);env.update()
         end
         assert(state.realignments>0 and state.fling_stops_verified==1 and state.retries==3 and state.status=='ready')

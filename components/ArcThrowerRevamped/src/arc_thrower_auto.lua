@@ -35,17 +35,26 @@ local POINTER_SIZE = 8
 local RECOVERY_WINDOW = 0.25
 local TRIGGER_BATCH, TRIGGER_LIMIT = 64, 4096
 local MEM_COMMIT, MEM_PRIVATE, PAGE_READONLY, PAGE_READWRITE = 0x1000, 0x20000, 0x02, 0x04
--- Every CHECK_FRAMES updates (0.25 s at 60 FPS) a check frame revalidates the
--- charge record and runs the full Fire check, which also keeps the gate's
--- slot current after a respawn.
-local CHECK_FRAMES = 15
+-- Frames are counted, never timed. Every POLL_FRAMES updates (1 s at 60 FPS)
+-- a poll frame reads whether a mission runs (2 reads) and revalidates the
+-- charge record (1 read). In a mission, every CHECK_FRAMES updates (0.25 s) a
+-- check frame runs the full Fire check, which also keeps the gate's slot
+-- current after a respawn; a poll frame is also a check frame. Outside a
+-- mission nothing can fire: no Fire input is read, and frames between poll
+-- frames read nothing.
+local CHECK_FRAMES, POLL_FRAMES = 15, 60
+-- The mission record (the loader frame-state definition, read by other mods
+-- too): a pointer at game.dll + MISSION_RECORD to 68 bytes; a mission runs
+-- while word +8 is set and word +0x40 is a mission type, 1 to 7.
+local MISSION_RECORD = 0x33266a0
 
 local state = {armed = false, patched = false, record = nil, scans = 0,
                checked = false, supported = false, resolved = nil,
                previous = nil, shots = {}, last_shot = nil, status = nil,
                status_charge = nil, reason = nil, reason_log = nil,
                reason_time = nil, drove_since = nil, drove_peak = 0, rescans = 0,
-               frames = CHECK_FRAMES - 1} -- the first ready frame is a check frame
+               mission = false, -- whether the last poll frame found a mission
+               frames = POLL_FRAMES - 1} -- the first ready frame is a poll frame
 
 -- Record flags this addon set, by address: the byte it found there. Put back
 -- when the addon pauses, stops or the game shuts down.
@@ -114,6 +123,20 @@ local function seconds()
     if not state.bound then return 0 end
     kernel.atr1_QueryPerformanceCounter(performance_counter)
     return (performance_counter[0] + performance_counter[1] * 4294967296) / performance_frequency
+end
+
+-- This update's timestamp, taken on first use: a frame that only finds Fire
+-- up and the record valid (an idle check or poll frame) takes none. Every
+-- use in one update sees the same value.
+local frame_now = nil
+local function now_time()
+    local now = frame_now
+    if not now then
+        now = seconds()
+        frame_now = now
+        state.now = now
+    end
+    return now
 end
 
 local loader = rawget(_G, 'CowboyBingusModLoader')
@@ -416,6 +439,14 @@ local function fire_may_be_held()
     return bit.band(held_bits[0], 0x7fffffff) ~= 0
 end
 
+-- Whether a mission runs (2 reads; poll frames only). Unreadable: no mission.
+local MISSION = words(17)
+local function in_mission()
+    local record = pointer(state.game + MISSION_RECORD)
+    if not record or record == 0 or not read_into(record, 68, MISSION) then return false end
+    return MISSION[2] ~= 0 and MISSION[16] >= 1 and MISSION[16] <= 7
+end
+
 -- The last weapon-holder row that showed the local avatar holding a weapon:
 -- the manager, its rows and the row index, for that weapon and avatar id.
 local holder = {manager = nil, rows = nil, index = nil, weapon = nil, avatar = nil}
@@ -610,7 +641,7 @@ local function patch_charge_record(now)
 end
 
 -- Revalidates the patched record (one 216-byte read) and repairs its flag.
-local function check_record(now)
+local function check_record()
     local charge=read(state.record,216)
     if valid_charge_record(charge) then
         state.patched=ensure_auto_fire(state.record,charge)
@@ -620,21 +651,21 @@ local function check_record(now)
     else
         -- Never write through an expired/reused record address.
         state.record=nil;state.patched=false
-        scan_thread=nil;next_scan=now
+        scan_thread=nil;next_scan=now_time()
         log_line('charge record unavailable or changed; rediscovering')
     end
 end
 
--- check: this is a check frame (every CHECK_FRAMES updates), which
--- revalidates the record; the scan runs on every frame that calls this while
--- it is in progress, requested or still needed.
-local function maintain_charge_record(now, check)
-    if state.record and (check or state.check_record_now) then
+-- poll: this is a poll frame (every POLL_FRAMES updates), which revalidates
+-- the record; the scan runs on every frame that calls this while it is in
+-- progress, requested or still needed.
+local function maintain_charge_record(poll)
+    if state.record and (poll or state.check_record_now) then
         state.check_record_now = nil -- after a pause: re-patch the kept record first
-        check_record(now)
+        check_record()
     end
     if not state.patched or state.rescan_requested or scan_thread then
-        local ok,reason=patch_charge_record(now)
+        local ok,reason=patch_charge_record(now_time())
         if ok then
             if not state.patch_logged then note('Charge record ready.');state.patch_logged=true end
         elseif not state.patched and reason~='pending' and reason~='waiting' and not state.scan_logged then
@@ -803,13 +834,13 @@ local function fresh_start()
     state.rescan_requested = nil
     state.fire_slot = nil
     forget_slot()
-    state.frames = CHECK_FRAMES - 1
+    state.frames = POLL_FRAMES - 1 -- resume on a poll frame
     state.check_record_now = state.record ~= nil
 end
 
 -- Bindings and the build check, each failure logged once and kept as the
 -- first failure. False: stay idle.
-local function ready()
+local function prepare()
     if not bind() then
         if not state.bind_logged then
             state.bind_logged = true
@@ -828,6 +859,13 @@ local function ready()
         return false
     end
     return true
+end
+
+-- Bound and on a supported build: one test per update once both passed,
+-- without entering bind and the build check (two calls) every frame.
+local function ready()
+    if state.bound and state.supported then return true end
+    return prepare()
 end
 
 -- Diagnostics only: the shot intervals of the hold that just ended.
@@ -1035,13 +1073,16 @@ local function follow_press(now, avatar, held, check)
 end
 
 -- The full check of the local Fire input and the hold it drives.
-local function follow_input(now, check)
+local function follow_input(check)
     local down,avatar,held,slot = local_fire(check)
     state.fire_slot = slot
     if down==nil then
         -- Unknown input is not proof of release. Retain only a short-lived
         -- binding, with no charge writes until all validation succeeds again.
-        suspend_hold(now,'native Fire input unavailable')
+        -- Without a press being followed there is nothing to suspend and no
+        -- timestamp is taken (no local avatar: dead, loading).
+        if holding() then suspend_hold(now_time(),'native Fire input unavailable')
+        else state.previous=nil;state.reason='native Fire input unavailable' end
         return
     end
     if not down then
@@ -1049,27 +1090,54 @@ local function follow_input(now, check)
         clear_hold(nil)
         return
     end
-    follow_press(now, avatar, held, check)
+    follow_press(now_time(), avatar, held, check)
 end
 
--- One update. Returns true when it ran the full Fire check. An idle frame
--- (no check frame, no press being followed, no scan in progress, Fire up)
--- stops after the gate's single read and takes no timestamp.
-local function step()
-    state.reason=nil -- diagnostics must describe this frame, not a past failure
-    if not ready() then return false end
-    state.frames = (state.frames + 1) % CHECK_FRAMES
-    local check = state.frames == 0
-    local input = check or holding() or fire_may_be_held()
-    if not input and not scan_thread and not state.check_record_now then return false end
-    local now = seconds()
-    state.now = now
-    maintain_charge_record(now, check)
+-- The record maintenance of this frame; false when it stopped the addon.
+local function maintain(poll)
+    maintain_charge_record(poll)
     if state.protection_lost then
         stop('weapon data protection could not be restored')
         return false
     end
-    if input then follow_input(now, check) end
+    return true
+end
+
+-- A poll frame: whether a mission runs. Leaving one ends any hold and drops
+-- the kept Fire slot (the next mission resolves it afresh).
+local function poll_mission()
+    local mission = in_mission()
+    if state.mission and not mission then
+        clear_hold(nil)
+        state.fire_slot = nil
+        forget_slot()
+    end
+    state.mission = mission
+end
+
+-- One update. Returns true when it ran the full Fire check. An idle frame
+-- reads at most the gate's one word and takes no timestamp: in a mission (no
+-- check frame, no press being followed, no scan in progress, Fire up) the
+-- kept Fire slot; outside a mission nothing, except on poll frames and while
+-- the record scan runs.
+local function step()
+    state.reason=nil -- diagnostics must describe this frame, not a past failure
+    frame_now=nil
+    if not ready() then return false end
+    local frames = state.frames + 1
+    if frames >= POLL_FRAMES then frames = 0 end
+    state.frames = frames
+    local poll = frames == 0
+    if poll then poll_mission() end
+    if not state.mission then
+        if poll or scan_thread or state.check_record_now then maintain(poll) end
+        return false
+    end
+    local check = frames % CHECK_FRAMES == 0
+    local input = check or holding() or fire_may_be_held()
+    if not input and not scan_thread and not state.check_record_now then return false end
+    if not maintain(poll) then return false end
+    if input then follow_input(check) end
     return input
 end
 
@@ -1077,7 +1145,8 @@ end
 -- unless it changed.
 local function log_reason()
     if not state.reason then state.reason_log = nil; return end
-    local now = state.now
+    if not rawget(_G, 'ArcThrowerDiagnostics') then return end -- log_line would write nothing
+    local now = now_time()
     if state.reason_log ~= state.reason or (now - (state.reason_time or 0) > 2) then
         state.reason_log = state.reason
         state.reason_time = now
@@ -1113,18 +1182,14 @@ if not installed then note('Update guard unavailable; the addon stays idle: ' ..
 -- Update owns the assist. Render remains untouched so discovery and native
 -- writes run once per game update, regardless of how often the engine renders.
 
--- The LuaJIT code cache is shared by the game and every mod. Only the idle
--- path, which runs on every update, and the read and decode helpers compile;
--- the rest runs on few updates (check frames, a held Fire, the scan, writes,
--- restores, diagnostics) and stays interpreted. Measured offline in the
--- game's lua51.dll: about 5 KB of machine code instead of 67 KB, for about
--- 2 us more per update while the Arc Thrower fires.
+-- The LuaJIT code cache is shared by the game and every mod, and LuaJIT
+-- remembers only 64 trace starts that failed. The whole addon runs
+-- interpreted: an idle update is a few dozen bytecodes, and a hold's work is
+-- native reads. v1.7 compiled the idle path and the read helpers; their
+-- traces kept aborting where they returned into the guard's pcall or into an
+-- interpreted caller (tests/test_equivalence.lua, traces).
 if jit and jit.off then
     jit.off(true, true) -- this chunk and every function in it
-    for _, f in ipairs({guarded_step, step, ready, holding, fire_may_be_held, read_into, read, pointer, u32, u64,
-                        f32, mul32, write, seconds}) do
-        jit.on(f)
-    end
 end
 
 note('Arc Thrower Revamped ' .. module.revision .. ' initialised on game build 25480438 (loader API ' ..

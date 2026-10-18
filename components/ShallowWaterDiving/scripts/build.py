@@ -12,8 +12,8 @@ import translations
 from package import package_release
 
 MODULE='mods/cowboybingus/shallow_water_dive'
-REVISION='data-v3.10'
-VERSION='v3.10'
+REVISION='data-v3.10.1'
+VERSION='v3.10.1'
 FORBIDDEN=('VirtualAlloc','VirtualProtect','FlushInstructionCache','CreateRemoteThread',
            'RtlAddFunctionTable','RtlDeleteFunctionTable','LoadLibrary')
 def run(args,**kwargs):
@@ -38,6 +38,7 @@ def main():
     tests+=run([LUA,ROOT/'tests/test_bingus_text.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_dive.lua',ROOT/'src'],env=env)
     tests+=run([LUA,ROOT/'tests/test_loader.lua',ROOT/'src'],env=env)
+    tests+=run([LUA,ROOT/'tests/test_idle_equivalence.lua',ROOT/'src'],env=env)
     (build/ARCHIVE).write_bytes(make_archive(resources))
     for suffix in ('.stream','.gpu_resources'): (build/(ARCHIVE+suffix)).write_bytes(b'')
     files={f'data/{ARCHIVE}{suffix}':f'build/{ARCHIVE}{suffix}' for suffix in ('','.stream','.gpu_resources')}

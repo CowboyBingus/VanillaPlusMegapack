@@ -8,6 +8,12 @@
 -- lines, keep the same shortcut states and leave the same presenter state;
 -- only their Mod Bindings Menu reads differ. A poll that raises or refuses is
 -- logged once and B asks is_down from then on, still behaving as A.
+-- Two more instances run the same frames with bindings that always answer
+-- (true or false) and with the game's mission record and the bindings' state
+-- bytes: C with the idle gate (Mod Bindings Menu's v2.0-v2.2.1 layout), which
+-- asks Mod Bindings Menu only while a binding's action is down, and D with
+-- poll on every frame aboard. Both must write the same log lines, keep the same
+-- shortcut states, leave the same presenter state and agree on ship and mission.
 -- Usage: luajit test_binding_paths.lua [path to src/galactic_menu_hotkey.lua]
 local ffi = require('ffi')
 local source = arg[1] or ((arg[0]:match('^(.*[/\\])') or '') .. '../src/galactic_menu_hotkey.lua')
@@ -52,11 +58,25 @@ end
 -- manager), its own engine, window and key fakes and its own log. Every call
 -- it makes outside Mod Bindings Menu's reads goes into calls, in order.
 local PRESENTER_OFFSET = 17032
-local function instance(name)
+-- game.dll's globals from the mission record pointer (0x33266a0) to the input
+-- owner pointer (0x347cf18), for C and D.
+local FIRST_GLOBAL, LAST_GLOBAL = 0x33266a0, 0x347cf18
+local function instance(name, globals)
     local side = {name = name, calls = {}, lines = {}, mbm = {is_down = 0, poll = 0}}
     local function record(...) side.calls[#side.calls + 1] = table.concat({...}, ' ') end
     side.record = record
-    side.module = ffi.new('uint8_t[?]', 0x347ce28 + 24)
+    if globals then
+        -- The mission record (flag at +8, type at +0x40) and the input owner (an
+        -- action's state byte at +808 + 32 * (97 * group + action)).
+        side.globals = ffi.new('uint8_t[?]', LAST_GLOBAL - FIRST_GLOBAL + 8)
+        side.module = side.globals - FIRST_GLOBAL
+        side.mode = ffi.new('uint8_t[72]')
+        side.owner = ffi.new('uint8_t[?]', 808 + 32 * 97 * 13)
+        ffi.cast('uint64_t *', side.module + FIRST_GLOBAL)[0] = ffi.cast('uint64_t', side.mode)
+        ffi.cast('uint64_t *', side.module + LAST_GLOBAL)[0] = ffi.cast('uint64_t', side.owner)
+    else
+        side.module = ffi.new('uint8_t[?]', 0x347ce28 + 24)
+    end
     side.ui = ffi.new('uint8_t[?]', PRESENTER_OFFSET + 64)
     ffi.cast('uint64_t *', side.module + 0x347ce28)[0] = ffi.cast('uint64_t', side.ui)
     side.current = ffi.cast('uint32_t *', side.ui + PRESENTER_OFFSET + 12)
@@ -124,9 +144,16 @@ end
 -- Mod Bindings Menu tables: register_binding refuses an id its first refused[id]
 -- tries on that table; is_down and poll answer from world.answers. poll is on
 -- B's table only; broken makes it raise, refuse makes it return false.
-local function host(side, with_poll, refused, faults)
+-- C's and D's tables (bound = true) answer true or false, never nil (no binding
+-- unavailable once registered and ready); C's (gate = true) has the layout the
+-- idle gate knows: 36 actions and ready, under API version 3 or 4 (version).
+local function host(side, with_poll, refused, faults, bound, gate, version)
     local tries = {}
-    local menu = {version = 3}
+    local menu = {version = version or 3}
+    local function answer(id)
+        if bound then return world.answers[id] == true end
+        return world.answers[id]
+    end
     function menu.register_binding(id, _, slot)
         side.record('register_binding', id, tostring(slot))
         tries[id] = (tries[id] or 0) + 1
@@ -135,7 +162,7 @@ local function host(side, with_poll, refused, faults)
     end
     function menu.is_down(id)
         side.mbm.is_down = side.mbm.is_down + 1
-        return world.answers[id]
+        return answer(id)
     end
     if with_poll then
         function menu.poll(ids, out)
@@ -143,14 +170,32 @@ local function host(side, with_poll, refused, faults)
             if faults.broken then error('poll broke', 0) end
             if faults.refuse then return false, 'invalid poll arguments' end
             out.down = out.down or {}
-            for index = 1, #ids do out.down[index] = world.answers[ids[index]] end
+            for index = 1, #ids do out.down[index] = answer(ids[index]) end
             return true
         end
+    end
+    if gate then
+        menu.capacity = 36
+        function menu.ready() return true end
     end
     return menu
 end
 
 local a, b = instance('A'), instance('B')
+-- C reads its bindings through the idle gate, D through poll on every frame
+-- aboard; both see the mission record and the bindings' state bytes.
+local c, d = instance('C', true), instance('D', true)
+local SLOT_ACTIONS = {{12, 1}, {12, 0}, {10, 1}, {10, 4}, {10, 8}, {10, 14}, {10, 9}}
+-- The game's state for C and D: the mission flag and type, and each binding's state byte.
+local function sync_globals(side)
+    local mission = world.main == MISSION_WORLD
+    ffi.cast('uint32_t *', side.mode + 8)[0] = mission and 1 or 0
+    ffi.cast('uint32_t *', side.mode + 0x40)[0] = mission and 1 or 0
+    for _, shortcut in ipairs(side.shortcuts) do
+        local action = SLOT_ACTIONS[shortcut.slot]
+        side.owner[808 + 32 * (action[1] * 97 + action[2])] = world.answers[shortcut.id] == true and 1 or 0
+    end
+end
 local IDS = {}
 for index, shortcut in ipairs(a.shortcuts) do IDS[index] = shortcut.id end
 local seed = 20261004
@@ -166,13 +211,17 @@ local function new_hosts()
     -- nothing is registered until a retry.
     local refused, all = {}, random(4) == 0
     for _, id in ipairs(IDS) do refused[id] = (all or random(4) == 0) and 1 + random(2) or 0 end
-    hosts = {A = host(a, false, refused, faults), B = host(b, true, refused, faults)}
+    -- C's table is a version 3 table (v2.0-v2.2.1) and a version 4 one (v2.3) in
+    -- turn, one per generation; the gate stands in for both.
+    hosts = {A = host(a, false, refused, faults), B = host(b, true, refused, faults),
+             C = host(c, true, refused, faults, true, true, 3 + generation % 2), D = host(d, true, refused, faults, true, false)}
 end
 new_hosts()
 local present = true
 
 local seen = {polls = 0, polled_nil = 0, acted = 0, fixed_keys = 0, focus_changes = 0, ship_frames = 0,
-              poll_failures = 0, raised = 0, refused = 0, generations = 0, unregistered = 0}
+              poll_failures = 0, raised = 0, refused = 0, generations = 0, unregistered = 0,
+              gated_idle = 0, gated_idle_v4 = 0, gated_acted = 0, missions = 0}
 -- Each change has a chance per frame; leaving the ship, the game's focus or
 -- Mod Bindings Menu is rarer than coming back.
 local function chance(per_10000) return random(10000) < per_10000 end
@@ -204,8 +253,11 @@ local function generate(frame_no)
     if a.current[0] ~= 0 and random(40) == 0 then
         for _, side in ipairs({a, b}) do side.current[0], side.depth[0] = 0, 0 end
     end
+    if c.current[0] ~= 0 and random(40) == 0 then
+        for _, side in ipairs({c, d}) do side.current[0], side.depth[0] = 0, 0 end
+    end
     if frame_no % 997 == 0 then
-        for _, side in ipairs({a, b}) do side.current[0], side.depth[0] = 2, 1 end
+        for _, side in ipairs({a, b, c, d}) do side.current[0], side.depth[0] = 2, 1 end
     end
 end
 
@@ -221,7 +273,46 @@ local function same_list(x, y, what, frame_no)
         assert(x[index] == y[index], string.format('frame %d, %s %d: %s | %s', frame_no, what, index, x[index], y[index]))
     end
 end
+-- One side's log lines since before, without its poll failure lines.
+local function new_lines(side, before)
+    local lines = {}
+    for index = before + 1, #side.lines do
+        if not side.lines[index]:find(POLL_FAILED, 1, true) then lines[#lines + 1] = side.lines[index] end
+    end
+    return lines
+end
+-- C (the idle gate) and D (poll on every frame aboard) on the same frame: the
+-- same log lines (poll failures aside: C polls only while a binding is down),
+-- shortcut states, presenter state and ship. C asks Mod Bindings Menu nothing
+-- on an idle frame aboard while its gate stands in for it.
+local function compare_gate(frame_no, dt)
+    sync_globals(c)
+    sync_globals(d)
+    c.calls, d.calls = {}, {}
+    local c_before, d_before, c_asked = #c.lines, #d.lines, c.mbm.poll + c.mbm.is_down
+    run(c, dt)
+    run(d, dt)
+    same_list(new_lines(c, c_before), new_lines(d, d_before), 'C and D log lines', frame_no)
+    for _, id in ipairs(IDS) do
+        assert((c.state.keys_down[id] == true) == (d.state.keys_down[id] == true),
+               'frame ' .. frame_no .. ': C and D shortcut state of ' .. id)
+    end
+    assert(c.current[0] == d.current[0] and c.depth[0] == d.depth[0], 'frame ' .. frame_no .. ': C and D presenter')
+    assert((c.state.world == nil) == (d.state.world == nil) and c.state.in_mission == d.state.in_mission,
+           'frame ' .. frame_no .. ': C and D ship')
+    local asked = c.mbm.poll + c.mbm.is_down > c_asked
+    if c.state.world and present and c.state.gate and not asked then
+        seen.gated_idle = seen.gated_idle + 1
+        if hosts.C.version == 4 then seen.gated_idle_v4 = seen.gated_idle_v4 + 1 end
+    end
+    for _, call in ipairs(c.calls) do
+        if call:find('^open_presenter') then seen.gated_acted = seen.gated_acted + 1 end
+    end
+    if c.state.in_mission then seen.missions = seen.missions + 1 end
+end
 local FRAMES = 30000
+-- Idle frames the gate answers alone, at least, with each Mod Bindings Menu version.
+local GATED_V4_MIN = 300
 -- B's log lines without its poll failure lines (one per failing table).
 local b_lines = {}
 for index = 1, #b.lines do b_lines[index] = b.lines[index] end
@@ -280,6 +371,7 @@ for frame_no = 1, FRAMES do
     for _, call in ipairs(a.calls) do
         if call:find('^open_presenter') then seen.acted = seen.acted + 1 end
     end
+    compare_gate(frame_no, dt)
     if a.state.world then seen.ship_frames = seen.ship_frames + 1 end
 end
 for index = 1, #a.lines do assert(not a.lines[index]:find('Update error', 1, true), a.lines[index]) end
@@ -296,3 +388,12 @@ print(string.format('poll and is_down paths over %d generated frames: the same c
       .. 'Mod Bindings Menu tables, %d polls that raised and %d that refused, each logged once OK', FRAMES, seen.polls,
       seen.polled_nil, seen.acted, seen.fixed_keys, seen.unregistered, seen.focus_changes, seen.generations, seen.raised,
       seen.refused))
+for index = 1, #c.lines do assert(not c.lines[index]:find('Update error', 1, true), c.lines[index]) end
+assert(seen.gated_idle >= 1000 and seen.gated_idle_v4 >= GATED_V4_MIN and seen.gated_idle - seen.gated_idle_v4 >= GATED_V4_MIN
+       and seen.gated_acted >= 200 and seen.missions >= 1000,
+       string.format('gate coverage: %d idle frames (%d with version 4), %d presenters opened, %d mission frames',
+                     seen.gated_idle, seen.gated_idle_v4, seen.gated_acted, seen.missions))
+print(string.format('idle gate and poll on every frame over the same %d frames: the same log lines, shortcut states, '
+      .. 'presenter state and ship on every frame; %d idle frames aboard answered by the gate alone (%d with Mod '
+      .. 'Bindings Menu version 3, %d with version 4), %d presenters opened, %d frames in a mission OK', FRAMES,
+      seen.gated_idle, seen.gated_idle - seen.gated_idle_v4, seen.gated_idle_v4, seen.gated_acted, seen.missions))

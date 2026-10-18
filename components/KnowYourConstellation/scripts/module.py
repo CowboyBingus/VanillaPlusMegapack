@@ -2,7 +2,7 @@
 import hashlib
 from pathlib import Path
 
-REVISION = 'v4.1'
+REVISION = 'v4.1.1'
 MODULE = 'mods/cowboybingus/enemy_intelligence'
 # Resource hash of the runtime confirmed in game (CONTRIBUTING.md). v4.1 started
 # cleanly in TestHarness run 20261004-164056-smoke-ship (ship, clean quit) inside

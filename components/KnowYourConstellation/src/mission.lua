@@ -136,16 +136,36 @@ function M.new(api, game, resolve)
     -- 'map' or 'briefing' when one of them is on top of the UI screen stack.
     -- No UI state yet (while the game starts) is no forecast screen, not an
     -- error: errors now count toward stopping the mod.
-    function self:screen()
-        local manager = pointer_at(read(game + 0x347ce28, 8), 0)
-        if not manager then return nil end
-        local state = read(manager + 0x429c, 24)
+    local function top_screen(state)
         local n = u32(state, 20)
         if n < 1 or n > 5 then return nil end
         local top = u32(state, 4 * (n - 1))
         if top == 15 then return 'map' end
         if top == 14 then return 'briefing' end
         return nil
+    end
+    -- The UI manager the last screen() found: the idle gate reads its stack
+    -- alone until the installer's next full check.
+    local kept_manager
+    function self:screen()
+        local manager = pointer_at(read(game + 0x347ce28, 8), 0)
+        kept_manager = manager
+        if not manager then return nil end
+        return top_screen(read(manager + 0x429c, 24))
+    end
+    -- The idle gate's one read: true when the kept manager's stack shows
+    -- neither screen. False (the caller runs the full frame) when no manager
+    -- is kept, the read fails or a forecast screen is on top. Never raises.
+    function self:quiet()
+        if not kept_manager or not api.read(kept_manager + 0x429c, 24, scratch, 0) then return false end
+        return top_screen(scratch.data) == nil
+    end
+    -- Interpreted: the gate that calls quiet is (install.lua), and a side
+    -- trace from a screen change would climb into it and abort. The read
+    -- itself still compiles.
+    if jit and jit.off then
+        jit.off(top_screen)
+        jit.off(self.quiet)
     end
 
     -- The key is built again only when the identity changes.
@@ -621,7 +641,7 @@ function M.new(api, game, resolve)
                              add_ids, event_modifiers, planet_modifiers, find_operation, apply_template,
                              template_modifiers, operation_modifiers, local_operation, global_entry, war_effects,
                              stamp_address, stamp, excluded_in, excluded_by_config, disabled_tags, horde_mode,
-                             mission_exclusions, unchanged, settings}) do
+                             mission_exclusions, unchanged, settings, clear}) do
             jit.off(fn)
         end
     end

@@ -12,7 +12,7 @@ from package import package_release
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = 'mods/cowboybingus/corpse_collision_repair'
-REVISION = 'v2.12.0'
+REVISION = 'v2.13.0'
 
 
 def run(args, **kwargs):
@@ -107,7 +107,9 @@ def main():
                         'profiler_schema': 2, 'slow_poll_records': 8, 'detail_sample_every_polls': 30,
                         'revisit_cache_slots': 256, 'metadata_cache_lifetime': 'current_poll_only',
                         'identical_pose_fast_path': True, 'lazy_auxiliary_guard_tables': True,
-                        'corpse_poll_cadence_changed': False},
+                        # v2.13.0: a corpse that needed no command is re-checked after
+                        # 2, 4 ... 64 polls (M.corpse_recheck_polls) instead of every visit.
+                        'corpse_poll_cadence_changed': True},
         'offline_tests': tests.strip(),
         'source_sha256': {p.relative_to(ROOT).as_posix(): sha(p.read_bytes())
                           for folder in ('src', 'scripts', 'tests', 'profiles') for p in (ROOT / folder).rglob('*')

@@ -461,6 +461,16 @@ local function activate_actions()
     log_input_probe()
 end
 
+local function write_u64(address, value)
+    return write_memory(address, 8, function() ffi.cast('MBM_u64 *', address)[0] = value end)
+end
+local function write_u32(address, value)
+    return write_memory(address, 4, function() ffi.cast('MBM_u32 *', address)[0] = value end)
+end
+
+-- No closure is created here: in LuaJIT 2.1 a function that creates one closes
+-- upvalues (bytecode UCLO, not compiled) on every return, so the early return
+-- below would abort a trace on every frame outside a binding page.
 local function mods_title(active)
     -- Nothing to change (every frame outside a binding page): no read.
     if not state.base or active == state.title_active then return end
@@ -473,15 +483,11 @@ local function mods_title(active)
             note('MODS title slot is already in use; leaving localization unchanged.')
             return
         end
-        state.title_active = write_memory(address, 8, function()
-            ffi.cast('MBM_u64 *', address)[0] = ours
-        end)
+        state.title_active = write_u64(address, ours)
     elseif not active and state.title_active then
         -- If the slot cannot be cleared, keep tracking it and retry later; the
         -- text buffer lives as long as the addon, so the pointer stays valid.
-        if u64(current) == tonumber(ours) and not write_memory(address, 8, function()
-                ffi.cast('MBM_u64 *', address)[0] = 0
-            end) then
+        if u64(current) == tonumber(ours) and not write_u64(address, 0) then
             return
         end
         state.title_active = false
@@ -727,12 +733,14 @@ _G.ModBindingsMenu = api
 -- else nil. Two reads on every frame, without allocation: the UI state and menu
 -- system pointers (16 bytes apart in game.dll), then the UI's screen stack
 -- (five screen types, then the depth); a third for the screen while a page is open.
+-- The step's idle gate (below) reads the same stack.
+local SCREEN_STACK, BINDING_SCREEN = 0x429c, 26
 active_screen = function()
     if not read_words(state.base + UI_STATE_PTR_RVA, 24) then return nil end
     local ui, menu = word_pointer(0), word_pointer(MENU_WORD)
-    if not ui or not read_words(ui + 0x429c, 24) then return nil end
+    if not ui or not read_words(ui + SCREEN_STACK, 24) then return nil end
     local depth = words[5]
-    if depth < 1 or depth > 5 or words[depth - 1] ~= 26 then return nil end
+    if depth < 1 or depth > 5 or words[depth - 1] ~= BINDING_SCREEN then return nil end
     if not menu or not read_words(menu + 208, 8) then return nil end
     return word_pointer(0)
 end
@@ -749,13 +757,6 @@ mbm.MENU_SYSTEM_PTR_RVA, mbm.upper = MENU_SYSTEM_PTR_RVA, translation.T.upper
 function mbm.text(key) return display_text(translation.tr(key)) end
 mbm_files.panel(mbm)
 local panel_frame, panel_hide = mbm.panel_frame, mbm.panel_hide
-
-local function write_u64(address, value)
-    return write_memory(address, 8, function() ffi.cast('MBM_u64 *', address)[0] = value end)
-end
-local function write_u32(address, value)
-    return write_memory(address, 4, function() ffi.cast('MBM_u32 *', address)[0] = value end)
-end
 
 -- Returns a localization ID that displays text, borrowing an empty pooled
 -- cache slot. Claims last until release_labels runs on leaving the page.
@@ -792,15 +793,22 @@ local function write_action_label(record, label_id)
     return true
 end
 
+-- Returns whether something is still borrowed afterwards (a later call would
+-- read or write again); false means a later call does nothing until a binding
+-- page borrows again.
 local function release_labels()
-    if not state.base then return end
+    if not state.base then return false end
+    local left = false
     -- Pooled row labels only make sense while their slots are borrowed.
     for _, record in ipairs(state.order) do
         local address = state.base + ACTION_LABELS_RVA + (record.group * 97 + record.action) * 4
-        if record.text and state.action_labels[address]
-           and u32(read(address, 4)) == state.action_labels[address]
-           and write_u32(address, ORIGINAL_LABELS[record.code]) then
-            state.action_labels[address] = nil
+        if record.text and state.action_labels[address] then
+            if u32(read(address, 4)) == state.action_labels[address]
+               and write_u32(address, ORIGINAL_LABELS[record.code]) then
+                state.action_labels[address] = nil
+            else
+                left = true
+            end
         end
     end
     for text, claim in pairs(state.claims) do
@@ -811,8 +819,11 @@ local function release_labels()
         if not ours or write_u64(claim.address, 0) then
             state.pooled[claim.index] = nil
             state.claims[text] = nil
+        else
+            left = true
         end
     end
+    return left
 end
 
 -- Sections in display order: categories alphabetically, bindings by slot.
@@ -1005,6 +1016,7 @@ local SWEEP_INTERVAL = 2
 -- does a mission: the mission check runs on the page's first frame and every
 -- MISSION_CHECK_FRAMES page frames, never on frames without a binding page.
 local function page_frame(screen, seconds)
+    state.release_pending = true
     state.mission_check = state.mission_check - 1
     if state.mission_check <= 0 then
         state.mission_check = MISSION_CHECK_FRAMES
@@ -1031,7 +1043,7 @@ end
 
 -- A frame without a binding page: the sweep when it is due (never while a page
 -- is open, so the page's rows are left alone), and whatever the page borrowed
--- goes back.
+-- goes back. Returns whether something it borrowed is still held.
 local function away_frame()
     if state.page_open then
         state.page_open, state.page_visited = false, true
@@ -1046,15 +1058,70 @@ local function away_frame()
     forget_rows()
     panel_hide('page closed')
     mods_title(false)
-    release_labels()
+    -- Only a binding page borrows labels and slots: once all went back, the
+    -- release is not called again (it would read nothing) until a page frame.
+    if state.release_pending then state.release_pending = release_labels() end
+    return state.release_pending
+end
+
+-- The idle gate: a frame where the menu cannot act ends after one read of the
+-- UI's screen stack. A full step that found no binding page and left nothing
+-- to retry (no MODS title or borrowed text slot still held; the extended
+-- panel closed and no key capture running, as every such step leaves them)
+-- arms it. While armed, a frame is idle when no sweep is due, no registration,
+-- assignment or extended binding is waiting to be saved, no key capture runs
+-- and the screen stack has no binding page on top: it only counts down the
+-- sweep timer, exactly as a full step outside a page would, which on such a
+-- frame changes nothing else (the step counts the frame for extended bindings
+-- before the gate). Any other frame runs the full step at once (a binding page
+-- on top, an unreadable UI state or stack, a sweep due, a registration, an
+-- unsaved assignment or bindings file, a capture to end), so nothing is
+-- noticed later than before: the sweep, and with it the keyboard defaults'
+-- re-apply after a re-parse, runs on the same frame as without the gate. The
+-- UI state pointer is loaded directly from game.dll's data section (always
+-- mapped while the game runs; Mod Bindings Menu writes in it too), the screen
+-- stack through ReadProcessMemory, as in active_screen.
+-- Idle frame: 1 ReadProcessMemory (24 bytes, the address and size the full
+-- check reads second), no allocation, no other call.
+-- The gate calls no Lua function and runs interpreted (jit.off below): a trace
+-- started in it or in a function it called would end at the return into step,
+-- which the guard calls under pcall, and abort on every idle frame.
+local idle_armed, ui_slot = false, nil
+local function idle(seconds)
+    if not idle_armed or state.defaults_pending or state.suppressed then return false end
+    local book, store = state.assignments, state.extended_store
+    if book and book.dirty or store and store.dirty then return false end
+    local timer = state.sweep_timer - seconds
+    if timer <= 0 then return false end
+    local ui = ui_slot[0] + ui_slot[1] * 4294967296
+    if ui < 0x10000 or ui >= 0x800000000000
+       or kernel32.MBM_read_at(process, ui + SCREEN_STACK, words, 24, words_read) == 0 or words_read_low[0] ~= 24 then
+        return false
+    end
+    local depth = words[5]
+    if depth >= 1 and depth <= 5 and words[depth - 1] == BINDING_SCREEN then return false end
+    state.sweep_timer = timer
+    return true
+end
+
+-- After a full step without a binding page: the gate is armed unless the step
+-- left something to retry (pending: a borrowed text slot or row label still
+-- held; or the MODS title).
+local function arm_idle(pending)
+    if pending or state.title_active then return end
+    ui_slot = ui_slot or ffi.cast('MBM_u32 *', state.base + UI_STATE_PTR_RVA)
+    idle_armed = true
 end
 
 local function step(dt)
-    -- Extended bindings are evaluated at most once per frame (src/extended.lua).
+    -- Extended bindings are evaluated at most once per frame (src/extended.lua):
+    -- the frame number grows on every frame, idle ones included.
     state.frame = state.frame + 1
+    local seconds = type(dt) == 'number' and dt or 0
+    if idle(seconds) then return end
+    idle_armed = false
     if not state.initialized then initialize() end
     if not state.base then return end
-    local seconds = type(dt) == 'number' and dt or 0
     local book = state.assignments
     if book and book.dirty then flush_assignments(seconds) end
     local store = state.extended_store
@@ -1079,7 +1146,7 @@ local function step(dt)
         state.page_open, state.mission_check = true, 0
         translation.refresh()
     end
-    if screen then page_frame(screen, seconds) else away_frame() end
+    if screen then page_frame(screen, seconds) else arm_idle(away_frame()) end
 end
 
 -- The update stops (the 8th error of a burst) or the game shuts down: the
@@ -1106,6 +1173,7 @@ end
 -- open. The binding maps (the player's mappings), the registrations, the
 -- reservations and the assignments file stay as they are; nothing is swept here.
 local function pause_menu()
+    idle_armed = false
     if state.page_open then state.page_open, state.page_visited = false, true end
     state.last_tab, state.layout, state.more_layout = nil, nil, nil
     forget_rows()
@@ -1122,6 +1190,20 @@ end
 -- BingusRuntime.statuses.ModBindingsMenu. Every argument and return value pass
 -- through. Per frame: the step under pcall and a few tests and stores, no
 -- allocation (pinned in tests/test_mods_tab.lua).
+-- Machine code: the guard calls step under pcall, so a trace started at step's
+-- entry would abort where step returns ("NYI: return to lower frame") and retry
+-- on every frame, using up LuaJIT's 64 slots for failing trace starts. step has
+-- no loop of its own; the functions it calls on working frames still compile.
+-- The idle gate runs interpreted too (see idle), and so does arming it. A
+-- function step calls on a working frame (a sweep every 2 s, a page) can still
+-- start a trace that ends at its return into step and aborts; such starts are
+-- few and LuaJIT blacklists each after a few aborts (tests/test_idle_gate.lua
+-- counts them).
+if type(jit) == 'table' and type(jit.off) == 'function' then
+    jit.off(step)
+    jit.off(idle)
+    jit.off(arm_idle)
+end
 guard = runtime.guard({name = 'ModBindingsMenu', step = step, stop = shut_down, pause = pause_menu, log = note,
                        env = _G}).install()
 note('Mod Bindings Menu initialized; waiting for native input actions.')

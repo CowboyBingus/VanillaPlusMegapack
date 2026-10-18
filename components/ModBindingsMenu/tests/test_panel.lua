@@ -718,9 +718,10 @@ end
 assert(checks == 2, 'two mission checks in 120 page frames, got ' .. checks)
 page(false)
 frame()
--- Away from the page: the UI stack check only (2 reads, as before v2.3).
-local away = frame_calls('mission check: away from the page', {ReadProcessMemory = 2}).ReadProcessMemory
-assert(away == 2)
+-- Away from the page: the idle gate's one read of the UI stack (was 2: the UI
+-- state and menu pointers, then the stack; the mission check adds none here).
+local away = frame_calls('mission check: away from the page', {ReadProcessMemory = 1}).ReadProcessMemory
+assert(away == 1)
 for index = 1, 100 do
     local reads = frame_calls('mission check: away from the page ' .. index, {ReadProcessMemory = away})
     assert((reads.ReadProcessMemory or 0) == (away or 0), budget.describe(reads))

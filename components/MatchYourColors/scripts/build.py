@@ -84,7 +84,8 @@ VENDORED = ('bingus_text.lua', 'bingus_runtime.lua', 'bingus_memory.lua')
 FORBIDDEN = ('VirtualAlloc', 'VirtualProtect', 'FlushInstructionCache', 'CreateRemoteThread', 'LoadLibrary',
              'Network.', 'RPC.', 'jit.flush', 'jit.attach', 'jit.opt', 'WriteProcessMemory', 'collectgarbage')
 TESTS = ['test_units.lua', 'test_addon.lua', 'test_install.lua', 'test_idle_alloc.lua', 'test_bingus_text.lua',
-         'test_locales.lua', 'test_cache.lua', 'test_job.lua', 'test_sync.lua', 'test_patches.lua', 'test_weapons.lua']
+         'test_locales.lua', 'test_cache.lua', 'test_job.lua', 'test_sync.lua', 'test_patches.lua', 'test_weapons.lua',
+         'test_idle_equivalence.lua']
 
 
 def read_lua(path: Path) -> str:

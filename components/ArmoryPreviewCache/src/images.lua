@@ -44,6 +44,18 @@ function M.new(adapter,options)
     function self:before()
         adapter:prune()
     end
+    -- Whether before() has work: bindings to check.
+    function self:bound()return adapter.bound==nil or adapter:bound()end
+    -- The idle gate (install.lua): the last full tick saw no thumbnail screen
+    -- and bound nothing, nothing is pending or waiting for a retry, it ran
+    -- without memory pressure and the adapter has no binding or retired
+    -- texture left. A skipped tick would then only repeat a gated tick that
+    -- adds nothing.
+    function self:quiet()
+        if not self.enabled then return true end
+        return self.screen=='none' and not pending and not retry and not pressured and not applied
+            and (adapter.quiet==nil or adapter:quiet())
+    end
     function self:clear(reason)
         if #self.textures>0 then self.clear_count=self.clear_count+1;self.last_clear_reason=reason or 'cleanup'end
         adapter:restore(true)

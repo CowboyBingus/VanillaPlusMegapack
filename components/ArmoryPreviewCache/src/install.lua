@@ -1,7 +1,7 @@
 return function(create_api,native,policy,profile,signatures,build,image_native,images,image_signatures,dependencies)
     if rawget(_G,'ArmoryPreviewCache')then return end
     local state={revision=build.revision,status='starting',frames=0,
-        policy_steps_skipped=0,policy_steps_full=0,policy_gate_misses=0}
+        policy_steps_skipped=0,policy_steps_full=0,policy_gate_misses=0,idle_frames=0}
     rawset(_G,'ArmoryPreviewCache',state)
     local previous,previous_shutdown=update,shutdown
     if type(previous)~='function'then state.status='disabled: update unavailable';return end
@@ -63,7 +63,7 @@ return function(create_api,native,policy,profile,signatures,build,image_native,i
             f:write('prewarm='..(options and tostring(options.prewarm) or 'pending')..'\n')
             f:write('verify_gate='..(options and tostring(options.verify_gate) or 'pending')..'\n')
             if watch then f:write('state_refreshes='..watch.refreshes..'\n')end
-            for _,key in ipairs({'frames','disabled_reason','disabled_frame','last_top','last_items','last_active','last_blocked','free_mib','commit_headroom_mib','private_growth_mib','pressure_reason','profile_error','disk_error','last_error',
+            for _,key in ipairs({'frames','idle_frames','disabled_reason','disabled_frame','last_top','last_items','last_active','last_blocked','free_mib','commit_headroom_mib','private_growth_mib','pressure_reason','profile_error','disk_error','last_error',
                 'policy_steps_skipped','policy_steps_full','policy_gate_misses','last_guard'})do
                 local value=state[key];if value==nil then value=''end
                 f:write(key..'='..tostring(value)..'\n')
@@ -183,9 +183,55 @@ return function(create_api,native,policy,profile,signatures,build,image_native,i
         state.commit_headroom_mib=math.floor(commit/1048576)
         state.pressure_reason=memory_guard:tick(api.time,free,commit)
     end
-    -- step checks the update thread before the pre-update image refresh; the
-    -- frame after the update checks it only when step did not (same callback,
-    -- same thread): one GetCurrentThreadId per frame.
+    -- The idle gate. A frame is idle when neither the image tick nor the
+    -- asset step could do anything but repeat itself: no Armory or briefing
+    -- on the state stack, no lease held, the startup prewarm window closed (or
+    -- the stack not empty, which it needs), no memory pressure or guard, no
+    -- profile save pending, the image cache quiet (images.quiet) and the
+    -- thumbnail manager the last full frame saw. An idle frame makes 2 reads
+    -- (image_native.state probe) and nothing else: no thread check, clock,
+    -- memory poll or allocation. With rendered images held, memory is still
+    -- polled every MEMORY_IDLE_POLL seconds (a full frame), so pressure keeps
+    -- releasing them. The same 2 reads serve the ship and missions.
+    local gate_tm,startup_closed=nil,false
+    local function quiet()
+        if not watch or not last_s or options.verify_gate then return false end
+        if next(cache.leases)~=nil or memory_guard.active or state.pressure_reason~=nil then return false end
+        if path and cache.profile_changed==true and not state.profile_error then return false end
+        return image_cache==nil or image_cache:quiet()
+    end
+    local function idle(seconds)
+        if not quiet()then return false end
+        if image_cache~=nil and #image_cache.textures>0 and memory_wait<=0 then return false end
+        -- The log's last_* fields keep the last working frame's values.
+        local tm,depth,top=watch:probe()
+        if not tm or tm~=gate_tm or top==5 or top==14 or (depth==0 and not startup_closed)then return false end
+        state.idle_frames=state.idle_frames+1
+        -- The 50 ms step clock runs on as if each step had found nothing to
+        -- do, so the first working frame steps exactly when it would have.
+        elapsed=elapsed+seconds
+        if elapsed>=.05 then memory_wait=memory_wait-elapsed;elapsed=0 end
+        return true
+    end
+    -- The gate runs interpreted (about 300 bytecodes): a trace through it
+    -- would follow the returns into every update wrapper below this mod in
+    -- the hook chain and fill the game's shared code cache.
+    local loaded=rawget(_G,'package') and package.loaded
+    local jit_module=rawget(_G,'jit') or (loaded and loaded.jit)
+    if jit_module and jit_module.off then
+        jit_module.off(quiet);jit_module.off(idle)
+    end
+    -- After a full policy tick at now: the startup window never reopens once
+    -- a menu was seen or 60 s passed since the first tick (policy.lua).
+    local function note_startup(now)
+        if startup_closed then return end
+        startup_closed=not cache.prewarm or cache.seen_menu==true
+            or (cache.started~=nil and now-cache.started>=60)
+    end
+    -- step checks the update thread before the pre-update image refresh when
+    -- bindings exist; the frame after the update checks it when step did not
+    -- (same callback, same thread) and the frame is not idle: one
+    -- GetCurrentThreadId per working frame, none on an idle one (it only reads).
     local thread_checked=false
     local function frame(dt) -- lint-ok: R10 ported from v23 unchanged; split into named steps is a follow-up (differential harness ready)
         state.frames=state.frames+1
@@ -195,12 +241,15 @@ return function(create_api,native,policy,profile,signatures,build,image_native,i
             local ok,why=pcall(initialize)
             if not ok then guard.stop('disabled: '..tostring(why));return end
         end
+        local frame_seconds=type(dt)=='number' and math.max(0,math.min(dt,.25)) or 0
+        if idle(frame_seconds)then log(false);return end
         if not thread_checked then api.assert_thread()end
         local refreshes=watch and watch.refreshes
         -- Presentation runs every callback, independent of the slower asset
         -- residency budget. A 50 ms image poll would itself add visible delay.
         if image_cache then image_cache:tick(state.pressure_reason~=nil)end
-        elapsed=elapsed+(type(dt)=='number' and math.max(0,math.min(dt,.25)) or 0)
+        if watch then gate_tm=watch.tm or 0 end
+        elapsed=elapsed+frame_seconds
         if elapsed<.05 then return end
         local seconds=elapsed
         elapsed=0
@@ -233,7 +282,9 @@ return function(create_api,native,policy,profile,signatures,build,image_native,i
         if reuse and cache.settled and state.pressure_reason==policy_pressure then
             cache:replay();state.policy_steps_skipped=state.policy_steps_skipped+1
         else
-            cache:tick(s,api.time(),state.pressure_reason~=nil)
+            local now=api.time()
+            cache:tick(s,now,state.pressure_reason~=nil)
+            note_startup(now)
             policy_pressure=state.pressure_reason;state.policy_steps_full=state.policy_steps_full+1
         end
         state.status=cache.status
@@ -250,7 +301,9 @@ return function(create_api,native,policy,profile,signatures,build,image_native,i
     local last_dt
     local function step(dt)
         last_dt=dt
-        thread_checked=image_cache~=nil and not stopped
+        -- The last frame's probe is not this frame's state.
+        if watch and watch.unprobe then watch:unprobe()end
+        thread_checked=image_cache~=nil and not stopped and image_cache:bound()
         if thread_checked then api.assert_thread();image_cache:before()end
     end
     local function after()frame(last_dt)end

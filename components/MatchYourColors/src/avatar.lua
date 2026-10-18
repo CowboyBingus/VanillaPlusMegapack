@@ -369,25 +369,42 @@ function Avatar.watch(memory, identity, slot)
     local copies_size = 4 + V_ENTRY_SIZE * Avatar.MAX_PREVIEWS
     local copies_now, copies_kept = ffi.new('uint8_t[?]', copies_size), ffi.new('uint8_t[?]', copies_size)
     local primed, copies_primed = false, false
+    -- The bytes the next read of the slot covers: the count and the entries in use at the last good read (2026-10-17;
+    -- v1.5 read all 16 entries, 2,116 bytes, on every other frame). Only those are compared, so a count that grew
+    -- (a change) is read again in full on that frame.
+    local copies_read = copies_size
     local self = {reads = 0}
 
     local function same_units()
-        for i = 0, 29 do if now[i] ~= kept[i] then return false end end
+        local a, b = now, kept
+        for i = 0, 29 do if a[i] ~= b[i] then return false end end
         return true
     end
+    local function copies_count()
+        return math.min(copies_now[0] + copies_now[1] * 256 + copies_now[2] * 65536 + copies_now[3] * 16777216,
+                        Avatar.MAX_PREVIEWS)
+    end
     -- The count and the entries in use, against the last read.
-    local function same_copies()
-        local count = math.min(copies_now[0] + copies_now[1] * 256 + copies_now[2] * 65536 + copies_now[3] * 16777216,
-                                Avatar.MAX_PREVIEWS)
-        for i = 0, 3 + V_ENTRY_SIZE * count do if copies_now[i] ~= copies_kept[i] then return false end end
+    local function same_copies(count)
+        local a, b = copies_now, copies_kept
+        for i = 0, 3 + V_ENTRY_SIZE * count do if a[i] ~= b[i] then return false end end
         return true
     end
 
     -- The body-copy slot's count and entries: true when they changed (or cannot be read) since its last read.
     local function copies_changed()
         self.reads = self.reads + 1
-        if not memory.read_into(copies_at, copies_size, copies_now) then return true end
-        if copies_primed and same_copies() then return false end
+        if not memory.read_into(copies_at, copies_read, copies_now) then return true end
+        local count = copies_count()
+        local size = 4 + V_ENTRY_SIZE * count
+        if size > copies_read then -- more entries than the last read covered: all of them read again
+            self.reads = self.reads + 1
+            if not memory.read_into(copies_at, copies_size, copies_now) then return true end
+            count = copies_count()
+            size = 4 + V_ENTRY_SIZE * count
+        end
+        copies_read = size
+        if copies_primed and same_copies(count) then return false end
         ffi.copy(copies_kept, copies_now, copies_size)
         copies_primed = true
         return true

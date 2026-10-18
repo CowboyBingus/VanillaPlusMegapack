@@ -45,27 +45,27 @@ repository.
 https://github.com/CowboyBingus/BingusSharedLoader/releases/latest
 
 Included revisions:
-- Better Stratagem Bounce v15.4
-- Hellpod Steering Unlocked v7.5
-- Reinforcement Beacons Fixed v4.6
-- Consistent Vaulting v8.9
-- Shallow Water Diving v3.10
-- Sentry Aim Retention v1.1.0
-- Enemy Collision Synchronized v2.12.0
-- Controllable Hover Pack v1.8
-- Know Your Constellation v4.1
-- Armory Preview Cache v23
+- Better Stratagem Bounce v15.4.1
+- Hellpod Steering Unlocked v7.5.1
+- Reinforcement Beacons Fixed v4.6.1
+- Consistent Vaulting v8.9.1
+- Shallow Water Diving v3.10.1
+- Sentry Aim Retention v1.1.1
+- Enemy Collision Synchronized v2.13.0
+- Controllable Hover Pack v1.8.1
+- Know Your Constellation v4.1.1
+- Armory Preview Cache v23.1
 - Clickable Scrollbars v2.15.1
 - Arc Thrower Revamped v1.7.1
-- Ship Station Hotkeys v1.9
+- Ship Station Hotkeys v1.9.1
 - Flame Damage Fixed v1.2
 - Mod Options Menu v1.2
 - Mod Bindings Menu v2.3
-- Better Lobby Management v1.2
-- Hellpod Drop Hold v1.2
-- Laser Sentry Cooldown v1.1
+- Better Lobby Management v1.2.1
+- Hellpod Drop Hold v1.2.1
+- Laser Sentry Cooldown v1.1.1
 - Match Your Colors v1.5
-- Sticky Grenade Handles v1.0
+- Sticky Grenade Handles v1.0.1
 - Stratagem Hero Expanded v1.0
 - Sound Systems Rebalanced v1.0
 - Foliage Pass-Through v1.0
@@ -77,7 +77,9 @@ Remove older startup-replacing packages when migrating.
 This is the refreshed v42 pre-release. Offline regression, package and
 option-selection checks passed. Live validation of the Mod Bindings Menu
 reset fix and measurement of its added binding-page and periodic checks are
-pending. Its ordinary gameplay idle checks and binding polling are unchanged.
+pending. Its binding polling is unchanged.
+Twenty bundled mods were updated to do less work on idle frames; their
+release builds were checked offline only.
 Match Your Colors v1.5 was checked in the game in the Armory, on the ship and
 in one solo mission, and its Recolor Weapons option against the game's own
 weapon paint schemes in the Armory; its per-frame cost in real play is not

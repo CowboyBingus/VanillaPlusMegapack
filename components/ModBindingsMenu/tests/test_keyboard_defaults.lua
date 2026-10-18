@@ -250,7 +250,8 @@ for _, entry in ipairs(DORMANT) do
     if not FIXED[code] then assert(#live(code) == 0 and #defaults(code) == 0) end
 end
 assert(logged('Added Mod Bindings Menu\'s keyboard defaults to 12 binding records.', from) == 1)
-for _ = 1, 3 do r, q = counted(frame, 0); assert(r == 2 and q == 0, 'idle frame: the page check only, ' .. r) end
+-- Idle frames: the idle gate's one read of the UI stack (was 2, the page check).
+for _ = 1, 3 do r, q = counted(frame, 0); assert(r == 1 and q == 0, 'idle frame: the gate\'s read only, ' .. r) end
 print('A fresh install: both maps get the replacement\'s lists byte for byte, once, with no VirtualQuery OK')
 
 -- 2. Registered (Ship Station Hotkeys' six): the first sweep leaves the mod

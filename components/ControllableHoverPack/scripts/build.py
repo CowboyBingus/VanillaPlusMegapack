@@ -26,11 +26,11 @@ def main():
     wrapper+='patch.policy=policy;patch.settings=settings\n'
     # The adapter takes the read side extended by the write side; the loader
     # takes the core for its update guard.
-    wrapper+=f"install(function()return create_api(runtime,runtime_write.extend(runtime_memory.new(runtime)))end,patch,{{revision='v1.8',game_sha256='{GAME_DLL_SHA}',exe_sha256='{EXE_SHA}'}},runtime)\n"
+    wrapper+=f"install(function()return create_api(runtime,runtime_write.extend(runtime_memory.new(runtime)))end,patch,{{revision='v1.8.1',game_sha256='{GAME_DLL_SHA}',exe_sha256='{EXE_SHA}'}},runtime)\n"
     source=build/'mod.wrapper.lua';source.write_text(wrapper,encoding='utf-8',newline='\n')
     env=dict(os.environ,LUA_PATH=str(LUA.parent/'?.lua')+';;')
     tests=''
-    for name in ('cancel','snapshot','settings','loader','replay','windows_api'):
+    for name in ('cancel','snapshot','settings','loader','replay','windows_api','idle_gate'):
         tests+=run([LUA,ROOT/f'tests/test_{name}.lua',ROOT/'src'],env=env)
     compiled=build/'mod.ljbc';run([LUA,'-bsdW',source,compiled],env=env)
     code=compiled.read_bytes();assert code[:5]==b'\x1bLJ\x02\x02'
@@ -40,7 +40,7 @@ def main():
     (build/ARCHIVE).write_bytes(make_archive({resource_hash(MODULE):resource}))
     for suffix in ('.stream','.gpu_resources'):(build/(ARCHIVE+suffix)).write_bytes(b'')
     files={f'data/{ARCHIVE}{s}':f'build/{ARCHIVE}{s}' for s in ('','.stream','.gpu_resources')}
-    report={'name':'Controllable Hover Pack','slug':'ControllableHoverPack','revision':'v1.8',
+    report={'name':'Controllable Hover Pack','slug':'ControllableHoverPack','revision':'v1.8.1',
         'resource_sha256':sha(resource),
         'guid':'abcde01a-374c-4c5c-b1a2-19d1be30234b','module':MODULE,
         'description':"Press Space again during hover-pack flight to descend early while preserving the pack's native landing assistance.",

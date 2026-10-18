@@ -1203,7 +1203,17 @@ function M.apply(api,game,exe,state)
     local accepted,reason,active=apply(api,game,exe,state)
     state.busy=state.observed_queries~=observed or state.pending~=nil or state.slope_lease~=nil
         or state.assist_intent~=nil
+    -- A check that found nothing to do lets the slope assistance's idle gate
+    -- answer the next frames (M.idle).
+    if M.assistance then M.assistance.settle(accepted and not state.busy) end
     return accepted,reason,active
+end
+
+-- The idle gate, before each check (archive_loader.lua): true when this frame
+-- needs no check (slope_assist.lua A.idle). Never raises.
+function M.idle(api,state)
+    local assistance=M.assistance
+    return assistance~=nil and assistance.idle(api,state)
 end
 
 function M.stop(api,game,exe,state)
@@ -1217,15 +1227,16 @@ end
 -- snapshot, plan and keep of a held vault query. Retries, commits, restores and
 -- candidate searches run at most a few times per vault; compiled they only took
 -- more of the LuaJIT code cache that the game and every mod share, with no
--- measurable gain in the game's lua51.dll, so they stay interpreted. Nothing is
--- flushed.
+-- measurable gain in the game's lua51.dll, so they stay interpreted. The idle
+-- gate (M.idle) stays interpreted like slope_assist.lua's A.idle: a trace from
+-- it follows the returns into every update wrapper below. Nothing is flushed.
 if jit and jit.off then
     for _,fn in ipairs({fresh_geometry,geometry_fits,basis_matches,endpoints,reprojected_record,M.reproject,
         rebuilt_context,approach_context,cast_in_reach,recast,M.refresh,candidate_snapshot,raised_wanted,raised_context,
         context_usable,new_trace,slope_pass,raised_in_reach,probe_clearance,raise_hit,ledge_pass,assisted_selection,
         raised_unchanged,commit_blocked,assist_candidate,M.assist_candidate,write_controller,first_mismatch,
         restore_in_place,M.restore,undo_partial,commit,out_of_reach,retry_writes,guards_hold,rollback,count_retry,
-        count_start,native_started,retry_commit,M.retry_consumed,release,prepare,prepared,retry,M.stop}) do
+        count_start,native_started,retry_commit,M.retry_consumed,release,prepare,prepared,retry,M.stop,M.idle}) do
         jit.off(fn)
     end
 end

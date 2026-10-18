@@ -267,12 +267,20 @@ function M.new(engine)
         wipe(self.rect_ids) wipe(self.text_ids)
         self.signature = nil
     end
+    -- True from a clear until the next show, the only path that creates a GUI
+    -- or fills these tables: clearing again then changes nothing, so hidden
+    -- frames skip it (no pairs loop on the idle path).
+    local empty = false
     local function clear(list)
         destroy(list)
         self.model, self.geometry = nil, nil
         wipe(self.cache) wipe(self.order)
+        empty = true
     end
-    function self:clear() clear() end
+    function self:clear()
+        if empty then return end
+        clear()
+    end
     -- Mirror native normal-font setup on one of our GUI materials.
     local function ink(gui, anchor)
         local material = Gui.material(gui, engine.IdString64.from_hex(anchor.material))
@@ -439,6 +447,7 @@ function M.new(engine)
         end
     end
     function self:show(model, dt, anchor)
+        empty = false
         if not prepare(anchor) then return false end
         local width, height = Gui.resolution()
         -- Unchanged report, geometry and font: only a long headline moves.
@@ -473,6 +482,11 @@ function M.new(engine)
             model = {key=model.key, screen=model.screen, label=model.label, footer=model.footer, signature='pending'}
         end
         return self:show(model, 0, anchor)
+    end
+    -- Removing the panel runs only when something was drawn (a screen change,
+    -- an unhover), and its pairs loops would abort any trace: interpreted.
+    if jit and jit.off then
+        for _, fn in ipairs({wipe, destroy, clear}) do jit.off(fn) end
     end
     return self
 end

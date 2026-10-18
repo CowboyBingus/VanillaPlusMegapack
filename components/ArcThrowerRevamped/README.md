@@ -84,9 +84,9 @@ the packaged release only.
 
 The startup scan runs incrementally, reading at most 64 KiB at once with bounded work per update. Active fire commands are checked before looking through charged weapons; unsuccessful discovery is retried at most ten times per second while the button stays held. Render does not run a second assist. Normal shot, hold and idle diagnostics are disabled; startup and actual errors remain logged.
 
-While Fire is up, an update reads only the local Fire input found at the last full check and stops there; every 15th update checks the local avatar and the charge record in full. While Fire is held between those checks, the update verifies the kept avatar, Fire input and weapon-holder row instead of resolving them again: 12 memory reads per update while the Arc Thrower fires (26 before) and 4 while another weapon fires (16 before). Reads go into reused buffers, so an idle update allocates nothing.
+Updates are counted, not timed. Every 60th update (once a second at 60 FPS) checks whether a mission runs and that the charge record is still patched. Outside a mission nothing can fire, so the updates in between read nothing. In a mission, while Fire is up, an update reads only the local Fire input found at the last full check and stops there; every 15th update checks the local avatar in full. While Fire is held between those checks, the update verifies the kept avatar, Fire input and weapon-holder row instead of resolving them again: 12 memory reads per update while the Arc Thrower fires (26 before v1.7) and 4 while another weapon fires (16 before v1.7). Reads go into reused buffers, so an idle update allocates nothing. The whole addon runs in LuaJIT's interpreter: in game it holds about 0.2 KB of the code cache the game and every mod share (v1.7: about 5 KB).
 
-Offline binding, work-budget and synthetic firing tests pass. Measured in live play (v1.7) the addon costs 0.018 ms per frame in missions and 0.016 ms on the ship.
+Offline binding, work-budget and synthetic firing tests pass. Measured in game: 0.0035 ms per frame on the ship and 0.011-0.013 ms in missions (v1.7: 0.017-0.018 ms and 0.016-0.018 ms).
 
 Release **v1.6** adds bounded recovery without changing charge times, cadence,
 damage, or arc settings. It revalidates the cached auto-fire record every 250 ms

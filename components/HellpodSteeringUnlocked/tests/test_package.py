@@ -19,8 +19,8 @@ def main():
         assert not any(name.lower().endswith(('.dll', '.exe', '.lua', '.ps1')) for name in payloads)
         manifest = json.loads(payloads['manifest.json'])
         assert manifest.get('Version') == 1, 'HD2MM requires an explicit V1 manifest'
-        assert manifest['Name'] == 'Hellpod Steering Unlocked - v7.5'
-        assert manifest['Options'] == [{'Name': 'Hellpod Steering Unlocked - v7.5', 'Description': manifest['Description'],
+        assert manifest['Name'] == 'Hellpod Steering Unlocked - v7.5.1'
+        assert manifest['Options'] == [{'Name': 'Hellpod Steering Unlocked - v7.5.1', 'Description': manifest['Description'],
                                         'Include': ['data'], 'Image': 'thumbnail.png'}]
         assert manifest['IconPath'] == 'thumbnail.png'
         assert payloads['thumbnail.png'].startswith(b'\x89PNG\r\n\x1a\n')
@@ -35,7 +35,7 @@ def main():
             offset = end + 4
         assert offset == len(png)
         provenance = json.loads(payloads['HellpodSteeringUnlocked-manifest.json'])
-        assert provenance['revision'] == 'data-v7.5' and provenance['runtime_verified'] is False
+        assert provenance['revision'] == 'data-v7.5.1' and provenance['runtime_verified'] is False
         assert provenance['requires'] == [{'name': 'Bingus Shared Loader', 'guid': '612eaf70-d682-43c7-9efd-16dcc695f977', 'api': 1}]
         for name, digest in provenance['files'].items():
             assert hashlib.sha256(payloads[name]).hexdigest().upper() == digest

@@ -19,16 +19,19 @@ return function(modules)
     local selected_key,selected_screen,controller_matches
     -- Translation notes (language, refused entries) stay under the status line.
     local notes = {}
+    -- The log is written only when the status or the notes change (kept
+    -- interpreted, with report and note: see the jit.off list at the end).
+    local function write_lines()
+        local logger=rawget(_G,'CowboyBingusModLoader')
+        local file=logger and logger.open_log and logger.open_log('EnemyIntelligence.log')
+        if file then
+            file:write(build.revision..'\n'..state.status..'\n')
+            for _,line in ipairs(notes) do file:write(line..'\n') end
+            file:close()
+        end
+    end
     local function write_log()
-        pcall(function()
-            local logger=rawget(_G,'CowboyBingusModLoader')
-            local file=logger and logger.open_log and logger.open_log('EnemyIntelligence.log')
-            if file then
-                file:write(build.revision..'\n'..state.status..'\n')
-                for _,line in ipairs(notes) do file:write(line..'\n') end
-                file:close()
-            end
-        end)
+        pcall(write_lines)
     end
     local function report(message)
         if state.status == message then return end
@@ -246,12 +249,39 @@ return function(modules)
         local drawn = surface:show(current,dt,anchor)
         report_draw(drawn and 'visible ' or 'waiting for GUI ',screen,current.key)
     end
+    -- Idle gate. After a frame that found neither the war table nor the
+    -- briefing and hid everything, the next frames read only the kept UI
+    -- manager's screen stack (1 read) and do nothing else while it shows
+    -- neither. Every QUIET_CHECK-th frame, a failed read or a forecast screen
+    -- runs the full frame again (its 2 reads find the manager anew). A hidden
+    -- frame repeated changes nothing but the frame count, which the gate
+    -- keeps. Anything that changes the status (a pause, a pending wait, an
+    -- error) restores, which ends the quiet state. A replaced UI manager
+    -- whose old stack still reads as neither screen is seen at the next
+    -- check: up to 0.5 s at 60 FPS, the longest the panel can appear late.
+    local QUIET_CHECK = 30
+    local quiet, quiet_frames = false, 0
+    local function idle()
+        if not quiet then return false end
+        quiet_frames = quiet_frames+1
+        if quiet_frames >= QUIET_CHECK or not source:quiet() then
+            quiet = false
+            return false
+        end
+        state.frames = state.frames+1
+        return true
+    end
+    -- Nothing to show. With neither screen on top, the gate takes over.
+    local function hidden(screen)
+        hide('hidden')
+        if not screen then quiet,quiet_frames = true,0 end
+    end
     local function frame(dt)
         if not initialize() then return end
         state.frames = state.frames+1
         local screen = source:screen()
         local anchor = screen and view:sample(screen,anchor_box)
-        if not anchor then return hide('hidden') end
+        if not anchor then return hidden(screen) end
         if selected_screen and selected_screen~=screen then
             reset_selection()
             surface:clear()
@@ -290,6 +320,7 @@ return function(modules)
         if surface then surface:clear() end
     end
     local function restore()
+        quiet = false
         reset_selection()
         clear_surface()
     end
@@ -311,10 +342,25 @@ return function(modules)
         error(why,0)
     end
     local function run()
+        if idle() then return end
         local ok,why = pcall(frame,frame_dt)
         if ok then return end
         if type(why) == 'table' and why.pending then return waited(why) end
         failed(why)
+    end
+    -- Interpreted, so they start no trace that keeps aborting (LuaJIT keeps
+    -- only 64 such starts for the whole game):
+    -- - keep_dt, run and frame: the guard calls keep_dt and run under pcall and
+    --   run calls frame under pcall, so a trace started in one of them aborts
+    --   when it returns into that pcall ("return to lower frame");
+    -- - idle, hidden, hide, reset_selection: a side trace from them would climb
+    --   into those; the readers they call (the gate's one read) still compile;
+    -- - report, note, write_log, write_lines: they write the log on a status
+    --   change, through its loop.
+    if jit and jit.off then
+        for _,fn in ipairs({keep_dt,run,frame,idle,hidden,hide,reset_selection,report,note,write_log,write_lines}) do
+            jit.off(fn)
+        end
     end
     -- An update below raised: remove the forecast and start the selection
     -- afresh. A removal that raises stops the mod instead.

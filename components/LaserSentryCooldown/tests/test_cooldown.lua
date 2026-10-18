@@ -131,9 +131,8 @@ end)
 
 check('patched frames allocate nothing and create no C types', function()
     local s = session()
-    -- The same loop runs first to warm up: its own traces (GC objects) are recorded then, not while measured,
-    -- and so is LuaJIT's one-time handling of the step's look branch (four compile attempts, one every 10
-    -- looks, then a small stub that leaves the look to the interpreter for good).
+    -- The same loop runs first to warm up: its own traces (GC objects) and those of the update guard are
+    -- recorded then, not while measured. The addon's step and look are interpreted (jit.off).
     local function frames(count) for _ = 1, count do s.env.update(1 / 60) end end
     frames(100 * Cooldown.WATCH_FRAMES)
     -- The smallest of up to five windows: an allocation of the addon's shows in every one, LuaJIT's once-per-

@@ -1,7 +1,10 @@
 # v42
 
 - Arc Thrower Revamped v1.7.1: does nothing on a game build it does not know; it now checks the game's files before anything else.
+- Arc Thrower Revamped v1.7.1: outside a mission it checks every 60 frames whether one has started and reads nothing in between. Measured in game: 0.0035 ms per frame on the ship instead of 0.017-0.018, and 0.011-0.013 ms in missions instead of 0.016-0.018.
+- Arc Thrower Revamped v1.7.1: runs in LuaJIT's interpreter, using about 0.2 KB of the code cache the game and every mod share instead of about 5 KB, and no longer makes the game's Lua compiler retry compiling it every frame.
 - Clickable Scrollbars v2.15.1: does nothing on a game build it does not know; it now checks the game's files before anything else.
+- Clickable Scrollbars v2.15.1: a frame with no new press ends right after reading the mouse button, and its per-frame code no longer makes the game's Lua compiler retry compiling it every frame.
 - Mod Bindings Menu v2.3: no fixed limit on mod bindings; bindings past the 36 native actions go on a new MORE MODS tab, offered outside missions only.
 - Mod Bindings Menu v2.3: extended bindings support Press, Release and Hold, modifiers, and keyboard, mouse and controller.
 - Mod Bindings Menu v2.3: two older mods that both ask for slot 2 no longer swap keys when their load order changes.
@@ -10,6 +13,7 @@
 - Mod Bindings Menu v2.3: every game text ID it borrows now exists in all of the game's languages; up to 59 different texts show on the MODS tab at once, down from 65.
 - Mod Bindings Menu v2.3: never changes the game's memory protection; a write to a page that is not writable is skipped and logged.
 - Mod Bindings Menu v2.3: no longer replaces the game's input configuration; its six keyboard defaults are added while the game runs, only on a supported game build.
+- Mod Bindings Menu v2.3: outside the binding pages a frame reads game memory once instead of twice, and the game's Lua compiler no longer keeps retrying to compile its per-frame check. Measured in game: 0.006 ms per frame on the ship instead of 0.009, and 0.005-0.006 ms in missions instead of 0.010-0.012.
 - Match Your Colors v1.5: new Recolor Squadmates option: squadmates without the mod, or every squadmate, are recolored with your settings, on your screen only.
 - Match Your Colors v1.5: Match Materials now also turns a painted hard part into the metal it takes, such as the B-22 Model Citizen's chrome or the Eye of Liberty cape's gold; cloth never turns into metal.
 - Match Your Colors v1.5: with Helmet and Armor Match Cape your gear matches the cape as it looks in the game, so the default black capes give a black armor, not a grey one.
@@ -23,8 +27,24 @@
 - Match Your Colors v1.5: squadmates are now recolored in missions too; the mod looked for them only among your own player's records.
 - Match Your Colors v1.5: new choice Squadmates' Colors: Their Own Gear (default) or Your Colors, which gives the squadmates Recolor Squadmates recolors your colors, so the squad matches you.
 - Match Your Colors v1.5: new choice Hide Cape: Your Cape hides your cape on the ship and in missions, also for squadmates who use the mod; Everyone's Capes hides every squadmate's cape on your screen too.
+- Armory Preview Cache v23.1: with no Armory or briefing screen open and nothing loading, a frame makes two reads of game memory and nothing else. Measured in game: 0.05 ms per frame on the ship instead of 0.13, and 0.010-0.013 ms in missions instead of 0.035-0.040.
+- Armory Preview Cache v23.1: with thumbnails kept and the Armory closed, memory is checked every 2 seconds instead of every 50 ms, so low memory releases them within 2 seconds.
+- Better Lobby Management v1.2.1: while the escape menu is closed and nothing is in progress, it only looks whether the menu has opened, instead of reading the session every frame.
+- Consistent Vaulting v8.9.1: while the climb input is released a frame reads only that input, with the full check every 10th frame and at once on a press; outside a mission it checks every 60th frame. Measured in game: 0.003 ms per frame on the ship instead of 0.013-0.015, and 0.008-0.009 ms in missions instead of 0.025-0.027.
+- Consistent Vaulting v8.9.1: after a respawn or a teammate leaving the mission, your climb input is found again within 10 frames; a tap that ends before then is missed, and a press held through it needs a fresh press for slope assistance.
+- Controllable Hover Pack v1.8.1: between hover-pack flights most frames read only the pack's state, or nothing on the ship and without a hover pack. Measured in game: 0.003 ms per frame on the ship instead of 0.009, and 0.003-0.004 ms in missions without a hover pack instead of 0.016-0.018.
+- Enemy Collision Synchronized v2.13.0: a poll with nothing to inspect no longer re-reads every enemy or the clock, and a corpse that has needed no correction for about a second is re-checked less often (at most 3-4 s apart). Measured in game: 0.021-0.022 ms per frame in missions instead of 0.036-0.047, and 0.025 under heavy load instead of 0.099.
+- Enemy Collision Synchronized v2.13.0: a settled ragdoll's motion check no longer makes Lua tables, with the same results.
+- Hellpod Steering Unlocked v7.5.1: the 100 ms check for a mission reset reads only the avoidance flag, with a full check every second. Measured in game: 0.003 ms per frame instead of 0.005-0.006, on the ship and in missions.
+- Know Your Constellation v4.1.1: while neither the war table nor the briefing is open, the forecast reads only which screen is on top. Measured in game: 0.006 ms per frame on the ship instead of 0.010-0.013, and 0.005-0.006 ms in missions instead of 0.008.
+- Reinforcement Beacons Fixed v4.6.1: between deaths it reads only your own spawn state, 2 memory reads per frame in a mission instead of 9-10. Measured in game: 0.010-0.011 ms per frame in missions instead of 0.028-0.032.
+- Sentry Aim Retention v1.1.1: with none of your sentries deployed it waits instead of reading the targeting registry every frame. Measured in game: 0.003 ms per frame on the ship instead of 0.011, 0.003-0.004 ms in missions instead of 0.010, and 0.006 ms under heavy load instead of 0.016.
+- Shallow Water Diving v3.10.1: waits for a dive with fewer memory reads. Measured in game: 0.002 ms per frame on the ship instead of 0.009-0.010, and 0.009-0.010 ms in missions instead of 0.012-0.015.
+- Ship Station Hotkeys v1.9.1: with Mod Bindings Menu an idle frame aboard the ship makes one read of game memory, and a two-read mission check every 60 frames replaces the ship search every 15 frames. Measured in game: 0.014 ms per frame on the ship instead of 0.032-0.035.
+- Better Stratagem Bounce v15.4.1, Hellpod Drop Hold v1.2.1, Laser Sentry Cooldown v1.1.1 and Sticky Grenade Handles v1.0.1: their per-frame code no longer makes the game's Lua compiler retry compiling it every frame; such retries from many mods kept the game recompiling indefinitely.
 - New option: Stratagem Hero Expanded v1.0: the ship's Stratagem Hero arcade draws from all 96 loadout stratagems and 12 common mission stratagems (108) instead of its 27 launch-era ones; themed rounds stay.
 - New option: Sound Systems Rebalanced v1.0: mission music plays at the war-table volume in every mission, also when you join one in progress (it was 6 dB louder then), and no longer goes silent on swamp, desert, oasis, deciduous and coniferous forest, hive world and active rift planets.
+- Sound Systems Rebalanced v1.0: sets the volume once when a mission starts, and its planet fix is a change to the game's music sound bank that runs no code. Measured in game: 0.005 ms per frame on the ship.
 - New option: Foliage Pass-Through v1.0: player rockets, missiles, launcher rounds and stratagem ordnance pass through tree canopies and bushes instead of exploding in them; trunks, the ground and enemies still stop them.
 - New option: Holster Your Shield v1.0: press Backpack Function to put the Ballistic Shield or the Directional Shield on your back while you keep a one-handed weapon in hand; press again to take it back.
 - Each option shows its own mod's cover in Arsenal and HD2MM instead of the pack's.

@@ -28,7 +28,7 @@ with zipfile.ZipFile(sys.argv[1]) as package:
     manifest = json.loads(package.read('EnemyCollisionSynchronized-manifest.json'))
     assert manifest['revision'] == revision and manifest['runtime_verified'] is False
     assert manifest['performance']['metadata_cache_lifetime'] == 'current_poll_only'
-    assert manifest['performance']['corpse_poll_cadence_changed'] is False
+    assert manifest['performance']['corpse_poll_cadence_changed'] is True
     assert manifest['performance']['profiler_schema'] == 2 and manifest['performance']['slow_poll_records'] == 8
     assert manifest['performance']['profiler_enabled_default'] is False
     assert manifest['performance']['routine_logs_enabled_default'] is False

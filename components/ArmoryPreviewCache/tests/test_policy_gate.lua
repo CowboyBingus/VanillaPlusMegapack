@@ -113,10 +113,14 @@ end
 
 local function describe(w)
     local c,out=w.policy,{}
-    for _,k in ipairs({'status','pressure','quarantined','seen_menu','world','owner','acquires','releases','hits',
+    for _,k in ipairs({'status','pressure','quarantined','seen_menu','acquires','releases','hits',
         'unresolved','retired','prewarms','dependency_acquires','startup_acquires','foreground_pending'})do
         out[#out+1]=k..'='..tostring(c[k])
     end
+    -- The lease owner and world the policy last saw matter only while it holds
+    -- leases (a tick updates both before it acquires): an idle frame runs no
+    -- tick, so with nothing held they can lag until the next working frame.
+    if next(c.leases)then out[#out+1]='world='..tostring(c.world)..' owner='..tostring(c.owner)end
     local leases={}
     for id,l in pairs(c.leases)do leases[#leases+1]={id=id,used=l.used,owner=l.owner}end
     table.sort(leases,function(a,b)if a.used~=b.used then return a.used<b.used end;return a.id<b.id end)
@@ -137,8 +141,10 @@ local function describe(w)
         out[#out+1]='guard '..k..'='..tostring(w.guard[k])
     end
     local st=w.env.ArmoryPreviewCache
-    for _,k in ipairs({'status','last_top','last_items','last_active','last_blocked','free_mib','commit_headroom_mib',
-        'private_growth_mib','pressure_reason','profile_error','last_error'})do
+    -- The log's last_* fields and memory figures are left out: an idle frame
+    -- (install.lua idle gate) runs no step, so they keep the last working
+    -- frame's values. Everything the mod acts on is compared.
+    for _,k in ipairs({'status','pressure_reason','profile_error','last_error'})do
         out[#out+1]='state '..k..'='..tostring(st[k])
     end
     return out

@@ -272,9 +272,15 @@ local missing_pointers={
     {game+0x3326598,sm},{sm+56,0x53700000},{game+0x3326558,mm},
     {mm+0x48d8,0x53900000},{owner+0xf12e20,0x54000000},
 }
-for _,item in ipairs(missing_pointers) do
+-- The first five come before the local avatar's dive controller: the loader
+-- polls those waits every 30th frame (patch.NO_AVATAR); the others wait on a
+-- dive frame and are checked at every boundary.
+for n,item in ipairs(missing_pointers) do
     reset();p(locate(item[1],8),0,0)
-    for i=1,3 do local ok,reason=apply();assert(ok and reason:find('waiting_for_',1,true)==1);assert(writes==0) end
+    for i=1,3 do
+        local ok,reason=apply();assert(ok and reason:find('waiting_for_',1,true)==1);assert(writes==0)
+        assert((patch.NO_AVATAR[reason]==true)==(n<=5),'NO_AVATAR classification: '..reason)
+    end
     p(locate(item[1],8),0,item[2]);assert(apply());assert(state.protected==1)
 end
 reset();u(drown,40,0);assert(apply());assert(writes==0);u(drown,40,16);assert(apply());assert(state.protected==1)
@@ -297,26 +303,35 @@ local ok,message=pcall(apply)
 assert(not ok and tostring(message):find('Native dive timeout changed (2.0 near expected block at: 0x23c70a0)',1,true),
     tostring(message))
 f(constants,0x20,0);reset();timeout_layout(2,1.5);assert(pcall(apply),'build 25480438 layout')
--- Idle gate: a full check follows a change of local avatar within 31 checks,
--- and the gate then watches the new avatar's controller.
+-- Idle gate (patch.idle, which the loader runs between full checks): it
+-- answers true only for the same avatar id with no dive flag and finite
+-- timers. A full check follows a change of local avatar, and the gate then
+-- watches the new avatar's controller.
 do
     reset();u(avatars,local_ctl+0xf8c,0);assert(apply());assert(state.gate_controller==am+local_ctl)
+    assert(patch.idle(api,state)==true)
     local other=0x53d900
     u(avatars,other+0xb84,111);u(rows_owner,9%16*8+4,0)
-    for i=1,30 do local ok,reason=apply();assert(ok and reason=='dive_ended' and state.gate_controller==am+local_ctl) end
+    -- Until the next full check the gate still watches the old controller.
+    assert(patch.idle(api,state)==true and state.gate_controller==am+local_ctl)
     assert(apply());assert(state.gate_controller==am+other and state.key==owner+0xf32f18)
-    u(avatars,other+0xf8c,0x20);local ok,reason=apply()
+    assert(patch.idle(api,state)==true)
+    u(avatars,other+0xf8c,0x20);assert(patch.idle(api,state)==false,'gate missed a dive')
+    local ok,reason=apply()
     assert(ok and reason=='waiting_for_water_record' and not state.gate_controller and writes==0)
     u(avatars,other+0xf8c,0);u(avatars,other+0xb84,0);u(rows_owner,9%16*8+4,1)
-    -- Anything unexpected at the controller goes to the full check, which
-    -- stops the mod as before: another avatar id, or a non-finite timer.
+    -- Anything unexpected at the controller fails the gate and goes to the
+    -- full check, which stops the mod as before: another avatar id, or a
+    -- non-finite timer.
     reset();u(avatars,local_ctl+0xf8c,0);assert(apply())
-    u(avatars,local_ctl+0xb84,999);assert(not pcall(apply),'gate accepted another avatar id')
+    u(avatars,local_ctl+0xb84,999);assert(patch.idle(api,state)==false,'gate accepted another avatar id')
+    assert(not pcall(apply),'full check accepted another avatar id')
     u(avatars,local_ctl+0xb84,222)
     reset();u(avatars,local_ctl+0xf8c,0);assert(apply())
-    f(avatars,local_ctl+0xb84+8,0/0);assert(not pcall(apply),'gate accepted a NaN dive timer')
+    f(avatars,local_ctl+0xb84+8,0/0);assert(patch.idle(api,state)==false,'gate accepted a NaN dive timer')
+    assert(not pcall(apply),'full check accepted a NaN dive timer')
 end
-print('PASS: idle gate reads one controller; a periodic full check follows a new local avatar')
+print('PASS: idle gate reads one controller and fails on a dive, another avatar id or a NaN timer; a full check follows a new local avatar')
 -- Map lookups use the low 32 bits of key*mult as the game does. The fixture
 -- maps use mult=1, so find the local entity through a 2^20-slot map (every
 -- bit of the hash counts) with a unit id above 16 bits and real multipliers.
@@ -342,12 +357,13 @@ for i=1,300 do
     assert(patch.restore(api,state.pending))
 end
 print('PASS: 300 compiled dive starts keep their leases')
--- Per-check call budget. The loader checks before the game update, and after
--- it only while a local avatar exists or a lease or retry is in progress.
--- Outside a mission a check reads the mission record and stops. In a mission a
--- full check reads the identity chain (14 reads: records of one object share
--- one read) and the next 30 read only the local dive controller (1 read). A
--- dive start reads and validates everything, then writes the lease.
+-- Per-check call budget. Outside a mission a full check reads the mission
+-- record and stops. In a mission it reads the identity chain (14 reads:
+-- records of one object share one read); between full checks the loader runs
+-- the idle gate, which reads only the local dive controller (1 read). A dive
+-- start reads and validates everything, then writes the lease. (Until v3.10
+-- apply ran the gate itself, so its dive starts counted the failed gate's
+-- read too: 99 and 94; the loader's frames below still do.)
 do
     local budget=dofile(arg[0]:gsub('[%w_]+%.lua$','')..'frame_budget.lua')
     local counts=budget.wrap(api)
@@ -356,27 +372,31 @@ do
         assert(ok and reason==expected,label..': '..tostring(reason))
         budget.check(frame,limits,label)
     end
+    local function gate(label)
+        local frame,idle=budget.frame(counts,patch.idle,api,state)
+        assert(idle==true,label..': gate failed')
+        budget.check(frame,{read=1},label)
+    end
     reset();u(mission,8,0)
     check('outside a mission',{read=2},'waiting_for_mission')
     u(mission,8,1);reset();u(avatars,local_ctl+0xf8c,0)
     check('idle in a mission, full check',{read=14},'dive_ended')
-    for i=1,30 do check('idle in a mission, gate '..i,{read=1},'dive_ended') end
+    gate('idle in a mission, gate')
     check('idle in a mission, periodic full check',{read=14},'dive_ended')
-    check('idle in a mission, gate after it',{read=1},'dive_ended')
+    gate('idle in a mission, gate after it')
     u(avatars,local_ctl+0xf8c,0x20)
-    -- The gate sees the dive and the full check runs at once. The session's
-    -- first dive also verifies the game.dll constants, and the first dive in a
-    -- water-record table checks its page: one protection query (about 0.25 ms
-    -- in game) covers both writes.
-    check('first dive start',{read=99,writable_data=1,write=2},'airborne_reference')
+    -- The session's first dive also verifies the game.dll constants, and the
+    -- first dive in a water-record table checks its page: one protection query
+    -- (about 0.25 ms in game) covers both writes.
+    check('first dive start',{read=98,writable_data=1,write=2},'airborne_reference')
     check('dive held',{read=31},'airborne_reference')
     u(avatars,local_ctl+0xf8c,0)
     -- The landing write reuses its dive's page check.
     check('dive end',{read=49,write=1},'dive_ended')
-    check('idle after a dive',{read=1},'dive_ended')
+    gate('idle after a dive')
     f(water,16,0.011);u(avatars,local_ctl+0xf8c,0x20)
     -- Later dives in the same table reuse the kept check.
-    check('later dive start',{read=94,write=2},'airborne_reference')
+    check('later dive start',{read=93,write=2},'airborne_reference')
     -- A restore outside a normal landing (shutdown, a stop) checks again.
     local frame,restored=budget.frame(counts,patch.restore,api,state.pending)
     assert(restored and frame.writable_data==1 and frame.write==1,'restore at shutdown: '..budget.describe(frame))
@@ -395,7 +415,7 @@ do
     assert(dive(water)==1 and dive(water)==0 and dive(water)==0,'one page check per table')
     -- The wait is seen by the next full check (the idle gate reads only the
     -- controller; a load spans many full checks).
-    u(mission,8,0);state.gate_left=0;apply();u(mission,8,1);apply()
+    u(mission,8,0);apply();u(mission,8,1);apply()
     assert(dive(water)==1,'a wait keeps the page check')
     u(entities,24+12,555);apply()
     assert(dive(water)==1,'an avatar change keeps the page check')
@@ -417,23 +437,24 @@ do
     -- check; the gate only runs again after it ends.
     reset();u(avatars,local_ctl+0xf8c,0);apply()
     f(water,24,1);u(avatars,local_ctl+0xf8c,0x20)
-    check('unassisted dive start',{read=35},'deep_water')
+    check('unassisted dive start',{read=34},'deep_water')
     check('unassisted dive',{read=31},'deep_water')
     u(avatars,local_ctl+0xf8c,0)
     check('unassisted dive end',{read=14},'dive_ended')
-    check('idle after an unassisted dive',{read=1},'dive_ended')
+    gate('idle after an unassisted dive')
 end
-print('PASS: per-check call budget: 2 reads outside a mission, 1 read (gate) or 14 (every 31st check) idle in a mission, 31 per dive frame')
+print('PASS: per-check call budget: 2 reads outside a mission, 1 read (gate) or 14 (full check) idle in a mission, 31 per dive frame')
 print('PASS: one protection query per water-record table: kept across dives and landings, redone after waits, avatar changes, table moves, failed writes and at shutdown')
 -- Garbage per check with the JIT off (the interpreter is the worst case): no
 -- state that repeats frame after frame may allocate.
 do
-    local function garbage(label,before_each)
+    local function garbage(label,before_each,run)
+        run=run or apply
         jit.off();jit.flush()
-        before_each();apply()
+        before_each();run()
         collectgarbage('collect');collectgarbage('stop')
         local start=collectgarbage('count')
-        for _=1,100 do before_each();apply() end
+        for _=1,100 do before_each();run() end
         local bytes=(collectgarbage('count')-start)*1024
         collectgarbage('restart');jit.on()
         assert(bytes==0,label..': '..bytes..' bytes in 100 checks')
@@ -443,8 +464,9 @@ do
     reset();p(locate(game+0x33266a0,8),0,0);garbage('waiting for the mission manager',nothing)
     p(locate(game+0x33266a0,8),0,mode)
     reset();u(players,0x3a8,0x7fff);garbage('waiting for a local avatar',nothing)
-    reset();u(avatars,local_ctl+0xf8c,0);garbage('idle, full check',function() state.gate_controller=nil end)
-    reset();u(avatars,local_ctl+0xf8c,0);garbage('idle, gate',function() state.gate_left=30 end)
+    reset();u(avatars,local_ctl+0xf8c,0);garbage('idle, full check',nothing)
+    reset();u(avatars,local_ctl+0xf8c,0);apply()
+    garbage('idle, gate',nothing,function() assert(patch.idle(api,state)) end)
     reset();assert(apply() and state.pending);garbage('dive held',nothing)
     assert(patch.restore(api,state.pending))
 end
@@ -452,8 +474,10 @@ print('PASS: no garbage outside a mission, while waiting, idle (full check and g
 -- The whole per-frame path: the loader (archive_loader.lua) on the runtime's
 -- update guard, over this patch and the fixture. A frame is one update: a
 -- check before the game's update and, while a local avatar exists or a lease
--- or retry is in progress, one after it. The calls per frame are the checks'
--- own (the guard and the loader add none), and a frame allocates nothing.
+-- or retry is in progress, one after it; idle, the checks are the gate's,
+-- and without a local avatar only every 30th frame checks. The calls per
+-- frame are the checks' own (the guard and the loader add none), and a frame
+-- allocates nothing.
 -- Both Mod Options Menu paths: loader v18 (the bounded retry, which watches
 -- all session here because no menu is installed) and a loader with the
 -- after_startup capability (one registration before the first update).
@@ -487,28 +511,51 @@ for _,kind in ipairs({'retry','after_startup'}) do
         budget.check(calls,limits,label)
         return calls
     end
+    -- Outside a mission (the ship, loading screens) every 30th frame checks
+    -- (2 reads); the frames between make no call.
     reset();u(mission,8,0)
     frame('outside a mission, first update',{read=2},'waiting_for_mission')
-    frame('outside a mission',{read=2},'waiting_for_mission')
-    -- 62 checks in 31 idle frames: 2 full checks (14 reads) and 60 gates (1 read).
+    for i=1,29 do frame('outside a mission, between polls '..i,{},'waiting_for_mission') end
+    frame('outside a mission, next poll',{read=2},'waiting_for_mission')
+    -- A mission is seen at the next poll.
     u(mission,8,1);u(avatars,local_ctl+0xf8c,0)
+    for i=1,29 do frame('mission started, before the poll '..i,{},'waiting_for_mission') end
+    -- Idle in a mission: a full check (14 reads) and the gate after the update
+    -- (1) on every 120th frame, the gate at both boundaries (2) on the others.
     local full=0
-    for i=1,31 do
+    for i=1,240 do
         local calls=frame('idle in a mission '..i,{read=15},'dive_ended')
         assert(calls.read==2 or calls.read==15,'idle frame '..i..': '..budget.describe(calls))
-        if calls.read==15 then full=full+1 end
+        if calls.read==15 then full=full+1;assert(i%120==1,'full check on idle frame '..i) end
     end
     assert(full==2,'idle frames with a full check: '..full)
-    -- A dive start and the held check after the update. The 31 idle frames
+    -- A dive start and the held check after the update. The 240 idle frames
     -- used up the gate, so the dive frame starts with a full check (98 reads:
     -- the session's first dive verifies the game.dll constants; one page
-    -- check), then 31 for the held check.
+    -- check), then 31 for the held check. On a frame whose gate is armed the
+    -- gate's read comes first (one more, as in v3.10).
     u(avatars,local_ctl+0xf8c,0x20)
     frame('first dive start',{read=129,writable_data=1,write=2},'airborne_reference')
     frame('dive held',{read=62},'airborne_reference')
     u(avatars,local_ctl+0xf8c,0)
     frame('dive end',{read=50,write=1},'dive_ended')
     frame('idle after a dive',{read=2},'dive_ended')
+    -- A dead local player (no unit): the gate keeps answering for the old
+    -- controller until the next full check (at most 120 frames), which waits;
+    -- then every 30th frame checks (5 reads) until a unit exists again.
+    u(players,0x3a8,0x7fff)
+    local dead=0
+    while loaded.status=='dive_ended' do
+        dead=dead+1;assert(dead<=120,'a dead player was not seen within 120 frames')
+        budget.frame(counts,env.update,1/60)
+    end
+    assert(loaded.status=='waiting_for_local_avatar')
+    for i=1,29 do frame('dead, between polls '..i,{},'waiting_for_local_avatar') end
+    frame('dead, next poll',{read=5},'waiting_for_local_avatar')
+    u(players,0x3a8,9)
+    for i=1,29 do frame('respawned, before the poll '..i,{},'waiting_for_local_avatar') end
+    frame('respawned',{read=15},'dive_ended')
+    frame('idle after a respawn',{read=2},'dive_ended')
     -- Garbage per frame with the JIT off (the interpreter is the worst case).
     local function garbage(label,setup)
         jit.off();jit.flush()
@@ -525,13 +572,15 @@ for _,kind in ipairs({'retry','after_startup'}) do
     garbage('guarded update with a dive held',function() f(water,16,0.011);u(avatars,local_ctl+0xf8c,0x20) end)
     assert(loaded.status=='airborne_reference' and loaded.pending)
     -- Compiled (JIT on), once the traces have settled: recording a trace
-    -- allocates, and the idle checks' traces settle within about 2000 frames
-    -- here. One loop serves the warm-up and the windows, so the windows record
-    -- nothing new. Every window of 100 frames then allocates nothing.
+    -- allocates, and a path's traces settle within about 2000 runs of it here.
+    -- Outside a mission a check runs every 30th frame and idle in a mission a
+    -- full check every 120th, so those warm up for 60000 frames. One loop
+    -- serves the warm-up and the windows, so the windows record nothing new.
+    -- Every window of 100 frames then allocates nothing.
     local function frames(n) for _=1,n do env.update(1/60) end end
-    local function compiled_garbage(label,setup)
+    local function compiled_garbage(label,setup,warm)
         jit.on();jit.flush()
-        setup();frames(3000)
+        setup();frames(warm or 3000)
         for window=1,3 do
             collectgarbage('collect');collectgarbage('stop')
             local start=collectgarbage('count')
@@ -542,15 +591,15 @@ for _,kind in ipairs({'retry','after_startup'}) do
         end
     end
     u(avatars,local_ctl+0xf8c,0);env.update(1/60)
-    compiled_garbage('guarded update outside a mission',function() u(mission,8,0) end)
-    compiled_garbage('guarded update idle in a mission',function() u(mission,8,1);u(avatars,local_ctl+0xf8c,0) end)
+    compiled_garbage('guarded update outside a mission',function() u(mission,8,0) end,60000)
+    compiled_garbage('guarded update idle in a mission',function() u(mission,8,1);u(avatars,local_ctl+0xf8c,0) end,60000)
     compiled_garbage('guarded update with a dive held',function() f(water,16,0.011);u(avatars,local_ctl+0xf8c,0x20) end)
     assert(loaded.status=='airborne_reference' and loaded.pending)
     u(avatars,local_ctl+0xf8c,0);env.update(1/60)
     assert(loaded.status=='dive_ended' and not loaded.pending and env.BingusRuntime.statuses.ShallowWaterDiving.errors==0)
     env.shutdown();assert(loaded.status=='stopped')
 end
-print('PASS: guarded update (loader on the runtime guard), with the menu retry and with after_startup: per frame only the checks\' calls (2 reads outside a mission, 2 or 15 idle, 62 with a dive held) and no garbage outside a mission, idle or with a dive held, interpreted or compiled')
+print('PASS: guarded update (loader on the runtime guard), with the menu retry and with after_startup: per frame only the checks\' calls (2 reads every 30th frame outside a mission and 5 while dead, 2 idle with 15 every 120th frame, 62 with a dive held) and no garbage outside a mission, idle or with a dive held, interpreted or compiled')
 -- Machine code in the LuaJIT cache the game and every mod share: idle and
 -- held-dive checks (with this fixture) compile about 13 KB while the full
 -- snapshot stays interpreted, about 50 KB if it is compiled.

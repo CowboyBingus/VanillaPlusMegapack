@@ -321,18 +321,21 @@ local function verify(c)
     for k,v in pairs(counts) do if type(v)=='number' then counts[k]=0 end end
     counts.regions={}; diagnostic()
     if c.event then
-        -- Snapshot before the game's update; after it, snapshot, fresh re-read,
-        -- the write with its one protection query, and the read-back.
-        assert(counts.writes==1 and counts.reads==43 and counts.queries==1,
+        -- The idle gate (2) and the snapshot it starts before the game's
+        -- update; after it, snapshot, fresh re-read, the write with its one
+        -- protection query, and the read-back.
+        assert(counts.writes==1 and counts.reads==45 and counts.queries==1,
             c.name..': reads '..counts.reads..' queries '..counts.queries)
         assert(ffi.cast('float *',pm+0x10C)[0]==11 and ffi.cast('float *',pm+0x110)[0]==22)
         assert(ffi.cast('float *',pm+0x114)[0]==321 and ffi.cast('float *',pm+0x12C)[0]==5)
     else assert(counts.writes==0 and counts.queries==0) end
-    -- The mode first (2 reads), then the missing player manager's global.
-    if c.missing or c.flap then assert(counts.reads==3,c.name..': read count '..counts.reads) end
+    -- The idle gate: the player manager global (missing: nothing more), then
+    -- the local spawn state. Alive (and on the ship) it stops there; queued or
+    -- pending every check reads a full snapshot.
+    if c.missing or c.flap then assert(counts.reads==1,c.name..': read count '..counts.reads) end
     if c.ship then assert(counts.reads==2,c.name..': read count '..counts.reads) end
     if not c.event and not c.flap and not c.missing and not c.ship then
-        local expected=checks(c)*snapshot_reads(c)
+        local expected=(c.state==1 or c.state==2) and checks(c)*snapshot_reads(c) or 2
         assert(counts.reads==expected,c.name..': read count '..counts.reads..' vs '..expected)
         assert(counts.logs==0,'Steady state unexpectedly logs')
     end
@@ -354,14 +357,17 @@ end
 -- Byte decoding into kept buffers removed every per-read string (ship 496 ->
 -- 240, alive 2408 -> 1448, pending 4880 -> 4080, solo 1076/1360 -> 848). The
 -- missing player manager rose 224 -> 256: the mission mode is now read (and
--- its pointer decoded) first, so the ship stops after it.
+-- its pointer decoded) first, so the ship stops after it. The idle gate
+-- (player manager global and spawn state into kept buffers, the state's
+-- address made once per manager) allocates nothing: startup 256 -> 0, ship
+-- 240 -> 0, alive 1448 -> 0, solo alive 848 -> 0.
 local GARBAGE={ -- scenario, bytes per update
-    {'startup_null',256},
-    {'ship',240},
-    {'mp_alive_b4',1448},
+    {'startup_null',0},
+    {'ship',0},
+    {'mp_alive_b4',0},
     {'mp_pending_b4',4080},
-    {'solo_alive_s32',848},
-    {'solo_alive_s128_full_source',848},
+    {'solo_alive_s32',0},
+    {'solo_alive_s128_full_source',0},
     {'solo_dead_a32_stress',13488}, -- two checks, 32 anchors each
 }
 local function per_update(frame,n)

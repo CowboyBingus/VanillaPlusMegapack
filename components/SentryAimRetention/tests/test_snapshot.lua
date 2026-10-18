@@ -10,10 +10,12 @@ local function fixture()
     local function p(a,n)put(a,bytes('uint64_t',n))end
     local function zero(a,n)put(a,string.rep('\0',n))end
     local api={}
-    function api.read(a,n)local t={};for i=0,n-1 do if not mem[a+i]then return nil end;t[#t+1]=mem[a+i]end;return table.concat(t)end
+    local function read(a,n)local t={};for i=0,n-1 do if not mem[a+i]then return nil end;t[#t+1]=mem[a+i]end;return table.concat(t)end
+    api.read=read
     function api.pointer(b)return b and tonumber(ffi.cast('const uint64_t *',b)[0])end
+    -- Not through api.read, so a call budget counts it once, as read_into.
     function api.read_into(a,n,buffer)
-        local b=api.read(a,n);if not b then return false end
+        local b=read(a,n);if not b then return false end
         ffi.copy(buffer,b,n);return true
     end
     function api.bind()error('Unvalidated native binding')end
@@ -86,16 +88,19 @@ assert(ok and why=='waiting_for_sentries')
 print('PASS: native-layout fixture, offsets, authority/resource gates, malformed maps/vectors and no binding before validation')
 
 -- Discovery remains fresh while contiguous entity-pointer reads are bounded.
+-- The check reads the registry and entity headers in place (read_into); both
+-- read kinds are counted.
 do
     local api,g,put,w,p,a=fixture()
     w(a.tm+308,512);w(a.tm+320,512);w(a.tm+324,512)
     for i=0,511 do p(0x810080+i*8,0xa00000+i*32);put(0xa00000+i*32,string.rep('\0',24)) end
-    local read=api.read;local calls,batches=0,0
-    api.read=function(address,size)
+    local read,read_into=api.read,api.read_into;local calls,batches=0,0
+    local function count(address,size)
         calls=calls+1;assert(size<=2048,'unbounded registry read')
         if address>=0x810080 and address<0x811080 then batches=batches+1 end
-        return read(address,size)
     end
+    api.read=function(address,size)count(address,size);return read(address,size)end
+    api.read_into=function(address,size,buffer)count(address,size);return read_into(address,size,buffer)end
     -- Cold: the targeting root and header, two pointer batches and every entity header.
     local cache=M.new_cache()
     assert(#M.snapshot(api,g,cache)==0 and calls==516 and batches==2,'batch pointer array, classify every entity')
@@ -106,7 +111,7 @@ do
     -- Every RESCAN-th check classifies every entry again (authority can change in place).
     for _=cache.checks+1,29 do M.snapshot(api,g,cache) end
     calls=0;M.snapshot(api,g,cache);assert(cache.checks==30 and calls==516,'rescan')
-    api.read=function(address,size)if size==2048 then return nil end;return read(address,size)end
+    api.read_into=function(address,size,buffer)if size==2048 then return false end;return read_into(address,size,buffer)end
     assert(not pcall(M.snapshot,api,g),'failed batch must not produce candidate sentries')
 end
 print('PASS: 512 non-sentries use two bounded pointer reads and reject failed snapshots')
@@ -125,6 +130,8 @@ local memory_file=assert(loadfile(arg[1]..'/bingus_memory.lua'))()
 local SENTRY='\x70\x1d\xe3\x58\xcf\xd6\x85\xef'
 local function budget_fixture()
     local api,g,put,w,p,a=fixture()
+    -- The mission mode record at [game+0x33266a0]: a mission runs.
+    p(g+0x33266a0,0x960000);put(0x960000,string.rep('\0',0x44));w(0x960008,1);w(0x960040,1)
     api.time=function()return 0 end
     api.module=function(n)return n and g or 0x200000 end
     api.module_hash=function(m)return m==g and 'game' or 'exe' end
@@ -188,58 +195,112 @@ local function budget_fixture()
         local frame=budget.frame(counts,env.update,1/60)
         assert(f.state.last_reason==expected,label..': '..tostring(f.state.last_reason))
         budget.check(frame,limits,label)
+        return frame
     end
+    -- A check whose counts equal limits exactly.
+    function f.exact(label,limits,expected)
+        local frame=f.check(label,limits,expected)
+        for name,n in pairs(limits) do
+            assert(frame[name]==n,label..': '..budget.describe(frame))
+        end
+    end
+    -- Idle-gated frames up to the next full check: each makes no api call at
+    -- all and leaves the status unchanged. Returns how many ran.
+    function f.idle_until_check(label)
+        local n,status=0,f.state.status
+        while f.state.layout and f.state.layout.idle and (f.state.layout.checks+1)%30~=0 do
+            n=n+1;f.frame(label..' (gated frame '..n..')',{})
+            assert(f.state.status==status,label..': status changed on a gated frame')
+        end
+        return n
+    end
+    -- A RESCAN-th frame outside a mission: only the mission check (limits
+    -- exactly), no full check.
+    function f.mission_check(label,limits)
+        local polls=f.state.polls
+        local frame=f.frame(label,limits)
+        for name,n in pairs(limits) do assert(frame[name]==n,label..': '..budget.describe(frame)) end
+        assert(f.state.polls==polls and f.state.layout.outside,label..': ran a full check')
+    end
+    function f.mission(on)w(0x960008,on and 1 or 0);w(0x960040,on and 1 or 0)end
     return f
 end
 do
     local f=budget_fixture();local a,w,p,put,state,check=f.a,f.w,f.p,f.put,f.state,f.check
     local roots={0x3326d30,0x3326740,0x3326d70}
     for _,rva in ipairs(roots)do p(f.g+rva,0)end
-    -- The targeting root is the idle gate; its header the second.
-    check('outside a mission',{read=1},'waiting_for_sentries')
-    p(f.g+roots[1],a.tm);p(f.g+roots[2],a.bm);p(f.g+roots[3],a.rm);w(a.tm+324,0)
-    check('idle in a mission',{read=2,pointer=1},'waiting_for_sentries')
-    -- A registered entity's header is read when its pointer first appears (or
-    -- changes, or on a rescan); afterwards only the pointer batch is read.
-    w(a.tm+324,1);put(a.entity,string.rep('\0',8))
-    check('idle, one non-sentry registered',{read=4,pointer=3},'waiting_for_sentries')
-    check('idle, the same non-sentry',{read=3,pointer=2},'waiting_for_sentries')
+    -- On the ship (no mission, no targeting registry) the first check reads the
+    -- root once; the idle gate then ends every frame with no api call, except
+    -- the mission check (2 reads) on every 60th, which here finds no mission.
+    f.mission(false)
+    f.exact('outside a mission',{read_into=1},'waiting_for_sentries')
+    assert(f.idle_until_check('outside a mission')==28 and state.polls==1 and state.updates==29)
+    f.mission_check('mission check at frame 30',{read_into=2,pointer=1})
+    assert(f.idle_until_check('outside a mission')==29)
+    f.mission_check('mission check at frame 60',{read_into=2})
+    -- Even with a populated targeting registry the ship is not rescanned.
+    p(f.g+roots[1],a.tm);p(f.g+roots[2],a.bm);p(f.g+roots[3],a.rm);w(a.tm+324,1);put(a.entity,string.rep('\0',8))
+    assert(f.idle_until_check('ship registry')==29)
+    f.mission_check('frame 90: no rescan, no mission check',{})
+    assert(f.idle_until_check('ship registry')==29)
+    f.mission_check('mission check at frame 120',{read_into=2})
+    assert(state.polls==1 and state.updates==120)
+    -- A mission starts: seen at the next 60th frame (at most 59 frames, 1 s at
+    -- 60 FPS), which then runs the full check: mission record, root, header,
+    -- pointer chunk and the entity's header, decoded in place.
+    f.mission(true)
+    assert(f.idle_until_check('mission started')==29)
+    f.mission_check('frame 150: still waiting for the mission check',{})
+    assert(f.idle_until_check('mission started')==29)
+    f.exact('mission seen at frame 180',{read_into=6,pointer=3},'waiting_for_sentries')
+    -- In a mission: the rescan every 30th frame, the mission check every 60th.
+    assert(f.idle_until_check('idle in a mission')==29)
+    f.exact('idle, the same non-sentry rescanned',{read_into=4},'waiting_for_sentries')
+    assert(f.idle_until_check('idle in a mission')==29)
+    f.exact('idle, rescan and mission check',{read_into=6},'waiting_for_sentries')
+    assert(state.polls==4 and state.updates==240)
     -- The entity becomes a sentry in place (same pointer): found at the next
     -- rescan, here forced by dropping the cache. Setters bind once when the
     -- first sentry appears; skip that one-off path.
     put(a.entity,SENTRY);state.layout=nil;state.native=f.native;f.env.update(1/60)
-    check('sentry tracking',{read=58,read_into=16,pointer=12,time=2},'observing')
+    check('sentry tracking',{read=36,read_into=22,time=2},'observing')
     -- Five protection queries (about 1.5 ms in game) once per target loss, one per
     -- range: fire mode, selection deadline, retention flags, aim, turret speeds.
     -- The three writes reuse the query made for their range earlier in the check.
     -- Reads include one per query: this fixture's writable_data reads its range.
     w(a.behavior+24,0);w(a.behavior+96,32)
-    check('target lost',{read=156,read_into=16,pointer=12,time=2,writable_data=5,write=3},'firing_paused')
-    check('holding aim',{read=54,read_into=16,pointer=12,time=2},'firing_paused')
+    check('target lost',{read=134,read_into=22,time=2,writable_data=5,write=3},'firing_paused')
+    check('holding aim',{read=32,read_into=22,time=2},'firing_paused')
     assert(state.holds==1 and state.holding==1 and state.fire_pauses==1 and state.reselections==1)
     -- A new target before the native handler used the search request: fire
     -- resumes (1 query), the request is restored (1; its write reuses that
     -- query) and the hold ends (3).
     w(a.behavior+24,77);w(a.behavior+96,3)
-    check('target reacquired',{read=152,read_into=16,pointer=12,time=2,writable_data=5,write=1},'observing')
+    check('target reacquired',{read=130,read_into=22,time=2,writable_data=5,write=1},'observing')
     assert(state.releases==1 and state.fire_resumes==1 and state.holding==0 and state.fire_paused==0)
     w(a.behavior+24,0);w(a.behavior+96,32)
-    check('target lost again',{read=156,read_into=16,pointer=12,time=2,writable_data=5,write=3},'firing_paused')
+    check('target lost again',{read=134,read_into=22,time=2,writable_data=5,write=3},'firing_paused')
     assert(state.holds==2 and state.reselections==2)
     -- The sentry vanishes while held: the same three releases in one check.
     -- Reads 94 -> 96: the fire guards now also hold the trigger manager root and
     -- the trigger array, because the trigger's address is kept between checks;
     -- each release's identity check reads them.
     w(a.tm+324,0)
-    check('sentry removed while held',{read=96,pointer=1,time=1,writable_data=5,write=1},
+    check('sentry removed while held',{read=94,read_into=2,time=1,writable_data=5,write=1},
         'waiting_for_sentries')
     assert(not next(state.records) and not next(state.fire_records))
-    check('idle after a sentry',{read=2,pointer=1,time=1},'waiting_for_sentries')
+    -- Nothing is held, paused or requested any more: the gate waits for the
+    -- next RESCAN-th check, where a new sentry is found.
+    assert(f.idle_until_check('idle after a sentry')>0)
+    f.exact('idle after a sentry',{read_into=4,pointer=1,time=1},'waiting_for_sentries')
+    assert(f.idle_until_check('idle after a sentry, again')==29)
     -- A sentry with no target is not engaged: one check per frame. Its first
     -- check locates it; the next ones verify the kept layout.
     w(a.tm+324,1);w(a.behavior+24,0);w(a.behavior+96,32);w(a.rt,0);put(0x942000,'\0')
-    check('sentry placed, no target',{read=52,read_into=8,pointer=23,time=1},'observing')
-    check('sentry scanning',{read=26,read_into=8,pointer=6,time=1},'observing')
+    -- Found at a 60th frame: its 2 mission-check reads are included.
+    check('sentry placed, no target',{read=40,read_into=14,pointer=17,time=1},'observing')
+    assert(not state.layout.idle,'a sentry this machine controls disarms the gate')
+    check('sentry scanning',{read=15,read_into=11,time=1},'observing')
     assert(not state.engaged)
 end
 -- A hold that fails halfway is undone in the same check: the search request is
@@ -256,14 +317,14 @@ do
     local moved=bytes('float',1)..bytes('float',2)..bytes('float',3)
     put(a.rt+8,moved);f.fail[a.rt+20]=true
     w(a.behavior+24,0);w(a.behavior+96,32)
-    f.frame('failed hold, then restore',{read=224,read_into=8,pointer=6,time=1,writable_data=10,write=5})
+    f.frame('failed hold, then restore',{read=213,read_into=11,time=1,writable_data=10,write=5})
     assert(state.status=='hold_aim_failed',state.status)
     local read=f.api.read
     assert(read(a.rt+8,12)==moved and read(a.nt+16,4)==bytes('uint32_t',0),'aim and retention restored')
     assert(read(a.control+8,8)==bytes('float',80)..bytes('float',50),'speeds restored')
     assert(read(0x941000,4)==bytes('uint32_t',1) and read(a.behavior+152,8)==bytes('uint64_t',1700000))
     assert(not next(state.records) and not next(state.fire_records) and f.guard().errors==1)
-    f.check('after a failed hold',{read=113,read_into=16,pointer=29,time=2,writable_data=1},'firing_paused')
+    f.check('after a failed hold',{read=90,read_into=23,pointer=23,time=2,writable_data=1},'firing_paused')
     assert(state.holding==0 and state.fire_paused==1 and f.guard().state=='running')
 end
 -- An update below this mod raised while a sentry was held. The failing frame
@@ -277,9 +338,9 @@ do
     local f=budget_fixture();local a,w,state=f.a,f.w,f.state
     state.native=f.native;f.env.update(1/60)
     w(a.behavior+24,0);w(a.behavior+96,32)
-    f.check('target lost',{read=156,read_into=16,pointer=12,time=2,writable_data=5,write=3},'firing_paused')
+    f.check('target lost',{read=134,read_into=22,time=2,writable_data=5,write=3},'firing_paused')
     assert(state.holding==1 and state.fire_paused==1 and state.reselections==1)
-    f.failing_frame('update below fails while held',{read=27,read_into=8,pointer=6,time=1})
+    f.failing_frame('update below fails while held',{read=16,read_into=11,time=1})
     -- Reads 90 -> 94: the release identity checks read the trigger manager root
     -- and trigger array guards (see 'sentry removed while held').
     f.frame('paused after an error below',{read=94,time=1,writable_data=5,write=1})
@@ -292,12 +353,12 @@ do
     assert(state.native==f.native,'natives stay bound')
     for i=1,59 do f.frame('paused frame '..i,{}) end
     assert(f.guard().state:find('^paused'))
-    f.check('resumed, target still lost',{read=113,read_into=16,pointer=29,time=2,writable_data=1},'firing_paused')
+    f.check('resumed, target still lost',{read=90,read_into=23,pointer=23,time=2,writable_data=1},'firing_paused')
     assert(f.guard().state=='running' and state.holding==0 and state.holds==1)
     w(a.behavior+24,77);w(a.behavior+96,3)
-    f.check('target back after a pause',{read=96,read_into=16,pointer=16,time=2,writable_data=1},'observing')
+    f.check('target back after a pause',{read=74,read_into=22,pointer=4,time=2,writable_data=1},'observing')
 end
-print('PASS: per-frame call budget: no protection queries and 2 reads idle; a kept sentry layout; holds query protection only when a target is lost or released; a pause restores once and makes no api call while paused')
+print('PASS: per-frame call budget: waiting frames make no api call; on the ship a mission check (2 reads) every 60th frame, in a mission a rescan every 30th; a kept sentry layout; holds query protection only when a target is lost or released; a pause restores once and makes no api call while paused')
 
 -- A kept layout follows moved memory. The turret control array moves while the
 -- sentry holds aim: the guards see the new array pointer, the sentry is located

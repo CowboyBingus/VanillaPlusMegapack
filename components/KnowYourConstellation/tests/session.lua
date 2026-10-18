@@ -6,11 +6,15 @@
 -- Also measures garbage per frame with the collector stopped, interpreted and
 -- compiled.
 --   local H = assert(loadfile(source .. '/../tests/session.lua'))()(source)
+-- `files` (optional) maps a module name ('install', 'mission', 'panel', ...)
+-- to another file to load in its place: the equivalence test runs the
+-- published reference copies (tests/reference/) this way.
 local ffi = require('ffi')
 
-return function(source)
+return function(source, files)
     local H = {}
-    local function load(name) return assert(loadfile(source .. '/' .. name .. '.lua'))() end
+    local function path(name) return files and files[name] or source .. '/' .. name .. '.lua' end
+    local function load(name) return assert(loadfile(path(name)))() end
     local budget = assert(loadfile(source .. '/../tests/frame_budget.lua'))()
     local memory = assert(loadfile(source .. '/../tests/fixtures/memory.lua'))()
     local resolve, mission, presentation = load('resolve'), load('mission'), load('presentation')
@@ -208,14 +212,15 @@ return function(source)
         function surface:clear() s.shown = nil end
         local panel = {new = function() return surface end}
         if engine then
-            local real = assert(loadfile(source .. '/panel.lua'))(text)
+            local real = assert(loadfile(path('panel')))(text)
             panel = {new = function(e) s.surface = real.new(e) return s.surface end}
         end
         s.env = setmetatable({stingray = engine or {Gui = {}, World = {}}, print = function() end, os = {}, io = io},
             {__index = _G})
         s.env._G = s.env
-        -- The game's update below the mod, which the runtime guard wraps.
-        s.env.update = function() end
+        -- The game's update below the mod, which the runtime guard wraps; it
+        -- raises while s.lower_raises is set.
+        s.env.update = function() if s.lower_raises then error('the game update failed', 0) end end
         -- The roster's calls, with the weights of the last one.
         s.roster_calls = 0
         local counted = setmetatable({new = function(data)

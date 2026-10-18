@@ -227,7 +227,19 @@ end
 local kept=false
 local kept_pm,kept_ref,kept_owner,kept_manager,kept_ai,kept_address,kept_registry
 local kept_entity={0,0,0,0,0,0}
+-- True when the chain just resolved found the kept identity again.
+local function kept_matches()
+    if not kept or found_pm~=kept_pm or found_ref~=kept_ref or found_owner~=kept_owner or found_manager~=kept_manager
+        or found_ai~=kept_ai or found_address~=kept_address or found_registry~=kept_registry then return false end
+    for i=0,5 do if word(found_entity,i*4)~=kept_entity[i+1] then return false end end
+    return true
+end
+-- renewed: the last snapshot replaced a kept identity with a different one.
+-- The idle gate (A.idle) reads the input at the kept index only, so a press
+-- made while the identity changed unseen is not a fresh press (A.step).
+local renewed=false
 local function keep_identity()
+    renewed=kept and not kept_matches()
     kept_pm,kept_ref,kept_owner,kept_manager,kept_ai=found_pm,found_ref,found_owner,found_manager,found_ai
     kept_address,kept_registry=found_address,found_registry
     for i=0,5 do kept_entity[i+1]=word(found_entity,i*4) end
@@ -250,9 +262,11 @@ end
 -- by every idle check; vault_phase is the address of the avatar's vault
 -- controller phase word, which the vault check reads next.
 local IDLE={manual=false}
+-- The manual climb input of avatar index ai.
+local function input_address(manager,ai) return manager+0x150+ai*0xa7aec+0x1b68+14*32 end
 -- True when the input is released (a light read, a guard).
 local function released(api)
-    local input=light_read(api,found_manager+0x150+found_ai*0xa7aec+0x1b68+14*32,1,SLOPE)
+    local input=light_read(api,input_address(found_manager,found_ai),1,SLOPE)
     return byte_at(input,0)==0
 end
 -- The snapshot goes on past the light gate: its light reads become guards, in
@@ -399,7 +413,7 @@ function A.snapshot(api,game,exe,key,light,verify)
         reads=0
     end
     local found,why=identify(api,base,key)
-    if not key then if found then keep_identity() else kept=false end end
+    if not key then if found then keep_identity() else kept=false;renewed=false end end
     if not found then return nil,why end
     local vault_phase=api_address(found_manager+0x53e1b8+found_ai*0x1238+4)
     -- With no lease and the manual input released, A.step uses only the
@@ -550,7 +564,10 @@ end
 -- Ends the assist with this status, restoring every cell it still owns.
 local function finish(api,game,exe,state,reason)
     state.slope_status=reason
-    state.assist_intent=nil
+    -- Cleared only when set: storing nil under a key the table lacks inserts it,
+    -- and with the checks of idle frames gated that insert can rehash the
+    -- state table (an allocation) on the next full check.
+    if state.assist_intent~=nil then state.assist_intent=nil end
     if state.slope_lease then state.slope_last_release=reason end
     if state.slope_lease and state.slope_lease.kind=='ledge' and reason=='attempt_timeout' then
         state.ledge_attempt_expiries=(state.ledge_attempt_expiries or 0)+1
@@ -689,26 +706,71 @@ local function arm(api,game,exe,state,s,kind,now)
     return true
 end
 
+-- The idle gate. After a check that found nothing to do (A.settle, called by
+-- the patch with the whole check's answer), the next frames are answered by
+-- A.idle in the loader's step, before its check: no pcall, apply or report.
+-- With the local avatar found and its input released a gated frame makes one
+-- read, the input byte at the kept avatar index; outside a mission or without
+-- a local avatar it makes none. A press, an unreadable input, work in progress
+-- (state.busy, which a fresh start clears) or the end of the window runs the
+-- full check on that same frame, so a press reaches it with no frame lost.
+-- Windows are counted in frames, without a clock call. Every GATE_MISSION-th
+-- frame of a mission the full check verifies the identity: until then a
+-- respawn, a teammate leaving (registry compaction) or the mission's end can
+-- leave the kept index stale, and a tap shorter than the rest of the window is
+-- missed; a held press is seen at the full check (tests/test_slope.lua). 10
+-- frames: about 0.17 s at 60 FPS, for 1.6 reads per idle frame on average (30
+-- frames: 0.5 s for 1.2). Outside a mission nothing can be pressed: every
+-- GATE_OUTSIDE-th frame looks for one. A check that raised is not gated.
+local GATE_MISSION,GATE_OUTSIDE=10,60
+local gate_frames,gate_input=0,nil
+-- What this check allows (A.step): frames and the input address, or 0.
+local gate_due,gate_due_input=0,nil
+local gate_byte=ffi.new('uint8_t[1]')
+function A.idle(api,state)
+    if gate_frames<=0 or state.busy~=false then return false end
+    gate_frames=gate_frames-1
+    if gate_input==nil or api.read_into(gate_input,1,gate_byte) and gate_byte[0]==0 then return true end
+    gate_frames=0
+    return false
+end
+-- idle: the whole check (slope and vault) found nothing to do.
+function A.settle(idle)
+    if idle and gate_due>0 then gate_frames,gate_input=gate_due-1,gate_due_input else gate_frames,gate_input=0,nil end
+end
+
+-- The local avatar was not resolved (ok: the snapshot returned, with why):
+-- the step's result. A transition or unavailable data needs a fresh release.
+local function unresolved(api,game,exe,state,ok,why)
+    state.slope_down=true
+    -- false: outside a mission, which the vault check need not read again.
+    if ok and why=='outside_mission' then state.avatar=false end
+    if ok then gate_due=why=='outside_mission' and GATE_OUTSIDE or GATE_MISSION end
+    return finish(api,game,exe,state,ok and 'waiting_for_avatar' or 'waiting_for_slope_data')
+end
+-- No lease and the input released: nothing else runs, nor needs the time; the
+-- gate may read the input at this avatar index on the next frames.
+local function released_idle(state)
+    gate_due,gate_due_input=GATE_MISSION,api_address(input_address(found_manager,found_ai))
+    state.slope_status='waiting_for_manual_climb'
+    if state.assist_intent~=nil then state.assist_intent=nil end
+    return true
+end
+
 function A.step(api,game,exe,state)
     -- state.avatar: this poll's verified local avatar, for the vault check
     -- that follows in the same poll (vault_data.lua), else nil.
     state.avatar=nil
+    gate_due,gate_due_input=0,nil
     local light=not state.slope_lease
     local ok,s,why=pcall(A.snapshot,api,game,exe,nil,light,light and state.slope_down==false)
-    if not ok or not s then
-        -- Require a fresh input release after transitions or unavailable data.
-        state.slope_down=true
-        -- false: outside a mission, which the vault check need not read again.
-        if ok and why=='outside_mission' then state.avatar=false end
-        return finish(api,game,exe,state,ok and 'waiting_for_avatar' or 'waiting_for_slope_data')
-    end
+    if not ok or not s then return unresolved(api,game,exe,state,ok,why) end
+    -- A new identity: a press already held is not a fresh one.
+    if renewed then state.slope_down=true;renewed=false end
     state.avatar=s
     local rising=s.manual and state.slope_down==false
     state.slope_down=s.manual
-    -- No lease and the input released: nothing below runs, nor needs the time.
-    if not state.slope_lease and not s.manual then
-        state.slope_status='waiting_for_manual_climb';state.assist_intent=nil;return true
-    end
+    if not state.slope_lease and not s.manual then return released_idle(state) end
     local now=api.time()
     if state.slope_lease then return hold(api,game,exe,state,s,now) end
     if not candidate_due(api,state,s,now,rising) then return true end
@@ -729,8 +791,12 @@ end
 -- calls dominate. Compiled, the whole idle check became one long trace per
 -- check state, about 100 KB more of the LuaJIT code cache that the game and
 -- every mod share in a session, for about 1 us less per idle frame in the game's
--- lua51.dll (offline). true selects this chunk, the second true every function
--- in it; the helpers are compiled again by name. Nothing is flushed.
+-- lua51.dll (offline). The idle gate (A.idle) stays interpreted too: compiled,
+-- its trace followed the returns into the loader and the update wrappers below
+-- it, 110 traces and 125 KB of machine code over the ledger tape (pass B, KB
+-- cv-idle-gate-2026-10-17) instead of 9 traces and 1.4 KB. true selects this
+-- chunk, the second true every function in it; the helpers are compiled again
+-- by name. Nothing is flushed.
 if jit and jit.off then
     jit.off(true,true)
     for _,fn in ipairs({u,float_bits,f,read,ptr,global,lookup,api_address,light_read,word,byte_at,light_pointer,

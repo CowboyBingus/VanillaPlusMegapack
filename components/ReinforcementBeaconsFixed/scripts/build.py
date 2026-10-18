@@ -12,7 +12,7 @@ from package import package_release
 
 ROOT=Path(__file__).resolve().parents[1]
 MODULE='mods/cowboybingus/reinforcement_beacon_fix_data'
-REVISION='data-v4.6'
+REVISION='data-v4.6.1'
 FORBIDDEN=('VirtualAlloc','VirtualProtect','FlushInstructionCache','CreateRemoteThread',
            'RtlAddFunctionTable','RtlDeleteFunctionTable','InterlockedCompareExchange','LoadLibrary')
 SOURCES=('bingus_runtime.lua','bingus_memory.lua','bingus_write.lua','windows_api.lua','spawn_data.lua','archive_loader.lua')
@@ -33,6 +33,7 @@ def main():
     env=dict(os.environ,LUA_PATH=str(LUA.parent/'?.lua')+';;')
     tests=run([LUA,ROOT/'tests/test_data.lua',ROOT/'src',ROOT/'tests/solo_scenarios.lua'],env=env)
     tests+=run([LUA,ROOT/'tests/test_startup.lua',ROOT/'src',build],env=env)
+    tests+=run([LUA,ROOT/'tests/test_idle_equivalence.lua',ROOT/'src'],env=env)
     # The synthetic benchmark's fixture and exact-count pass; its timing modes run by hand.
     tests+=run([LUA,ROOT/'tests/benchmark_synthetic.lua',ROOT/'src','check'],env=env)
     (build/ARCHIVE).write_bytes(make_archive(resources))

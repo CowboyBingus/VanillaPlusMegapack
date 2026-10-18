@@ -1,6 +1,8 @@
 # v1.7.1
 
 - Does nothing on a game build it does not know: it now checks the game's files before anything else, like the other CowboyBingus mods. Its log then says why, for example `Disabled: unsupported game build (needs Steam build 25480438)`.
+- Waits for its work: outside a mission it checks every 60 frames whether one has started and reads nothing in between. Measured in game: about 0.017-0.018 ms to 0.0035 ms per frame on the ship and 0.016-0.018 ms to 0.011-0.013 ms in missions.
+- Runs entirely in LuaJIT's interpreter: it holds about 0.2 KB of the code cache shared by the game and every mod (v1.7: about 5 KB) and no longer makes the game's Lua compiler retry compiling it every frame.
 
 # v1.7
 

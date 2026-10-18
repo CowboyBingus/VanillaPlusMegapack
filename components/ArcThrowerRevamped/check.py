@@ -84,6 +84,30 @@ def check_recovery(lua, path):
     print("PASS: {} recovery/safety scenarios, including slow native reads".format(len(scenarios)*2))
 
 
+def check_equivalence(lua, path):
+    """The update against v1.7.1 (tests/reference), side by side, and its trace aborts."""
+    root = Path(__file__).parent
+    sys.path.insert(0, str(root / "scripts"))
+    from entry import entry_text
+    handle, reference = tempfile.mkstemp(suffix=".lua")
+    os.close(handle)
+    Path(reference).write_bytes(entry_text(addon=root / "tests" / "reference" / "arc_thrower_auto.lua"))
+    environment = dict(os.environ)
+    # jit.vmdef (abort reasons) lives beside the workspace LuaJIT binary.
+    environment["LUA_PATH"] = str(Path(lua).parent / "?.lua") + ";;"
+    try:
+        for mode in ("equivalence", "traces"):
+            arguments = [str(lua), str(root / "tests" / "test_equivalence.lua"), str(path), reference]
+            if mode == "traces":
+                arguments.append("traces")
+            result = subprocess.run(arguments, capture_output=True, text=True, env=environment)
+            if result.returncode:
+                raise SystemExit("Equivalence regression failed ({}):\n{}".format(mode, result.stdout + result.stderr))
+            print(result.stdout.strip())
+    finally:
+        os.unlink(reference)
+
+
 def archive_entry(archive):
     with zipfile.ZipFile(archive) as package:
         name = next(entry for entry in package.namelist() if entry.endswith(".patch_0"))
@@ -139,6 +163,7 @@ def check(source, arguments):
     check_bindings(luajit, source)
     check_work_budget(luajit, source)
     check_recovery(luajit, source)
+    check_equivalence(luajit, source)
     if arguments.archive:
         body = archive_entry(arguments.archive)
         with tempfile.NamedTemporaryFile("wb", suffix=".lua", delete=False) as handle:
@@ -149,6 +174,7 @@ def check(source, arguments):
             check_bindings(luajit, temporary)
             check_work_budget(luajit, temporary)
             check_recovery(luajit, temporary)
+            check_equivalence(luajit, temporary)
         finally:
             os.unlink(temporary)
         print("packaged entry check ({}): ok".format(arguments.archive))

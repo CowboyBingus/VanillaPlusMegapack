@@ -131,9 +131,21 @@ end
 print('PASS: another game.dll or EXE, changed code, missing modules or PlayFab, api failures and no game update leave '
     .. 'the game alone; changed menu code disables only the menu')
 
--- The idle gate: exact calls per frame, never a page check, no log lines. Every
--- frame includes the scanner's own check (a load64 and a load32) once it has
--- settled; its first write, in the first frame, is the only page check.
+-- The idle gate: exact calls per frame, never a page check, no log lines.
+-- While nothing is pending and the escape screen is closed, a frame reads the
+-- screen (the menu system and its screen: 2 load64) and runs the scanner's own
+-- check (a load64 and a load32): 4 loads, whatever the session (no session,
+-- alone, client, host with a squad, ship or mission, an SOS on). The menu
+-- system is confirmed once (one read64); its first write, in the first frame,
+-- is the scanner's only page check. Counts are exact (budget.check plus
+-- equality), so a lower count also fails until its pin is lowered.
+local function exactly(frame, limits, label)
+    budget.check(frame, limits, label)
+    for name, n in pairs(limits) do
+        assert(frame[name] == n, label .. ': api.' .. name .. ' ' .. tostring(frame[name]) .. ', pinned ' .. n)
+    end
+end
+local IDLE = {load32 = 1, load64 = 3}
 do
     local t = install({options = options_menu()})
     local world, state = t.world, t.state
@@ -143,39 +155,38 @@ do
     local counts = budget.wrap(world.api)
     local lines, queries = #t.lines, world.api.queries
     local function idle(label, limits, n)
-        for i = 1, n or 300 do budget.check(budget.frame(counts, t.env.update, 0.016), limits, label .. ' ' .. i) end
+        for i = 1, n or 300 do exactly(budget.frame(counts, t.env.update, 0.016), limits, label .. ' ' .. i) end
     end
-    -- Alone, CANCEL SOS is the only action: the mode is looked at (2 loads
-    -- since v1.1), the escape menu only in a mission, the SOS only while the
-    -- menu is open.
-    idle('alone on the ship', {load32 = 3, load64 = 3})
+    exactly(budget.frame(counts, t.env.update, 0.016), {load32 = 1, load64 = 4, read64 = 1}, -- the pointer read again to confirm
+        'first idle frame: the menu system confirmed once')
+    idle('alone on the ship', IDLE)
     world.put64(Fake.GAME + G.CONTEXT_PTR, 0)
-    idle('no session', {load32 = 1, load64 = 2})
+    idle('no session', IDLE)
     world.put64(Fake.GAME + G.CONTEXT_PTR, Fake.CTX)
-    budget.check(budget.frame(counts, t.env.update, 0.016), {load32 = 3, load64 = 4, read32 = 2}, 'new session')
+    idle('new session (confirmed when the menu opens)', IDLE)
     world.session, world.host = {TANGO, world.local_peer}, TANGO
     world.sync()
-    idle('client of another host', {load32 = 4, load64 = 2})
+    idle('client of another host', IDLE)
     squad(world, {TANGO})
-    budget.check(budget.frame(counts, t.env.update, 0.016), {load32 = 6, load64 = 4, read64 = 1},
-        'first hosting frame: the menu system confirmed once')
-    idle('hosting a squad, menu closed', {load32 = 6, load64 = 4})
+    idle('hosting a squad, menu closed', IDLE)
     squad(world, {})
     world.mode = G.MODE_MISSION
     world.sync()
     world.sos_beacon()
-    idle('alone in a mission, SOS on, menu closed', {load32 = 3, load64 = 5})
+    idle('alone in a mission, SOS on, menu closed', IDLE)
     world.sos.active, world.sos.enabled = 0, 0
     world.sync()
     world.open_menu()
-    t.env.update(0.016) -- the new screen and the SOS object, each confirmed once
-    idle('alone in a mission, escape menu open, no SOS', {load32 = 3, load64 = 6, load8 = 1})
+    t.env.update(0.016) -- the new session, the new screen and the SOS object, each confirmed once
+    -- The menu open: the gate's 2 loads, then the full frame (v1.2: load32 3, load64 6, load8 1).
+    idle('alone in a mission, escape menu open, no SOS', {load32 = 3, load64 = 8, load8 = 1})
     world.close_menu()
+    idle('alone in a mission, menu closed again', IDLE)
     assert(#t.lines == lines, 'idle updates log nothing')
     assert(world.api.queries == queries, 'no page checks while idle')
 end
-print('PASS: idle frames cost 3 loads with no session, 6 alone on the ship, 6 as a client, 10 hosting a squad with the '
-    .. 'menu closed and 8 alone in a mission (10 with the menu open; 2 of them the scanner\'s); no page checks')
+print('PASS: idle frames cost 4 direct loads (2 of them the scanner\'s) in every session state while the escape '
+    .. 'screen is closed, 12 with it open alone in a mission; no page checks')
 
 -- The escape menu while hosting a squad on the ship.
 do
@@ -198,7 +209,8 @@ do
     local f
     for _ = 1, 60 do f = budget.frame(counts, t.env.update, 0.016) end
     assert(#world.calls == calls and (f.writable_data or 0) == 0 and (f.read32 or 0) == 0, budget.describe(f))
-    budget.check(f, {load8 = 10, load32 = 29, load64 = 6}, 'hosting a squad, menu open, nothing to do')
+    -- The idle gate's look at the screen adds 2 load64 while the menu is open (v1.2: 6).
+    exactly(f, {load8 = 10, load32 = 29, load64 = 8}, 'hosting a squad, menu open, nothing to do')
     -- Promote Charlie: focus, select, confirm (hold) in the game's dialog.
     world.focus(4 + 3)
     frames(t, 1)
@@ -275,7 +287,7 @@ do
     local calls, f = #world.calls, nil
     for _ = 1, 60 do f = budget.frame(counts, t.env.update, 0.016) end
     assert(#world.calls == calls and (f.writable_data or 0) == 0 and (f.read32 or 0) == 0, budget.describe(f))
-    budget.check(f, {load8 = 10, load32 = 25, load64 = 9}, 'alone in a mission, SOS on, menu open, nothing to do')
+    exactly(f, {load8 = 10, load32 = 25, load64 = 11}, 'alone in a mission, SOS on, menu open, nothing to do') -- v1.2: 9
     world.focus(4 + 2)
     frames(t, 1)
     assert(world.texts[world.dialog + M.DIALOG_TITLE] == 'CANCEL SOS')
@@ -295,7 +307,7 @@ do
     world.close_menu()
     frames(t, 2)
     for _ = 1, 60 do f = budget.frame(counts, t.env.update, 0.016) end
-    budget.check(f, {load8 = 1, load32 = 5, load64 = 8}, 'alone in a mission, SOS cancelled, menu closed')
+    exactly(f, {load8 = 1, load32 = 5, load64 = 8}, 'alone in a mission, SOS cancelled, menu closed') -- a kept cancel is work: no gate
     -- The host changes their mind: a new SOS Beacon lists the mission again,
     -- the mod lets it, and the escape menu offers CANCEL SOS again.
     world.sos_beacon()
@@ -326,7 +338,7 @@ do
     local f
     for _ = 1, 60 do f = budget.frame(counts, t.env.update, 0.016) end
     -- The ship's 45 loads with a squad of three, + the SOS (2) and the privacy setting (2).
-    budget.check(f, {load8 = 11, load32 = 30, load64 = 8}, 'hosting a squad in a mission, SOS on, menu open')
+    exactly(f, {load8 = 11, load32 = 30, load64 = 10}, 'hosting a squad in a mission, SOS on, menu open') -- v1.2: 8
     world.privacy = 0
     frames(t, 1)
     world.focus(4 + 3)
@@ -786,10 +798,11 @@ do
 end
 -- Errors apart: each count starts again after 3600 frames without one, so rare
 -- errors never stop the mod (one log line each); 8 within a burst do, even
--- with clean frames between them.
+-- with clean frames between them. The failing load is the scanner's field,
+-- which idle frames read too.
 do
     local t = install({})
-    local calls = failing_load(t, Fake.CTX + G.PEER_COUNT)
+    local calls = failing_load(t, Fake.SCANNER_CONFIG + S.RECHARGE)
     for _ = 1, 9 do
         calls.on = true
         t.env.update(0.016)
@@ -799,7 +812,7 @@ do
     assert(t.state.status == 'ready' and t.state.errors == 9
         and count_logged(t, 'BetterLobbyManagement error: exploded') == 9, t.state.status)
     local u = install({})
-    calls = failing_load(u, Fake.CTX + G.PEER_COUNT)
+    calls = failing_load(u, Fake.SCANNER_CONFIG + S.RECHARGE)
     for i = 1, 800 do
         calls.on = i % 100 == 0
         u.env.update(0.016)

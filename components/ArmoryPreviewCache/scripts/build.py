@@ -91,7 +91,8 @@ def main():
                  'test_v10_images.lua','test_v10_policy.lua','test_material_synthetic.lua',
                  'test_prewarm_recency.lua','test_render_refresh.lua','test_current_ui.lua',
                  'test_visible_handoff.lua','test_visible_adapter.lua','test_platform_reads.lua',
-                 'test_gate_equivalence.lua','test_policy_gate.lua','test_frame_budget.lua'):
+                 'test_gate_equivalence.lua','test_policy_gate.lua','test_idle_gate.lua','test_lease_table.lua',
+                 'test_frame_budget.lua'):
         tests+=run(LUA,ROOT/'tests'/name,ROOT)
     # One fresh Lua state per load order: a C declaration cannot be undone.
     for mode in ('hostile','sdk','after'):
@@ -102,7 +103,7 @@ def main():
     tests+='PASS: retired disk modules, callbacks and native GPU transfer entry points absent from shipped source\n'
     data=compile_resource(source,BUILD,'armory_preview_cache')
     archive(BUILD,RESOURCE,data)
-    cache_release=package(BUILD,'Armory Preview Cache','ArmoryPreviewCache','v23',
+    cache_release=package(BUILD,'Armory Preview Cache','ArmoryPreviewCache','v23.1',
         '6346a6a5-289b-436c-8cdb-c335afc9e2a7',RESOURCE,
         {'requires':{'shared_loader_api':1,'registered_by':'loader-v13'}},tests)
     (BUILD/'offline-tests.txt').write_text(tests)

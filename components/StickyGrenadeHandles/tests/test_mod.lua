@@ -367,6 +367,140 @@ test('fallback: no previous update, a hostile neighbour below and above', functi
     pin(frame, {}, 'pass-through frame under a later mod')
 end)
 
+-- Pass-through cost --------------------------------------------------------------------------------------------
+
+local function upvalue(fn, wanted)
+    for i = 1, 255 do
+        local name, value = debug.getupvalue(fn, i)
+        if name == nil then return nil end
+        if name == wanted then return value end
+    end
+end
+
+test('pass-through: no allocation, no closures, no trace starts that abort', function()
+    local w, env = World({no_library = true}), {}
+    previous_update(env)
+    Mod.install(Api(w), {env = env, layout = LAYOUT, loader = Loader()})
+    local callback = env.update
+    local after, step = upvalue(callback, 'after'), upvalue(callback, 'step')
+    assert(type(after) == 'function' and type(step) == 'function', 'hook functions not found')
+    H.chain(env, 'double_call')
+    env.update(0.1)
+    put(w.exe, LAYOUT.library_rva, le64(address(w.library)))
+    env.update(0.1)
+    assert(tag_of(w) == Mod.THROWABLE and env.update ~= callback, 'expected a pass-through under a later mod')
+    local function frames() for _ = 1, 2000 do callback(1 / 60, 'x') end end
+    frames() -- warm-up: traces of this loop are recorded now, not while measuring
+    frames()
+    local kb = H.heap_peak(frames)
+    assert(kb == 0, 'pass-through frames allocated ' .. kb .. ' KB')
+    if not (jit and jit.status and jit.status()) then return end
+    local util = require('jit.util')
+    -- A function that creates a closure gets a UCLO on every early return, which LuaJIT cannot compile.
+    for name, fn in pairs({callback = callback, after = after, step = step}) do
+        assert(not util.funcinfo(fn).children, name .. ' creates a closure')
+    end
+    -- Vararg: LuaJIT starts no trace in them and traces from the updates around them stop there.
+    assert(util.funcinfo(callback).isvararg and util.funcinfo(after).isvararg, 'pass-through not vararg')
+    -- Counted by where the trace started: a trace started in the update below (test code) may abort on returning
+    -- into callback ("return to lower frame"), which is that start's abort, not one of the mod's.
+    local mine = {[util.funcinfo(callback).source] = true}
+    local aborts, started = 0, {}
+    local function on_trace(what, tr, fn, _, code)
+        if what == 'start' then
+            started[tr] = mine[util.funcinfo(fn).source] or false
+        elseif what == 'abort' and type(code) == 'number' and started[tr] then
+            aborts = aborts + 1
+        end
+    end
+    jit.attach(on_trace, 'trace')
+    local ok, err = pcall(function() for _ = 1, 5000 do env.update(1 / 60) end end)
+    jit.attach(on_trace)
+    assert(ok, tostring(err))
+    assert(aborts == 0, aborts .. ' trace aborts in the mod over 5000 pass-through frames')
+end)
+
+-- Equivalence with v1.0 (tests/reference): the same scripted frames through both versions give the same
+-- results, api calls, log lines, status, outermost update and material tag on every frame.
+
+local Reference = dofile(root .. '/tests/reference/sticky_grenade_handles.lua')
+
+-- Each case: World options, what sits below and above the mod, frames, dt and the frame on which the missing
+-- engine data appears (nil: never).
+local CASES = {
+    {name = 'waits, applies, unhooks', world = {no_settings = true}, frames = 500, appear = 300, dt = 1 / 60},
+    {name = 'refused data while waiting', world = {no_library = true, vtable = 0x208}, frames = 300,
+     appear = 100, dt = 1 / 60},
+    {name = 'refused grenades while waiting', frames = 300, appear = 120, dt = 1 / 60, world = {no_settings = true,
+     records = {{grenade = THERMITE, sticky = 0, material = Mod.THROWABLE},
+                {grenade = STUN, sticky = 1, material = Mod.THROWABLE}}}},
+    {name = 'gives up', world = {no_settings = true}, frames = 700, dt = 1},
+    {name = 'pass-through under a later mod', world = {no_library = true}, frames = 600, appear = 200,
+     dt = 1 / 60, above = 'double_call'},
+    {name = 'skipped frames above', world = {no_library = true}, frames = 300, appear = 151, dt = 1 / 60,
+     above = 'skip_odd_frames'},
+    {name = 'failing update below', world = {no_library = true}, frames = 300, appear = 90, dt = 1 / 60,
+     below = 'throw_below', raise_on = function(frame) return frame % 7 == 0 end},
+    {name = 'no update below', world = {no_library = true}, frames = 200, appear = 50, dt = 1 / 60,
+     no_previous = true},
+    {name = 'no update below, later mod', world = {no_library = true}, frames = 200, appear = 50, dt = 1 / 60,
+     no_previous = true, above = 'double_call'},
+}
+
+local function appear(w, options)
+    if options.no_settings then put(w.root, LAYOUT.throwable_table, le64(address(w.table))) end
+    if options.no_library then put(w.exe, LAYOUT.library_rva, le64(address(w.library))) end
+end
+
+local function outermost(env, known)
+    for name, fn in pairs(known) do
+        if env.update == fn then return name end
+    end
+    return type(env.update)
+end
+
+local function frame_line(n, env, known, counts, state, loader, w, ok, ...)
+    local results = {}
+    for i = 1, select('#', ...) do results[i] = tostring((select(i, ...))) end
+    if not ok then results = {'error', type(...) == 'table' and tostring((...).hostile_vm) or tostring(...)} end
+    return table.concat({n, table.concat(results, ','), budget.describe(counts), state.status,
+                         outermost(env, known), tag_of(w), #loader.text()}, ' | ')
+end
+
+local function run_case(impl, case)
+    local w, loader, env = World(case.world), Loader(), {}
+    local known = {}
+    if not case.no_previous then known.vanilla = previous_update(env) end
+    if case.below then known.below = H.chain(env, case.below, {raise_on = case.raise_on}).fn end
+    local api = Api(w)
+    local counts = budget.wrap(api)
+    local state = impl.install(api, {env = env, layout = LAYOUT, loader = loader})
+    known.mod = env.update
+    if case.above then known.above = H.chain(env, case.above).fn end
+    local lines = {}
+    for n = 1, case.frames do
+        if n == case.appear then appear(w, case.world) end
+        for name in pairs(counts) do counts[name] = nil end
+        local update = env.update
+        lines[n] = frame_line(n, env, known, counts, state, loader, w, pcall(update, case.dt, n))
+    end
+    lines[#lines + 1] = loader.text()
+    return lines
+end
+
+test('equivalence: v1.0 and this version over 3,400 scripted frames', function()
+    local frames = 0
+    for _, case in ipairs(CASES) do
+        local old, new = run_case(Reference, case), run_case(Mod, case)
+        assert(#old == #new, case.name .. ': frame counts differ')
+        for i = 1, #old do
+            assert(old[i] == new[i], case.name .. ', frame ' .. i .. ':\n  v1.0: ' .. old[i] .. '\n  new:  ' .. new[i])
+        end
+        frames = frames + case.frames
+    end
+    assert(frames >= 2000, 'fewer than 2000 frames')
+end)
+
 for name, status in pairs(clash) do
     assert(status == 'clashed' or status == 'already declared', name .. ': ' .. status)
 end

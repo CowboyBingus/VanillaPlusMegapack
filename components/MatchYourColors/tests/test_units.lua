@@ -662,13 +662,13 @@ check('the idle watch reports a change once, then only real changes; the body-co
       function()
     local units = ffi.new('uint8_t[120]')
     local copies = ffi.new('uint8_t[2116]') -- count (+64) and 16 entries of 132 bytes (+68)
-    local readable, reads = true, {}
+    local readable, reads, sizes = true, {}, {}
     local memory = {}
     function memory.read_into(address, size, out)
         local a = tonumber(ffi.cast('uintptr_t', address))
-        reads[#reads + 1] = a
+        reads[#reads + 1], sizes[#reads + 1] = a, size
         if a == 0x1000 then ffi.copy(out, units, size) return true end
-        if a == 0x2000 + 64 and size == 2116 and readable then ffi.copy(out, copies, size) return true end
+        if a == 0x2000 + 64 and size <= 2116 and readable then ffi.copy(out, copies, size) return true end
         return false
     end
     local watch = Avatar.watch(memory, {units_at = 0x1000}, 0x2000)
@@ -693,6 +693,21 @@ check('the idle watch reports a change once, then only real changes; the body-co
     assert(watch.changed(true) and watch.changed(true), 'an unreadable slot counts as a change')
     readable, copies[0] = true, 0
     assert(watch.changed(true) and not watch.changed(true), 'entry gone')
+    -- 2026-10-17: the slot read covers the count and the entries in use at the last read (4 bytes while empty); a
+    -- count that grew is read again in full on that frame, once
+    reads, sizes = {}, {}
+    watch.changed(true)
+    assert(#reads == 2 and sizes[2] == 4, 'empty slot: the count alone, ' .. tostring(sizes[2]))
+    copies[0] = 2
+    reads, sizes = {}, {}
+    assert(watch.changed(true), 'two entries appear')
+    assert(#reads == 3 and sizes[2] == 4 and sizes[3] == 2116, 'grown: the whole slot read again on that frame')
+    reads, sizes = {}, {}
+    assert(not watch.changed(true) and #reads == 2 and sizes[2] == 4 + 2 * 132, 'then the two entries in use')
+    copies[0] = 1
+    reads, sizes = {}, {}
+    assert(watch.changed(true) and #reads == 2, 'shrunk: no second read')
+    assert(not watch.changed(true) and sizes[#sizes] == 4 + 132, 'then one entry')
 end)
 
 -- A color model over flat tiler samples (every texel 0.5: no detail, no camo pattern), so a row's albedo is its

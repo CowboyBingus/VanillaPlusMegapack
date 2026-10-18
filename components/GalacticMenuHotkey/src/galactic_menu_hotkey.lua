@@ -33,7 +33,7 @@ typedef unsigned long long GMH_u64;
 typedef unsigned char GMH_u8;
 void *GMH_GetCurrentProcess(void) __asm__("GetCurrentProcess");
 GMH_u32 GMH_GetCurrentProcessId(void) __asm__("GetCurrentProcessId");
-int GMH_ReadProcessMemory(void *process, const void *address, void *buffer,
+int GMH_ReadProcessMemory(void *process, GMH_u64 address, void *buffer,
                           size_t size, size_t *received) __asm__("ReadProcessMemory");
 short GMH_GetAsyncKeyState(int key) __asm__("GetAsyncKeyState");
 int32_t GMH_GetForegroundWindow(void) __asm__("GetForegroundWindow");
@@ -62,13 +62,47 @@ local MENU_SHORTCUTS = {
 -- Every shortcut in the order they are polled and acted on: the map first.
 local SHORTCUTS = {MAP_SHORTCUT, unpack(MENU_SHORTCUTS)}
 -- Context checks: the galaxy table lookup makes engine calls for every world
--- and the focus check two Windows calls, all unmeasured in game, so they do
--- not run on every frame. The context is read again every CONTEXT_FRAMES
--- frames and on every frame that acts (a newly pressed shortcut, or a Hellpod
--- wait or seat in progress), so nothing acts on an older answer. While the
--- game is not focused aboard the ship, its focus is checked on every frame, so
--- a shortcut pressed right after switching back acts on that frame as before.
-local CONTEXT_FRAMES = 15
+-- (unmeasured in game, and each allocates a table) and the focus check two
+-- Windows calls (unmeasured), so neither runs on an idle frame. The context is
+-- read on every frame that acts (a newly pressed shortcut, or a Hellpod wait or
+-- seat in progress), so nothing acts on an older answer. Until the ship is
+-- found it is read every CONTEXT_FRAMES frames, outside a mission. Aboard, and
+-- in a mission, the mission check (two reads) runs every WATCH_FRAMES frames
+-- instead: entering a mission leaves the ship, leaving one starts the search.
+-- While the game is not focused aboard, its focus is checked on every frame a
+-- shortcut is down, so a shortcut pressed right after switching back acts on
+-- that frame as before.
+local CONTEXT_FRAMES, WATCH_FRAMES = 15, 60
+-- The mission record (the pointer at game.dll+MODE_PTR_RVA, 68 bytes read as
+-- other mods read it): a mission flag at +8 and the mission type at +0x40; a
+-- mission is a flag other than 0 with a type from 1 to 7.
+local MODE_PTR_RVA, MODE_RECORD_SIZE = 0x33266a0, 68
+local MODE_FLAG_WORD, MODE_TYPE_WORD = 2, 16
+-- The idle gate with Mod Bindings Menu. The game evaluates every input action
+-- once per frame into a 32-byte state entry of the input owner, byte 0 set
+-- while one of its mappings fires (Mod Bindings Menu's is_down reads the same
+-- byte). The six shortcuts sit on Mod Bindings Menu's fixed v1 slots, whose
+-- native actions are fixed (players' saved bindings belong to them):
+-- slot = {group, action}. One read of the stretch from the lowest to the
+-- highest of the six (the same read as Mod Bindings Menu's poll) tells whether
+-- any of them is down; only then is Mod Bindings Menu asked, as before.
+local INPUT_OWNER_PTR_RVA, ACTION_STATE_OFFSET, ACTION_STATE_STRIDE = 0x347cf18, 808, 32
+local SLOT_ACTIONS = {{12, 1}, {12, 0}, {10, 1}, {10, 4}, {10, 8}, {10, 14}, {10, 9}}
+-- The Mod Bindings Menu layouts the gate knows: 36 actions with API version 3
+-- (v2.0-v2.2.1) or 4 (v2.3, which adds extended bindings beyond the native
+-- actions but keeps the fixed slots native, on the same actions and state
+-- bytes). Only these versions: any other keeps the polling fallback.
+local GATE_VERSIONS, GATE_CAPACITY = {[3] = true, [4] = true}, 36
+-- Each shortcut's state entry index; GATE_OFFSETS[i] is shortcut i's state
+-- byte in the stretch of GATE_SIZE bytes that starts at entry GATE_FIRST.
+local GATE_INDEX, GATE_OFFSETS, GATE_FIRST, GATE_LAST = {}, {}, math.huge, -1
+for index, shortcut in ipairs(SHORTCUTS) do
+    local action = SLOT_ACTIONS[shortcut.slot]
+    GATE_INDEX[index] = action[1] * 97 + action[2]
+    GATE_FIRST, GATE_LAST = math.min(GATE_FIRST, GATE_INDEX[index]), math.max(GATE_LAST, GATE_INDEX[index])
+end
+for index = 1, #SHORTCUTS do GATE_OFFSETS[index] = ACTION_STATE_STRIDE * (GATE_INDEX[index] - GATE_FIRST) end
+local GATE_SIZE = ACTION_STATE_STRIDE * (GATE_LAST - GATE_FIRST) + 1
 local SHIP_TABLE_HASH = '3b9bcf29e38da0a6'
 local GAME_SHA256 = '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
 local EXE_SHA256 = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
@@ -128,11 +162,16 @@ local BRIEFING_PREFIX =
 local state = {
     -- keys_down: each shortcut's state on the last frame, by id; now: this
     -- frame's, in SHORTCUTS order.
-    world = nil, world_status = nil, keys_down = {}, now = {},
-    -- context_frames: frames until the context is read again; focused: the
-    -- game window was in the foreground then; other_window: a foreground
-    -- window already found to belong to another process.
-    context_frames = 0, focused = false, other_window = nil,
+    -- held: a shortcut was down on the last frame that read them.
+    world = nil, world_status = nil, keys_down = {}, now = {}, held = false,
+    -- context_frames: frames until the next check (the context, or the mission
+    -- check); in_mission: that check found a mission; focused: the game window
+    -- was in the foreground at the last context read or focus check;
+    -- other_window: a foreground window already found to belong to another
+    -- process.
+    context_frames = 0, in_mission = false, focused = false, other_window = nil,
+    -- owner: the input owner, read at each mission check aboard (nil: unknown).
+    owner = nil,
     initialized = false,
     open_presenter = nil, start_arcade = nil, enter_seat = nil, open_briefing = nil,
     unit_position = nil, game_base = nil, hellpod_wait = nil, hellpod_seat = nil,
@@ -143,6 +182,9 @@ local state = {
     -- binding_poll: that table's poll answers the shortcuts (see poll_bindings).
     binding_host = nil, binding_slots = {}, binding_retry = false, binding_retries = 0, binding_since = 0,
     binding_revision = nil, binding_poll = false,
+    -- gate: that table has the layout the idle gate knows and holds all six
+    -- shortcuts; gate_ready: its native input answered ready (it stays so).
+    gate = false, gate_ready = false,
 }
 
 local loader = rawget(_G, 'CowboyBingusModLoader')
@@ -265,11 +307,33 @@ local function key_down(key)
 end
 local function read(address, size)
     local buffer, received = ffi.new('GMH_u8[?]', size), ffi.new('size_t[1]')
-    if kernel32.GMH_ReadProcessMemory(process, ffi.cast('const void *', address),
-            buffer, size, received) == 0 or tonumber(received[0]) ~= size then
+    if kernel32.GMH_ReadProcessMemory(process, address, buffer, size, received) == 0
+       or tonumber(received[0]) ~= size then
         return nil
     end
     return ffi.string(buffer, size)
+end
+-- The reads of idle frames allocate nothing: ReadProcessMemory takes the
+-- address as a number (no pointer cdata per call), into reused buffers decoded
+-- in place. words holds 72 bytes (the mission record and pointers); gate_span
+-- the gate's stretch, allocated at its first read.
+local words, words_received = ffi.new('GMH_u32[18]'), ffi.new('size_t[1]')
+local words_received_low = ffi.cast('GMH_u32 *', words_received)
+local gate_span
+-- Reads size bytes at address into buffer; false unless all were read.
+local function read_into(address, buffer, size)
+    return kernel32.GMH_ReadProcessMemory(process, address, buffer, size, words_received) ~= 0
+        and words_received_low[0] == size
+end
+-- The user-mode pointer in words[index] and words[index + 1], or nil.
+local function word_pointer(index)
+    local value = words[index] + words[index + 1] * 4294967296
+    if value < 0x10000 or value >= 0x800000000000 then return nil end
+    return value
+end
+-- The pointer at address, read into words, or nil.
+local function pointer_at(address)
+    return read_into(address, words, 8) and word_pointer(0) or nil
 end
 local function u32(blob)
     if not blob or #blob ~= 4 then return nil end
@@ -778,8 +842,18 @@ local function register_missing(host, try)
     return missing
 end
 
+-- Whether the idle gate can stand in for host while nothing is down: a table
+-- with a layout the gate knows (see GATE_VERSIONS), holding all six shortcuts.
+local function update_gate(host)
+    local all = true
+    for _, shortcut in ipairs(SHORTCUTS) do all = all and state.binding_slots[shortcut.id] == true end
+    state.gate = all and GATE_VERSIONS[host.version] == true and host.capacity == GATE_CAPACITY
+        and type(host.ready) == 'function'
+end
+
 -- After a try: another one is due while a shortcut is missing and tries are left.
 local function schedule_retry(host, missing)
+    update_gate(host)
     state.binding_since, state.binding_revision = 0, host.revision
     state.binding_retry = missing ~= nil and state.binding_retries < BINDING_RETRIES
     if missing and not state.binding_retry then
@@ -792,7 +866,7 @@ end
 -- A table that offers poll (its field, never its version) answers them all in
 -- one call per frame.
 local function register_all(host)
-    state.binding_host, state.binding_slots, state.binding_retries = host, {}, 0
+    state.binding_host, state.binding_slots, state.binding_retries, state.gate_ready = host, {}, 0, false
     state.binding_poll = type(host.poll) == 'function'
     schedule_retry(host, register_missing(host, 0))
 end
@@ -879,6 +953,7 @@ end
 local function enter_world(world)
     state.world = world
     state.keys_down = {}
+    state.held = false
     state.hellpod_wait = nil
     state.hellpod_seat = nil
     if world then
@@ -892,21 +967,90 @@ end
 
 -- Reads the context: the ship's world, then (aboard) the window focus.
 local function refresh_context()
-    state.context_frames = CONTEXT_FRAMES
     local world = ship_world(rawget(_G, 'stingray'))
     if state.world ~= world then enter_world(world) end
     state.focused = state.world ~= nil and focused_game(true)
 end
 
--- Runs once per frame before anything acts; returns whether it read the context.
-local function advance_context()
-    state.context_frames = state.context_frames - 1
-    if state.context_frames <= 0 or state.hellpod_wait or state.hellpod_seat then
-        refresh_context()
+-- Whether the mission record shows a mission (see MODE_PTR_RVA): two reads, no
+-- allocation. Only once the native check has passed (the build is verified);
+-- an unreadable record counts as no mission.
+local function mission_now()
+    local mode = pointer_at(state.game_base + MODE_PTR_RVA)
+    if not (mode and read_into(mode, words, MODE_RECORD_SIZE)) then return false end
+    local kind = words[MODE_TYPE_WORD]
+    return words[MODE_FLAG_WORD] ~= 0 and kind >= 1 and kind <= 7
+end
+
+local function set_mission(mission)
+    if mission == state.in_mission then return end
+    state.in_mission = mission
+    note(mission and 'Mission detected; the shortcuts wait until it ends.' or 'Mission over; looking for the ship.')
+end
+
+-- A check that is due; returns whether aboard. Once the native check has
+-- passed: in a mission, nothing more until the next check in WATCH_FRAMES
+-- frames (the ship, if still known, is left); aboard, the input owner is read
+-- again for the gate (one read, only while update_gate accepts the Mod Bindings
+-- Menu table), and the next check is in WATCH_FRAMES frames. Otherwise
+-- (the ship not found yet, or before the native check) the context is read,
+-- and read again in CONTEXT_FRAMES frames.
+local function check_context()
+    local native = state.game_base ~= nil
+    if native then
+        set_mission(mission_now())
+        if state.in_mission then
+            if state.world then enter_world(nil) end
+            state.context_frames = WATCH_FRAMES
+            return false
+        end
+    end
+    if not (native and state.world) then refresh_context() end
+    if state.world and state.game_base then
+        state.owner = state.gate and pointer_at(state.game_base + INPUT_OWNER_PTR_RVA) or nil
+        state.context_frames = WATCH_FRAMES
+    else
+        state.context_frames = CONTEXT_FRAMES
+    end
+    return state.world ~= nil
+end
+
+-- Runs once per frame before anything else; returns whether aboard.
+local function watch()
+    local frames = state.context_frames - 1
+    state.context_frames = frames
+    if frames <= 0 then return check_context() end
+    return state.world ~= nil
+end
+
+-- Whether the idle gate answers for host on this frame: a table update_gate
+-- accepted whose native input is ready, and the input owner known.
+local function gated(host)
+    if not (state.gate and state.owner and host == state.binding_host) then return false end
+    if not state.gate_ready then
+        local called, ready = pcall(host.ready)
+        state.gate_ready = called and ready == true
+    end
+    return state.gate_ready
+end
+
+-- Whether a state byte of the six shortcuts' actions is set: one read, no
+-- allocation. An unreadable stretch counts as set, so Mod Bindings Menu answers.
+local function gate_open()
+    gate_span = gate_span or ffi.new('GMH_u8[?]', GATE_SIZE)
+    if not read_into(state.owner + ACTION_STATE_OFFSET + ACTION_STATE_STRIDE * GATE_FIRST, gate_span, GATE_SIZE) then
         return true
     end
-    if state.world and not state.focused then state.focused = focused_game(false) end
+    for index = 1, #GATE_OFFSETS do
+        if gate_span[GATE_OFFSETS[index]] ~= 0 then return true end
+    end
     return false
+end
+
+-- The gate found nothing down after a frame with a shortcut down: all are up.
+local function release_all()
+    for _, shortcut in ipairs(SHORTCUTS) do state.keys_down[shortcut.id] = false end
+    state.held = false
 end
 
 -- Every shortcut's state on this frame, in order (none is polled while the game
@@ -930,27 +1074,58 @@ end
 -- Records this frame's states and acts on each newly pressed shortcut, in
 -- order. Nothing is down while the game is not focused.
 local function act_on_shortcuts()
+    local held = false
     for index, shortcut in ipairs(SHORTCUTS) do
         local down = state.focused and state.now[index]
         local pressed = down and not state.keys_down[shortcut.id]
         state.keys_down[shortcut.id] = down
+        held = held or down == true
         if pressed then act(shortcut) end
     end
+    state.held = held
 end
 
--- Shortcuts are polled on every frame aboard while the game is focused, and a
--- shortcut acts on the frame it is first seen down, as before; only the
--- context checks are spaced out (see CONTEXT_FRAMES).
+-- Aboard, a shortcut acts on the frame it is first seen down, as before. With
+-- Mod Bindings Menu (see GATE_VERSIONS) an idle frame ends after the gate's one
+-- read; Mod Bindings Menu is asked only while a shortcut's action is down, and
+-- the context only on a new press. Without it, or before it is ready, the
+-- shortcuts are polled on every focused frame aboard. A Hellpod wait or seat
+-- reads the context on every frame. Outside the ship a frame only counts down
+-- to the next check (see CONTEXT_FRAMES).
+-- A Hellpod wait or seat in progress: the context, then its step. Returns
+-- whether still aboard.
+local function service_pending(dt)
+    refresh_context()
+    if not state.world then return false end
+    if state.hellpod_wait then service_hellpod(tonumber(dt) or 0) end
+    if state.hellpod_seat then service_hellpod_seat(tonumber(dt) or 0) end
+    return true
+end
+
+-- Whether this frame reads the shortcuts: false on an idle frame the gate
+-- answered (all up); otherwise the focus is checked first while it was lost.
+local function shortcuts_due(host)
+    if gated(host) and not gate_open() then
+        if state.held then release_all() end
+        return false
+    end
+    if not state.focused then state.focused = focused_game(false) end
+    return true
+end
+
 local function step(dt)
     if not state.update_logged then
         state.update_logged = true
         note('Update callback is running.')
     end
     local host = binding_host()
-    local fresh = advance_context()
-    if not state.world then return end
-    if state.hellpod_wait then service_hellpod(tonumber(dt) or 0) end
-    if state.hellpod_seat then service_hellpod_seat(tonumber(dt) or 0) end
+    if not watch() then return end
+    local fresh = state.hellpod_wait ~= nil or state.hellpod_seat ~= nil
+    if fresh then
+        if not service_pending(dt) then return end
+    elseif not shortcuts_due(host) then
+        return
+    end
     -- A newly pressed shortcut acts only on a context read on this frame.
     if poll_shortcuts(host) and not fresh then
         refresh_context()
@@ -962,15 +1137,29 @@ end
 -- An update below this mod raised: the shortcuts pause, and start afresh when
 -- they resume. Every shortcut counts as held until it is released, so a key
 -- held through the pause needs a fresh press; a Hellpod wait or seat still
--- pending is cancelled; the context is read again on the next frame. The
--- registrations with Mod Bindings Menu stay.
+-- pending is cancelled; the next check (check_context) runs on the next frame.
+-- The registrations with Mod Bindings Menu stay.
 local function pause_shortcuts()
     for _, shortcut in ipairs(SHORTCUTS) do state.keys_down[shortcut.id] = true end
+    state.held = true
     if state.hellpod_wait or state.hellpod_seat then
         state.hellpod_wait, state.hellpod_seat = nil, nil
         note('Hellpod shortcut cancelled; the update paused.')
     end
     state.context_frames = 0
+end
+
+-- Machine code: every function an idle frame runs stays interpreted (about 200
+-- bytecodes per idle frame aboard). Compiled, a trace that starts in one of
+-- them follows the returns up through the update chain into the other mods'
+-- update wrappers below this one. In the ledger replay of the v42 install, that
+-- took 101 traces and 146 KB of the game's shared 512 KB code cache when the
+-- gate was compiled, and 102 traces and 288 KB from its read alone.
+if type(jit) == 'table' and type(jit.off) == 'function' then
+    for _, fn in ipairs({step, binding_host, watch, check_context, mission_now, set_mission, pointer_at, word_pointer,
+                         gated, shortcuts_due, gate_open, read_into, release_all}) do
+        jit.off(fn)
+    end
 end
 
 -- The update chain, through Bingus Shared Runtime's guard: the previous update

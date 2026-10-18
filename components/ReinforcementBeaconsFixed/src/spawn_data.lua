@@ -15,6 +15,8 @@ local MODE, PLAYERS, ENTITY = buffer(0x44), buffer(0x440), buffer(24)
 local REINFORCEMENT, POSITIONS = buffer(0x58), buffer(0x60)
 local ENTITIES, USED = buffer(128*8), buffer(128*4)
 local POINTER, ROW, COORDINATES, BYTE = buffer(8), buffer(8), buffer(12), buffer(1)
+-- The idle gate's own buffers: the player manager global and the spawn state.
+local MANAGER, SPAWN = buffer(8), buffer(4)
 local STRATAGEMS, SOURCE_LOOKUP, REGISTRY = buffer(0x80), buffer(20), buffer(0xA8)
 -- The stratagem rows grow to the largest count seen (at most 512 x 64 B).
 local rows, rows_size = nil, 0
@@ -296,8 +298,14 @@ end
 -- The source is read here, for the first new dummy only: no source (nil)
 -- captures nothing, as before. Returns the waiting status when the source's
 -- game data is unavailable, or nil.
+-- After the idle gate, previous is its baseline: its rows are those of the
+-- last solo landing on this player manager (an earlier death's anchor that is
+-- still listed is not new), or nil when none was seen. With no rows known,
+-- only a lone row can be the death's anchor; several are ambiguous and
+-- capture nothing.
 local function capture_anchor(previous, current, state)
     if not (current.count==1 and (current.state==1 or current.state==2) and not state.anchor) then return nil end
+    if not previous.automatic and #current.automatic~=1 then return nil end
     for _,auto in ipairs(current.automatic) do
         if not was_present(previous.automatic,auto.key) then
             local source,waiting=patch.source(current)
@@ -315,6 +323,10 @@ local function spawn_blocked(previous, current, state)
     if previous.state~=2 and previous.state~=1 and previous.state~=3 then
         return 'initial_deployment_unchanged'
     end
+    -- Alive (3) straight to pending (2) with no queued frame: the gate never
+    -- read the beacons' use bits before this spawn, so no beacon can be
+    -- associated with it safely. Whether this happens in game is unmeasured.
+    if previous.unobserved then return 'pending_without_queue_skipped' end
     if state.pending then return 'reinforcement_already_centered' end
     if not current.position or not current.countdown or current.countdown~=current.countdown
         or current.countdown<=0.1 or current.countdown>5.1 then
@@ -387,7 +399,7 @@ end
 
 -- Forgets every association, as when game data becomes unavailable (a fresh start).
 local function forget(state)
-    state.previous,state.anchor,state.pending=nil,nil,nil
+    state.previous,state.anchor,state.pending,state.spawn,state.landed=nil,nil,nil,nil,nil
 end
 
 function patch.plan(current, state)
@@ -462,10 +474,83 @@ local function record_correction(state, current, fresh, plan)
     state.last={kind=plan.kind,beacon=plan.beacon,association=plan.association,from=current.position,to=plan.target}
 end
 
+-- The idle gate. Only the local player's own spawn state starts work (3
+-- alive, 1 dead and queued, 2 pod pending, 0 before the first deployment);
+-- teammates' deaths and beacons start nothing. Between deaths a check reads
+-- the player manager global and that state: two reads, no allocation. The
+-- manager's address is decoded as a number and compared with the last one;
+-- the state's address (a pointer) is made once per manager, which the game
+-- replaces per mission, and a new manager forgets the last state. The spawn
+-- state, or nil and the waiting status; an invalid non-null pointer raises.
+local HIGH = 4294967296
+local function spawn_state(api, game, state)
+    local global=state.manager_global
+    if not global or state.manager_game~=game then
+        global=game+PLAYER_MANAGER
+        state.manager_global,state.manager_game=global,game
+    end
+    if not api.read_into(global,8,MANAGER) then return nil,'waiting_for_game_data:player_manager' end
+    local low,high=u32(MANAGER,0),u32(MANAGER,4)
+    if low==0 and high==0 then return nil,'waiting_for_game_data:player_manager' end
+    local manager=low+high*HIGH
+    if manager~=state.manager then
+        local pm=api.pointer_at(MANAGER,0)
+        if not pm then error('Invalid spawn data pointer: player_manager') end
+        state.manager,state.spawn_address,state.spawn,state.landed=manager,pm+0x2E0,nil,nil
+    end
+    if not api.read_into(state.spawn_address,4,SPAWN) then return nil,'waiting_for_game_data:spawn_state' end
+    return u32(SPAWN,0)
+end
+
+-- Waiting at the gate: no snapshot to compare against; alive (3) or before the
+-- first deployment (0) ends any association, as the plan does.
+local function wait(state, spawn)
+    state.previous=nil
+    if spawn==3 or spawn==0 then state.anchor,state.pending=nil,nil end
+    return true,'waiting_for_reinforcement',false
+end
+
+-- What the plan compares the first full snapshot after the gate with, in place
+-- of the alive snapshots no longer read: the same identity, local player,
+-- player count and mode; the spawn state the gate saw last (so 0 -> 2, the
+-- initial deployment, stays excluded); no beacons; the anchor rows of the last
+-- solo landing, or nil. Nil when the gate saw no state before (a new player
+-- manager or a fresh start) or only a queued or pending one: the plan then
+-- starts afresh, as before.
+local function baseline(current, last, landed)
+    if last==nil or last==1 or last==2 then return nil end
+    return {identity=current.identity,id=current.id,count=current.count,mode=current.mode,owned=current.owned,
+        state=last,beacons={},automatic=landed,unobserved=true}
+end
+
+-- After a full check: while queued or pending the next check runs in full
+-- again; otherwise it waits at the gate, keeping a solo snapshot's anchor rows
+-- so the next death's baseline knows which rows are not new.
+local function track(state, current)
+    state.spawn=current.state
+    if current.state==1 or current.state==2 then return end
+    state.previous=nil
+    state.landed=current.state and current.count==1 and current.automatic or nil
+end
+
+-- A reinforcement is in progress when the last full snapshot was queued or
+-- pending: then every check is a full one (the snapshot reads the manager and
+-- the state itself); otherwise it starts at the gate.
 function patch.apply(api,game,exe,state)
+    local previous=state.previous
+    local tracking=previous~=nil and (previous.state==1 or previous.state==2)
+    local last
+    if not tracking then
+        local spawn,waiting=spawn_state(api,game,state)
+        if not spawn then forget(state);return true,waiting,false end
+        last,state.spawn=state.spawn,spawn
+        if spawn~=1 and spawn~=2 then return wait(state,spawn) end
+    end
     local current,waiting=patch.snapshot(api,game,exe)
     if not current then forget(state);return true,waiting,false end
+    if not tracking then state.previous=baseline(current,last,state.landed) end
     local plan,reason=patch.plan(current,state)
+    track(state,current)
     if not plan then return true,reason,false end
     -- Re-read every identity and association immediately before the single write.
     local fresh,waiting=patch.snapshot(api,game,exe)
@@ -484,7 +569,7 @@ end
 -- Returns ok (false: the write failed) and the outcome.
 function patch.restore(api,game,state)
     local pending=state.pending
-    state.previous,state.anchor,state.pending=nil,nil,nil
+    forget(state)
     if not (pending and pending.address and pending.original) then return true,'nothing_to_restore' end
     local pm=api.pointer(api.read(game+PLAYER_MANAGER,8))
     if not pm or pm+0x10C~=pending.address or api.read(pm+0x2E0,4)~=PENDING
@@ -510,11 +595,14 @@ end
 -- an anchor is captured, through patch.source, also interpreted. The byte
 -- decoders (u32, float, vector) replace the float cdata loads and string
 -- slices they decoded from; they compile into the same reader traces. Nothing
--- is flushed.
+-- is flushed. The idle gate's steps (spawn_state, wait, baseline, track) stay
+-- interpreted too: the only code that runs between deaths adds no trace, and
+-- the reader traces above now run only while a reinforcement is in progress.
 if jit and jit.off then
     for _,fn in ipairs({session,local_player,beacon_managers,stratagem_rows,unit_position,source_position,snapshot,
         settle,patch.snapshot,patch.source,was_present,capture_anchor,spawn_blocked,used_before,newly_used,unmarked_remote,
-        associated_beacon,placement,forget,spawn_changed,beacon_kept,write_correction,record_correction,patch.apply}) do
+        associated_beacon,placement,forget,spawn_state,wait,baseline,track,spawn_changed,beacon_kept,write_correction,
+        record_correction,patch.apply}) do
         jit.off(fn)
     end
 end

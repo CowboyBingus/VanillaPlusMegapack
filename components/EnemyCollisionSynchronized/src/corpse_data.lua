@@ -1,4 +1,4 @@
--- Corpse collision repair and renewed-motion containment. The resource
+-- Corpse collision repair and renewed-motion containment. The resource -- lint-ok: R15 the scan steps share one poll's upvalues; splitting the file changes the chunk interface of every test and the Megapack component: follow-up
 -- allowlist is generated data in src/corpse_profiles.lua (from
 -- profiles/catalog.json); the module wrapper passes it in as this chunk's
 -- argument.
@@ -19,8 +19,22 @@ for key in pairs(profiles) do
 end
 
 local ffi,bit=require('ffi'),require('bit')
-local M={profiles=profiles,interval=1/30,max_entities=128,max_units=4,budget_seconds=.001}
+-- interval: seconds of frame time between polls. It was 1/30 s on
+-- GetTickCount64, which advances in 15.625 ms steps, so polls came every
+-- third step: 46.9 ms (21 Hz) at 60 FPS and above, every other frame (15 Hz)
+-- at 30 FPS. The frame time now drives the poll (archive_loader.lua) at that
+-- same measured period, so the poll rate does not rise.
+local M={profiles=profiles,interval=3/64,max_entities=128,max_units=4,budget_seconds=.001}
 M.completion_grace=1
+-- Corpse re-check backoff. A corpse's collision is repaired at conversion
+-- (about 0.2 s after); recordings show no collider of a settled corpse moving
+-- again, and every gap under 2.5 cm from 1 s after conversion (KB
+-- corpse-recheck-backoff-2026-10-17). So a corpse that needed no command on
+-- every inspection for corpse_settle_polls polls is inspected again after
+-- 2, 4, 8 ... polls, at most corpse_recheck_polls (about 3-4 s); one that
+-- needs a command starts over. 0 turns the backoff off.
+M.corpse_settle_polls=24
+M.corpse_recheck_polls=64
 local ZERO8=string.rep('\0',8)
 local byte,ldexp,floor=string.byte,math.ldexp,math.floor
 -- Little-endian decode from the copied bytes. Unlike an FFI cast, this makes
@@ -97,9 +111,14 @@ local function rigid_values(matrix)
     return matrix[13],matrix[14],matrix[15],a/length,b/length,c/length,d/length
 end
 
-function M.rigid(matrix)
+-- M.rigid's numbers, for a pose that may not be a 16-number table.
+local function rigid_pose(matrix)
     if type(matrix)~='table' or #matrix~=16 then return nil end
-    local px,py,pz,qx,qy,qz,qw=rigid_values(matrix)
+    return rigid_values(matrix)
+end
+
+function M.rigid(matrix)
+    local px,py,pz,qx,qy,qz,qw=rigid_pose(matrix)
     if not px then return nil end
     return {px,py,pz},{qx,qy,qz,qw}
 end
@@ -262,21 +281,116 @@ local function same(api,guards)
 end
 M.same=same
 
-local function separation(p,q,old,oldq)
-    local distance=math.sqrt((p[1]-old[1])^2+(p[2]-old[2])^2+(p[3]-old[3])^2)
-    local cosine=math.min(1,math.abs(q[1]*oldq[1]+q[2]*oldq[2]+q[3]*oldq[3]+q[4]*oldq[4]))
+-- Distance and degrees between a pose (position XYZ then rotation XYZW, seven
+-- numbers) and a kept position and rotation.
+local function separation(pose,old,oldq)
+    local distance=math.sqrt((pose[1]-old[1])^2+(pose[2]-old[2])^2+(pose[3]-old[3])^2)
+    local cosine=math.min(1,math.abs(pose[4]*oldq[1]+pose[5]*oldq[2]+pose[6]*oldq[3]+pose[7]*oldq[4]))
     return distance,math.deg(2*math.acos(cosine))
 end
 
-local function relative(p,q,r,rq)
-    -- Inverse root rotation applied to the displacement, and conjugate(root)
-    -- multiplied by body rotation. A coherent whole-corpse turn is not flapping.
-    local x,y,z,w=-rq[1],-rq[2],-rq[3],rq[4]
-    local dx,dy,dz=p[1]-r[1],p[2]-r[2],p[3]-r[3]
+-- Motion sample scratch, refilled by every M.fling_action call and read only
+-- within it, so a sample makes no table: the root body's pose, and each main
+-- body's pose relative to it by the body's index in main_bodies (one table per
+-- index, made up front for the largest profile), each as seven numbers.
+-- History keeps copies (kept_pose, kept_limbs), made only when it starts or
+-- restarts.
+local root_pose,limb_poses,limb_capacity={0,0,0,0,0,0,0},{},0
+local function limb_scratch(n)
+    for i=limb_capacity+1,n do limb_poses[i]={0,0,0,0,0,0,0} end
+    limb_capacity=math.max(limb_capacity,n)
+end
+do
+    local most=0
+    for _,p in pairs(profiles) do most=math.max(most,p.bodies) end
+    limb_scratch(most)
+end
+-- Body id -> stamp of the last sample that had it: an id repeats within a
+-- sample when it already has the current stamp. Nothing is emptied per sample
+-- (an id an error left behind has an older stamp); the table is replaced once
+-- it has gathered 1024 new ids (about 68 ragdolls of 15 bodies), which bounds
+-- it below 2048 entries. Ragdolls sampled in turn reuse their ids.
+local limb_seen,seen_ids,sample_stamp={},0,0
+
+-- The root's pose into scratch; false when it is not rigid.
+local function sample_root(matrix)
+    local px,py,pz,qx,qy,qz,qw=rigid_pose(matrix)
+    if not px then return false end
+    local r=root_pose
+    r[1],r[2],r[3],r[4],r[5],r[6],r[7]=px,py,pz,qx,qy,qz,qw
+    return true
+end
+
+-- A body's pose relative to the root's, written into pose; false when the
+-- body's pose is not rigid. Inverse root rotation applied to the displacement,
+-- and conjugate(root) multiplied by body rotation. A coherent whole-corpse
+-- turn is not flapping.
+local function relative_pose(matrix,pose)
+    local bx,by,bz,qx,qy,qz,qw=rigid_pose(matrix)
+    if not bx then return false end
+    local r=root_pose
+    local x,y,z,w=-r[4],-r[5],-r[6],r[7]
+    local dx,dy,dz=bx-r[1],by-r[2],bz-r[3]
     local tx,ty,tz=2*(y*dz-z*dy),2*(z*dx-x*dz),2*(x*dy-y*dx)
-    return {dx+w*tx+y*tz-z*ty,dy+w*ty+z*tx-x*tz,dz+w*tz+x*ty-y*tx},
-        {w*q[1]+x*q[4]+y*q[3]-z*q[2],w*q[2]-x*q[3]+y*q[4]+z*q[1],
-         w*q[3]+x*q[2]-y*q[1]+z*q[4],w*q[4]-x*q[1]-y*q[2]-z*q[3]}
+    pose[1],pose[2],pose[3],pose[4],pose[5],pose[6],pose[7]=
+        dx+w*tx+y*tz-z*ty,dy+w*ty+z*tx-x*tz,dz+w*tz+x*ty-y*tx,
+        w*qx+x*qw+y*qz-z*qy,w*qy-x*qz+y*qw+z*qx,w*qz+x*qy-y*qx+z*qw,w*qw-x*qx-y*qy-z*qz
+    return true
+end
+
+-- Every main body's relative pose into scratch, in main_bodies order. Returns
+-- how many bodies it sampled, or nil when a pose is not rigid, a body id
+-- repeats or the root is not among them.
+local function sample_limbs(bodies,root_id)
+    -- ipairs visits at most #bodies entries.
+    if #bodies>limb_capacity then limb_scratch(#bodies) end
+    if seen_ids>=1024 then limb_seen,seen_ids={},0 end
+    sample_stamp=sample_stamp+1
+    local seen,stamp,sampled=limb_seen,sample_stamp,0
+    for i,body in ipairs(bodies) do
+        local id=body.id
+        local mark=seen[id]
+        if mark==stamp or not relative_pose(body.pose,limb_poses[i]) then return nil end
+        if mark==nil then seen_ids=seen_ids+1 end
+        seen[id]=stamp;sampled=i
+    end
+    if seen[root_id]~=stamp then return nil end
+    return sampled
+end
+
+-- History's own copies of a scratch pose (position, rotation) and of each
+-- body's relative pose by body id: history never holds a scratch table.
+local function kept_pose(pose)
+    return {pose[1],pose[2],pose[3]},{pose[4],pose[5],pose[6],pose[7]}
+end
+local function kept_limbs(bodies,sampled)
+    local limbs={}
+    for i=1,sampled do
+        local position,rotation=kept_pose(limb_poses[i])
+        limbs[bodies[i].id]={position=position,rotation=rotation}
+    end
+    return limbs
+end
+
+-- An armed sample's limbs: a main body other than the root that stays more
+-- than 0.5 m or 15 degrees from its kept relative pose for at least 100 ms.
+-- Returns its id, distance and degrees; nil when there is none; false when
+-- history lacks one of the bodies.
+local function limb_excursion(bodies,root_id,previous,now)
+    local excursions=previous.excursions or {}
+    previous.excursions=excursions
+    for i,body in ipairs(bodies) do
+        local id=body.id
+        local old=previous.limbs[id]
+        if not old then return false end
+        local ld,la=separation(limb_poses[i],old.position,old.rotation)
+        if id~=root_id and (ld>.5 or la>15) then
+            local started=excursions[id]
+            if started and now-started>=.1 then return id,ld,la end
+            excursions[id]=started or now
+        else excursions[id]=nil end
+    end
+    return nil
 end
 
 -- Client-side containment of motion restarting after a fixed corpse has had
@@ -312,51 +426,37 @@ function M.fling_action(unit,state,now)
         end
         return nil
     end
-    if not root then history[key]=nil;return nil end
-    local p,q=M.rigid(root.pose)
-    if not p then history[key]=nil;return nil end
-    if not unit.main_bodies or #unit.main_bodies~=unit.main_enabled then history[key]=nil;return nil end
-    local limbs={}
-    for _,body in ipairs(unit.main_bodies) do
-        local bp,bq=M.rigid(body.pose)
-        if not bp or limbs[body.id] then history[key]=nil;return nil end
-        local rp,rq=relative(bp,bq,p,q)
-        limbs[body.id]={position=rp,rotation=rq}
-    end
-    if not limbs[root.id] then history[key]=nil;return nil end
+    if not root or not sample_root(root.pose) then history[key]=nil;return nil end
+    local bodies=unit.main_bodies
+    if not bodies or #bodies~=unit.main_enabled then history[key]=nil;return nil end
+    local sampled=sample_limbs(bodies,root.id)
+    if not sampled then history[key]=nil;return nil end
     local previous=history[key]
     if not previous or previous.entity~=unit.id or previous.resource~=unit.resource
         or previous.actor~=root.id or previous.members~=unit.main_signature or previous.enabled~=unit.main_enabled
         or now<=previous.last or now-previous.last>1 then
+        local position,rotation=kept_pose(root_pose)
         history[key]={entity=unit.id,resource=unit.resource,actor=root.id,members=unit.main_signature,
-            enabled=unit.main_enabled,position=p,rotation=q,limbs=limbs,since=now,last=now,samples=1,armed=false}
+            enabled=unit.main_enabled,position=position,rotation=rotation,limbs=kept_limbs(bodies,sampled),
+            since=now,last=now,samples=1,armed=false}
         return nil
     end
     previous.last=now;previous.samples=previous.samples+1
-    local distance,degrees=separation(p,q,previous.position,previous.rotation)
+    local distance,degrees=separation(root_pose,previous.position,previous.rotation)
     if previous.armed then
         -- Experimental containment thresholds, not engine-defined limits.
         if distance>.75 or degrees>20 then
             return {distance=distance,degrees=degrees,actor=root.id,
                 cause=distance>.75 and 'translation' or 'rotation'}
         end
-        previous.excursions=previous.excursions or {}
-        for _,body in ipairs(unit.main_bodies) do
-            local current,old=limbs[body.id],previous.limbs[body.id]
-            if not old then history[key]=nil;return nil end
-            local ld,la=separation(current.position,current.rotation,old.position,old.rotation)
-            if body.id~=root.id and (ld>.5 or la>15) then
-                local started=previous.excursions[body.id]
-                if started and now-started>=.1 then
-                    return {distance=distance,degrees=degrees,actor=body.id,
-                        limb_distance=ld,limb_degrees=la,
-                        cause=ld>.5 and 'limb_translation' or 'limb_rotation'}
-                end
-                previous.excursions[body.id]=started or now
-            else previous.excursions[body.id]=nil end
+        local actor,ld,la=limb_excursion(bodies,root.id,previous,now)
+        if actor==false then history[key]=nil;return nil end
+        if actor then
+            return {distance=distance,degrees=degrees,actor=actor,limb_distance=ld,limb_degrees=la,
+                cause=ld>.5 and 'limb_translation' or 'limb_rotation'}
         end
     elseif distance>.25 or degrees>10 then
-        previous.position=p;previous.rotation=q;previous.limbs=limbs
+        previous.position,previous.rotation=kept_pose(root_pose);previous.limbs=kept_limbs(bodies,sampled)
         previous.since=now;previous.samples=1
     elseif previous.samples>=3 and now-previous.since>=1 then
         previous.armed=true;state.fling_armed=(state.fling_armed or 0)+1
@@ -505,9 +605,12 @@ end
 -- poll before a step reads it; nothing is used by a later poll.
 local scan_poll,scan_steps
 do
-    local api,state,exe,consume,budget
+    local api,state,exe,consume,budget,preflight_due
     local mode_reference,mode,mode_bytes
     local corpse,manager_name,manager,active,entities,pointers,runtime,sync,sync_number,globals,selected
+    -- The entity address of the entry being visited (the listing's number),
+    -- recorded in its unit for the corpse re-check backoff.
+    local visit_address
     -- sync_counts[k] is the count of entry sync_first+k, copied this poll
     -- after the last inspection; sync_first is nil when there is none.
     local manager_count,sync_first,sync_last,sync_counts=0,nil,nil,{}
@@ -516,7 +619,7 @@ do
     -- The unit's record and identity guards: its entity header, the mission
     -- mode and its manager entry.
     local function new_unit(index,entity,e)
-        local u={resource=e:sub(1,8),id=u32(e,8),unit=u32(e,12),corpse=corpse,
+        local u={resource=e:sub(1,8),id=u32(e,8),unit=u32(e,12),corpse=corpse,address=visit_address,
             owner=bit.band(u32(e,20),1)~=0,active=index<active,manager=manager,index=index,
             guards={},main={},main_bodies={},main_pose_guards={},registered={},actors={},
             main_enabled=0,main_static=0,main_disabled=0,main_dynamic_allowed=0}
@@ -782,7 +885,19 @@ do
         end
     end
     -- Inspects a listed, eligible unit and records the outcome.
+    -- The poll's first inspection sets its 1 ms deadline (one clock read) and
+    -- runs the read-only preflight: the exact getter path the corpse reader
+    -- uses, checked before any unit's bodies. World 2 hosts the captured enemy
+    -- actors; absence during loading is normal.
+    local function first_inspection()
+        if budget and not budget.deadline and api.clock then budget.deadline=api.clock()+M.budget_seconds end
+        if not preflight_due then return end
+        preflight_due=false
+        state.preflight_getter='checking'
+        state.preflight_getter=world_for(2) and 'verified' or 'waiting_for_world'
+    end
     local function inspect_listed(index,entity,e,profile,quick)
+        first_inspection()
         if budget then budget.inspected=budget.inspected+1 end
         phase(api,'snapshot')
         detail(api,'metadata')
@@ -831,45 +946,207 @@ do
         if not key then return nil end
         return ffi.string(v,24),profiles[key]
     end
+    -- The listing: which entries of a manager hold a listed resource, kept
+    -- across polls in state.listings so an idle poll reads no entry header.
+    -- It is a hint for where to look, never data to act on: an entry it names
+    -- has its header read afresh before inspection, and everything a command
+    -- depends on is read and guarded in that poll, as before. Entities are
+    -- classified by address (the header's resource words; the unit word is
+    -- kept for clearing motion history). The whole pointer array is compared
+    -- with the last poll's (an interned string: one comparison, no
+    -- allocation); only a changed array is walked, and only addresses not
+    -- seen before cost a header view. An entity can be freed and another
+    -- allocated at the same address between two polls, leaving the array
+    -- unchanged: a rolling verification re-reads ceil(count/16) headers of
+    -- the manager scanned first in each poll (the managers alternate), so
+    -- every entry is checked again within 32 polls (1.5-2 s).
+    local SWEEP_POLLS=16
+    local listing
+    local function listing_of(is_corpse)
+        local all=state.listings
+        if not all then all={};state.listings=all end
+        local l=all[is_corpse]
+        if not l then l={known={},units={},stamps={},listed={},n=0,size=0,stamp=0,sweep=0};all[is_corpse]=l end
+        return l
+    end
+    -- The entity address at entry index of the copied pointer array, as a
+    -- number (no pointer object); 0 when it is not a user address.
+    local function address_at(index)
+        local b1,b2,b3,b4,b5,b6,b7,b8=byte(pointers,index*8+1,index*8+8)
+        local value=b1+b2*256+b3*65536+b4*16777216+(b5+b6*256+b7*65536+b8*16777216)*4294967296
+        if value<0x10000 or value>=0x800000000000 then return 0 end
+        return value
+    end
+    -- The resource key (false when not listed) and unit word of the entity
+    -- at address, from a fresh header; nil when the header is unreadable.
+    local function classify(address)
+        if viewable(api) then
+            local v=api.view(address,24)
+            if not v then return nil end
+            local keys=resource_words[view_u32(v,0)]
+            local key=keys and keys[view_u32(v,4)]
+            if not key then return false end
+            return key,view_u32(v,12)
+        end
+        local e=api.read(address,24)
+        if not e or #e~=24 then return nil end
+        local key=e:sub(1,8)
+        if not profiles[key] then return false end
+        return key,u32(e,12)
+    end
+    -- Forgets addresses the array no longer holds, once they outnumber it.
+    local function prune(l,count)
+        if l.size<=2*count+64 then return end
+        local known,units,stamps,stamp,size=l.known,l.units,l.stamps,l.stamp,0
+        for address,seen in pairs(stamps) do
+            if seen~=stamp then stamps[address]=nil;known[address]=nil;units[address]=nil else size=size+1 end
+        end
+        l.size=size
+    end
+    -- Rebuilds the listed entry indices from this poll's pointer array. At
+    -- most M.max_entities new addresses are classified per poll; the rest
+    -- wait for the next (the listing stays incomplete and the poll counts as
+    -- yielded).
+    -- The listing's key for a valid address, classifying it while the poll
+    -- may still (left > 0). Returns the key (nil: not classified) and left.
+    -- An unreadable header counts as unlisted: the rolling verification
+    -- reads it again within 32 polls, and the array's next change reclassifies
+    -- nothing it already knows.
+    local function key_of(l,address,left)
+        local key=l.known[address]
+        if key==nil and left>0 then
+            left=left-1
+            local unit
+            key,unit=classify(address)
+            if key==nil then key=false;state.listing_unreadable=(state.listing_unreadable or 0)+1 end
+            l.known[address],l.units[address]=key,unit
+            state.listing_classified=(state.listing_classified or 0)+1
+        end
+        if l.stamps[address]==nil then l.size=l.size+1 end
+        l.stamps[address]=l.stamp
+        return key,left
+    end
+    local function relist(l,count)
+        l.stamp=l.stamp+1
+        local listed,n,left,complete=l.listed,0,M.max_entities,true
+        for index=0,count-1 do
+            local address=address_at(index)
+            local key
+            if address~=0 then key,left=key_of(l,address,left) else key=false end
+            if key==nil then complete=false elseif key then n=n+1;listed[n]=index end
+        end
+        for i=n+1,l.n do listed[i]=nil end
+        l.n,l.count,l.complete,l.pointers=n,count,complete,complete and pointers or nil
+        prune(l,count)
+        if not complete and budget then budget.yielded=true end
+    end
+    -- Re-reads a few known entries' headers (the rolling verification); a
+    -- changed one is reclassified and the listing rebuilt.
+    local function verify(l,count)
+        local known,units=l.known,l.units
+        for _=1,math.ceil(count/SWEEP_POLLS) do
+            local index=l.sweep%count;l.sweep=index+1
+            local address=address_at(index)
+            local key=known[address]
+            if key~=nil then
+                local fresh,unit=classify(address)
+                if fresh~=nil and (fresh~=key or fresh and units[address]~=unit) then
+                    known[address],units[address],l.pointers=fresh,unit,nil
+                    state.listing_changes=(state.listing_changes or 0)+1
+                end
+            end
+        end
+    end
+    -- Whether the corpse at address waits for its next re-check: its unit's
+    -- backoff record (consume keeps it) names this address and is not due.
+    -- Records are kept only by M.apply's polls.
+    local function backed_off(address)
+        local checks=state.corpse_checks
+        local record=checks and checks[listing.units[address]]
+        return record~=nil and record.address==address and state.fling_scan<record.due
+    end
+    -- A listed entry: the cheap lifecycle check (ragdolls: the sync count),
+    -- then a fresh header for an eligible one. A header that no longer
+    -- matches the listing is skipped this poll and classified afresh by the
+    -- next poll's rebuild.
     local function visit(index)
-        local entity=api.pointer(pointers,index*8)
-        if not entity then return false end
-        local e,profile=header(entity)
+        local address=address_at(index)
+        local key=listing.known[address]
+        local profile=key and profiles[key]
         if not profile then return false end
+        if corpse and backed_off(address) then
+            state.corpse_rechecks_deferred=(state.corpse_rechecks_deferred or 0)+1
+            return false
+        end
         local quick=not corpse and sync_count(index)
-        local eligible=corpse or quick==profile.bodies
-        if eligible then inspect_listed(index,entity,e,profile,quick)
-        elseif state.fling_history then state.fling_history[u32(e,12)]=nil end
+        if corpse or quick==profile.bodies then
+            local entity=api.pointer(pointers,index*8)
+            local e,fresh=header(entity)
+            visit_address=address
+            if fresh==profile then inspect_listed(index,entity,e,profile,quick)
+            else
+                listing.known[address],listing.pointers=nil,nil
+                state.listing_changes=(state.listing_changes or 0)+1
+            end
+        elseif state.fling_history then state.fling_history[listing.units[address]]=nil end
         phase(api,'discovery')
         return #selected>=32
     end
-    -- The clock is a system call: it is read every CLOCK_EVERY scanned entries
-    -- (a header check costs about two reads) and after every inspection (about
-    -- a hundred), not before every entry. The 1 ms deadline stays soft.
+    -- The clock is a system call: it is read every CLOCK_EVERY scanned listed
+    -- entries and after every inspection (about a hundred reads), not before
+    -- every entry, and only once the poll's first inspection has set the
+    -- deadline (inspect_listed): a poll that inspects nothing reads no clock.
+    -- The 1 ms deadline stays soft.
     local function exhausted()
         if not budget then return nil end
         -- A deadline seen by the first manager also ends the second's scan.
         if budget.yielded or budget.scanned>=M.max_entities or budget.inspected>=M.max_units then return true end
-        if budget.scanned==0 or not api.clock then return false end
+        if budget.scanned==0 or not api.clock or not budget.deadline then return false end
         if budget.scanned%CLOCK_EVERY~=0 and budget.inspected==budget.clocked then return false end
         budget.clocked=budget.inspected
         return api.clock()>=budget.deadline
     end
-    -- The manager's entries from its rotating cursor, within the poll's budget.
+    -- The first listed position whose entry index is at or after cursor
+    -- (wrapping to the first), by bisection of the ascending listed indices.
+    local function listed_from(cursor)
+        local listed,low,high=listing.listed,1,listing.n
+        while low<high do
+            local middle=floor((low+high)/2)
+            if listed[middle]<cursor then low=middle+1 else high=middle end
+        end
+        if listed[low]<cursor then return 1 end
+        return low
+    end
+    -- The manager's listed entries from its rotating cursor (an entry index),
+    -- within the poll's budget. Unlisted entries cost nothing.
     local function scan_entities(count)
-        local start=(state.cursors[manager_name] or 0)%count
-        for step=0,count-1 do
+        local n=listing.n
+        if n==0 then return end
+        local listed=listing.listed
+        local first=listed_from((state.cursors[manager_name] or 0)%count)
+        for step=0,n-1 do
             if exhausted() then budget.yielded=true;break end
-            local index=(start+step)%count
+            local index=listed[(first-1+step)%n+1]
             state.cursors[manager_name]=(index+1)%count
             if budget then budget.scanned=budget.scanned+1 end
             if visit(index) then break end
         end
     end
+    -- The manager's slot: the bytes copied with the mode slot this poll
+    -- (in_mission), or its own read without the paired view.
+    local slot_bytes={}
+    local function manager_slot()
+        local b=slot_bytes[corpse]
+        if not b then return keep(globals,1,manager_slots[corpse],8) end
+        local entry=globals[1]
+        if entry then entry.address,entry.bytes=manager_slots[corpse],b
+        else globals[1]={address=manager_slots[corpse],bytes=b} end
+        return b
+    end
     -- The manager's header, read through its kept globals, with its bounds
     -- checked. Returns the header bytes and the entry count.
     local function manager_header()
-        manager=pointer(keep(globals,1,manager_slots[corpse],8))
+        manager=pointer(manager_slot())
         local h=keep(globals,2,manager,88)
         local capacity,count=u32(h,corpse and 16 or 4),u32(h,corpse and 24 or 12)
         active=u32(h,corpse and 28 or 16)
@@ -894,54 +1171,85 @@ do
             result[#result+1]=u
         end
     end
-    local function scan_manager(is_corpse,result)
+    local function scan_manager(is_corpse,result,first)
         phase(api,'discovery')
         corpse,manager_name=is_corpse,is_corpse and 'corpse' or 'ragdoll'
         globals,selected=manager_lists(corpse,consume)
         local h,count=manager_header()
         manager_count,sync_first=count,nil
+        listing=listing_of(corpse)
         if count>0 then
             entities,runtime,sync=pointer(h,corpse and 64 or 56),pointer(h,72),pointer(h,80)
             pointers=read(entities,count*8)
+            if first then verify(listing,count) end
+            if pointers~=listing.pointers then relist(listing,count) end
             -- Sync count reads take a number address: no pointer object per entry.
-            sync_number=api.address(sync)
+            if listing.n>0 and not corpse then sync_number=api.address(sync) end
             scan_entities(count)
         end
         collect(result)
+    end
+    -- The mode slot and both manager slots lie within 0x2b0 bytes of
+    -- game.dll's data: one view copies all three. A slot is compared as two
+    -- words with last poll's (slot_low/slot_high by slot key: 0 for the mode,
+    -- false and true for the managers); an unchanged one keeps last poll's
+    -- bytes, so no string is made for it. The manager slots are taken from
+    -- the view only in a mission, before any other view.
+    local SLOT_SPAN=0x2b0
+    local slot_low,slot_high,slot_view={},{},nil
+    local function slot_from(offset,key,kept)
+        local low,high=view_u32(slot_view,offset),view_u32(slot_view,offset+4)
+        if kept and slot_low[key]==low and slot_high[key]==high then return kept end
+        slot_low[key],slot_high[key]=low,high
+        return ffi.string(slot_view+offset,8)
+    end
+    local function read_mode_slot()
+        slot_view=viewable(api) and api.view(mode_slot,SLOT_SPAN) or nil
+        if not slot_view then slot_low[0]=nil;return api.read(mode_slot,8) end
+        return slot_from(0,0,mode_reference)
+    end
+    local function read_manager_slots()
+        if not slot_view then slot_bytes[false],slot_bytes[true]=nil,nil;return end
+        slot_bytes[false]=slot_from(0x2a8,false,slot_bytes[false])
+        slot_bytes[true]=slot_from(0x280,true,slot_bytes[true])
     end
     -- The mission mode. The recorded client mission had +8=1 and +0x40=2.
     -- Back on the ship, +8 became zero while +0x40 stayed 2. Do not use that
     -- second field as a mission selector; entity/profile/lifecycle guards
     -- remain mandatory.
     local function in_mission()
-        mode_reference=api.read(mode_slot,8)
+        mode_reference=read_mode_slot()
         mode=api.pointer(mode_reference)
         state.mission_flag=0;state.mode_field_40=0
         if not mode then return false end
+        -- A read, not a view: the slot view stays valid for the managers.
         mode_bytes=read(mode,0x44)
         state.mission_flag=u32(mode_bytes,8);state.mode_field_40=u32(mode_bytes,0x40)
-        return state.mission_flag~=0
+        if state.mission_flag==0 then return false end
+        read_manager_slots()
+        return true
     end
     -- The mission check, then both managers. Returns nil outside a mission.
     function scan_poll(a,s,e,c,b)
         api,state,exe,consume,budget=a,s,e,c,b
         if not in_mission() then state.preflight_getter='waiting_for_mission';return nil end
-        -- This read-only preflight uses the exact getter path used by the
-        -- corpse reader, so validation need not wait for a death. It runs only
-        -- in a mission: off a mission and on the ship it cost 3 reads a poll
-        -- for nothing the mod could act on. World 2 hosts the captured enemy
-        -- actors; absence during loading is normal.
-        state.preflight_getter='checking'
-        state.preflight_getter=world_for(2) and 'verified' or 'waiting_for_world'
+        -- The physics getter preflight runs before the poll's first
+        -- inspection (inspect_listed): a poll that inspects nothing makes none
+        -- of its 3 reads.
+        preflight_due=true
+        if state.preflight_getter=='waiting_for_mission' or state.preflight_getter==nil then
+            state.preflight_getter='waiting_for_unit'
+        end
         local result=no_units(consume)
         state.cursors=state.cursors or {}
         -- Alternate first ownership of the shared budget so neither manager can
         -- starve the other. Cursors are indices only; pointers are always reread.
         state.manager_turn=not state.manager_turn
-        for _,is_corpse in ipairs(state.manager_turn and RAGDOLL_FIRST or CORPSE_FIRST) do scan_manager(is_corpse,result) end
+        for i,is_corpse in ipairs(state.manager_turn and RAGDOLL_FIRST or CORPSE_FIRST) do scan_manager(is_corpse,result,i==1) end
         return result
     end
-    scan_steps={scan_poll,in_mission,scan_manager,collect,manager_header,scan_entities,exhausted,visit,inspect_listed}
+    scan_steps={scan_poll,in_mission,scan_manager,collect,manager_header,scan_entities,exhausted,visit,inspect_listed,first_inspection,key_of,backed_off,
+        relist,verify,classify,prune,listed_from,read_mode_slot,read_manager_slots,slot_from,manager_slot}
 end
 
 function M.snapshot(api,game,exe,state,consume,budget)
@@ -995,18 +1303,42 @@ local function emptied(t) if not t then return {} end;for key in pairs(t) do t[k
 function M.reset(state)
     state.fling_history,state.fling_stopped=emptied(state.fling_history),emptied(state.fling_stopped)
     state.cursors,state.reposed=emptied(state.cursors),emptied(state.reposed)
+    state.listings,state.corpse_checks=emptied(state.listings),emptied(state.corpse_checks)
 end
 -- consume is made once, not as a new closure every poll: begin_apply points it
 -- at the poll's api, state and time before each snapshot.
 local poll_budget,apply_consume,begin_apply={}
 do
     local api,state,now
+    -- n is nil when M.apply read no time: the first unit reads it.
     function begin_apply(a,s,n) api,state,now=a,s,n end
     -- Whether the unit's own and global guards still hold. A unit the snapshot
     -- just verified (see hand_over) holds until this unit's first native
     -- call, which clears verified; every later check compares afresh.
     local function holds(u) return u.verified or same(api,u.guards) end
+    local function read_time()
+        if now==nil then now=api.time and api.time() or 0 end
+    end
+    -- The corpse re-check backoff (M.corpse_settle_polls): a corpse that
+    -- needed no command keeps a record by unit, with its entity address and
+    -- identity; one that needs a command, or a new entity, starts over.
+    local function note_corpse(u,actions,stopped)
+        if not u.corpse then return end
+        local clean=actions==0 and not stopped
+        local checks=state.corpse_checks
+        if not checks then checks={};state.corpse_checks=checks end
+        if not clean or not u.address or M.corpse_recheck_polls<=0 then checks[u.unit]=nil;return end
+        local scan,record=state.fling_scan,checks[u.unit]
+        if not record or record.address~=u.address or record.entity~=u.id then
+            record={address=u.address,entity=u.id,since=scan,wait=0,due=0};checks[u.unit]=record
+        end
+        record.seen=scan
+        if scan-record.since<M.corpse_settle_polls then return end
+        record.wait=math.min(math.max(record.wait*2,2),M.corpse_recheck_polls)
+        record.due=scan+record.wait
+    end
     local function consume(u)
+        read_time()
         state.observed=state.observed+1
         state.accepted_units=(state.accepted_units or 0)+1
         phase(api,'planning')
@@ -1015,8 +1347,9 @@ do
             u.profile_lifecycle=u.corpse and (#actions>0 and 'corpse_repair' or settled(u) and 'corpse_aligned' or 'corpse_other')
                 or (u.update_enabled==false and 'ragdoll_stopped' or settled(u) and 'ragdoll_settled' or 'ragdoll_dynamic')
         end
-        actions=defer_repeats(state,u,actions,now)
         local stopped=state.fling_stopped[u.unit]
+        note_corpse(u,#actions,stopped)
+        actions=defer_repeats(state,u,actions,now)
         if #actions==0 and not stopped and u.corpse then return end
         if stopped and stopped.requested and u.corpse and u.active
             and stopped.resource==u.resource and holds(u) then
@@ -1123,16 +1456,21 @@ do
     apply_consume=consume
 end
 
-function M.apply(api,game,exe,state)
-    phase(api,'maintenance')
-    local now=api.time and api.time() or 0
-    state.reposed=state.reposed or {}
+-- Every 256 polls, forgets backoff records of corpses not inspected for 256
+-- polls (a waiting corpse is inspected at least every corpse_recheck_polls):
+-- the game disposed of them.
+local function prune_corpse_checks(state)
+    local checks=state.corpse_checks
+    if not checks or state.fling_scan%256~=0 then return end
+    for unit,record in pairs(checks) do
+        if state.fling_scan-record.seen>256 then checks[unit]=nil end
+    end
+end
+-- Expires repose cooldowns and motion histories older than now allows.
+local function expire(state,now)
     for id,entry in pairs(state.reposed) do
         if now<entry.at or now-entry.at>=M.repose_cooldown then state.reposed[id]=nil end
     end
-    state.fling_history=state.fling_history or {}
-    state.fling_stopped=state.fling_stopped or {}
-    state.fling_scan=(state.fling_scan or 0)+1
     for key,entry in pairs(state.fling_history) do
         if now<entry.last or now-entry.last>1 then
             state.max_revisit_seconds=math.max(state.max_revisit_seconds or 0,now-entry.last)
@@ -1140,6 +1478,23 @@ function M.apply(api,game,exe,state)
             state.fling_history[key]=nil
         end
     end
+end
+
+function M.apply(api,game,exe,state)
+    phase(api,'maintenance')
+    state.reposed=state.reposed or {}
+    state.fling_history=state.fling_history or {}
+    state.fling_stopped=state.fling_stopped or {}
+    state.fling_scan=(state.fling_scan or 0)+1
+    -- The time is a system call: read here only when a cooldown or history
+    -- may expire, otherwise by the poll's first unit (consume). A poll that
+    -- keeps neither and hands over no unit reads no clock.
+    local now
+    if next(state.reposed)~=nil or next(state.fling_history)~=nil then
+        now=api.time and api.time() or 0
+        expire(state,now)
+    end
+    prune_corpse_checks(state)
     for key,entry in pairs(state.fling_stopped) do
         -- Count successful scans rather than wall time: a paused application
         -- must not forget a stop immediately before an ownership handoff.
@@ -1147,7 +1502,8 @@ function M.apply(api,game,exe,state)
     end
     state.observed=0
     begin_apply(api,state,now);local consume,budget=apply_consume,poll_budget
-    budget.scanned,budget.inspected,budget.yielded,budget.deadline=0,0,nil,api.clock and api.clock()+M.budget_seconds
+    -- The deadline is set by the poll's first inspection (inspect_listed).
+    budget.scanned,budget.inspected,budget.yielded,budget.deadline=0,0,nil,nil
     budget.clocked=0
     local units,reason=M.snapshot(api,game,exe,state,consume,budget)
     -- Snapshot substitutes used by policy tests may return complete units.
@@ -1156,7 +1512,10 @@ function M.apply(api,game,exe,state)
     state.scan_entities=(state.scan_entities or 0)+budget.scanned
     state.deep_inspections=(state.deep_inspections or 0)+budget.inspected
     if budget.yielded then state.budget_yields=(state.budget_yields or 0)+1 end
-    if reason~='ready' then M.reset(state) end
+    -- Off a mission the first poll forgets everything; later ones find it
+    -- forgotten already and skip the reset.
+    if reason=='ready' then state.forgotten=false
+    elseif not state.forgotten then M.reset(state);state.forgotten=true end
     state.completion_pending=0
     for _,entry in pairs(state.fling_stopped) do
         if entry.requested then state.completion_pending=state.completion_pending+1 end

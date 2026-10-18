@@ -16,6 +16,7 @@ local M = {}
 
 M.MENU_SYSTEM_PTR = 0x347ce38
 M.SCREEN = 200                  -- menu system -> escape screen (0 while the menu is closed)
+M.CONFIRM_RETRY = 60            -- idle gate: calls between tries to confirm a new menu system
 M.SHOWN = 8                     -- screen: shown content (0 GAME, 1 SOCIAL, 2 OPTIONS)
 M.CONTENT = 281480              -- screen -> GAME content
 -- GAME content
@@ -204,17 +205,29 @@ function M.new(api, game, natives, status, note)
         return api.write_words(base + first, last - first + 4, flat)
     end
 
-    -- The open escape screen, or 0. The menu system and a new screen are each
-    -- confirmed once with a guarded read; later frames use direct loads.
-    local function open_screen()
+    -- The escape screen is closed: what it held is forgotten (the screen, a
+    -- refused write, the dialog prepared, open or holding our text). The one
+    -- close path, for screen() and the idle gate (closed) alike.
+    local function forget_screen()
+        screen_cache, refused, prepared, pending, release = 0, false, nil, nil, false
+    end
+    -- The menu system, or 0 (not there, or a new one not readable yet).
+    local function menu_system()
         local menu = api.load64(game + M.MENU_SYSTEM_PTR)
         if menu == 0 or menu % 8 ~= 0 then return 0 end
         if menu ~= menu_cache then
             if not api.read64(menu + M.SCREEN) then return 0 end
             menu_cache = menu
         end
+        return menu
+    end
+    -- The open escape screen, or 0. The menu system and a new screen are each
+    -- confirmed once with a guarded read; later frames use direct loads.
+    local function open_screen()
+        local menu = menu_system()
+        if menu == 0 then return 0 end
         local screen = api.load64(menu + M.SCREEN)
-        if screen == 0 or screen % 8 ~= 0 then screen_cache, refused = 0, false; return 0 end
+        if screen == 0 or screen % 8 ~= 0 then forget_screen(); return 0 end
         if screen ~= screen_cache then
             if not api.read32(screen + M.SHOWN) or not api.read32(screen + M.CONTENT + M.COUNT) then return 0 end
             screen_cache, prepared, pending, release, labels, last_answered = screen, nil, nil, false, {}, 0
@@ -330,6 +343,28 @@ function M.new(api, game, natives, status, note)
         local screen = open_screen()
         if screen == 0 then prepared, pending, release = nil, nil, false end
         return screen
+    end
+
+    -- The addon's idle gate: true while the escape screen is closed, which
+    -- goes through forget_screen, the path a host closing the menu has always
+    -- taken through screen(). An open screen, or a menu system that is not
+    -- there or not confirmed readable, is left to the full frame untouched.
+    -- Idle: two direct loads, no call into Windows. The menu system is
+    -- confirmed once (one guarded read); a confirm that fails is tried again
+    -- on every M.CONFIRM_RETRY-th call, not every frame.
+    local confirm_wait = 0
+    function self.closed()
+        local menu = api.load64(game + M.MENU_SYSTEM_PTR)
+        if menu == 0 or menu % 8 ~= 0 then return false end
+        if menu ~= menu_cache then
+            if confirm_wait > 0 then confirm_wait = confirm_wait - 1; return false end
+            if menu_system() == 0 then confirm_wait = M.CONFIRM_RETRY - 1; return false end
+        end
+        local screen = api.load64(menu + M.SCREEN)
+        if screen ~= 0 and screen % 8 == 0 then return false end
+        -- Only a screen seen open holds state (screen_cache 0: forgotten already).
+        if screen_cache ~= 0 then forget_screen() end
+        return true
     end
 
     -- One frame on an open escape screen while the host has a squad.

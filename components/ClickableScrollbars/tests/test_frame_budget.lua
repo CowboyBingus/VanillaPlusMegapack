@@ -111,6 +111,7 @@ local function new_world(route)
     put_pointer(image, RVA.dispatch, dispatch); put_pointer(image, RVA.stack, owner)
     put_pointer(image, RVA.menu, menu); put_pointer(image, RVA.input, input)
     world.dispatch, world.owner, world.menu, world.block = dispatch, owner, menu, block
+    world.input_block = input
     local rows, top = {}, 5
     if route == 'grid' or route == 'career' then
         local controller = block(GRID_OFFSET + 622700)
@@ -164,7 +165,10 @@ local function new_windows(input)
     return {
         GetTickCount64 = function() return input.now end,
         GetCurrentProcessId = function() return PID end,
-        GetAsyncKeyState = function(key) return key == 0x01 and input.down and -32768 or 0 end,
+        GetAsyncKeyState = function(key)
+            if input.fail then error('synthetic button query failure', 0) end
+            return key == 0x01 and input.down and -32768 or 0
+        end,
         GetForegroundWindow = function() return WINDOW end,
         GetWindowThreadProcessId = function(_, process) process[0] = PID; return 1 end,
         GetCursorPos = function(point) point[0].x, point[0].y = input.x, input.y; return 1 end,
@@ -212,8 +216,10 @@ local TEST_BUILD = {exe_sha256 = test_hash, game_sha256 = test_hash}
 local function known_build() return real_verify_build(stand_in_memory()) end
 
 -- The addon installed on one world. Every call it makes is counted. With
--- plain, it runs on plain_platform instead of the real platform.
-local function new_session(route, plain)
+-- plain, it runs on plain_platform instead of the real platform. addon: the
+-- module to install (default: the entry under test).
+local function new_session(route, plain, addon)
+    local module = addon or module
     local world = new_world(route)
     local input = {now = 1000, down = false, x = 200, y = 600}
     local windows = new_windows(input)
@@ -791,8 +797,215 @@ for _, route in ipairs({'grid', 'loadout', 'career', 'bindings', 'settings'}) do
     same('restored')
 end
 
+-- ------------------------------------------------------- idle (play) frames
+
+-- Ship and mission play: no screen on the stack and no menu registered. An
+-- idle frame reads the button and nothing else, with the button up or held
+-- (firing); in game that call costs about 0.7 us (ledger probe, standard tape
+-- 20261017-000228, n=7060, median 0.70 us). Then the frame stops before pcall.
+local TOPS = {grid = 5, career = 5, loadout = 14, bindings = 26, settings = 1}
+local KINDS = {grid = 224, career = 224, loadout = 229}
+local function set_menu(world, open, top)
+    put_u32(world.owner, 0x429c + 20, open and 1 or 0)
+    put_u32(world.owner, 0x429c, top or TOPS[world.route])
+    if KINDS[world.route] then
+        put_u32(world.dispatch, 5744 + 16 + 8, open and KINDS[world.route] or 7)
+    else
+        world.screen[12] = open and 1 or 0
+    end
+end
+local idle_checked = 0
+for _, route in ipairs({'grid', 'loadout', 'career', 'bindings', 'settings'}) do
+    local s = new_session(route)
+    set_menu(s.world, false)
+    for index = 1, 120 do
+        -- Fire: pressed on every 7th frame, held two more. A new press runs the
+        -- full frame as in v2.15.1 (the equivalence test compares it); the frames
+        -- before and after it are idle.
+        local was_down = s.input.down
+        s.input.down = index % 7 < 3
+        local frame = s.frame()
+        if not s.input.down or was_down then
+            budget.check(frame, EVERY, route .. ' play frame ' .. index)
+            assert(frame.GetAsyncKeyState == 1, route .. ': a play frame did not read the button')
+            idle_checked = idle_checked + 1
+        end
+    end
+    assert(s.state.frames == 120 and s.state.errors == 0, route .. ': play frames were not counted')
+end
+
+-- Idle frames allocate nothing, interpreted and with the JIT on, in play and
+-- in a menu with the pointer resting.
+local idle_garbage = 0
+for _, plain in ipairs({true, false}) do
+    if jit_library then
+        if plain then
+            jit_library.off() -- lint-ok: R5 test only: measures the interpreter
+            jit_library.flush() -- lint-ok: R5 test only: starts the interpreted measurement without traces
+        else
+            jit_library.on() -- lint-ok: R5 test only: restores the JIT
+        end
+    end
+    for _, open in ipairs({false, true}) do
+        local s = new_session('grid', plain)
+        set_menu(s.world, open)
+        if jit_library then jit_library.off(s.update) end
+        for _ = 1, 2 do window_bytes(s.update, 2000) end -- warm-up
+        for _ = 1, 3 do
+            local bytes = window_bytes(s.update, 2000)
+            assert(bytes == 0, string.format('%s idle frames (%s) allocated %d bytes per 2000 frames',
+                open and 'menu' or 'play', plain and 'interpreted' or 'compiled', bytes))
+            idle_garbage = idle_garbage + 1
+        end
+    end
+end
+if jit_library then jit_library.on() end -- lint-ok: R5 test only: restores the JIT
+
+-- ------------------------------------------- equivalence with v2.15.1
+
+-- v2.15.1 (tests/reference/clickable_scrollbars_v2.15.1.lua, built from the
+-- release's src/) and this entry run side by side, each on its own world, over
+-- the same scripted frames per route, diagnostics off and on: play (no screen
+-- on the stack, the menu's controller unregistered or its page closed) with
+-- fire presses, menus opening and closing with the button up or held (pressed
+-- on the opening frame too), hovers, thumb and track presses and drags, a menu
+-- closing mid-drag, another screen on top, the stack owner moving and the stack
+-- unreadable. After every frame every gesture, write and counter must match.
+local reference = assert(loadfile(directory .. '/reference/clickable_scrollbars_v2.15.1.lua'))()
+
+local function activate(world)
+    put_pointer(image, RVA.dispatch, world.dispatch)
+    put_pointer(image, RVA.stack, world.unreadable and 0 or world.owner)
+    put_pointer(image, RVA.menu, world.menu)
+    put_pointer(image, RVA.input, world.input_block)
+end
+
+local COMPARED = {'drag_active', 'drags', 'pages', 'clicks', 'frame_clicks', 'frames', 'down_frames', 'last_key',
+                  'native_writes', 'native_ok', 'native_fallbacks', 'native_failed', 'native_value', 'errors',
+                  'status', 'last_error', 'last_reason', 'burst_errors', 'frame_ms_total', 'frame_interval_ms'}
+local function same_outcome(a, b, label)
+    for _, field in ipairs(COMPARED) do
+        assert(a.state[field] == b.state[field], label .. ': ' .. field .. ' v2.15.1=' .. tostring(a.state[field])
+            .. ' new=' .. tostring(b.state[field]))
+    end
+end
+
+local function pair(route, diagnostics)
+    local old = new_session(route, false, reference)
+    local new = new_session(route, false)
+    old.state.settings.diagnostics, new.state.settings.diagnostics = diagnostics, diagnostics
+    local both = {old, new}
+    function both.frame(change)
+        for _, s in ipairs(both) do
+            activate(s.world)
+            if change then change(s) end
+            s.update()
+        end
+        activate(new.world)
+    end
+    return both
+end
+
+local seed = 12345
+local function random(n)
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    return math.floor(seed / 65536) % n
+end
+
+local equivalent_frames = 0
+local covered = {opened = 0, opened_held = 0, opened_pressed = 0, moved = 0, unreadable = 0, other_top = 0,
+                 failures = 0}
+for _, diagnostics in ipairs({0, 1}) do
+    for _, route in ipairs({'grid', 'loadout', 'career', 'bindings', 'settings'}) do
+        local both = pair(route, diagnostics)
+        local old, new = both[1], both[2]
+        local open, down = true, false
+        for frame = 1, 2400 do
+            local next_open, next_down = open, down
+            if random(40) == 0 then next_open = not open end
+            if random(6) == 0 then next_down = not down end
+            local where, event, jitter = random(4), random(300), random(9) - 4
+            both.frame(function(s)
+                if next_open ~= open then set_menu(s.world, next_open) end
+                s.input.down = next_down
+                if where == 0 then s.input.x, s.input.y = s.x, s.thumb_y + jitter
+                elseif where == 1 then s.input.x, s.input.y = s.x, s.track_y
+                elseif where == 2 then s.input.x, s.input.y = 200, 600
+                else s.input.y = s.input.y + 3 end
+                if event == 0 then moved_block(s.world, 'owner', 0x4400, RVA.stack)
+                elseif event == 1 then s.world.unreadable = not s.world.unreadable
+                elseif event == 2 and open then put_u32(s.world.owner, 0x429c, route == 'bindings' and 1 or 26)
+                elseif event == 3 then put_u32(s.world.owner, 0x429c, TOPS[route]) end
+                -- A failing button query: a frame error (the guard stops the addon after
+                -- 8 in a burst; kept to the first 1000 frames, so the addon keeps running).
+                s.input.fail = event == 4 and frame < 1000
+            end)
+            if event == 4 and frame < 1000 then covered.failures = covered.failures + 1 end
+            if next_open and not open then
+                covered.opened = covered.opened + 1
+                if down and next_down then covered.opened_held = covered.opened_held + 1 end
+                if next_down and not down then covered.opened_pressed = covered.opened_pressed + 1 end
+            end
+            if event == 0 then covered.moved = covered.moved + 1
+            elseif event == 1 then covered.unreadable = covered.unreadable + 1
+            elseif event == 2 and open then covered.other_top = covered.other_top + 1 end
+            open, down = next_open, next_down
+            same_outcome(old, new, route .. ' diagnostics=' .. diagnostics .. ' frame ' .. frame)
+            equivalent_frames = equivalent_frames + 1
+        end
+        assert(new.state.drags > 0 and new.state.pages > 0 and new.state.status == "running" and new.state.errors > 0,
+            route .. ": the script made no gesture, no error or stopped the addon")
+    end
+end
+for name, n in pairs(covered) do assert(n >= 5, 'the equivalence script covered ' .. name .. ' only ' .. n .. ' times') end
+
+-- ------------------------------------------------ trace aborts on idle frames
+
+-- The guard calls step and after under pcall every frame. v2.15.1 compiled them:
+-- a trace started at their entry aborts where it returns into the guard
+-- ("NYI: return to lower frame"), and frame() entered log(), whose closure
+-- (UCLO) aborts any trace reaching it; they retry and fill LuaJIT's 64-slot
+-- penalty cache (the ledger replay: 128 aborts). Fresh copies of both entries
+-- (no earlier penalties) run 3000 play and 3000 menu frames from an
+-- interpreted driver, as the engine calls update; v2.15.1 is the control.
+local trace_aborts, trace_control
+if jit_library and jit_library.attach and jit_library.status() then
+    local function aborts(path)
+        local fresh = assert(loadfile(path))()
+        local s = new_session('grid', false, fresh)
+        local function drive(open)
+            set_menu(s.world, open)
+            for _ = 1, 3000 do s.update() end
+        end
+        jit_library.off(drive)
+        local count = 0
+        local function on_trace(what) if what == 'abort' then count = count + 1 end end
+        jit_library.attach(on_trace, 'trace')
+        local ok, err = pcall(function() drive(false); drive(true) end)
+        jit_library.attach(on_trace)
+        assert(ok, err)
+        return count
+    end
+    trace_aborts = aborts(assert(arg[2]))
+    trace_control = aborts(directory .. '/reference/clickable_scrollbars_v2.15.1.lua')
+    assert(trace_control > 0, 'control: v2.15.1 did not abort, so this test proves nothing')
+    assert(trace_aborts == 0, trace_aborts .. ' trace aborts on idle frames (v2.15.1: ' .. trace_control .. ')')
+end
+
 kernel.hd2cs_test_VirtualFree(image_base, 0, 0x8000)
 if not PRINT then
+    print('idle: ' .. idle_checked .. ' play frames (button up or held) make exactly 1 GetAsyncKeyState and no other '
+          .. 'call; ' .. idle_garbage .. ' windows of 2000 idle frames (play, menu; interpreted, compiled) allocate 0 B')
+    print('equivalence: ' .. equivalent_frames .. ' scripted frames on 5 routes, diagnostics off and on, match v2.15.1 '
+          .. 'in every gesture, write and counter')
+    print(string.format('  covered: %d menu openings (%d with the button held, %d pressed on the opening frame), '
+        .. '%d owner moves, %d unreadable toggles, %d other screens on top, %d failing button queries',
+        covered.opened, covered.opened_held, covered.opened_pressed, covered.moved, covered.unreadable,
+        covered.other_top, covered.failures))
+    if trace_aborts then
+        print('trace aborts: ' .. trace_aborts .. ' over 3000 play and 3000 menu frames (v2.15.1: ' .. trace_control
+              .. '; step, after and the idle check stay interpreted; log() is entered only with diagnostics)')
+    end
     print('frame budget: ' .. checked .. ' frames on 5 routes within their pinned calls (idle, hover, press, held, '
           .. 'verification, release, track press)')
     print('build gate: ' .. unsupported .. ' unsupported builds (another build, no game.dll) stop install before the '

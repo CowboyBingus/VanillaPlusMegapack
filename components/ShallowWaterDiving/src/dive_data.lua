@@ -67,10 +67,20 @@ for _,name in ipairs({'mission','local_player','local_avatar','water','stance','
     STAGES[name]={read='waiting_for_'..name..'_read',pointer='waiting_for_'..name..'_pointer',
         invalid='Invalid '..name..' pointer'}
 end
+-- Waiting reasons answered before the local avatar's dive controller was
+-- reached (no mission, no local player, no local avatar): no dive can start
+-- before one exists, so the loader polls these less often. Waits on a dive
+-- frame (water, stance, movement, settings) are not in it.
+local BEFORE_AVATAR={mission=true,local_player=true,local_avatar=true}
+M.NO_AVATAR={}
+for name in pairs(BEFORE_AVATAR) do
+    M.NO_AVATAR['waiting_for_'..name],M.NO_AVATAR[STAGES[name].read],M.NO_AVATAR[STAGES[name].pointer]=true,true,true
+end
 local GLOBAL_WAIT={}
 for rva,name in pairs({[0x33266a0]='mission',[0x3326468]='local_player',[0x346bf98]='local_avatar',
     [0x3326d20]='local_avatar',[0x3326a80]='water',[0x3326598]='stance',[0x3326558]='movement'}) do
     GLOBAL_WAIT[rva]=string.format('waiting_for_%s_global_%x',name,rva)
+    if BEFORE_AVATAR[name] then M.NO_AVATAR[GLOBAL_WAIT[rva]]=true end
 end
 
 -- The running check: adapter, game.dll base address, stage, the reason the
@@ -425,24 +435,23 @@ local function writable(api,state,s)
     return true
 end
 
--- Idle gate. After a full check found the local avatar, the next GATE_CHECKS
--- checks read only its dive controller: the same avatar id, no dive flag and
--- finite timers mean 'dive_ended', exactly what the full check answers there.
--- Anything else (a dive, another id, a failed read) runs the full check at
--- once, and every GATE_CHECKS+1-th check is a full one to follow avatar and
--- mission changes (about 0.25 s at 60 FPS with both boundaries).
-local GATE_CHECKS=30
-local function idle(api,state)
+-- Idle gate, run by the loader between full checks while the last one found
+-- the local avatar idle ('dive_ended', no lease or retry): one read of its
+-- dive controller. The same avatar id, no dive flag (bit 0x20 of +0xf8c) and
+-- finite timers mean 'dive_ended', exactly what the full check answers there;
+-- true then. Anything else (a dive, another id, a failed read) is false, and
+-- the loader runs the full check at once. The gate reads into the snapshot
+-- arena and writes nothing.
+local band=bit.band
+function M.idle(api,state)
     if not api.read(state.gate_controller+CONTROLLER,CONTROLLER_SIZE,buffer,0) or words[0]~=state.gate_id
-        or bit.band(words[(FLAGS+12)/4],0x20)~=0 then return false end
+        or band(words[(FLAGS+12)/4],0x20)~=0 then return false end
     return finite(floats[2]) and finite(floats[3])
 end
 
+-- The full check: every call reads the identity chain (the idle gate above
+-- is the loader's).
 function M.apply(api,game,exe,state)
-    if state.gate_controller and state.gate_left>0 and not (state.pending or state.retry_start or state.was_dive) then
-        state.gate_left=state.gate_left-1
-        if idle(api,state) then return true,'dive_ended',false end
-    end
     local s,waiting=M.snapshot(api,game,state)
     if not s then
         -- Clear only what is set: storing nil under a missing key still adds
@@ -466,7 +475,7 @@ function M.apply(api,game,exe,state)
         if state.write_check then state.write_check=nil end
         for i=0,5 do seen[i]=words[s.entity/4+i] end
     end
-    state.gate_controller,state.gate_id,state.gate_left=s.controller,s.id,GATE_CHECKS
+    state.gate_controller,state.gate_id=s.controller,s.id
     local new_dive=s.dive and not state.was_dive
     if new_dive then state.observed=state.observed+1 end
     if state.was_dive and not s.dive and s.elapsed<=0.02 then state.short_ends=state.short_ends+1 end
@@ -529,8 +538,8 @@ function M.apply(api,game,exe,state)
     return true,'airborne_reference',true
 end
 
--- The full snapshot is long straight-line code that runs every 31st idle
--- check and on dive frames. Compiled, it took 50-74 KB of the LuaJIT code
+-- The full snapshot is long straight-line code that runs every 120th idle
+-- frame and on dive frames. Compiled, it took 50-74 KB of the LuaJIT code
 -- cache every mod and the game share, to save about 6 us per dive-frame check
 -- (measured in the game's lua51.dll); interpreted, the helpers it calls still
 -- compile and the mod's machine code stays at 9-13 KB. The idle gate is

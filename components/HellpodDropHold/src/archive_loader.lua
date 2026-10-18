@@ -10,7 +10,7 @@
 --   8 such errors in a burst stop it, with the pod released. When the mod stops
 --   it releases the pod too; the game quitting writes nothing.
 -- The log keeps the status and the last events (loading screens, holds, releases).
-return function(create_api, hold, build, runtime)
+local function install(create_api, hold, build, runtime)
     if _G.HellpodDropHold then return end
     local state = {revision = build.revision, active = false, status = '', events = {}}
     _G.HellpodDropHold = state  -- lint-ok: R8 the mod's one status table, named after the mod like every family mod's
@@ -94,3 +94,12 @@ return function(create_api, hold, build, runtime)
     end)
     if not installed then report(tostring(problem), false) end
 end
+-- Every function here stays interpreted, like the hold's own. A trace started in
+-- step always aborted on returning into the guard's pcall frame, and one started
+-- in frame on entering hold.update (jit.off); both kept retrying (19-45 and 19-33
+-- failed recordings per game-shaped ledger replay, 2026-10-17), each holding one
+-- of LuaJIT's 64 failed-start slots. The rest (the log, start, pause, stop) is
+-- cold and could only add aborting starts (a closure is NYI). Interpreted, step
+-- and frame cost a few bytecodes a frame.
+if jit and jit.off then jit.off(install, true) end
+return install

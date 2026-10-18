@@ -13,7 +13,7 @@ from module import build_module
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'src'
 TESTS = ROOT / 'tests'
-REVISION = 'data-v7.5'
+REVISION = 'data-v7.5.1'
 BUILD = ROOT / 'build'
 INSPECTOR = Path(os.environ.get('HD2_PATCH_INSPECT', ROOT / 'tools/bin/hd2-patch-inspect.exe'))
 
@@ -40,6 +40,7 @@ def main():
             raise ValueError('HD2_BOUNCE_SOURCE must point to the Bounce source repository')
         arguments.append(peer_source)
     tests = run(arguments, env=env)
+    tests += run([LUA, TESTS / 'test_idle_gate.lua', SOURCE, TESTS / 'reference'], env=env)
     if peer_source is not None:
         for order in ('hellpod-first', 'bounce-first'):
             tests += run([LUA, TESTS / 'test_api_coexistence.lua', SOURCE, peer_source, order], env=env)

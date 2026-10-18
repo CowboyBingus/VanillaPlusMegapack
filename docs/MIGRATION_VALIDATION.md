@@ -41,6 +41,9 @@ cleanly with loader v20; no deployed archive held content/input, and Mod
 Bindings Menu reported version 4, its guard ran without errors and it logged
 that it added its keyboard defaults to 12 binding records. Rebinding them in
 the binding pages has not been checked in game yet.
+v42 then updates twenty components to their idle-rework releases (listed in
+docs/TECHNICAL.md), checked offline by their own suites and the pack's; their
+release builds and this package have not been run in the game.
 v42 also gives each option its own cover: every file a manager deploys is byte
 for byte the previous v42 package's, and Arsenal 0.36.0 and HD2MM 1.3
 imported it and resolved each option's own image.

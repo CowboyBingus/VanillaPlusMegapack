@@ -6,9 +6,10 @@
 --     kits the player will wear), so the Helldiver's own job is about one frame;
 --   * idle: one read of the Helldiver's 120 unit bytes, plus one of its preview slot's entry count (and
 --     entries while there are any); nothing else unless they changed;
---   * the UI preview of the local player (the Armory CHARACTER view, src/preview.lua): one 8-byte read on 1
---     frame in UI_GATE_FRAMES while it is not shown, that read and one of its 160-byte record every frame while
---     it is; a change of the kits it shows starts a job for that pair (its own textures and bindings);
+--   * the UI preview of the local player (the Armory CHARACTER view, src/preview.lua): on 1 frame in UI_GATE_FRAMES
+--     while it is not shown, one 16-byte read of the preview system's gate while no player slot shows (else the
+--     player slots' span, 1,296 bytes), the span every frame while it is shown; a change of the kits it shows starts a
+--     job for that pair (its own textures and bindings);
 --   * every VERIFY_FRAMES frames the whole local-player chain is resolved again;
 --   * every CHECK_FRAMES frames one recolored material per runtime texture is read (two reads each): if the
 --     game put its original LUT back, the recolor is applied again;

@@ -127,8 +127,11 @@ local runtime=assert(loadfile(source..'/bingus_runtime.lua'))()
 setfenv(assert(loadfile(source..'/archive_loader.lua'))(),e)(function()return api end,patch,
     {revision='test',game_sha256=tostring(G),exe_sha256='2'},runtime)
 local function tick()e.update(1/60)end
+-- After a transition the idle gate can answer up to 59 frames (outside a
+-- mission) or 29 (in a mission without a hover pack) before its next full
+-- check: a flight begins after them, as a drop or a pickup takes longer.
 local function flight()
-    put(0x46000005,'\0\0\1\0\0');tick()
+    put(0x46000005,'\0\0\1\0\0');for _=1,60 do tick()end
     put(0x46000005,'\1\0\1\0\1');put(input+8,f(.3));tick()
     put(input+8,f(0));tick()
     local before=commands;put(input+8,f(.01));tick()
@@ -188,25 +191,52 @@ do
         local frame=budget.frame(counts,tick)
         assert(hook.status==expected,label..': '..tostring(hook.status))
         budget.check(frame,limits,label)
+        -- Exact: each pin is the frame's count, not only its upper bound.
+        for name,limit in pairs(limits)do assert(frame[name]==limit,label..': api.'..name..' '..tostring(frame[name]))end
     end
     -- Pointers decode in place from the snapshot's buffer: no api.pointer calls.
     -- The first frame in a mission, and any frame on which the kept layout no
     -- longer matches, locates everything (41 reads with a hover pack); the
     -- frames after it read only the kept layout (16 with a hover pack).
-    put(input+8,f(0));put(mode+0x40,u(0))
-    check('outside a mission',{read=2},'waiting_for_mission');put(mode+0x40,u(2))
-    put(0x42000000+48+12,u(0))
+    -- The idle gate (hover_data.lua M.idle) answers the frames after a full
+    -- check that found nothing to do: the next frame after to_full() is one.
+    local function to_full()while (hook.idle_left or 0)>1 do tick()end end
+    local function gated(label,n,limits,expected)
+        for i=1,n do check(label..', gated frame '..i,limits,expected)end
+    end
+    put(input+8,f(0));put(mode+0x40,u(0));to_full()
+    -- Outside a mission: the mission check, then 59 frames with no call.
+    check('outside a mission',{read=2},'waiting_for_mission')
+    gated('outside a mission',59,{},'waiting_for_mission')
+    put(mode+0x40,u(2));put(0x42000000+48+12,u(0))
     check('no backpack, first frame in a mission',{read=25},'no_backpack')
-    check('no backpack',{read=8},'no_backpack');put(0x42000000+48+12,u(524))
-    ent(0x44000000,'073270650f859dd0',524,250,true)
+    -- In a mission without a hover pack: 29 frames with no call, then the
+    -- kept layout (8 reads without a backpack, 11 with another jump pack).
+    gated('no backpack',29,{},'no_backpack')
+    check('no backpack',{read=8},'no_backpack')
+    gated('no backpack',29,{},'no_backpack')
+    put(0x42000000+48+12,u(524));ent(0x44000000,'073270650f859dd0',524,250,true)
     -- 8 reads of the kept layout find a backpack again, then 30 locate it.
     check('backpack equipped, first frame',{read=38},'not_hover_pack')
+    gated('other jump pack',29,{},'not_hover_pack')
     check('other jump pack',{read=11},'not_hover_pack');ent(0x44000000,'5ec80f4f1cdb66cf',524,250,true)
+    -- No local player (dead, or leaving): no call either.
+    to_full();put(pm+0x84,u(0)..u(0))
+    -- The changed pack record ends the kept layout, and the player is located
+    -- afresh (13 reads), as before the gate.
+    check('local player removed',{read=13},'waiting_for_player')
+    gated('local player removed',29,{},'waiting_for_player');put(pm+0x84,u(2)..u(2))
     put(0x46000005,'\0\0\1\0\0');tick()
-    -- Without a flight no cancellation can start: only the snapshot runs, with
-    -- no focus check.
+    -- A hover pack worn and inactive: one read of its state row per frame,
+    -- and the kept layout (16 reads) on every 30th. Without a flight no
+    -- cancellation can start, so there is no focus check.
+    gated('hover pack idle',29,{read=1},'waiting_for_hover')
     check('hover pack idle',{read=16},'waiting_for_hover')
-    put(0x46000005,'\1\0\1\0\1');tick()
+    gated('hover pack idle',3,{read=1},'waiting_for_hover')
+    -- Activation ends the wait in the same frame: the row read, then the
+    -- kept layout.
+    put(0x46000005,'\1\0\1\0\1')
+    check('flight, first frame',{read=17,focused=1},'watching_hover')
     check('hover flight',{read=16,focused=1},'watching_hover')
     put(input+8,f(.01))
     -- The press locates the pack afresh (41 reads) before the settings write.
@@ -249,9 +279,15 @@ do
         check(label..' idle frames',compiled);assert(e.HoverPackCancel.status=='waiting_for_hover')
         put(0x46000005,'\1\0\1\0\1');put(input+8,f(.3));tick();put(input+8,f(0))
         check(label..' flight frames',compiled);assert(e.HoverPackCancel.status=='watching_hover')
+        -- The idle gate's windows (100-frame windows hold full checks too).
+        put(0x46000005,'\0\0\1\0\0');put(mode+0x40,u(0))
+        check(label..' frames outside a mission',compiled);assert(e.HoverPackCancel.status=='waiting_for_mission')
+        put(mode+0x40,u(2));put(0x42000000+48+12,u(0))
+        check(label..' frames without a backpack',compiled);assert(e.HoverPackCancel.status=='no_backpack')
+        put(0x42000000+48+12,u(524))
     end
     jit.attach(count) -- lint-ok: R5 test only: detaches the handler above
 end
-print('PASS: no garbage on idle or flight frames, interpreted or compiled')
+print('PASS: no garbage on idle (hover pack worn, outside a mission, no backpack) or flight frames, interpreted or compiled')
 print('PASS: installed production hook recovers through repeated mission/player/pack transitions without reload')
 print('PASS: production snapshot at local index one, exact pack/holder, input, recovery, focus, ordinary pack, grounded/ragdoll/swim and stale guards')

@@ -27,7 +27,8 @@ SOURCE_FILES = (
     'tests/test_package.py', 'tests/test_snapshot.lua', 'tests/test_windows_api.lua',
     'tests/test_firing.lua', 'tests/firing_sweeps.lua', 'tests/frame_budget.lua', 'tests/test_module.lua',
     'tests/hostile_vm.lua', 'tests/test_current_game.lua', 'tests/captured_game.lua',
-    'tests/current_game_25327279.lua',
+    'tests/current_game_25327279.lua', 'tests/test_idle_gate.lua', 'tests/reference/aim_data.lua',
+    'tests/reference/archive_loader.lua',
 )
 PATTERNS = {
     'research_session': r'(?i)\bPID\s*[:=]?\s*\d{2,}\b',

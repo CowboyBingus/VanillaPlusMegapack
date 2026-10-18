@@ -127,30 +127,29 @@ local function garbage(w,label,frames)
     assert(windows[6]==0,label..': median '..windows[6]..' bytes of garbage in 60 compiled frames')
 end
 
--- Every frame checks the update thread once (was twice: before and after the
--- game update).
--- On the ship: the thumbnail screen is closed. 3 reads (globals, state stack,
--- UI world); the policy step adds the lease owner (2 reads) and the clock for
--- the profile-save throttle. Memory telemetry, whose pressure reason changes
--- nothing outside a menu with no leases or images held, runs once every 2 s
--- (was every policy step); the pinned frames fall between two polls.
+-- Every working frame checks the update thread once (was twice: before and
+-- after the game update); an idle frame only reads and checks nothing.
+-- On the ship: the thumbnail screen is closed and nothing is held, so every
+-- frame is idle (install.lua idle gate): 2 reads (globals, state stack), no
+-- thread check, clock or memory poll (was 3 reads and a thread check per
+-- frame, plus 2 reads and the clock per policy step, and memory every 2 s).
 local ship=game_world()
 ship.top(3);ship.snapshot.menu=false;ship.snapshot.top=3
-pin(ship,'ship',{assert_thread=1,read=3},{assert_thread=1,read=5,time=1})
+pin(ship,'ship',{read=2},{read=2})
 -- Longer than the 5 s profile-save throttle: nothing learned, nothing encoded.
 garbage(ship,'ship',720)
 assert(ship.files['fixture/ArmoryPreviewCache.profile'],'The first save wrote the profile')
 do
     local polls=0
     for _=1,240 do polls=polls+(ship.frame().memory or 0)end
-    assert(polls==2,'ship: '..polls..' memory polls in 4 s, expected one every 2 s')
+    assert(polls==0,'ship: '..polls..' memory polls in 4 s idle with nothing held, expected none')
     -- Opening a menu polls on its first policy step, whatever the idle wait.
     for _=1,3 do ship.step()end
-    ship.snapshot.menu=true
+    ship.top(5);ship.snapshot.menu=true;ship.snapshot.top=5
     polls=0
     for _=1,3 do polls=polls+(ship.frame().memory or 0)end
     assert(polls==1,'ship: the first policy step in a menu polls memory')
-    ship.snapshot.menu=false
+    ship.top(3);ship.snapshot.menu=false;ship.snapshot.top=3
 end
 -- Armory grid, every card stuck preparing (as with --toaster_mode): nothing
 -- completes, nothing is bound. 10 reads: globals, stack, UI world, dispatch
@@ -174,4 +173,11 @@ dofile(root..'/tests/synthetic_screens.lua').preselect(preselect.poke,preselect.
 preselect.card(0,5);preselect.active(0,5)
 pin(preselect,'pre-select',{assert_thread=1,read=12},{assert_thread=1,read=14,memory=1})
 garbage(preselect,'pre-select',120)
-print('PASS: per-frame budget: ship 3 reads; Armory grid unchanged 10 reads (nothing bound) or 21 (15 retained crops bound); pre-select 12; policy step +2 reads, one memory poll in a menu and one per 2 s on the ship; one thread check per frame; no garbage in any unchanged scenario, interpreted or compiled')
+-- In a mission (a gameplay state on the stack, nothing held): the same 2
+-- reads as idle on the ship (was 3 reads and a thread check per frame, plus
+-- the snapshot, lease reads and clock per policy step).
+local mission=game_world()
+mission.top(20);mission.snapshot.menu=false;mission.snapshot.top=20
+pin(mission,'mission',{read=2},{read=2})
+garbage(mission,'mission',720)
+print('PASS: per-frame budget: ship idle 2 reads; mission idle 2 reads; Armory grid unchanged 10 reads (nothing bound) or 21 (15 retained crops bound); pre-select 12; policy step +2 reads and one memory poll in a menu; one thread check per working frame, none idle; no garbage in any unchanged scenario, interpreted or compiled')

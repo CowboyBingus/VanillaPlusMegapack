@@ -433,7 +433,7 @@ end
 function Weapons.watch(memory, where)
     local row_at = ffi.cast('const uint8_t *', where.row)
     local now, kept = ffi.new('uint8_t[?]', ROW_BYTES), ffi.new('uint8_t[?]', ROW_BYTES)
-    local cell = ffi.new('uint8_t[8]')
+    local cell = ffi.new('uint32_t[2]') -- the binding's two halves, compared as read (no byte decoding per frame)
     local primed = false
     local self = {reads = 0}
     local entry_p, entry_at = nil, nil
@@ -461,7 +461,7 @@ function Weapons.watch(memory, where)
         if entry ~= entry_at then entry_p, entry_at = ffi.cast('const uint8_t *', entry), entry end
         self.reads = self.reads + 1
         if not memory.read_into(entry_p, 8, cell) then return false end
-        return u32(cell, 0) == low and u32(cell, 4) == high
+        return cell[0] == low and cell[1] == high
     end
     return self
 end

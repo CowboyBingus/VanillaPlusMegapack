@@ -91,7 +91,7 @@ local function inspect(api, game)
     if not (read_flag and records and links and read_set and read_dims) then
         return nil, false, 'avoidance_fields_unreadable'
     end
-    if blank(records, links) then return nil, true, 'waiting_for_mission' end
+    if blank(records, links) then return nil, true, 'waiting_for_mission', manager end
     if not layout_valid(manager, records, links) then return nil, false, 'avoidance_layout_mismatch' end
     view.manager, view.owner, view.enabled = manager, owner, flag[0]
     local set, dimensions = view.set, view.dims
@@ -161,24 +161,68 @@ local function clear(api, game, v, own)
     return true, 'avoidance_settings_ready', true
 end
 
+-- Waiting for work. The work is a flag change: mission initialization sets the
+-- game's 1 in place, in the storage that sits blank (all zero) aboard ship. The
+-- manager and owner keep their addresses from the ship into the mission (ledger
+-- tape 20261017-000228: one address pair for the whole session). So after a full
+-- check, a poll reads only the flag byte (one 1-byte ReadProcessMemory): the value
+-- the full check saw means nothing to do. Any other value, or a failed read, runs
+-- the full check on that same poll, so a mission reset is still cleared within
+-- one poll (100 ms), as before: a joiner's pod is spawned at once, during loading,
+-- so the drop can need the cleared flag right after initialization.
+-- Every REVALIDATE-th poll is a full check anyway: it notices what the flag
+-- alone cannot show (the manager going blank after a mission, new pointers, a
+-- layout or ownership change) at most REVALIDATE polls (1 s) late; before, at
+-- most one poll late.
+local REVALIDATE = 10
+-- The watch lives in own (the caller's table), next to the record of the write.
+local function arm(own, manager, value)
+    own.watch_manager, own.watch_value, own.watch_left = manager, value, REVALIDATE - 1
+end
+
+-- true: the flag holds the value the last full check saw and no full check is
+-- due; the poll is done. false: run patch.apply now (the watch is dropped).
+-- Allocates nothing.
+function patch.idle(api, own)
+    local manager, left = own.watch_manager, own.watch_left
+    if manager == nil then return false end
+    if left <= 0 then own.watch_manager = nil; return false end
+    fields(manager)
+    if not api.read_into(at_flag, 1, flag) or flag[0] ~= own.watch_value then
+        own.watch_manager = nil
+        return false
+    end
+    own.watch_left = left - 1
+    return true
+end
+
 -- accepted (false stops the mod), status, active. own is the caller's table
 -- for this mod's write. The flag is written only over the game's own value:
 -- 0 needs nothing, 1 is cleared again (mission initialization reset it), and
 -- any other value belongs to another writer: it is left alone and reported,
--- and polling goes on.
+-- and polling goes on. A check that read the flag of a blank or valid manager,
+-- and needs no recheck at the next poll, arms the watch with that value.
 function patch.apply(api, game, own)
-    local v, polling, status = inspect(api, game)
+    own.watch_manager = nil
+    local v, polling, status, blank_manager = inspect(api, game)
     if not v then
         forget(own)
+        if blank_manager then arm(own, blank_manager, 0) end
         return polling, status, false
     end
     if v.enabled == OWN_VALUE then
         if not owns(own, v) then forget(own) end
+        arm(own, v.manager, OWN_VALUE)
         return true, 'avoidance_settings_ready', true
     end
     forget(own)
-    if v.enabled ~= GAME_VALUE then return true, 'avoidance_flag_set_by_another_writer', false end
-    return clear(api, game, v, own)
+    if v.enabled ~= GAME_VALUE then
+        arm(own, v.manager, v.enabled)
+        return true, 'avoidance_flag_set_by_another_writer', false
+    end
+    local accepted, cleared, active = clear(api, game, v, own)
+    if active then arm(own, v.manager, OWN_VALUE) end
+    return accepted, cleared, active
 end
 
 -- Puts the game's own value back, only over this mod's own write: the flag must
@@ -186,7 +230,9 @@ end
 -- the layout still valid, rechecked right before the store. Anything else is
 -- left alone. Forgets the write either way. Returns ok (false: the write
 -- failed) and the outcome.
+-- The watch is dropped: the next poll (after a resume) runs the full check.
 function patch.restore(api, game, own)
+    own.watch_manager = nil
     if own.manager == nil then return true, 'nothing_to_restore' end
     local v = inspect(api, game)
     local ours = v and v.enabled == OWN_VALUE and owns(own, v)
@@ -196,13 +242,13 @@ function patch.restore(api, game, own)
     if failure then return false, failure end
     return true, 'avoidance_restored'
 end
--- The check runs ten times a second and stays interpreted, as apply always did
+-- The poll runs ten times a second and stays interpreted, as apply always did
 -- (its traces aborted). Compiled, these functions would add about 6.6 KB to the
 -- game's shared code cache to save about 0.25 us per frame (offline, game's
 -- lua51.dll); interpreted, a check still allocates nothing.
 if jit and jit.off then
     for _, check in ipairs({slots, fields, pointer_at, count_at, near, zero, blank, layout_valid, inspect, remember,
-        forget, owns, same_set, same_dims, stable, write_flag, clear, patch.apply, patch.restore}) do
+        forget, owns, same_set, same_dims, stable, write_flag, clear, arm, patch.idle, patch.apply, patch.restore}) do
         jit.off(check)
     end
 end

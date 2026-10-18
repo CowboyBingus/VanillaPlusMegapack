@@ -130,8 +130,13 @@ return function(create_api,patch,build,runtime)
     -- so it advances exactly as with two checks per frame (an assist armed with a
     -- climb already started caps its speed before the update, not one frame
     -- later).
+    -- The patch's idle gate (vault_data.lua M.idle), if it has one, answers
+    -- idle frames before the check: no pcall, apply or report. It never
+    -- raises; any frame it does not answer gets the full check.
+    local idle=patch.idle
     local function step()
         state.updates=state.updates+1
+        if idle and idle(api,state) then return end
         check('before_update')
         if skipped and state.busy~=false then skipped=false;check('before_update') end
     end

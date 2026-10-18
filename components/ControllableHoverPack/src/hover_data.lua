@@ -341,7 +341,49 @@ local function fly(api,game,s,state)
     state.cancellations=(state.cancellations or 0)+1
     return 'cancel_requested'
 end
-function M.apply(api,game,exe,state)
+-- Idle gate -------------------------------------------------------------------
+-- Waiting for work: after a full check that found nothing to do, with no
+-- cancellation lease held, M.idle answers the next frames before apply, its
+-- pcall and the report (the loader calls it first):
+--   outside a mission: 59 frames with no read, then the full check (a mission
+--   start is noticed up to 1 s late, during its drop);
+--   in a mission without a usable hover pack (no player or avatar yet, no
+--   backpack, another backpack, a pack not owned or not attached): 29 frames
+--   with no read (a hover pack picked up is noticed up to 0.5 s late);
+--   hover pack worn and inactive: 29 frames, each reading only the pack's state
+--   row (one 5-byte read at its kept address). Every flight and the native
+--   landing assistance need state +0 (active) set, so a set +0 or a failed read
+--   ends the wait at once and the same frame runs the full check.
+-- The full check every 30th frame renews the identity proof: after a respawn,
+-- a pack swap or a registry move the kept row can belong to nothing, and a
+-- flight is then seen up to 29 frames late (a player cannot fly that soon
+-- after a respawn or a pickup). The window counts updates, never the clock.
+local IDLE_SHIP,IDLE_MISSION=60,30
+local NO_HOVER={waiting_for_player=true,waiting_for_avatar=true,no_backpack=true,no_jump_pack=true,
+    not_hover_pack=true,pack_not_owned=true,pack_not_attached=true}
+local gate_row=ffi.new('uint8_t[8]')
+local gate_into={data=gate_row,address=tonumber(ffi.cast('uintptr_t',gate_row)),size=8}
+-- true answers this frame (nothing to do); false runs the full check.
+function M.idle(api,state)
+    local left=state.idle_left
+    if not left or left<=1 or state.lease then state.idle_left=0;return false end
+    state.idle_left=left-1
+    local at=state.idle_at
+    if at~=0 and not (api.read(at,5,gate_into,0) and gate_row[0]==0) then state.idle_left=0;return false end
+    return true
+end
+-- After a full check: how many frames the gate may answer, and what it reads.
+local function arm(state,status)
+    local left,at=0,0
+    if state.lease then left=0
+    elseif status=='waiting_for_mission' then left=IDLE_SHIP
+    elseif NO_HOVER[status] then left=IDLE_MISSION
+    elseif status=='waiting_for_hover' and not S.active and L.stage==4 then left,at=IDLE_MISSION,L.states+L.ji*5
+    end
+    state.idle_left,state.idle_at=left,at
+end
+
+local function work(api,game,state)
     local s,reason=read_snapshot(api,game,state)
     if state.lease then
         if s and s.key==state.lease.key and s.active then return 'native_descent' end
@@ -356,22 +398,33 @@ function M.apply(api,game,exe,state)
     if not s.flight then M.policy.step(state,s);return 'waiting_for_hover'end
     return fly(api,game,s,state)
 end
+function M.apply(api,game,exe,state)
+    local status=work(api,game,state)
+    arm(state,status)
+    return status
+end
 -- Undo this mod's change to the game and start afresh (the loader calls it
 -- when the mod pauses, stops or shuts down): the restore's result (true, or
 -- false and why while it waits), and the policy forgets the flight, so a
 -- flight in progress needs a release and a new press before it can be
 -- cancelled.
-function M.cleanup(api,game,state)M.policy.step(state,nil);return M.settings.restore(api,game,state)end
+function M.cleanup(api,game,state)
+    state.idle_left=0;M.policy.step(state,nil)
+    return M.settings.restore(api,game,state)
+end
 -- The snapshot's stages are straight-line code that runs once per frame.
 -- Compiled, they took about 34 KB of the LuaJIT code cache that the game and
 -- every mod share (the whole mod 44,464 bytes in the game's lua51.dll) to
 -- save about 2 us per frame in a test process. Interpreted, the helpers they
 -- call (reads, pointers, map probes, record compares, the float decoder) still
 -- compile and the mod's machine code stays near 10 KB. This marks only these
--- functions; it flushes nothing.
+-- functions; it flushes nothing. The callers of M.snapshot (read_snapshot,
+-- work, M.apply) are interpreted too: a trace started in one of them aborts
+-- at the snapshot ("blacklisted") and would retry on every full check. The
+-- idle gate (M.idle, arm) and the policy still compile.
 if jit and jit.off then
     for _,stage in ipairs({mission,local_unit,avatar_record,avatar_slot,backpack,jump_pack,attached,pack_state,
-        resolve,check_avatar,check_equipment,check_pack,warm,M.snapshot})do
+        resolve,check_avatar,check_equipment,check_pack,warm,M.snapshot,read_snapshot,work,M.apply})do
         jit.off(stage)
     end
 end

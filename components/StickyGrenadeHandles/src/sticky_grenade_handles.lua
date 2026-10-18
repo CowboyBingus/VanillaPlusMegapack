@@ -8,9 +8,10 @@
 -- other value stay vanilla, and no other object in the game uses that material.
 -- Cost: the write happens once. The game loads its entity settings a few seconds after the loader starts
 -- addons, so a self-removing update hook waits for them at the splash screen (one or two reads per frame), then
--- checks and writes once and removes itself; nothing runs per frame after that. One read at shutdown logs
+-- checks and writes once and removes itself; nothing runs per frame after that (when a later mod wrapped update
+-- meanwhile, the hook stays as a pass-through: one flag check, no api calls). One read at shutdown logs
 -- whether the value held. A second deployed copy does nothing.
-local Mod = {VERSION = '1.0'}
+local Mod = {VERSION = '1.0.1'}
 
 Mod.EXE_SHA256 = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
 Mod.GAME_SHA256 = '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
@@ -156,27 +157,32 @@ function Mod.attempt(api, exe, game, layout)
     return 'applied', tag, handle
 end
 
+local function no_update() end
+
 -- Waits for the engine with a self-removing update hook. The previous update runs first, outside pcall, so its
 -- errors reach the game unchanged. try(dt) returns true when finished; an error also finishes. When finished,
 -- the hook puts the previous update back if it is still the outermost one; otherwise it stays a pass-through.
+-- The pass-through is callback and after only: both vararg (LuaJIT starts no trace there, and traces from the
+-- updates around it stop at them), neither creates a closure, and step is no longer called. step creates no
+-- closure either: a function that does gets a UCLO on every early return, which LuaJIT cannot compile, and the
+-- hot step then started a trace that aborted on every retry.
 function Mod.hook(env, try, finish)
     local previous = env.update
     local callback, done
     local function step(dt)
-        if done then return end
         local ok, finished = pcall(try, dt)
         if ok and not finished then return end
         done = true
         finish(ok, finished)
-        if env.update == callback then env.update = previous or function() end end
+        if env.update == callback then env.update = previous or no_update end
     end
     local function after(dt, ...)
-        step(dt)
+        if not done then step(dt) end
         return ...
     end
     callback = function(dt, ...)
         if previous then return after(dt, previous(dt, ...)) end
-        step(dt)
+        if not done then step(dt) end
     end
     env.update = callback
 end

@@ -305,7 +305,7 @@ assert(bare.update == unguarded and bare.HellpodSteeringUnlocked.status:find('bi
 pass('standalone update forwards return values unchanged; no runtime, no wrapper')
 
 -- Per-frame call budget through the real loader and patch: the 10 Hz poll runs
--- one check, frames between polls make no calls. Only the poll that applies the
+-- one check (a flag read between full checks), frames between polls make no calls. Only the poll that applies the
 -- settings queries memory protection, once (about 0.29 ms in game). The checks
 -- read with read_into: the same ReadProcessMemory per field as read, into the
 -- patch's reused buffers, so no string is made; pointers and distances are
@@ -337,28 +337,42 @@ do
         assert((memory.queries > old_queries) == ((frame.writable_data or 0) > 0), label .. ': uncounted query')
         budget.check(frame, limits, label)
     end
+    -- Waiting for work: after a full check (7 reads), each poll reads only the
+    -- flag byte (1 read) while it holds the value that check saw; every 10th
+    -- poll is a full check again. Ship idle and mission idle alike.
+    local function idle_window(status)
+        for _ = 1, 9 do
+            check('idle poll', {read_into = 1}, status)
+            check('between polls', {}, status)
+        end
+        check('full check every 10th poll', {read_into = 7}, status)
+        check('between polls', {}, status)
+    end
     ffi.fill(manager, patch.size, 0)
     check('ship poll', {read_into = 7}, 'waiting_for_mission')
     check('between polls', {}, 'waiting_for_mission')
+    idle_window('waiting_for_mission')
+    idle_window('waiting_for_mission')
+    -- Mission initialization sets the flag: the flag read sees it and the full
+    -- check runs on the same poll (1 + 13 reads).
     ready()
     -- One protection query on this one poll, inside write_batch: it covers the
     -- whole manager right before the one-byte write (about 0.29 ms in game, once
     -- per mission). write_batch replaces write, which repeated the query after
     -- a separate check of the manager: two queries, about 0.6 ms.
-    check('first mission poll', {read_into = 13, writable_data = 1, write_batch = 1}, 'avoidance_settings_ready', 1)
+    check('first mission poll', {read_into = 14, writable_data = 1, write_batch = 1}, 'avoidance_settings_ready', 1)
     check('between polls', {}, 'avoidance_settings_ready')
-    check('later poll', {read_into = 7}, 'avoidance_settings_ready')
-    check('between polls', {}, 'avoidance_settings_ready')
-    check('later poll', {read_into = 7}, 'avoidance_settings_ready')
-    check('between polls', {}, 'avoidance_settings_ready')
-    -- Another writer's value: the same reads as a later poll, no write, no query.
+    idle_window('avoidance_settings_ready')
+    idle_window('avoidance_settings_ready')
+    -- Another writer's value: the flag read sees it, then the full check's reads;
+    -- no write, no query. Later polls read the flag only.
     manager[0] = 2
-    check('another writer', {read_into = 7}, 'avoidance_flag_set_by_another_writer')
+    check('another writer', {read_into = 8}, 'avoidance_flag_set_by_another_writer')
     check('between polls', {}, 'avoidance_flag_set_by_another_writer')
-    check('another writer, later poll', {read_into = 7}, 'avoidance_flag_set_by_another_writer')
+    check('another writer, later poll', {read_into = 1}, 'avoidance_flag_set_by_another_writer')
     check('between polls', {}, 'avoidance_flag_set_by_another_writer')
     ready()
-    check('mission reset after another writer', {read_into = 13, writable_data = 1, write_batch = 1},
+    check('mission reset after another writer', {read_into = 14, writable_data = 1, write_batch = 1},
         'avoidance_settings_ready', 1)
     check('between polls', {}, 'avoidance_settings_ready')
     -- An update below raises. Its error reaches the caller; the next frame pauses
@@ -560,6 +574,10 @@ do
     env.update(0.1)
     u32(32772, 1025)
     local old_writes, old_restores = writes, restores
+    -- The flag still holds 0, so the idle gate answers polls until the next full
+    -- check, the 10th poll after the last one, which finds the mismatch.
+    for _ = 1, 9 do env.update(0.1) end
+    assert(status.state == 'running' and env.HellpodSteeringUnlocked.active)
     env.update(0.1)
     assert(status.state == 'stopped: avoidance_layout_mismatch' and not env.HellpodSteeringUnlocked.active)
     assert(env.HellpodSteeringUnlocked.status == 'stopped: avoidance_layout_mismatch')

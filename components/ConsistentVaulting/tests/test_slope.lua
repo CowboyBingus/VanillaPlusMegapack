@@ -139,6 +139,21 @@ local function baseline()
     assert(math.abs(number(cells.slope)-math.cos(50*math.pi/180))<.000001)
     assert(math.abs(number(cells.height)-1.95)<.000001)
 end
+-- The mod through its loader, as the game runs it: a fresh vault module with
+-- slope (a slope assistance module), on adapter with these module bases; the
+-- environment, whose update runs one frame.
+local function load_mod(adapter,game,exe,slope)
+    local runtime=assert(loadfile(source..'/bingus_runtime.lua'))()
+    local vault=assert(loadfile(source..'/vault_data.lua'))()
+    vault.assistance=slope;slope.candidate=slope.candidate or vault.assist_candidate
+    local env=setmetatable({print=function()end,CowboyBingusModLoader={api=1,version=6}},{__index=_G});env._G=env
+    env.update=function(...)return ... end
+    local loader_api=setmetatable({module=function(name)return name and game or exe end,
+        module_hash=function(module)return module==game and 'G' or 'E' end},{__index=adapter})
+    setfenv(assert(loadfile(source..'/archive_loader.lua'))(),env)(function()return loader_api end,vault,
+        {revision='fixture',game_sha256='G',exe_sha256='E'},runtime)
+    return env
+end
 -- Idle checks allocate nothing: outside a mission, idle in a mission and with
 -- a retained query and the input released, frames through the loader (its
 -- guard and every check) create no garbage, with the fixture's number
@@ -168,17 +183,8 @@ do
     local function install(pointers)
         local adapter,game,exe=api,g,e
         if pointers then adapter,game,exe=pointer_api() end
-        local runtime=assert(loadfile(source..'/bingus_runtime.lua'))()
-        local vault=assert(loadfile(source..'/vault_data.lua'))()
         local slope=assert(loadfile(source..'/slope_assist.lua'))()
-        vault.assistance=slope;slope.candidate=vault.assist_candidate
-        local env=setmetatable({print=function()end,CowboyBingusModLoader={api=1,version=6}},{__index=_G});env._G=env
-        env.update=function(...)return ... end
-        local loader_api=setmetatable({module=function(name)return name and game or exe end,
-            module_hash=function(module)return module==game and 'G' or 'E' end},{__index=adapter})
-        setfenv(assert(loadfile(source..'/archive_loader.lua'))(),env)(function()return loader_api end,vault,
-            {revision='fixture',game_sha256='G',exe_sha256='E'},runtime)
-        return env
+        return load_mod(adapter,game,exe,slope)
     end
     local function garbage(env,frames)
         collectgarbage('collect');collectgarbage('stop')
@@ -197,8 +203,11 @@ do
     local function traced() events=events+1 end
     -- bytes per frame over a window of 600 frames; compiled, the first window
     -- without trace events after a warm-up.
+    -- Interpreted, one warm-up window first: with idle frames gated a scenario
+    -- reaches its first full checks later, and the state table settles to the
+    -- scenario's keys once (one rehash), never again in the windows after it.
     local function per_frame(env,compiled)
-        if not compiled then return garbage(env,600)/600 end
+        if not compiled then garbage(env,600);return garbage(env,600)/600 end
         for _=1,5 do garbage(env,600) end
         for _=1,20 do
             events=0
@@ -216,7 +225,9 @@ do
         for _,scenario in ipairs(scenarios) do
             scenario[2]()
             for i,env in ipairs(envs) do
-                for _=1,10 do env.update(1/60) end
+                -- 61 frames: the idle gate runs a full check at least every
+                -- 60th frame (outside a mission), which reports the new state.
+                for _=1,61 do env.update(1/60) end
                 assert(env.ConsistentVaulting.status==scenario[3],scenario[1]..': '..env.ConsistentVaulting.status)
                 local bytes=per_frame(env,compiled)
                 assert(bytes==0,string.format('%s (%s addresses, %s): %.1f bytes per frame',scenario[1],
@@ -331,6 +342,18 @@ p(avatars,0x118,owner+0xf32f18+24);step(state);step(state);assert(state.slope_st
 u(entities,32,999);step(state);assert(state.slope_status=='waiting_for_avatar')
 u(entities,32,222);step(state);step(state);assert(state.slope_status=='waiting_for_manual_climb')
 avatars[input]=1;step(state);assert(state.slope_lease);assert(A.stop(api,g,e,state));baseline();done()
+-- A new identity found while the input is held is not a fresh press: the
+-- local avatar's entity record moves (same avatar index, ID and unit; the unit
+-- reference and the registry slot now lead to the copy) while the input is
+-- pressed. Released and pressed again, it arms.
+local moved,unitrows=region(owner+0xf32f18+48,24),locate(0x70100000,128)
+reset();state={};step(state);step(state);assert(state.slope_status=='waiting_for_manual_climb')
+ffi.copy(moved,entities+24,24);u(unitrows,9%16*8+4,2);p(avatars,0x118,owner+0xf32f18+48)
+avatars[input]=1;step(state)
+assert(not state.slope_lease and state.slope_down==true,'a press held across a new identity armed')
+avatars[input]=0;step(state);avatars[input]=1;step(state);assert(state.slope_lease,'a fresh press after a new identity')
+assert(A.stop(api,g,e,state));baseline()
+u(unitrows,9%16*8+4,1);p(avatars,0x118,owner+0xf32f18+24);ffi.fill(moved,24);done()
 -- Relocation of the same entity's override must restore its new row.
 reset();state={};arm(state);local old_enter,old_exit=cells.enter,cells.exit
 ffi.copy(avatars+0x547d24+2*852,settings,852);u(overrides,222%16*8+4,2)
@@ -444,4 +467,78 @@ do
     assert(not s.slope_lease);baseline()
 end
 print('PASS: per-check call budget: 7 reads and no protection queries idle; released-input checks skip the mover/settings reads; leases write only on arm, cap and release')
+-- Per-frame call budget of the loaded mod with its idle gate (slope_assist.lua
+-- A.idle): the checks above run on one frame in 10 in a mission (the full
+-- identity check, 7 reads) and one in 60 outside a mission (2 reads); the
+-- frames between make one read (the input at the kept avatar index) and none.
+-- A press reaches the full check on the frame it is seen. Agreed limitation:
+-- when the local avatar's index changes (a teammate leaving compacts the
+-- registry; a respawn) the gate reads the old index until the next full check,
+-- so a tap that ends before it is missed and a held press is seen there, as a
+-- held press (a fresh one is needed for the slope assist).
+do
+    local budget=dofile(arg[0]:gsub('[%w_]+%.lua$','')..'frame_budget.lua')
+    local counts=budget.wrap(api)
+    reset();avatars[input]=0
+    local env=load_mod(api,g,e,A)
+    local s=env.ConsistentVaulting
+    local function frame() return (budget.frame(counts,env.update,1/60)) end
+    -- Runs frames until a full check (s.polls grows); its frame's counts.
+    local function full_check()
+        for _=1,60 do
+            local polls=s.polls
+            local counts_of=frame()
+            if s.polls>polls then return counts_of end
+        end
+        error('no full check within 60 frames')
+    end
+    -- Outside a mission: 59 frames without a call, then the mission check.
+    u(mission,8,0);full_check();full_check()
+    for i=1,59 do budget.check(frame(),{},'outside a mission, gated frame '..i) end
+    local polls=s.polls
+    budget.check(frame(),{read_into=2},'outside a mission, full check')
+    assert(s.polls==polls+1 and s.status=='waiting_for_mission')
+    -- In a mission, idle: 9 frames of one read, then the 7-read check.
+    u(mission,8,1);full_check();full_check()
+    for i=1,9 do budget.check(frame(),{read_into=1},'idle in a mission, gated frame '..i) end
+    budget.check(frame(),{read_into=7},'idle in a mission, full check')
+    assert(s.status=='waiting_for_vault_query')
+    -- A press on a gated frame arms on that frame: the gate's read, then the
+    -- check, which arms, the check replayed before the update now that work
+    -- has started (archive_loader.lua) and the check after the update.
+    full_check();budget.check(frame(),{read_into=1},'gated frame before the press')
+    avatars[input]=1;polls=s.polls;local arms=s.slope_arms or 0
+    local pressed=frame()
+    assert(s.polls==polls+3 and s.slope_lease and s.slope_arms==arms+1,'a press on a gated frame arms at once')
+    budget.check(pressed,{read=195,read_into=57,pointer=30,distance=11,native=3,time=3,writable_data=2,write=1,
+        write_batch=1},'press on a gated frame')
+    avatars[input]=0;now=now+2;for _=1,3 do frame() end;assert(not s.slope_lease);baseline()
+    -- The local avatar's index changes (222 moves to index 0, 111 to 1) right
+    -- after a full check, and the new index's input is pressed.
+    full_check();full_check()
+    local in0=0x150+0x1b68+14*32
+    local function compact(on)
+        u(avatarrows,222%16*8+4,on and 0 or 1);u(avatarrows,111%16*8+4,on and 1 or 0)
+        p(avatars,0x110,owner+0xf32f18+(on and 24 or 0));p(avatars,0x118,owner+0xf32f18+(on and 0 or 24))
+        u(avatars,0x53e1b8+0x2ac,on and 222 or 0);u(avatars,0x53e134+40,on and 222 or 0)
+        if not on then avatars[in0]=0 end
+    end
+    compact(true)
+    -- A tap of 3 frames ends before the next full check: missed.
+    polls=s.polls
+    avatars[in0]=1;for _=1,3 do frame() end;avatars[in0]=0;frame()
+    assert(s.polls==polls and s.slope_down==false,'a tap on the new index before the full check is not seen')
+    -- Held: seen at the next full check, within 10 frames, as a held press.
+    avatars[in0]=1
+    local seen
+    for i=1,10 do frame();if s.slope_down then seen=i;break end end
+    assert(seen==6,'a held press is seen at the next full check')
+    assert(not s.slope_lease and s.status=='waiting_for_vault_query')
+    -- Released, the gate reads the new index: the next press is seen at once.
+    avatars[in0]=0;full_check();frame();polls=s.polls
+    avatars[in0]=1;frame();assert(s.polls==polls+1 and s.slope_down==true,'the gate follows the new index')
+    compact(false);avatars[input]=0;for _=1,20 do frame() end
+    assert(s.slope_down==false and not s.slope_lease);baseline()
+end
+print('PASS: per-frame call budget with the idle gate: 1 read on 9 of 10 idle mission frames (7 on the 10th), none on 59 of 60 frames outside a mission (2 on the 60th); a press arms on the frame it is seen; a changed avatar index is found within 10 frames (a tap before then is missed)')
 print('PASS: '..passed..' slope ownership, native-override model, limits, lease lifecycle, cleanup and integration scenarios')

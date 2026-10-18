@@ -161,7 +161,8 @@ do
 end
 
 local global_offset, presenter_offset = 0x347ce28, 17032
-local module = ffi.new('GMH_u8[?]', global_offset + 24)
+-- game.dll's data up to the input owner pointer (0x347cf18), the last global read.
+local module = ffi.new('GMH_u8[?]', 0x347cf20)
 local ui = ffi.new('GMH_u8[?]', presenter_offset + 64)
 local ui_address = ffi.cast('GMH_u64', ui)
 ffi.copy(module + global_offset, ffi.new('GMH_u64[1]', ui_address), 8)
@@ -1189,25 +1190,55 @@ print('Registration after startup: with the loader\'s after_startup the six shor
 -- PerformanceBaseline/frame_budget.lua). A fresh instance runs whole frames on a
 -- fake engine, fake windows and keys, a fake Mod Bindings Menu and the fake
 -- game memory above; its engine calls, Windows calls, binding calls, reads and
--- native calls are counted through one api table. In game a ReadProcessMemory
--- costs about 1-2 us; the engine calls and the window and key calls are
--- unmeasured in game. Twice: with a Mod Bindings Menu that offers only is_down
--- (v2.1 and older), which makes 3 reads per call (v2.1: 4), 18 per focused
--- frame; and with one that offers poll, which answers all six in one call of 8
--- reads (Mod Bindings Menu's tests/test_mods_tab.lua pins both).
-local function per_frame_calls(with_poll)
+-- native calls are counted through one api table, and every frame makes
+-- exactly the calls pinned for it. In game a ReadProcessMemory costs about 1-2
+-- us; the engine calls and the window and key calls are unmeasured in game.
+-- Reads are counted as ReadProcessMemory: the actions', the idle gate's, the
+-- input owner's and the mission check's (the last three without allocation).
+-- Three times: with a Mod Bindings Menu that offers only is_down (v2.1 and older, 3
+-- reads per call, 18 per polled frame), with one that offers poll (one call of
+-- 8 reads for all six; Mod Bindings Menu's tests/test_mods_tab.lua pins both)
+-- but not the layout the idle gate knows, and with that layout (36 actions and
+-- ready) under each API version: 3 (v2.0 to v2.2.1) and 4 (v2.3), where an
+-- idle frame aboard makes the gate's one read and nothing else, and 2 and 5,
+-- which the gate does not know: those are polled on every focused frame, as
+-- with poll.
+local function per_frame_calls(variant, version)
     local budget = dofile((arg[0]:match('^(.*[/\\])') or './') .. 'frame_budget.lua')
+    version = version or 3
+    local GATED = variant == 'gate' and (version == 3 or version == 4)
     -- A mission lists its main world again among all worlds, as does the ship.
-    local SHIP_WORLD, MISSION_WORLD, UI_WORLD, GALAXY = {}, {}, {}, {1}
+    local SHIP_WORLD, MISSION_WORLD, UI_WORLD, GALAXY, NO_UNITS = {}, {}, {}, {1}, {}
     -- The game's window and another program's.
     local GAME_WINDOW, OTHER_WINDOW = 0x1234, 0x5678
     local game = {main = MISSION_WORLD, list = {MISSION_WORLD, UI_WORLD}, window = GAME_WINDOW, process = 0,
                   keys = {}, down = {}}
+    -- The mission record: flag at +8, mission type at +0x40.
+    local mode_record = ffi.new('GMH_u8[72]')
+    ffi.copy(module + 0x33266a0, ptr(mode_record), 8)
+    local function mission(on)
+        set32(mode_record, 8, on and 1 or 0)
+        set32(mode_record, 0x40, on and 3 or 0)
+    end
+    mission(false)
+    -- The input owner: each action's 32-byte state entry at +808, byte 0 set
+    -- while it fires. Mod Bindings Menu's fixed v1 slots, {group, action}.
+    local owner = ffi.new('GMH_u8[?]', 808 + 32 * 97 * 13)
+    ffi.copy(module + 0x347cf18, ptr(owner), 8)
+    local SLOT_ACTIONS = {{12, 1}, {12, 0}, {10, 1}, {10, 4}, {10, 8}, {10, 14}, {10, 9}}
+    local slots = {}
+    for _, shortcut in ipairs(shortcuts) do slots[shortcut.id] = shortcut.slot end
+    -- A binding down or up, in Mod Bindings Menu's answers and in the game's state byte.
+    local function press(id, down)
+        game.down[id] = down or nil
+        local action = SLOT_ACTIONS[slots[id]]
+        owner[808 + 32 * (action[1] * 97 + action[2])] = down and 1 or 0
+    end
     local api = {
         from_hex = function() return 'galaxy table resource' end,
         main_world = function() return game.main end,
         worlds = function() return game.list end,
-        units_by_resource = function(world) return world == SHIP_WORLD and GALAXY or {} end,
+        units_by_resource = function(world) return world == SHIP_WORLD and GALAXY or NO_UNITS end,
         GetForegroundWindow = function() return game.window end,
         GetWindowThreadProcessId = function(window, process)
             process[0] = window == GAME_WINDOW and game.process or game.process + 1
@@ -1222,6 +1253,7 @@ local function per_frame_calls(with_poll)
             for index = 1, #ids do out.down[index] = game.down[ids[index]] == true end
             return true
         end,
+        ready = function() return true end,
         open_presenter = function(_, kind) current[0], depth[0] = kind, 1 end,
     }
     _G.stingray = {
@@ -1229,9 +1261,10 @@ local function per_frame_calls(with_poll)
         World = {units_by_resource = function(world, id) return api.units_by_resource(world, id) end},
         IdString64 = {from_hex = function(hex) return api.from_hex(hex) end},
     }
-    local host = {version = 3, register_binding = function(...) return api.register_binding(...) end,
+    local host = {version = version, register_binding = function(...) return api.register_binding(...) end,
                   is_down = function(id) return api.is_down(id) end}
-    if with_poll then host.poll = function(...) return api.poll(...) end end
+    if variant ~= 'is_down' then host.poll = function(...) return api.poll(...) end end
+    if variant == 'gate' then host.capacity, host.ready = 36, function() return api.ready() end end
     _G.ModBindingsMenu = host
     _G.GalacticMenuHotkeyInstalled, _G.BingusTranslations, _G.BingusRuntime = nil, nil, nil
     Text.registry().steam_language = 'en'
@@ -1240,9 +1273,12 @@ local function per_frame_calls(with_poll)
     local wrapper = update
     local st = upvalue(wrapper, 'state')
     -- The native layer is the test's own (st.open_presenter below): the native
-    -- check, which refuses outside the game, is marked done.
-    st.initialized = true
-    local CONTEXT_FRAMES = upvalue(wrapper, 'CONTEXT_FRAMES')
+    -- check, which refuses outside the game, finds this fake game.dll.
+    local native_holder, native_index = holder(wrapper, 'initialize_native')
+    debug.setupvalue(native_holder, native_index, function()
+        st.initialized, st.game_base = true, tonumber(ffi.cast('GMH_u64', module))
+    end)
+    st.open_presenter = function(...) return api.open_presenter(...) end
     -- The Windows calls go by their private names in the mod (GMH_ and the real
     -- name) and are counted under the real one.
     local function windows_api(real)
@@ -1257,18 +1293,24 @@ local function per_frame_calls(with_poll)
     debug.setupvalue(kernel_holder, kernel_index, windows_api(real_kernel))
     game.process = upvalue(wrapper, 'process_id')
     local counts = budget.wrap(api)
+    -- One frame: within the budget, and exactly the calls pinned.
     local function frame(label, limits)
-        budget.check((budget.frame(counts, wrapper, 1 / 64)), limits, label)
+        local made = budget.frame(counts, wrapper, 1 / 64)
+        budget.check(made, limits, label)
+        for name, limit in pairs(limits) do
+            assert((made[name] or 0) == limit, label .. ': ' .. budget.describe(made))
+        end
     end
-    -- Frames that do not read the context.
+    -- Frames without a check (see CONTEXT_FRAMES); until_check runs them up to the next one.
     local function between(label, frames, limits)
         for index = 1, frames do
-            assert(st.context_frames > 1, label .. ' ' .. index .. ' must not read the context')
+            assert(st.context_frames > 1, label .. ' ' .. index .. ' must not be a check')
             frame(label .. ' ' .. index, limits)
         end
     end
+    local function until_check(label, limits) between(label, st.context_frames - 1, limits) end
     local function check(label, limits)
-        assert(st.context_frames <= 1, label .. ' must read the context')
+        assert(st.context_frames <= 1, label .. ' must be a check')
         frame(label, limits)
     end
     local function with(...)
@@ -1278,123 +1320,203 @@ local function per_frame_calls(with_poll)
         end
         return limits
     end
+    local CONTEXT_FRAMES, WATCH_FRAMES = upvalue(wrapper, 'CONTEXT_FRAMES'), upvalue(wrapper, 'WATCH_FRAMES')
+    assert(CONTEXT_FRAMES == 15 and WATCH_FRAMES == 60)
+    local MAP = 'cowboybingus.galactic_menu'
     local from = #messages + 1
     -- The context: the galaxy table looked up in every world, and aboard the
-    -- window focus (two Windows calls). It is read once every CONTEXT_FRAMES
-    -- frames (v1.8: on every frame) and on every frame that acts.
-    local MISSION = {from_hex = 1, main_world = 1, worlds = 1, units_by_resource = 3}
+    -- window focus (two Windows calls). Read every CONTEXT_FRAMES frames until
+    -- the ship is found, and on every frame that acts.
+    local NONE = {}
+    local MENU = {from_hex = 1, main_world = 1, worlds = 1, units_by_resource = 3}
     local SHIP = {from_hex = 1, main_world = 1, worlds = 1, units_by_resource = 1}
     local FOCUS = {GetForegroundWindow = 1, GetWindowThreadProcessId = 1}
-    -- Aboard with the game focused, all six shortcuts are polled on every frame:
-    -- six is_down calls, or one poll.
-    local POLL, NONE = with_poll and {poll = 1} or {is_down = 6}, {}
+    -- Aboard and in a mission, the mission check every WATCH_FRAMES frames (two
+    -- reads); aboard with the gate, the input owner read again then (one read).
+    local MISSION_CHECK = {ReadProcessMemory = 2}
+    local OWNER = GATED and {ReadProcessMemory = 1} or NONE
+    local POLL = variant == 'is_down' and {is_down = 6} or {poll = 1}
+    -- An idle frame aboard: the gate's one read, else all six polled (focused).
+    local IDLE = GATED and {ReadProcessMemory = 1} or POLL
+    -- A frame with a shortcut down: the gate's read, then all six polled.
+    local GATE = GATED and {ReadProcessMemory = 1} or NONE
+    local DOWN = with(GATE, POLL)
+    -- An action: the presenter check (3 reads), the native call and the log line's read.
     local PRESS = {ReadProcessMemory = 4, open_presenter = 1}
 
-    -- In a mission. The first frame also registers the six bindings.
-    check('first frame, in a mission', with(MISSION, {register_binding = 6}))
-    between('in a mission', CONTEXT_FRAMES - 1, NONE)
-    check('in a mission, context check', MISSION)
-    between('in a mission', 4, NONE)
-    -- The ship's world is found at the next context check.
+    -- Before the ship (the native check has not run): the context every
+    -- CONTEXT_FRAMES frames. The first frame also registers the six bindings.
+    check('first frame, before the ship', with(MENU, {register_binding = 6}))
+    between('before the ship', CONTEXT_FRAMES - 1, NONE)
+    check('before the ship, context check', MENU)
+    between('before the ship', 4, NONE)
+    -- The ship's world is found at the next context check: the native check
+    -- runs, and the next check is the mission check, WATCH_FRAMES frames later.
     game.main, game.list = SHIP_WORLD, {SHIP_WORLD, UI_WORLD}
     between('ship loaded, before the next context check', CONTEXT_FRAMES - 5, NONE)
-    check('arrival on the ship', with(SHIP, FOCUS, POLL))
-    st.game_base = tonumber(ffi.cast('GMH_u64', module))
-    st.open_presenter = function(...) return api.open_presenter(...) end
+    check('arrival on the ship', with(SHIP, FOCUS, OWNER, IDLE, GATED and {ready = 1} or NONE))
+    assert(st.world == SHIP_WORLD and st.focused and st.context_frames == WATCH_FRAMES)
+    assert(st.gate == GATED, 'the gate stands in for Mod Bindings Menu versions 3 and 4 only (version '
+           .. tostring(version) .. ')')
     current[0], depth[0] = 0, 0
-    between('ship, focused', CONTEXT_FRAMES - 1, POLL)
-    check('ship, focused, context check', with(SHIP, FOCUS, POLL))
-    -- Another window comes to the front: until the next context check the
-    -- shortcuts are still polled (a press would read the context first, below).
+    between('ship, idle', WATCH_FRAMES - 1, IDLE)
+    check('ship, mission check', with(MISSION_CHECK, OWNER, IDLE))
+    -- Another window comes to the front: idle frames do not check the focus.
     game.window = OTHER_WINDOW
-    between('ship, another window in front, before the context check', CONTEXT_FRAMES - 1, POLL)
-    check('ship, not focused, context check', with(SHIP, FOCUS))
-    -- Not focused: the focus on every frame, one call while the same window
-    -- stays in front.
-    between('ship, not focused', 3, {GetForegroundWindow = 1})
-    -- Back to the game: seen on that frame, and the shortcuts are polled at once.
-    game.window = GAME_WINDOW
-    between('ship, focused again', 1, with(FOCUS, POLL))
-    between('ship, focused', 2, POLL)
-    -- A press reads the context, then acts on the frame it is first seen down:
-    -- the presenter check (3 reads), the native call and the log line's read.
-    game.down['cowboybingus.galactic_menu'] = true
-    between('ship, Tab pressed', 1, with(POLL, SHIP, FOCUS, PRESS))
-    assert(current[0] == 15, 'Tab opens the Galactic Map')
-    between('ship, Tab held', 2, POLL)
-    game.down['cowboybingus.galactic_menu'] = nil
-    current[0], depth[0] = 0, 0
-    -- A press while another window is already in front reads the context and
-    -- does not act; held as the game comes back, it acts then, as in v1.8.
-    -- That frame reads the focus twice (v1.8: once): when the game comes back,
-    -- then with the whole context before the shortcut acts.
-    between('ship, focused', 1, POLL)
-    game.window, game.down['cowboybingus.galactic_menu'] = OTHER_WINDOW, true
-    between('ship, Tab pressed in another window', 1, with(POLL, SHIP, FOCUS))
+    between('ship, another window in front', 3, IDLE)
+    -- A press there reads the context and does not act; held, only the focus
+    -- is checked (one call while the same window stays in front); held as the
+    -- game comes back, it acts then, as in v1.8. That frame reads the focus
+    -- twice (v1.8: once): when the game comes back, then with the whole context.
+    press(MAP, true)
+    between('ship, Tab pressed in another window', 1, with(DOWN, SHIP, FOCUS))
     assert(current[0] == 0 and not st.focused, 'no shortcut acts without focus')
+    between('ship, Tab held in another window', 2, with(GATE, {GetForegroundWindow = 1}))
     game.window = GAME_WINDOW
-    between('ship, Tab held as the game comes back', 1, with(FOCUS, POLL, SHIP, FOCUS, PRESS))
+    between('ship, Tab held as the game comes back', 1, with(GATE, FOCUS, POLL, SHIP, FOCUS, PRESS))
     assert(current[0] == 15, 'a held Tab opens the map once the game is focused')
-    game.down['cowboybingus.galactic_menu'] = nil
+    between('ship, Tab held', 2, DOWN)
+    -- Released: with the gate that frame only marks every shortcut up.
+    press(MAP, false)
     current[0], depth[0] = 0, 0
+    between('ship, Tab released', 1, IDLE)
+    assert(not st.held and not st.keys_down[MAP])
+    between('ship, idle', 2, IDLE)
+    -- A press reads the context, then acts on the frame it is first seen down.
+    press(MAP, true)
+    between('ship, Tab pressed', 1, with(DOWN, SHIP, FOCUS, PRESS))
+    assert(current[0] == 15, 'Tab opens the Galactic Map')
+    press(MAP, false)
+    current[0], depth[0] = 0, 0
+    between('ship, Tab released', 1, IDLE)
     -- Without Mod Bindings Menu the fixed keys are polled instead.
     _G.ModBindingsMenu = nil
-    between('ship, focused, without Mod Bindings Menu', CONTEXT_FRAMES - 1, {GetAsyncKeyState = 6})
-    check('ship, focused, without Mod Bindings Menu, context check', with(SHIP, FOCUS, {GetAsyncKeyState = 6}))
+    between('ship, focused, without Mod Bindings Menu', 3, {GetAsyncKeyState = 6})
     _G.ModBindingsMenu = host
+    between('ship, Mod Bindings Menu back', 1, IDLE)
     -- F8 pressed during the Hellpod's ready animation: until it opens, every
     -- frame reads the context and checks the presenter (3 reads) and the
-    -- Hellpod (13 reads).
+    -- Hellpod (13 reads), and polls the shortcuts without the gate.
     pod_state(2, 1, 1)
     st.hellpod_wait = 10
-    for index = 1, 2 do frame('ship, Hellpod wait ' .. index, with(SHIP, FOCUS, POLL, {ReadProcessMemory = 16})) end
+    between('ship, Hellpod wait', 2, with(SHIP, FOCUS, POLL, {ReadProcessMemory = 16}))
     assert(st.hellpod_wait == 10 - 2 / 64, 'the Hellpod wait continues')
     st.hellpod_wait = nil
-    between('ship, focused', 2, POLL)
-    -- Leaving the ship: until the next context check the shortcuts are still
-    -- polled, and a press reads the context first, so it does not act.
+    until_check('ship, idle', IDLE)
+    check('ship, mission check', with(MISSION_CHECK, OWNER, IDLE))
+    -- Leaving for a mission: until the mission check idle frames stay as they
+    -- are, and a press reads the context first, so it does not act.
     game.main, game.list = MISSION_WORLD, {MISSION_WORLD, UI_WORLD}
-    between('ship gone, before the context check', 2, POLL)
-    game.down['cowboybingus.galactic_menu'] = true
-    between('Tab pressed as the ship is gone', 1, with(POLL, MISSION))
+    mission(true)
+    between('ship gone, before the mission check', 2, IDLE)
+    press(MAP, true)
+    between('Tab pressed as the ship is gone', 1, with(DOWN, MENU))
     assert(current[0] == 0 and st.world == nil, 'no shortcut acts off the ship')
-    game.down['cowboybingus.galactic_menu'] = nil
-    between('in a mission', CONTEXT_FRAMES - 1, NONE)
-    check('in a mission, context check', MISSION)
+    press(MAP, false)
+    until_check('off the ship, before the mission check', NONE)
+    check('mission check, in a mission', MISSION_CHECK)
+    assert(st.in_mission and st.context_frames == WATCH_FRAMES)
+    -- In a mission: nothing between the mission checks, keys or not.
+    press(MAP, true)
+    until_check('in a mission', NONE)
+    press(MAP, false)
+    check('in a mission, mission check', MISSION_CHECK)
+    -- The mission ends and the ship is back: found at the next mission check.
+    mission(false)
+    game.main, game.list = SHIP_WORLD, {SHIP_WORLD, UI_WORLD}
+    until_check('ship loading', NONE)
+    check('back on the ship', with(MISSION_CHECK, SHIP, FOCUS, OWNER, IDLE))
+    assert(st.world == SHIP_WORLD and not st.in_mission)
+    -- Leaving again without a press: the mission check leaves the ship.
+    until_check('ship, idle', IDLE)
+    mission(true)
+    game.main, game.list = MISSION_WORLD, {MISSION_WORLD, UI_WORLD}
+    check('ship to mission at the mission check', MISSION_CHECK)
+    assert(st.world == nil and st.in_mission)
+    until_check('in a mission', NONE)
     for index = from, #messages do
         assert(not messages[index]:find('Update error:', 1, true), messages[index])
     end
+    assert(#messages >= from, 'logged')
 
-    -- Context checks and the frames between them allocate nothing of their own
-    -- aboard, focused or not (the fakes return kept tables), interpreted, so
-    -- that compiled-trace allocation sinking cannot hide garbage. One context
-    -- period runs first: a full collection shrinks LuaJIT's temporary string
-    -- buffer, which the first status text after it grows again.
+    -- Idle frames allocate nothing of their own, aboard focused or not and in
+    -- a mission (the fakes return kept tables), interpreted, so that
+    -- compiled-trace allocation sinking cannot hide garbage. One check period
+    -- runs first: a full collection shrinks LuaJIT's temporary string buffer,
+    -- which the first status text after it grows again.
     local function garbage(periods)
         jit.off()
         jit.flush()
         collectgarbage('collect')
         collectgarbage('stop')
-        for _ = 1, CONTEXT_FRAMES do wrapper(1 / 64) end
+        for _ = 1, WATCH_FRAMES do wrapper(1 / 64) end
         local before = collectgarbage('count')
-        for _ = 1, CONTEXT_FRAMES * periods do wrapper(1 / 64) end
+        for _ = 1, WATCH_FRAMES * periods do wrapper(1 / 64) end
         local bytes = (collectgarbage('count') - before) * 1024
         collectgarbage('restart')
         jit.on()
         return bytes
     end
+    local in_mission = garbage(4)
+    assert(st.in_mission and st.world == nil)
+    mission(false)
     game.main, game.list = SHIP_WORLD, {SHIP_WORLD, UI_WORLD}
     local focused = garbage(4)
     assert(st.world == SHIP_WORLD and st.focused)
-    game.window = OTHER_WINDOW
+    game.window, st.focused = OTHER_WINDOW, false
     local unfocused = garbage(4)
     assert(st.world == SHIP_WORLD and not st.focused)
     game.window = GAME_WINDOW
-    assert(focused == 0 and unfocused == 0,
-           string.format('ship frames allocated %d bytes (focused) and %d (not focused)', focused, unfocused))
+    assert(focused == 0 and unfocused == 0 and in_mission == 0,
+           string.format('idle frames allocated %d bytes (focused), %d (not focused), %d (mission)',
+                         focused, unfocused, in_mission))
 end
-per_frame_calls(false)
-per_frame_calls(true)
-print('Per-frame calls, with is_down and with poll: the context read every 15 frames and on frames that act, '
-      .. 'missions, the ship focused and not, presses on an older context, fixed keys and a Hellpod wait within their '
-      .. 'pinned budgets, and ship frames without allocation OK')
+per_frame_calls('is_down')
+per_frame_calls('poll')
+per_frame_calls('gate', 3)
+per_frame_calls('gate', 4)
+per_frame_calls('gate', 2)
+per_frame_calls('gate', 5)
+print('Per-frame calls, with is_down, with poll and with the idle gate: the context read until the ship is found and '
+      .. 'on frames that act, the mission check every 60 frames aboard and in a mission, one read per idle frame '
+      .. 'aboard with the gate (Mod Bindings Menu versions 3 and 4; 2 and 5 polled), nothing between checks in a '
+      .. 'mission, presses on and off focus, fixed keys and a Hellpod wait within their exact pinned budgets, and idle '
+      .. 'frames without allocation OK')
+
+-- The tables the idle gate stands in for: all six shortcuts registered, 36
+-- actions, a ready function and API version 3 or 4 exactly. Any other version,
+-- capacity or ready, or a shortcut not registered, keeps the polling fallback.
+do
+    _G.ModBindingsMenu, _G.GalacticMenuHotkeyInstalled, _G.BingusTranslations, _G.BingusRuntime = nil, nil, nil, nil
+    Text.registry().steam_language = 'en'
+    _G.update = function() end
+    dofile(source)
+    local st, update_gate = upvalue(update, 'state'), upvalue(update, 'update_gate')
+    local ids = {}
+    for index, shortcut in ipairs(upvalue(update, 'SHORTCUTS')) do ids[index] = shortcut.id end
+    for _, id in ipairs(ids) do st.binding_slots[id] = true end
+    local function ready() return true end
+    local cases = {
+        {3, 36, ready, true}, {4, 36, ready, true},
+        {2, 36, ready, false}, {5, 36, ready, false}, {1, 36, ready, false}, {nil, 36, ready, false},
+        {'4', 36, ready, false}, {4.5, 36, ready, false},
+        {4, 35, ready, false}, {4, 37, ready, false}, {4, nil, ready, false},
+        {4, 36, nil, false}, {4, 36, true, false}, {3, 36, nil, false},
+    }
+    for _, case in ipairs(cases) do
+        update_gate({version = case[1], capacity = case[2], ready = case[3]})
+        assert(st.gate == case[4], string.format('version %s, capacity %s, ready %s: gate %s',
+               tostring(case[1]), tostring(case[2]), type(case[3]), tostring(st.gate)))
+    end
+    for _, id in ipairs(ids) do
+        st.binding_slots[id] = nil
+        update_gate({version = 4, capacity = 36, ready = ready})
+        assert(st.gate == false, 'a shortcut not registered: no gate (' .. id .. ')')
+        st.binding_slots[id] = true
+    end
+    update_gate({version = 4, capacity = 36, ready = ready})
+    assert(st.gate == true)
+end
+print('Idle gate layouts: Mod Bindings Menu API version 3 or 4 with 36 actions, ready and all six shortcuts '
+      .. 'registered; versions 1, 2, 5, nil, "4" and 4.5, other capacities, no ready and a missing shortcut keep '
+      .. 'the polling fallback OK')

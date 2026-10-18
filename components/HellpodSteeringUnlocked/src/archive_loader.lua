@@ -40,11 +40,15 @@ return function(create_api, patch, build, runtime)
     local elapsed, frame_dt = POLL, 0
     local function step(dt) frame_dt = dt end
     -- Because mission initialization resets the flag, it is checked every 100 ms.
+    -- Between full checks the patch's idle gate (steering_patch.lua patch.idle)
+    -- answers a poll with one read of the flag byte: no apply, no report.
+    local idle = patch.idle
     local function poll()
         local dt = frame_dt
         elapsed = elapsed + ((type(dt) == 'number' and dt == dt and dt > 0) and dt or 0)
         if elapsed < POLL then return end
         elapsed = 0
+        if idle and idle(api, own) then return end
         local accepted, reason, active = patch.apply(api, game, own)
         if not accepted then return guard.stop(reason) end
         report(tostring(reason), active == true)
@@ -69,6 +73,15 @@ return function(create_api, patch, build, runtime)
     local function log(line)
         if line:sub(1, #prefix) == prefix then line = line:sub(#prefix + 1) end
         report(line, false)
+    end
+    -- The guard calls step and poll under pcall, so a trace started at either's
+    -- entry aborts where it returns ("NYI: return to lower frame") and retries
+    -- whenever LuaJIT's 64 penalty slots have evicted it. Neither has a loop:
+    -- they run interpreted (a few bytecodes per frame, and the patch's checks
+    -- were interpreted already).
+    if type(jit) == 'table' and type(jit.off) == 'function' then
+        jit.off(step)
+        jit.off(poll)
     end
     local installed, problem = pcall(function()
         guard = runtime.guard({name = 'HellpodSteeringUnlocked', step = step, after = poll, stop = stop,

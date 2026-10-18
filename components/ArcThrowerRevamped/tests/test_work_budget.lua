@@ -59,6 +59,11 @@ local function move_avatar(index)
 end
 local relocated, generation, input_valid, command=false,1,true,true
 local aim=false -- the Aim slot (8) sits just before Fire; the assist never reads it
+-- The mission record (game.dll+0x33266a0 -> 68 bytes): a mission runs while
+-- word +8 is set and word +0x40 is 1..7. mission=false is the ship.
+local MODE=0x27000000
+put(GAME+0x33266a0,integer(MODE))
+local mission,mission_type=true,1
 -- The engine copies each weapon's fire command into its charging flag every
 -- frame and clears it once the shot fires: engine_flag is what the assist
 -- reads at the start of its update (0: cleared, the assist must set it).
@@ -76,6 +81,7 @@ local function slot()return second and 510 or (relocated and 3 or 511)end
 local function entry_base()return ENTRIES+(relocated and 0x10000 or 0)end
 local ZERO4='\0\0\0\0'
 local function memory(address,size)
+    if address==MODE and size==68 then return blob(68,{[8]=u(mission and 1 or 0),[0x40]=u(mission_type)}) end
     if blocked[address] then return nil end
     if address==input+8 and size==4 then -- the idle gate's read: allocates nothing while Fire is up
         if not input_valid then return nil end
@@ -365,23 +371,44 @@ if mode=='budget' then
         first_frame(label,limits,function() return record_checks>c end)
     end
     -- +1 VirtualQueryEx: the record page is checked right before its write.
+    -- +2 reads: the first frame is a poll frame, which reads the mission record.
     pin('startup scan and record patch',{GetModuleHandleA=2,GetCurrentProcess=1,QueryPerformanceFrequency=1,
-        QueryPerformanceCounter=6,ReadProcessMemory=21,VirtualQueryEx=3,VirtualProtectEx=2,WriteProcessMemory=1},
+        QueryPerformanceCounter=6,ReadProcessMemory=23,VirtualQueryEx=3,VirtualProtectEx=2,WriteProcessMemory=1},
         startup)
     assert(region_protection(REGION+record+184)==2,'the record page is read-only again after the patch')
-    -- Every 15th update is a check frame: the record check (one 216-byte read)
-    -- and the full Fire check (16 reads). Between them the idle gate reads the
-    -- kept Fire slot once and stops while Fire is up.
+    -- In a mission every 15th update is a check frame: the full Fire check
+    -- (16 reads). Every 60th is a poll frame, also a check frame: the mission
+    -- record (2 reads) and the record check (one 216-byte read) as well.
+    -- Between them the idle gate reads the kept Fire slot once and stops while
+    -- Fire is up. Frames are counted: no timestamp unless a frame does work.
     settle()
     pin('in a mission, fire up',{ReadProcessMemory=1})
-    check_frame('in a mission, fire up, check frame',{ReadProcessMemory=17,QueryPerformanceCounter=1})
+    for _=2,14 do tick() end
+    pin('in a mission, fire up, check frame',{ReadProcessMemory=16})
+    check_frame('in a mission, fire up, poll frame',{ReadProcessMemory=19})
     aim=true;settle()
     pin('aiming, fire up',{ReadProcessMemory=1})
     aim=false
-    put(GAME+0x3326468,integer(0));settle() -- no player manager: outside a mission
-    pin('outside a mission',{})
-    check_frame('outside a mission, check frame',{ReadProcessMemory=4,QueryPerformanceCounter=1})
+    put(GAME+0x3326468,integer(0));settle() -- no player manager: no local avatar in a mission
+    pin('no local avatar',{})
+    check_frame('no local avatar, poll frame',{ReadProcessMemory=6})
     put(GAME+0x3326468,integer(PM));settle()
+    -- On the ship (or any screen outside a mission) nothing can fire: frames
+    -- between poll frames read nothing, Fire held or not; a poll frame reads
+    -- the mission record and checks the charge record (3 reads).
+    mission=false;settle()
+    pin('on the ship',{})
+    down=true;pin('on the ship, fire held',{})
+    check_frame('on the ship, poll frame',{ReadProcessMemory=3})
+    down=false
+    mission_type=0;mission=true -- a set flag with no mission type is not a mission
+    check_frame('mission flag without a mission type, poll frame',{ReadProcessMemory=3})
+    pin('mission flag without a mission type',{})
+    mission_type=1
+    -- Entering a mission is seen on the next poll frame (up to 1 s at 60 FPS),
+    -- which runs the full Fire check at once.
+    check_frame('mission entered: poll frame',{ReadProcessMemory=19})
+    pin('mission entered, fire up',{ReadProcessMemory=1})
     down=true
     -- Between check frames the Fire check verifies the slot kept from the last
     -- check frame: the avatar manager global, the entity at the kept index and
@@ -394,7 +421,7 @@ if mode=='budget' then
     -- Discovery retries ten times a second while the press finds no Arc Thrower.
     first_frame('fire held, ordinary weapon, discovery retry',{ReadProcessMemory=9,QueryPerformanceCounter=1},
         function(frame) return frame.ReadProcessMemory>4 end)
-    down=false;pin('release, ordinary weapon',{ReadProcessMemory=4,QueryPerformanceCounter=1})
+    down=false;pin('release, ordinary weapon',{ReadProcessMemory=4})
     -- Arc Thrower: until the first shot the engine copies its fire command
     -- into the charging flag every frame, so the assist reads it set and
     -- writes nothing. +1 read on the first frame: the gate's read.
@@ -414,12 +441,12 @@ if mode=='budget' then
     pin('first write of a binding: page check',{ReadProcessMemory=12,QueryPerformanceCounter=1,VirtualQueryEx=1,
         WriteProcessMemory=1})
     pin('Arc Thrower held after the shot',{ReadProcessMemory=12,QueryPerformanceCounter=1,WriteProcessMemory=1})
-    check_frame('Arc Thrower held, check frame',{ReadProcessMemory=27,QueryPerformanceCounter=1,WriteProcessMemory=1})
+    check_frame('Arc Thrower held, poll frame',{ReadProcessMemory=29,QueryPerformanceCounter=1,WriteProcessMemory=1})
     relocated=true -- the entry array moved to another page: checked again
     pin('entry moved to another page',{ReadProcessMemory=13,QueryPerformanceCounter=1,VirtualQueryEx=1,
         WriteProcessMemory=1})
     relocated=false;tick()
-    down=false;pin('release, Arc Thrower',{ReadProcessMemory=4,QueryPerformanceCounter=1})
+    down=false;pin('release, Arc Thrower',{ReadProcessMemory=4})
     -- The next press is a new binding: its page is checked again before its
     -- first write (here the engine has already cleared the flag).
     settle();down=true
@@ -427,16 +454,16 @@ if mode=='budget' then
         VirtualQueryEx=1,WriteProcessMemory=1})
     down=false;tick()
 
-    -- A cleared record flag is repaired on a check frame: one query, the
-    -- page made writable and read-only again, one write and its read-back.
+    -- A cleared record flag is repaired on a poll frame: one query, the page
+    -- made writable and read-only again, one write and its read-back.
     region[record+184]=0
-    check_frame('record repair',{ReadProcessMemory=18,QueryPerformanceCounter=1,VirtualQueryEx=1,
+    check_frame('record repair',{ReadProcessMemory=20,VirtualQueryEx=1,
         VirtualProtectEx=2,WriteProcessMemory=1})
     assert(region[record+184]==1 and region_protection(REGION+record+184)==2,
            'the repaired record page is read-only again')
     -- A record page that is already private read-write is written directly.
     protections[math.floor((record+184)/PAGE)]=4;region[record+184]=0
-    check_frame('record repair, page already writable',{ReadProcessMemory=18,QueryPerformanceCounter=1,
+    check_frame('record repair, page already writable',{ReadProcessMemory=20,
         VirtualQueryEx=1,WriteProcessMemory=1})
     protections[math.floor((record+184)/PAGE)]=nil
     assert(region[record+184]==1)
@@ -447,7 +474,7 @@ if mode=='budget' then
     -- slot verified, its input unreadable), which drops the slot; until the
     -- next check frame nothing is read.
     input_valid=false
-    pin('kept Fire slot unreadable',{ReadProcessMemory=5,QueryPerformanceCounter=1})
+    pin('kept Fire slot unreadable',{ReadProcessMemory=5})
     pin('no Fire slot known',{})
     input_valid=true;settle()
     pin('Fire slot found again on the check frame',{ReadProcessMemory=1})
@@ -466,38 +493,47 @@ if mode=='budget' then
     assert(armed_after,'a press after a respawn must arm by the next check frame')
     down=false;settle();weapon='ordinary'
 
-    -- Idle frames allocate nothing: interpreted, and compiled once warm.
-    local function idle_bytes()
+    -- Idle frames allocate nothing: interpreted, and compiled once warm. In a
+    -- mission the 14 gate frames after a poll frame; on the ship the 59
+    -- frames between poll frames. (Check and poll frames are left out: this
+    -- test's memory model builds strings for the reads they make.)
+    local function idle_bytes(frames)
         settle()
         collectgarbage('collect');collectgarbage('stop')
         local before=collectgarbage('count')
-        for _=1,14 do tick() end
+        for _=1,frames do tick() end
         local grown=(collectgarbage('count')-before)*1024
         collectgarbage('restart')
         return grown
     end
-    jit.off()
-    local interpreted=idle_bytes()
-    jit.on()
-    for _=1,3000 do tick() end
-    local compiled=math.huge
-    for _=1,5 do compiled=math.min(compiled,idle_bytes()) end -- a window where the JIT compiled nothing
-    assert(interpreted==0 and compiled==0,
-           'idle frames must allocate nothing: '..interpreted..' B interpreted, '..compiled..' B compiled')
+    local function idle_allocation(label,frames)
+        jit.off()
+        local interpreted=idle_bytes(frames)
+        jit.on()
+        for _=1,3000 do tick() end
+        local compiled=math.huge
+        for _=1,5 do compiled=math.min(compiled,idle_bytes(frames)) end -- a window where the JIT compiled nothing
+        assert(interpreted==0 and compiled==0, label..': idle frames must allocate nothing: '..interpreted
+               ..' B interpreted, '..compiled..' B compiled')
+    end
+    idle_allocation('in a mission',14)
+    mission=false;settle()
+    idle_allocation('on the ship',59)
+    mission=true;settle()
     report[#report+1]='press right after a respawn armed on update '..armed_after
-        ..'; idle frames allocate 0 B interpreted and compiled'
+        ..'; idle frames allocate 0 B interpreted and compiled, in a mission and on the ship'
 
     -- Update-chain policy. The update below raises once: on the next update
     -- the addon puts the record back (one query, the page made writable and
     -- read-only again, the write and its read-back) and pauses; paused
     -- updates make no call; after 60 clean updates below it resumes on a
-    -- check frame and patches the kept record again.
+    -- poll frame and patches the kept record again.
     below_raises=1;assert(not pcall(env.update,.01,'original'))
     pin('first update after an error below: record put back',{ReadProcessMemory=2,VirtualQueryEx=1,
         VirtualProtectEx=2,WriteProcessMemory=1})
     pin('paused',{})
     for _=1,58 do tick() end
-    pin('resumed: check frame, record patched again',{ReadProcessMemory=18,QueryPerformanceCounter=1,
+    pin('resumed: poll frame, record patched again',{ReadProcessMemory=20,
         VirtualQueryEx=1,VirtualProtectEx=2,WriteProcessMemory=1})
     -- Shutdown puts the record back; a stopped addon makes no call.
     pin('shutdown: record put back',{ReadProcessMemory=2,VirtualQueryEx=1,VirtualProtectEx=2,
@@ -545,7 +581,7 @@ if scenario then
         else restore_fails=true end
         local changes=#protection_changes
         env.ArcThrowerDiagnostics=scenario~='record-restore-failed' or nil -- the repair log names the reason
-        region[record+184]=0;ticks(30)
+        region[record+184]=0;ticks(60) -- the record is checked on poll frames (every 60)
         env.ArcThrowerDiagnostics=nil
         if scenario=='record-restore-failed' then
             -- The flag was written, the page stayed writable: the addon stops
@@ -565,7 +601,7 @@ if scenario then
             assert(table.concat(log_text):find('charge record repair failed ('..why..'); retrying',1,true),
                    'the diagnostics log names why the record could not be written')
             assert(region_protection(REGION+record+184)==2)
-            protect_fails=false;region_type=0x20000;ticks(30)
+            protect_fails=false;region_type=0x20000;ticks(60)
             assert(region[record+184]==1 and region_protection(REGION+record+184)==2,
                    'the record is repaired, read-only again, once the page qualifies')
         end
@@ -633,7 +669,7 @@ if scenario then
         charge=.8;tick();charge=0;command=false;tick()
         local before=writes
         if scenario=='patch-reset' then
-            region[record+184]=0;ticks(30)
+            region[record+184]=0;ticks(60) -- the record is checked on poll frames (every 60)
             assert(region[record+184]==1 and patches==2,'lost static auto-fire flag must be repaired')
         elseif scenario=='patch-replaced' then
             install_record(record2);region[record+168]=0;region[record+184]=0;ticks(100)

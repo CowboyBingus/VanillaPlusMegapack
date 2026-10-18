@@ -26,7 +26,7 @@ sys.path.insert(0, str(LOADER / 'scripts'))
 from archive import ARCHIVE, make_archive, resource_hash  # noqa: E402
 from build_addon import entry_source  # noqa: E402
 
-VERSION = '1.0'
+VERSION = '1.0.1'
 LUA_NAME = 'mods/cowboybingus/sticky_grenade_handles'
 GUID = '2170bc37-eac4-49c9-843f-3fc1fcd578d9'
 TITLE = 'Sticky Grenade Handles v' + VERSION

@@ -87,6 +87,10 @@ function Mod.new(api, game, set_state, note, state, layout)
         if mission and not in_mission then enter_mission(value) end
         in_mission = mission
     end
+    -- The guard calls step under pcall, so a trace started at its entry aborts where it returns ("NYI: return to
+    -- lower frame") and retries whenever LuaJIT's 64 penalty slots have evicted it. Run step interpreted (about 13
+    -- bytecodes on an idle frame, as before: it never compiled); the read path it calls still compiles.
+    if type(jit) == 'table' and type(jit.off) == 'function' then jit.off(self.step) end
 
     -- An update below raised: start fresh (the next mission state sets the room again; setting it twice is
     -- harmless).

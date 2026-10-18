@@ -410,6 +410,146 @@ for _, mode in ipairs({'success', 'ffi', 'exe', 'game', 'missing', 'patch'}) do
 end
 pass('loader preserves updates, verifies both modules, contains failures and removes its update hook')
 
+-- Equivalence: the published loader (tests/reference/archive_loader.lua, origin/main
+-- v15.4) and the current one run the same scripted sessions side by side. Every
+-- frame's returns and errors, every hook change, module and hash lookup, apply,
+-- report and log write must match. The current loader tests `attempted` before
+-- entering initialize, so frames after the first never reach initialize's UCLO.
+do
+    local modes = {'success', 'ffi', 'exe', 'game', 'missing', 'patch', 'throw'}
+    local function capture(...) return select('#', ...), {...} end
+    local function session(path, mode, shape)
+        local events = {}
+        local function log(...) events[#events + 1] = table.concat({...}, '|') end
+        local env = setmetatable({print = function(text) log('print', text) end, os = {getenv = function() end}},
+            {__index = _G})
+        env._G = env
+        env.CowboyBingusModLoader = {open_log = function(name)
+            log('open_log', name)
+            return {write = function(_, ...) log('write', ...) end, close = function() log('close') end}
+        end}
+        local below_calls = 0
+        if shape.below then
+            env.update = function(dt, marker)
+                below_calls = below_calls + 1
+                if shape.below_error and below_calls == shape.below_error then error('below failed', 0) end
+                return dt, nil, marker, below_calls
+            end
+        end
+        local original = env.update
+        -- One chunk name for both, so error texts carrying it compare equal.
+        local file = assert(io.open(path, 'rb'))
+        local loader = assert(loadstring(file:read('*a'), '@archive_loader.lua')); file:close()
+        setfenv(loader, env)
+        local install = loader(); setfenv(install, env)
+        local function create_api()
+            log('create_api')
+            if mode == 'ffi' then error('No ffi', 0) end
+            return {
+                module = function(name)
+                    log('module', tostring(name))
+                    if mode == 'missing' then return nil end
+                    return name or 'exe'
+                end,
+                module_hash = function(name)
+                    log('module_hash', name)
+                    if (mode == 'exe' and name == 'exe') or (mode == 'game' and name == 'game.dll') then return 'wrong' end
+                    return name
+                end
+            }
+        end
+        local patch_api = {apply = function(_, module)
+            log('apply', module)
+            if mode == 'throw' then error('apply threw', 0) end
+            return mode ~= 'patch', 'scripted result'
+        end}
+        local build = {revision = 'equivalence', exe_sha256 = 'exe', game_sha256 = 'game.dll'}
+        install(create_api, patch_api, build)
+        if shape.twice then install(create_api, patch_api, build) end
+        local hook = env.update
+        local later_calls = 0
+        local function later(...) later_calls = later_calls + 1; return hook(...) end
+        if shape.later_at == 0 then env.update = later end
+        local function describe(value)
+            if value == nil then return 'nil' elseif value == original then return 'original'
+            elseif value == hook then return 'hook' elseif value == later then return 'later' end
+            return type(value)
+        end
+        for frame = 1, shape.frames do
+            if shape.later_at == frame then env.update = later end
+            local count, results = capture(pcall(env.update, 0.016, frame))
+            local parts = {'frame', frame, tostring(results[1]), count - 1}
+            for index = 2, 6 do parts[#parts + 1] = tostring(results[index]) end
+            log(unpack(parts))
+            log('hook', describe(env.update), later_calls, below_calls)
+            local state = env.BetterStratagemBounce
+            log('state', tostring(state.active), state.status, state.revision)
+        end
+        return events
+    end
+    local shapes, frames = {}, 0
+    for _, below in ipairs({false, true}) do
+        for _, later_at in ipairs({false, 0, 1, 2, 50}) do
+            shapes[#shapes + 1] = {below = below, later_at = later_at, frames = 40}
+        end
+        shapes[#shapes + 1] = {below = below, later_at = 0, twice = true, frames = 40}
+    end
+    shapes[#shapes + 1] = {below = true, later_at = 0, below_error = 1, frames = 40}
+    shapes[#shapes + 1] = {below = true, later_at = false, below_error = 1, frames = 40}
+    shapes[#shapes + 1] = {below = true, later_at = 0, below_error = 3, frames = 40}
+    for _, mode in ipairs(modes) do
+        for _, shape in ipairs(shapes) do
+            local old = session(directory .. '/../tests/reference/archive_loader.lua', mode, shape)
+            local new = session(directory .. '/archive_loader.lua', mode, shape)
+            assert(#old == #new, mode .. ': ' .. #old .. ' events before, ' .. #new .. ' after')
+            for index = 1, #old do
+                assert(old[index] == new[index], string.format('%s, event %d: %s ~= %s', mode, index,
+                    old[index], new[index]))
+            end
+            frames = frames + shape.frames
+        end
+    end
+    assert(frames >= 2000, frames .. ' scripted frames')
+    pass('loader equivalence: ' .. frames .. ' scripted frames match the published loader event for event')
+end
+
+-- Below a later mod's update the hook stays in the chain. Its idle frames must not
+-- keep aborting trace recordings in this loader (the published loader aborted on
+-- initialize's UCLO every time a recording reached it).
+do
+    local function aborts(path)
+        local env = setmetatable({print = function() end, os = {getenv = function() end},
+            update = function(dt) return dt end}, {__index = _G})
+        env._G = env
+        local loader = assert(loadfile(path)); setfenv(loader, env)
+        local install = loader(); setfenv(install, env)
+        install(function() error('no api', 0) end, {}, {revision = 'jit', exe_sha256 = 'exe', game_sha256 = 'game'})
+        local hook = env.update
+        env.update = function(...) return hook(...) end
+        local count, source = 0, path:gsub('\\', '/')
+        local function on_trace(what, _, func, pc, reason)
+            if what ~= 'abort' then return end
+            local info = require('jit.util').funcinfo(func, pc)
+            if info.source and info.source:gsub('\\', '/'):find(source, 1, true) then
+                count = count + 1
+            end
+        end
+        jit.on(); jit.flush()
+        jit.attach(on_trace, 'trace')
+        local step = env.update
+        for _ = 1, 3000 do step(0.016) end
+        jit.attach(on_trace)
+        jit.flush()
+        return count
+    end
+    local before = aborts(directory .. '/../tests/reference/archive_loader.lua')
+    local after = aborts(directory .. '/archive_loader.lua')
+    assert(before > 0, 'the published loader no longer aborts here: the check cannot tell the loaders apart')
+    assert(after == 0, 'idle frames below a later mod: ' .. after .. ' aborted recordings in the loader')
+    pass('idle frames below a later mod record no aborting traces in the loader (published loader: ' ..
+        before .. ')')
+end
+
 local env = setmetatable({print = function() end, os = {getenv = function() end},
     update = function() return 1, nil, 3 end}, {__index = _G})
 env._G = env

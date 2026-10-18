@@ -55,8 +55,7 @@ end
 
 -- The heap growth of 20 looks in steady state: the smallest of up to five windows. Every look takes the same
 -- path, so an allocation of the addon's would show in every window; what LuaJIT does once per session (a trace
--- of the guard, the stub that leaves the look branch to the interpreter, scheduled with a random backoff) can
--- land in one window only.
+-- of the guard, scheduled with a random backoff) can land in one window only.
 local function steady_heap(frames)
     local smallest = math.huge
     for _ = 1, 5 do
@@ -195,9 +194,8 @@ check('looks allocate nothing and create no C types: idle in a mission, and whil
         for id = 1, 6 do scene.add({id = 100 + id, sentry = false}) end
     end)
     local function frames(count) for _ = 1, count do s.env.update(1 / 60) end end
-    -- Warm up past LuaJIT's one-time handling of the step's look branch: it tries to compile that exit four
-    -- times (every 10 looks), then leaves it to the interpreter for good with a small stub trace. Measured
-    -- from there on, as a long session runs.
+    -- Warm up past LuaJIT's one-time work on the update guard's traces. Measured from there on, as a long
+    -- session runs.
     frames(100 * WATCH)
     local kb = steady_heap(frames)
     assert(kb == 0, format('idle looks allocated %.3f KB', kb))

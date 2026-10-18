@@ -85,6 +85,8 @@ return function(create_api,patch,build,runtime,runtime_memory)
     -- other errors in the mod's own frame reach the guard.
     local ERRORS=8
     local guard,next_poll,raised,first_raised,resumed,update_start=nil,0,0,nil,false,nil
+    -- elapsed: frame time since the last poll; frame_dt: this frame's.
+    local elapsed,frame_dt=math.huge,nil
     -- failure: the first failure in this mod's own words; status: its stop text.
     local failure,stop_status
     -- The mod refuses (a poll declined) or gives up (raised polls in a row).
@@ -98,9 +100,22 @@ return function(create_api,patch,build,runtime,runtime_memory)
         if raised<ERRORS then report('waiting_for_stable_data',false)
         else give_up(first_raised,'stopped after: '..first_raised) end
     end
+    -- The poll clock is the frame time the game passes to update (step keeps
+    -- it), so a frame makes no Windows call to decide whether a poll is due.
+    -- Without a number frame time it falls back to api.time.
+    local function due()
+        local dt=frame_dt;frame_dt=nil
+        if type(dt)=='number' and dt>=0 and dt<3600 then
+            elapsed=elapsed+dt
+            if elapsed<patch.interval then return false end
+            elapsed=0;return true
+        end
+        local now=api.time();if now<next_poll then return false end
+        next_poll=now+patch.interval;return true
+    end
     local function check()
-        local now=api.time();if now<next_poll then return end
-        next_poll=now+patch.interval;state.polls=state.polls+1
+        if not due() then return end
+        state.polls=state.polls+1
         telemetry('begin',state)
         local called,accepted,reason,active=pcall(patch.apply,api,game,exe,state)
         if profiler then
@@ -127,7 +142,7 @@ return function(create_api,patch,build,runtime,runtime_memory)
         state.pauses=(state.pauses or 0)+1
         telemetry('update_finished',nil,false)
         report('paused_after_update_error',false,true)
-        next_poll=0;patch.reset(state)
+        next_poll,elapsed=0,math.huge;patch.reset(state)
         resumed=true
     end
     -- The guard's stop reasons in this mod's status texts.
@@ -163,8 +178,16 @@ return function(create_api,patch,build,runtime,runtime_memory)
     local function log(line)
         if line:sub(1,#NAME+8)==NAME..' error: ' then report(line,state.active,true) end
     end
-    guard=runtime.guard({name=NAME,step=profiler and function()
-        update_start=telemetry('update_started')
-    end or nil,after=after,stop=stop,pause=pause,log=log,env=_G}).install()
+    -- step runs before the update below, every frame while running: it keeps
+    -- the frame time for the poll clock (and starts the update's timing with
+    -- diagnostics).
+    local function step(dt)
+        frame_dt=dt
+        if profiler then update_start=telemetry('update_started') end
+    end
+    -- The per-frame hooks stay interpreted: a trace started in them could
+    -- follow their returns into every update wrapper below this mod.
+    if jit and jit.off then for _,fn in ipairs({step,after,check,due}) do jit.off(fn) end end
+    guard=runtime.guard({name=NAME,step=step,after=after,stop=stop,pause=pause,log=log,env=_G}).install()
     report('waiting_for_mission',false,true)
 end

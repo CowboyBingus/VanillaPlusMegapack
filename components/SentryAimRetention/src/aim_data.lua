@@ -129,9 +129,23 @@ local function component(api,manager,off,index,stride,size,guards)
     guard(api,guards,manager+off,b)
     return p+index*stride,need(api,p+index*stride,size)
 end
+-- The check decodes the targeting root, header and pointer chunks in place
+-- (targeting). Only a sentry needs them as strings: its guards are verified
+-- against the windows, and its registries come from the header. Built at most
+-- once per check, when the first sentry needs them; unchanged bytes give the
+-- interned strings of earlier checks (no allocation).
+local function materialize(api,c)
+    if c.strings then return end
+    c.strings=true
+    local w,b,k,reg=c.windows,c.buf,c.kept,c.reg
+    window(api,w,c.at.tm,k.tmb)
+    reg.th=window(api,w,k.th,ffi.string(b.head8,84))
+    for n=0,reg.chunks do window(api,w,c.chunk_at[n],ffi.string(b.chunk8[n],b.chunk_size[n])) end
+end
 -- The behavior and turret registries of this check (read once per check, only
 -- when a sentry needs them), or nil while a root is empty.
 local function components(api,game,c)
+    materialize(api,c)
     local reg=c.reg
     if reg.bm~=nil then return reg.bm and reg end
     local w,at=c.windows,c.at
@@ -325,13 +339,32 @@ end
 -- sentry is then found within RESCAN checks, about a quarter of a second).
 -- Layouts are verified on every check from the memory the check read.
 local RESCAN=30
+-- Read buffers, made once per cache: the targeting root and header, the
+-- pointer chunks (one per 256 entries, made when first needed), an entity
+-- header and the mission mode record.
+local function buffers()
+    local b={root=ffi.new('uint32_t[2]'),head=ffi.new('uint32_t[21]'),entity=ffi.new('uint32_t[6]'),
+        mode_at=ffi.new('uint32_t[2]'),mode=ffi.new('uint32_t[17]'),chunks={},chunk8={},chunk_size={}}
+    b.root8,b.head8=ffi.cast('uint8_t *',b.root),ffi.cast('uint8_t *',b.head)
+    b.entity8,b.mode_at8=ffi.cast('uint8_t *',b.entity),ffi.cast('uint8_t *',b.mode_at)
+    return b
+end
 function M.new_cache()
     return {lo={},hi={},class={},layouts={},checks=0,active=0,windows={n=0},rows={},reg={},kept={},
-        chunks={},chunk_at={}}
+        chunk_at={},addr={},pointer={},buf=buffers()}
 end
 local function forget(c,from)
-    for i=from,c.active-1 do c.lo[i],c.hi[i],c.class[i],c.layouts[i]=nil,nil,nil,nil end
+    for i=from,c.active-1 do
+        c.lo[i],c.hi[i],c.class[i],c.layouts[i],c.addr[i],c.pointer[i]=nil,nil,nil,nil,nil,nil
+    end
     c.active=from
+end
+-- The sentry profiles by the two 32-bit words of their resource identity, so
+-- an entity header is classified from its buffer without a string.
+local profile_words={}
+for key,profile in pairs(profiles) do
+    assert(not profile_words[u(key,0)],'Ambiguous sentry resource word')
+    profile_words[u(key,0)]={u(key,4),profile}
 end
 -- The roots' addresses in game.dll, kept per module base.
 local function roots(c,game)
@@ -341,39 +374,64 @@ local function roots(c,game)
     end
     return c.at
 end
--- This check's targeting registry and entity pointers (windows), or nil.
-local function targeting(api,game,c)
-    local w,at,k=c.windows,roots(c,game),c.kept;w.n=0
-    local reg=c.reg;reg.bm=nil
-    local tmb=window(api,w,at.tm,need(api,at.tm,8))
-    if tmb==NULL then return nil end
-    if tmb~=k.tmb then k.tmb,k.tm=tmb,need_pointer(api,tmb);k.th=k.tm+308 end
-    local th=window(api,w,k.th,need(api,k.th,84))
-    local cap,total,active=u(th,0),u(th,12),u(th,16)
-    assert(active<=total and total<=cap and cap<=8192,'Unsupported targeting registry')
-    if active==0 then return nil end
-    local epb=th:sub(53,60)
-    if epb~=k.epb then
-        k.epb,k.ep=epb,need_pointer(api,epb)
-        for i in pairs(c.chunk_at) do c.chunk_at[i]=nil end
-    end
-    reg.tm,reg.tmb,reg.th,reg.active,reg.ep=k.tm,tmb,th,active,k.ep
-    for n=0,math.floor((active-1)/256) do
+-- The pointer chunks of this check, read in place: chunk n holds entries
+-- n*256 .. n*256+255 as 32-bit halves.
+local function read_chunks(api,c,b,active)
+    local last=math.floor((active-1)/256)
+    for n=0,last do
         local first=n*256
         local address=c.chunk_at[n]
-        if not address then address=k.ep+8*first;c.chunk_at[n]=address end
-        c.chunks[n]=window(api,w,address,need(api,address,math.min(256,active-first)*8))
+        if not address then address=c.kept.ep+8*first;c.chunk_at[n]=address end
+        if not b.chunks[n] then b.chunks[n]=ffi.new('uint32_t[512]');b.chunk8[n]=ffi.cast('uint8_t *',b.chunks[n]) end
+        local size=math.min(256,active-first)*8
+        into(api,address,size,b.chunks[n]);b.chunk_size[n]=size
     end
+    return last
+end
+-- This check's targeting registry, or nil. The root, header and pointer chunks
+-- are decoded in place; pointers become addresses only when they change.
+local function targeting(api,game,c)
+    local w,at,k,b=c.windows,roots(c,game),c.kept,c.buf;w.n=0;c.strings=false
+    local reg=c.reg;reg.bm=nil
+    into(api,at.tm,8,b.root)
+    local lo,hi=b.root[0],b.root[1]
+    if lo==0 and hi==0 then return nil end
+    if lo~=k.tm_lo or hi~=k.tm_hi then
+        local tmb=ffi.string(b.root8,8)
+        k.tm_lo,k.tm_hi,k.tmb,k.tm=lo,hi,tmb,need_pointer(api,tmb);k.th=k.tm+308
+    end
+    into(api,k.th,84,b.head)
+    local h=b.head
+    local cap,total,active=h[0],h[3],h[4]
+    assert(active<=total and total<=cap and cap<=8192,'Unsupported targeting registry')
+    if active==0 then return nil end
+    if h[13]~=k.ep_lo or h[14]~=k.ep_hi then
+        local epb=ffi.string(b.head8+52,8)
+        k.ep_lo,k.ep_hi,k.epb,k.ep=h[13],h[14],epb,need_pointer(api,epb)
+        for i in pairs(c.chunk_at) do c.chunk_at[i]=nil end
+    end
+    reg.tm,reg.tmb,reg.th,reg.active,reg.ep=k.tm,k.tmb,nil,active,k.ep
+    reg.chunks=read_chunks(api,c,b,active)
     return reg
 end
 -- The layout of entry i whose pointer changed (or a rescan), or nil when it is
--- not a sentry this machine controls. Sets the entry's class.
-local function classify(api,game,c,reg,i,pointer)
-    local address=need_pointer(api,pointer);local entity=need(api,address,24)
-    local profile=profiles[entity:sub(1,8)]
-    c.class[i]=profile~=nil and bit.band(entity:byte(21),3)==1
+-- not a sentry this machine controls. Sets the entry's class. The entity
+-- address is kept while the entry's pointer is unchanged, and the header is
+-- decoded from its buffer: classifying another entity allocates nothing.
+local function classify(api,game,c,reg,i)
+    local b=c.buf
+    local address=c.addr[i]
+    if not address then
+        local pointer=ffi.string(b.chunk8[math.floor(i/256)]+(i%256)*8,8)
+        address=need_pointer(api,pointer);c.addr[i],c.pointer[i]=address,pointer
+    end
+    into(api,address,24,b.entity)
+    local words=profile_words[b.entity[0]]
+    local profile=words and words[1]==b.entity[1] and words[2] or nil
+    c.class[i]=profile~=nil and bit.band(b.entity8[20],3)==1
     if not c.class[i] or not components(api,game,c) then return nil end
-    return locate(api,game,reg,{index=i,pointer=pointer,address=address,bytes=entity,
+    local entity=ffi.string(b.entity8,24)
+    return locate(api,game,reg,{index=i,pointer=c.pointer[i],address=address,bytes=entity,
         key=entity:sub(1,20),profile=profile,id=u(entity,8)})
 end
 -- A cached layout still valid this check: its entity keeps the same identity
@@ -392,36 +450,88 @@ local function entry_row(api,game,c,reg,i,moved)
     local L=c.layouts[i]
     if L and not moved and current(api,game,c,L) and refresh(api,game,L,c.windows) then return L.row end
     c.layouts[i]=nil
-    local at=(i%256)*8
-    L=classify(api,game,c,reg,i,c.chunks[math.floor(i/256)]:sub(at+1,at+8))
+    L=classify(api,game,c,reg,i)
     if not L then return nil end
     c.layouts[i]=L
     assert(refresh(api,game,L,c.windows),'Sentry changed while located')
     return L.row
 end
+-- One targeting entry of a check: its row (added to rows) when it is a sentry
+-- this machine controls. Returns 1 while the entry is not classified as
+-- something else (a sentry, or one not yet settled), otherwise 0.
+local function visit(api,game,c,reg,i,rescan,rows)
+    local chunk,at=c.buf.chunks[math.floor(i/256)],(i%256)*2
+    local lo,hi=chunk[at],chunk[at+1]
+    local moved=lo~=c.lo[i] or hi~=c.hi[i]
+    c.lo[i],c.hi[i]=lo,hi
+    if moved then c.addr[i]=nil end
+    if not (moved or rescan or c.class[i]~=false) then return 0 end
+    local row=entry_row(api,game,c,reg,i,moved)
+    if row then rows[#rows+1]=row end
+    return c.class[i]~=false and 1 or 0
+end
+-- c.idle is true after a check that found no targeting registry, or only
+-- entries classified as not being a sentry this machine controls (M.idle).
 function M.snapshot(api,game,c)
     c=c or M.new_cache()
-    c.checks=c.checks+1
+    c.checks=c.checks+1;c.idle=false
     local rows=c.rows
     for k=#rows,1,-1 do rows[k]=nil end
     local reg=targeting(api,game,c)
-    if not reg then forget(c,0);return rows,'waiting_for_sentries' end
+    if not reg then forget(c,0);c.idle=true;return rows,'waiting_for_sentries' end
     -- Another targeting registry (a new mission): every entry is new.
     if reg.tmb~=c.tmb then forget(c,0);c.tmb=reg.tmb end
     if reg.active<c.active then forget(c,reg.active) end
     c.active=reg.active
     local rescan=c.checks%RESCAN==0
-    for i=0,reg.active-1 do
-        local chunk,at=c.chunks[math.floor(i/256)],(i%256)*8
-        local lo,hi=u(chunk,at),u(chunk,at+4)
-        local moved=lo~=c.lo[i] or hi~=c.hi[i]
-        c.lo[i],c.hi[i]=lo,hi
-        if moved or rescan or c.class[i]~=false then
-            local row=entry_row(api,game,c,reg,i,moved)
-            if row then rows[#rows+1]=row end
-        end
-    end
+    -- Entries still a sentry, or not yet settled (a sentry whose components or
+    -- maps are not ready is classified again on every check).
+    local unsettled=0
+    for i=0,reg.active-1 do unsettled=unsettled+visit(api,game,c,reg,i,rescan,rows) end
+    c.idle=unsettled==0
     return rows,#rows==0 and 'waiting_for_sentries' or 'observing'
+end
+-- Whether a mission runs: the mode record at [game.dll+0x33266a0] (68 bytes;
+-- a mission is word +8 set and word +0x40 in 1..7, as other mods read it).
+-- Nil when it cannot be read. Two reads, decoded in place; the record's
+-- address is kept while its pointer is unchanged.
+local MISSION_EVERY=2*RESCAN
+local function in_mission(api,game,c)
+    local b,k=c.buf,c.kept
+    if c.mode_game~=game then c.mode_game,c.mode_global=game,game+0x33266a0 end
+    if not api.read_into(c.mode_global,8,b.mode_at) then return nil end
+    local lo,hi=b.mode_at[0],b.mode_at[1]
+    if lo==0 and hi==0 then return false end
+    if lo~=k.mode_lo or hi~=k.mode_hi then
+        local record=api.pointer(ffi.string(b.mode_at8,8))
+        if not record then return nil end
+        k.mode_lo,k.mode_hi,k.mode=lo,hi,record
+    end
+    if not api.read_into(k.mode,0x44,b.mode) then return nil end
+    return b.mode[2]~=0 and b.mode[16]>=1 and b.mode[16]<=7
+end
+-- The idle gate, run by the loader before each frame's check. While the last
+-- check found no sentry this machine controls (c.idle; nothing is held, paused
+-- or requested then), a frame only counts as a check: no read, no allocation.
+-- In a mission the next full check is the next RESCAN-th, which classifies
+-- every entry again, so a new sentry, a changed registry or an ownership
+-- change is found within RESCAN frames (0.5 s at 60 FPS), as an in-place
+-- sentry already was. Outside a mission no sentry can exist: no rescan runs,
+-- and the mission is checked every MISSION_EVERY-th frame (two reads), so a
+-- mission start is seen within 59 frames (1 s at 60 FPS, 2 s at 30 FPS),
+-- seconds before anyone can land and call in a sentry. A mission record that
+-- cannot be read counts as a mission (the rescan runs).
+-- Returns true when this frame needs no check.
+function M.idle(api,game,state)
+    local c=state.layout
+    if not c or not c.idle then return false end
+    local checks=c.checks+1
+    if checks%RESCAN==0 then
+        if c.outside==nil or checks%MISSION_EVERY==0 then c.outside=in_mission(api,game,c)==false end
+        if not c.outside then return false end
+    end
+    c.checks=checks
+    return true
 end
 
 local function writable(api,s)
@@ -1021,6 +1131,12 @@ local function engaged(rows,state)
     end
     return false
 end
+-- engaged's traces aborted on every check (return to the pcall'd apply's
+-- caller); it stays interpreted. M.idle runs every frame under the loader's
+-- pcall'd step and would abort the same way. in_mission runs once per 60
+-- frames, called from the interpreted gate (its traces aborted there: 8 in
+-- three game-shaped replays); it stays interpreted too.
+if jit and jit.off then jit.off(engaged);jit.off(M.idle);jit.off(in_mission) end
 -- One check. The layout cache lives in state.layout; a failed snapshot drops
 -- it, so the next check locates every sentry again.
 function M.apply(api,game,exe,state)

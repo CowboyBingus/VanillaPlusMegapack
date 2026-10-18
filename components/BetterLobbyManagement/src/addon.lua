@@ -165,6 +165,9 @@ local function at_startup(loader, fn, note)
     return false
 end
 
+-- The idle gate without the menu buttons: no escape screen to wait for.
+local function always() return true end
+
 -- Diagnostic builds: the Kick From Render test runs its kicks in the render
 -- callback, after the game's own update in the same frame, while running()
 -- says the mod runs and is not paused; failed(problem) takes an error there.
@@ -207,6 +210,11 @@ local function install_hooks(build, hooks)
             end
         end
     end
+    -- The guard calls step under pcall, so a trace started at its entry
+    -- aborts where it returns ("NYI: return to lower frame") and retries until
+    -- blacklisted, again whenever LuaJIT's 64 penalty slots have evicted it.
+    -- step runs interpreted (a few bytecodes, no loop); what it calls compiles.
+    if jit then jit.off(step) end
     local installed, guard = pcall(function()
         return build.runtime.guard({name = 'BetterLobbyManagement', step = step, pause = hooks.pause,
             stop = hooks.stop, log = hooks.note, env = _G}).install()
@@ -330,9 +338,12 @@ return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
     -- update (any other kick left the kicked player's Helldiver behind and
     -- crashed the host; see docs/TECHNICAL.md).
     lobby.kick_mode = 'game'
+    -- The idle gate's look at the escape screen (step).
+    local closed = always
     if menu then
         lobby.game_kicker = function(lo, hi) return menu.game_kick(menu.screen(), lo, hi) end
         lobby.menu_closer = menu.close
+        closed = menu.closed
     end
 
     -- Diagnostic test builds: the kick timeline recorder (read-only).
@@ -486,7 +497,14 @@ return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
         if action == 'cancel_sos' then return sos.cancel(clock) end
     end
 
-    local menu_seen = false
+    -- quiet: nothing pending after the last full frame (no action, kick, hold,
+    -- arrival check or kept SOS cancel, no diagnostics); set by run, cleared
+    -- by the entry points and the pause.
+    local menu_seen, quiet = false, false
+    local function nothing_pending()
+        if diag or (sos and sos.cancelled()) or lobby.holding() or lobby.arrival then return false end
+        return not lobby.busy() and not lobby.ui_pending()
+    end
     local function run(dt)
         clock = clock + (dt or 0)
         if scanner then
@@ -531,6 +549,22 @@ return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
         end
         if lobby.ui_pending() then lobby.ui_step(clock) end
         region.step()
+        quiet = nothing_pending()
+    end
+    -- An idle frame (see step): what run does while nothing is pending and the
+    -- escape screen is closed (offer_screen would answer 0), without the
+    -- session reads. The scanner keeps its own check: its trigger is its field.
+    local function idle(dt)
+        clock = clock + (dt or 0)
+        if scanner then
+            scanner.check()
+            if state.scanner.revision ~= scanned then
+                scanned = state.scanner.revision
+                note(scanner_summary())
+            end
+        end
+        menu_seen = false
+        region.step()
     end
     -- The step the guard runs before the update below, every frame while the
     -- mod runs: current is first, run, with_options (while a Mod Options Menu
@@ -554,8 +588,12 @@ return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
         if errors > recovered then recover() end
         recovered = errors
     end
+    -- The idle gate runs first: while quiet and in the plain frame (no first
+    -- frame, Mod Options Menu retry or restart pending), a closed escape
+    -- screen (four direct loads) ends the frame with idle(dt).
     local function step(dt)
         if guarded.errors ~= recovered then catch_up() end
+        if quiet and current == run and closed() then idle(dt); return end
         current(dt)
     end
     -- While a Mod Options Menu registration is pending: its retry check after
@@ -600,7 +638,7 @@ return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
         if region.mode() == 2 then region.set_mode(1) end
         if scanner then scanner.pause('paused') end
         if menu then menu.reset() end
-        chosen, shown.mode, menu_seen = nil, -1, false
+        chosen, shown.mode, menu_seen, quiet = nil, -1, false, false
         current = restart
     end
     -- Stop (8 errors in a burst, or a pause that failed): the same for the rest
@@ -646,10 +684,12 @@ return function(create_api, G, L, R, M, C, S, B, T, locales, build, D)
     state.guard = guarded
 
     -- Lua entry points (console or other addons). target: {lo, hi} or nil.
-    function state.disband() return lobby.disband(clock) end
-    function state.promote(target) return lobby.promote(target, clock) end
-    function state.cancel() return lobby.cancel('requested') end
+    -- Each one ends the idle gate's quiet: the next frame is a full one.
+    function state.disband() quiet = false; return lobby.disband(clock) end
+    function state.promote(target) quiet = false; return lobby.promote(target, clock) end
+    function state.cancel() quiet = false; return lobby.cancel('requested') end
     function state.cancel_sos()
+        quiet = false
         if not sos then return false, state.sos end
         return sos.cancel(clock)
     end

@@ -312,6 +312,48 @@ assert(checks_per_update(function(state) state.retry_start=true end)==2)
 assert(checks_per_update(function(state) state.pending={} end)==2)
 print('PASS: minimum/newer loader and API gates, duplicate loads, callback tuples, shutdown, update exceptions and failure isolation')
 print('PASS: after-update check only while a lease, retry or local avatar exists')
+-- Waiting for a dive, with a patch that offers the idle gate: after a full
+-- check that found the avatar idle, both boundaries run only the gate and the
+-- step boundary a full check every 120th frame; a failed gate runs the full
+-- check at once; waits before a local avatar exists (patch.NO_AVATAR) check
+-- only every 30th frame; anything else checks at both boundaries.
+do
+    local env=setmetatable({print=function()end},{__index=_G});env._G=env
+    env.CowboyBingusModLoader={api=1,version=6,open_log=function() end};env.update=function() return 1 end
+    local applies,gates,mode=0,0,'ship'
+    local patch={apply=function(a,g,e,state)
+        applies=applies+1
+        if mode=='ship' then state.gate_controller=nil;return true,'waiting_for_mission',false end
+        if mode=='wait' then state.gate_controller=nil;state.was_dive=false;return true,'waiting_for_water_record',false end
+        state.gate_controller=0x40000000;state.was_dive=mode=='dive'
+        return true,mode=='dive' and 'other_state' or 'dive_ended',false
+    end,idle=function(a,state)
+        assert(state.gate_controller==0x40000000 and not state.was_dive,'gate run while not idle')
+        gates=gates+1;return mode=='idle'
+    end,restore=function() return true end,NO_AVATAR={waiting_for_mission=true}}
+    setfenv(assert(loadfile(source..'/archive_loader.lua')),env)()(function()
+        return {module=function(n)return n and 1 or 2 end,module_hash=function(n)return n==1 and 'game' or 'exe' end}
+    end,patch,{revision='test',game_sha256='game',exe_sha256='exe'},Text,LOCALES,Runtime)
+    local function updates(n) applies,gates=0,0;for _=1,n do env.update() end;return applies,gates end
+    local a,g=updates(300);assert(a==10 and g==0,'ship: '..a..' checks in 300 frames')
+    mode='idle';a,g=updates(30);assert(a==1 and g==59,'first idle frames: '..a..' '..g)
+    a,g=updates(240);assert(a==2 and g==478,'idle: '..a..' full checks and '..g..' gates in 240 frames')
+    assert(env.ShallowWaterDive.status=='dive_ended')
+    -- The gate sees a dive (fails): the full check runs at once, and while the
+    -- dive lasts both boundaries check in full.
+    mode='dive';a,g=updates(1);assert(a==2 and g==1,'dive frame: '..a..' '..g)
+    a,g=updates(10);assert(a==20 and g==0)
+    -- A wait on a dive frame (the full check cleared the controller) is
+    -- checked on every frame, before the update, as in v3.10.
+    mode='wait';a,g=updates(10);assert(a==10 and g==0,'a wait on a dive frame: '..a..' '..g)
+    mode='idle';a,g=updates(1);assert(a==1 and g==1)
+    -- A full check that raises arms nothing: the next boundary checks in full.
+    mode='dive';patch.apply=function() applies=applies+1;error('fixture error',0) end
+    a,g=updates(1);assert(a==2 and g==1,'failed gate, then errors: '..a..' '..g)
+    a,g=updates(1);assert(a==2 and g==0,'after an error: '..a..' '..g)
+    assert(env.BingusRuntime.statuses.ShallowWaterDiving.errors==4)
+end
+print('PASS: idle gate at both boundaries with a full check every 120th frame, polls every 30th frame without a local avatar, full checks at both boundaries on dive frames and after errors')
 -- Routine checks keep the status in ShallowWaterDive without writing the log;
 -- startup, the menu registration and shutdown write it, and diagnostics
 -- (CowboyBingusDiagnostics = true) add writes at most every 2 s.

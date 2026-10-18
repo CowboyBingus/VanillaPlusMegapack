@@ -156,16 +156,42 @@ return function(create_api,patch,build,text,locales,runtime)
         if called and restored then state.pending=nil;return true end
         return false
     end
+    -- Waiting for a dive. What the last full check found decides the next
+    -- checks, which this loader keeps in locals (set by settle):
+    -- * the local avatar idle ('dive_ended', no lease or retry): both
+    --   boundaries run the patch's idle gate (one read of its dive controller,
+    --   no pcall, apply or report; the status stays 'dive_ended'), and the
+    --   step boundary runs a full check every GATE_FRAMES-th frame (about 2 s
+    --   at 60 FPS) to follow avatar and mission changes. A failed gate runs
+    --   the full check at once, which verifies the identity again;
+    -- * no mission, local player or local avatar (patch.NO_AVATAR): no dive
+    --   can start before one exists, so only every POLL_FRAMES-th step checks
+    --   (the ship, loading screens, a dead player);
+    -- * anything else (a dive, a lease, a retry, a wait on a dive frame): a
+    --   full check at both boundaries, as before.
+    -- A patch without idle (the test fakes) is never gated.
+    local idle,no_avatar=patch.idle,patch.NO_AVATAR or {}
+    local GATE_FRAMES,POLL_FRAMES=120,30
+    local gated,gate_left,poll_left,watch_after=false,0,0,false
+    local function settle(checked,reason)
+        gated=checked and idle~=nil and state.gate_controller~=nil
+            and not (state.pending or state.retry_start or state.was_dive)
+        gate_left=gated and GATE_FRAMES-1 or 0
+        poll_left=checked and not state.pending and no_avatar[reason] and POLL_FRAMES-1 or 0
+        watch_after=(state.pending or state.retry_start or state.gate_controller) and true or false
+    end
     -- A refusal (false and a reason) stops the mod at once; the guard then
     -- runs stop below, which restores. An error goes on to the guard, which
-    -- counts it: 8 in a burst stop the mod the same way. apply still runs
-    -- under pcall, as in every release: called directly, its own entry would
-    -- compile too (about 1.3 KB more of the shared code cache, offline in the
-    -- game's lua51.dll) for no measurable time.
+    -- counts it: 8 in a burst stop the mod the same way, and the next check
+    -- is a full one. apply still runs under pcall, as in every release:
+    -- called directly, its own entry would compile too (about 1.3 KB more of
+    -- the shared code cache, offline in the game's lua51.dll) for no
+    -- measurable time.
     local function check()
         local called,accepted,reason,active=pcall(patch.apply,api,game,exe,state)
-        if not called then error(accepted,0) end
+        if not called then settle(false);error(accepted,0) end
         if not accepted then guard.stop(reason);return end
+        settle(true,reason)
         report(reason,active==true)
     end
     -- Before the game's update, every frame while the mod runs.
@@ -174,15 +200,22 @@ return function(create_api,patch,build,text,locales,runtime)
             menu_wait=menu_wait-1
             if menu_wait<=0 then menu_wait=MENU_FRAMES;watch_menu() end
         end
+        if poll_left>0 then poll_left=poll_left-1;return end
+        if gate_left>0 then
+            gate_left=gate_left-1
+            if idle(api,state) then return end
+        end
         check()
     end
     -- The after-update boundary is checked while a lease or retry is in
-    -- progress or a local avatar exists (then the patch's idle gate costs
-    -- one read). Which boundary first sees a new dive is unknown
+    -- progress or a local avatar exists (then usually the idle gate's one
+    -- read). Which boundary first sees a new dive is unknown
     -- (docs/TECHNICAL.md), so both watch whenever a dive can start; without
     -- a local avatar none can start before the next update.
     local function after()
-        if state.pending or state.retry_start or state.gate_controller then check() end
+        if not watch_after then return end
+        if gated and idle(api,state) then return end
+        check()
     end
     -- Once: a refusal, 8 errors in a burst or a failed pause stopped the mod,
     -- or the game shuts down. The shutdown status keeps the first failure,
@@ -202,6 +235,7 @@ return function(create_api,patch,build,text,locales,runtime)
         if not cleanup() then error('restore_failed',0) end
         state.retry_start,state.was_dive=false,false
         state.gate_controller,state.key,state.write_check=nil,nil,nil
+        settle(false)
         report('paused: '..reason,false,true)
     end
     -- These run every frame (the menu watch every 30th while unregistered)
@@ -210,7 +244,7 @@ return function(create_api,patch,build,text,locales,runtime)
     -- every mod and the game share, for no measurable time (offline in the
     -- game's lua51.dll). The patch's checks still compile.
     if jit and jit.off then
-        for _,fn in ipairs({report,check,step,after,watch_menu,menu_changed}) do jit.off(fn) end
+        for _,fn in ipairs({report,settle,check,step,after,watch_menu,menu_changed}) do jit.off(fn) end
     end
     -- The previous update runs outside pcall, so its errors reach the caller
     -- unchanged (value and traceback); every argument and value passes through.

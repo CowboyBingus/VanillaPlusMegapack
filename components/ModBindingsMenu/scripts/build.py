@@ -62,7 +62,7 @@ def suites() -> list[tuple[str, list]]:
             ("test_ffi_names_hostile_first.lua", []), ("test_ffi_names_mbm_first.lua", []),
             ("test_bingus_text.lua", [HERE / "src"]), ("test_extended.lua", [source]),
             ("test_extended_store.lua", [source]), ("test_capture.lua", [source]),
-            ("test_panel.lua", [source]), ("test_keyboard_defaults.lua", [])]
+            ("test_panel.lua", [source]), ("test_keyboard_defaults.lua", []), ("test_idle_gate.lua", [])]
 
 
 def run(label: str, command: list) -> list[str]:

@@ -1,13 +1,13 @@
 -- Laser Sentry Cooldown tests: a simulated game. A sparse address space with Windows page attributes, the heat
 -- table built from the live bytes of Steam build 25480438 (tests/heat_fixture.lua), the adapter's interface over
 -- it with injectable failures, and a session that installs the addon with a fresh update guard.
--- Usage: local G = dofile(root .. '/tests/fake_game.lua')(root)
-return function(root)
+-- Usage: local G = dofile(root .. '/tests/fake_game.lua')(root[, module path, default src/laser_sentry_cooldown.lua])
+return function(root, module_path)
     local ffi = require('ffi')
     local budget = dofile(root .. '/tests/frame_budget.lua')
     local H = dofile(root .. '/tests/hostile_vm.lua')
     local fixture = dofile(root .. '/tests/heat_fixture.lua')
-    local Cooldown = dofile(root .. '/src/laser_sentry_cooldown.lua')
+    local Cooldown = dofile(module_path or (root .. '/src/laser_sentry_cooldown.lua'))
     local G = {budget = budget, H = H, fixture = fixture, Cooldown = Cooldown}
 
     G.MEM_COMMIT, G.MEM_PRIVATE, G.MEM_IMAGE = 0x1000, 0x20000, 0x1000000

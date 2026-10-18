@@ -11,6 +11,21 @@ return function(create_api,patch,build,runtime)
     local state={revision=build.revision,cancellations=0,updates=0,active=false}
     rawset(_G,'HoverPackCancel',state)
     local api,last_report
+    -- The log file with the status and counters. Defined once, outside report:
+    -- a closure built inside report would make report uncompilable (UCLO
+    -- before every early return) on every frame that reports.
+    local function write_log(status)
+        local logger=rawget(_G,'CowboyBingusModLoader')
+        local f=logger and logger.open_log and logger.open_log('ControllableHoverPack.log');if not f then return end
+        f:write(build.revision..'\n'..status..'\n')
+        for _,key in ipairs({'updates','cancellations','restorations','snapshot_waits','settings_waits','restore_waits'}) do
+            f:write(key..'='..tostring(state[key] or 0)..'\n')
+        end
+        for _,key in ipairs({'snapshot_status','mission_type','last_snapshot_error','last_settings_error','last_restore_error'}) do
+            f:write(key..'='..tostring(state[key] or 'none')..'\n')
+        end
+        f:close()
+    end
     local function report(status,force)
         state.status=status
         if not force and rawget(_G,'CowboyBingusDiagnostics')~=true then return end
@@ -18,18 +33,7 @@ return function(create_api,patch,build,runtime)
         if not force and last_report and now-last_report<2 then return end
         last_report=now
         print('[ControllableHoverPack] '..build.revision..': '..status)
-        pcall(function()
-            local logger=rawget(_G,'CowboyBingusModLoader')
-            local f=logger and logger.open_log and logger.open_log('ControllableHoverPack.log');if not f then return end
-            f:write(build.revision..'\n'..status..'\n')
-            for _,key in ipairs({'updates','cancellations','restorations','snapshot_waits','settings_waits','restore_waits'}) do
-                f:write(key..'='..tostring(state[key] or 0)..'\n')
-            end
-            for _,key in ipairs({'snapshot_status','mission_type','last_snapshot_error','last_settings_error','last_restore_error'}) do
-                f:write(key..'='..tostring(state[key] or 'none')..'\n')
-            end
-            f:close()
-        end)
+        pcall(write_log,status)
     end
     local ok,adapter,game,exe=pcall(function()
         local loader=rawget(_G,'CowboyBingusModLoader')
@@ -82,13 +86,24 @@ return function(create_api,patch,build,runtime)
         report((ran and not state.lease and 'stopped' or 'restore_failed')..(failure and ' after: '..failure or ''),true)
     end
     -- Every frame the guard runs this mod: the work, after the game's update.
-    -- An error here goes to the guard, which counts it.
+    -- An error here goes to the guard, which counts it. The patch's idle gate
+    -- (hover_data.lua M.idle), if it has one, answers frames with nothing to
+    -- do first: no snapshot, pcall or report. It never raises; any frame it
+    -- does not answer gets the full check.
+    local idle=patch.idle
     local function after()
         state.updates=state.updates+1;state.active=false
+        if idle and idle(api,state) then return end
         local status=patch.apply(api,game,exe,state)
         state.active=status=='watching_hover' or status=='native_descent'
         report(tostring(status))
     end
+    -- The guard calls after under pcall, so a trace started at its entry
+    -- aborts where it returns ("NYI: return to lower frame") and retries
+    -- forever, filling LuaJIT's 64-slot penalty cache. It has no loop: it
+    -- runs interpreted, and the gate and snapshot helpers it calls still
+    -- compile. This marks only this function; it flushes nothing.
+    if jit and jit.off then jit.off(after) end
     -- An update below raised: restore and start afresh while the guard pauses
     -- this mod. A restore that cannot finish now raises, and the guard stops
     -- the mod instead, as it did on every such error before.

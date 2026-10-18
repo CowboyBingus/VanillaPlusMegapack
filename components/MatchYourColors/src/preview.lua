@@ -29,6 +29,7 @@ local SPAN = GATE_OFFSET + 16
 local WORDS = Preview.RECORD_BYTES / 4
 local UNITS_W, UNITS_END_W, BODY_W, KITS_END_W = UNITS / 4, UNITS_END / 4, BODY / 4, KITS_END / 4
 local BITS = {[0] = 1, 2, 4, 8}
+local PLAYER_BITS = 15 -- slots 0-3
 
 local function at(address) return ffi.cast('const uint8_t *', address) end
 local function u32(p, o) return p[o] + p[o + 1] * 256 + p[o + 2] * 65536 + p[o + 3] * 16777216 end
@@ -65,6 +66,7 @@ function Preview.watch(memory, where)
     local first_at = at(where.first)
     local players = Preview.RECORD_BYTES * (Preview.MAX_SLOT + 1)
     local now, kept = ffi.new('uint8_t[?]', SPAN), ffi.new('uint8_t[?]', players)
+    local gate_at, gate = at(where.first + GATE_OFFSET), ffi.new('uint8_t[16]')
     local now32, kept32 = ffi.cast('const uint32_t *', now), ffi.cast('const uint32_t *', kept)
     local present, statuses = {}, {}
     for s = 0, Preview.MAX_SLOT do present[s], statuses[s] = false, 'absent' end
@@ -99,14 +101,39 @@ function Preview.watch(memory, where)
         return status
     end
 
+    -- The occupied count, mask and ring of bytes b at offset o: the mask (0 when the count is not believable).
+    local function gate_of(b, o)
+        local ring = u32(b, o + 8)
+        moved, head = head >= 0 and ring ~= head, ring
+        if u32(b, o) <= MAX_OCCUPIED then return u32(b, o + 4) end
+        return 0
+    end
+
+    -- While no player slot showed at the last poll, the gate's 16 bytes alone (2026-10-17; v1.5 read the whole span,
+    -- 1,296 bytes, every time): with no player slot shown now either, the records are not needed (every status
+    -- 'absent', nothing kept), else the span is read as before on that frame.
+    local function idle_poll()
+        if not memory.read_into(gate_at, 16, gate) then
+            moved = false
+            return true
+        end
+        local saved_head = head
+        if band(gate_of(gate, 0), PLAYER_BITS) == 0 then return true end
+        head = saved_head -- the span's read below sets the ring again
+        return false
+    end
+
     function self.poll()
         self.reads, self.changes = self.reads + 1, 0
+        if not (present[0] or present[1] or present[2] or present[3]) and idle_poll() then
+            -- slots 0-3 (Preview.MAX_SLOT), written out: a 4-pass loop here would be a loop trace start that leaves
+            statuses[0], statuses[1], statuses[2], statuses[3] = 'absent', 'absent', 'absent', 'absent'
+            return statuses[where.slot]
+        end
         local ok = memory.read_into(first_at, SPAN, now)
         local mask = 0
         if ok then
-            local ring = u32(now, GATE_OFFSET + 8)
-            moved, head = head >= 0 and ring ~= head, ring
-            if u32(now, GATE_OFFSET) <= MAX_OCCUPIED then mask = u32(now, GATE_OFFSET + 4) end
+            mask = gate_of(now, GATE_OFFSET)
         else
             moved = false
         end

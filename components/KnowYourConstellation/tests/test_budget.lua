@@ -10,14 +10,16 @@ local measure=arg[2]=='measure'
 local H=assert(loadfile(source..'/../tests/session.lua'))()(source)
 local budget,text,word,session=H.budget,H.text,H.word,H.session
 
--- Exact counts: the same reads as v4.0 in every scenario. A refresh frame is
--- the 0.5 s re-sample of a highlighted mission. A mission's own screens are
--- neither the war table nor the briefing, the same two reads as the ship.
--- Campaign spawn weights and war effects come from rows the plain refresh
--- reads already.
+-- Exact counts: the same reads as v4.0 in every scenario but the idle ones. A
+-- refresh frame is the 0.5 s re-sample of a highlighted mission. A mission's
+-- own screens are neither the war table nor the briefing, the same reads as
+-- the ship. Idle frames read only the kept screen stack (1 read; v4.1 read the
+-- manager pointer too, 2), and every 30th frame runs the full 2-read check
+-- (tests/test_idle.lua pins that window). Campaign spawn weights and war
+-- effects come from rows the plain refresh reads already.
 local limits={
-    ship={read=2},
-    mission={read=2},
+    ship={read=1},
+    mission={read=1},
     map_steady={read=16},
     map_refresh={read=64},
     briefing_steady={read=18},
@@ -30,6 +32,11 @@ local limits={
 local function frame(s,label,dt)
     local used=budget.frame(s.counts,s.env.update,dt)
     if measure then print(label,budget.describe(used)) else budget.check(used,limits[label],label) end
+    if not measure then
+        for name,n in pairs(limits[label]) do
+            assert(used[name]==n,label..': '..name..' '..tostring(used[name])..' times, pinned at '..n)
+        end
+    end
     assert(not used.writable_data,'The forecast never queries memory protection')
     return used
 end

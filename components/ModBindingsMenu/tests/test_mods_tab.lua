@@ -870,16 +870,23 @@ do
     -- defaults once: their first use clears the inherited developer defaults
     -- (was 174 with every dormant action swept, 2424 with a read per bucket).
     frame('first frame: the first sweep', {ReadProcessMemory = 40})
-    -- Idle: the binding page check, 2 reads (was 4: the UI state and menu
-    -- pointers are read together, so is the screen stack, and the MODS title
-    -- slot is read only when the title changes).
-    for index = 1, 3 do frame('idle frame ' .. index, {ReadProcessMemory = 2}) end
+    -- Idle: the idle gate's one read of the screen stack, through the UI state
+    -- pointer the last full step read (was 2: the UI state and menu pointers,
+    -- then the screen stack; 4 before that). The first sweep left the
+    -- assignments unsaved, so the next frame runs the full step (2 reads)
+    -- and saves them; the gate answers from then on.
+    frame('frame saving the assignments', {ReadProcessMemory = 2})
+    assert(not st.assignments.dirty, 'assignments saved')
+    for index = 1, 3 do frame('idle frame ' .. index, {ReadProcessMemory = 1}) end
     -- Every 2 seconds each registered action's live and default records are
     -- checked. Six extra reads prevent a config reload from restoring unsafe
     -- reset defaults; idle and input-poll frames are unchanged. In-game cost
     -- of the added sweep work has not been measured.
     frame('sweep frame', {ReadProcessMemory = 14}, 2)
-    frame('idle frame after a sweep', {ReadProcessMemory = 2})
+    frame('idle frame after a sweep', {ReadProcessMemory = 1})
+    -- The gate loads the UI state pointer directly every frame, so idle frames
+    -- stay at one read with no periodic full check (dt 0: no sweep comes due).
+    for _ = 1, 200 do frame('idle frame without a sweep', {ReadProcessMemory = 1}, 0) end
     -- is_down: the cached record's code and mapping count in one read, the
     -- input owner and the action's state byte (was 4 reads).
     assert(call('is_down', {ReadProcessMemory = 3}, menu.is_down, SHIP[1][1]) == false)
@@ -922,7 +929,9 @@ do
     -- Check the six reset sources before the user can revert this page, and
     -- whether a mission runs (2 reads: the record's pointer and the record;
     -- v2.3's MORE MODS gate, once per page visit and every 60 page frames).
-    frame('binding page opens on a native tab', {ReadProcessMemory = 19, VirtualQuery = 1, set_tab_labels = 1})
+    -- The frame a page opens also makes the idle gate's read (was 19): the
+    -- gate sees the page and the full check runs on the same frame.
+    frame('binding page opens on a native tab', {ReadProcessMemory = 20, VirtualQuery = 1, set_tab_labels = 1})
     for index = 1, 2 do frame('binding page on a native tab ' .. index, {ReadProcessMemory = 11}) end
     put32(screen + 8, 3)
     frame('MODS tab, first frame', {ReadProcessMemory = 36, VirtualQuery = 7, build_rows = 1, reset_list = 1})
@@ -967,7 +976,7 @@ do
     -- the title, claimed slots and row labels.
     page(false)
     frame('binding page closes', {ReadProcessMemory = 20, VirtualQuery = 6})
-    for index = 1, 2 do frame('idle frame after the page ' .. index, {ReadProcessMemory = 2}) end
+    for index = 1, 2 do frame('idle frame after the page ' .. index, {ReadProcessMemory = 1}) end
 
     -- A config re-parse restores the shipped defaults: is_down sweeps first and
     -- reports this frame as not down.

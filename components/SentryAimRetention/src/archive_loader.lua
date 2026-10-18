@@ -88,9 +88,19 @@ return function(create_api,patch,build,runtime)
         state.last_reason=reason
         report(reason,active==true)
     end
+    -- The idle gate runs first: while no sentry this machine controls exists,
+    -- a frame between the periodic checks ends here, before pcall, apply and
+    -- report (status and counters stay as the last check left them; polls
+    -- counts the checks that ran).
+    local idle=patch.idle
     local function step()
-        state.updates=state.updates+1;check()
+        state.updates=state.updates+1
+        if idle and idle(api,game,state) then return end
+        check()
     end
+    -- step returns into the guard's pcall on every frame; its traces would
+    -- abort there, so it stays interpreted.
+    if jit and jit.off then jit.off(step) end
     local function after()
         -- The second check, after the game update, catches a target lost inside
         -- that update before the next frame. It runs only while a sentry is
@@ -99,6 +109,9 @@ return function(create_api,patch,build,runtime)
         -- and the next frame's first check sees the same state.
         if state.engaged then check() end
     end
+    -- after also returns into the guard's pcall on every frame (6 aborted
+    -- traces in 3000 waiting frames offline); it stays interpreted too.
+    if jit and jit.off then jit.off(after) end
     -- An update below this mod raised. The guard skips this mod until the
     -- updates below have returned on 60 frames in a row. A failed restore
     -- raises, and the guard stops the mod.

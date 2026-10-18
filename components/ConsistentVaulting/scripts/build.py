@@ -11,8 +11,8 @@ from module import build_module
 from package import package_release
 
 MODULE='mods/cowboybingus/consistent_vaulting'
-REVISION='data-v8.9'
-VERSION='v8.9'
+REVISION='data-v8.9.1'
+VERSION='v8.9.1'
 FORBIDDEN=('VirtualAlloc','VirtualProtect','FlushInstructionCache','CreateRemoteThread',
            'RtlAddFunctionTable','RtlDeleteFunctionTable','LoadLibrary')
 def run(args,**kwargs):
