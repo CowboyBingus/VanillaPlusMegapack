@@ -1,3 +1,7 @@
+# v1.7.1
+
+- Does nothing on a game build it does not know: it now checks the game's files before anything else, like the other CowboyBingus mods. Its log then says why, for example `Disabled: unsupported game build (needs Steam build 25480438)`.
+
 # v1.7
 
 - Windows functions and the memory-region record are declared under private names, so another mod that declared them first with other prototypes can no longer leave the addon idle for the session.

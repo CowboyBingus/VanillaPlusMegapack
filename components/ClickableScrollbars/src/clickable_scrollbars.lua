@@ -6,7 +6,7 @@
 -- A second copy of the addon loads nothing: the first one runs.
 if rawget(_G, 'ClickableScrollbars') then return end
 
-local module = {revision = 'v2.15'}
+local module = {revision = 'v2.15.1'}
 
 -- Keeps these functions, and the functions defined inside them, in the
 -- interpreter; without the jit library it does nothing. A function that gets
@@ -39,6 +39,7 @@ end
 -- offline tests load it.
 local cs = {keep_interpreted = keep_interpreted, clamp = clamp}
 cs.runtime = cs_files.bingus_runtime(module, cs) -- Bingus Shared Runtime: the update guard (vendored)
+cs.bingus_memory = cs_files.bingus_memory(module, cs) -- its read side: the game build check (vendored)
 cs_files.native(module, cs)   -- the UI bridge, the game's scroll routines and the native writes
 cs_files.memory(module, cs)   -- memory views and the reader the addon ships with
 cs_files.locate(module, cs)   -- resolving the visible scrollbar's owner

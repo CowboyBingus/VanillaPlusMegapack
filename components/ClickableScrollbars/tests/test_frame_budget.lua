@@ -193,6 +193,24 @@ local function plain_platform(input)
     }
 end
 
+-- The build gate runs for real: Bingus Shared Runtime's read side hashes the
+-- module files. This process has no game.dll, so its own executable stands in
+-- for both modules, and the sessions below pin that file's hash as the known
+-- build. The gate runs once, in install, before the frames counted here.
+local real_verify_build, PINNED_BUILD = module.verify_build, module.BUILD
+local function stand_in_memory()
+    local memory = module.build_memory()
+    local find = memory.module
+    memory.module = function() return find(nil) end
+    return memory
+end
+local test_hash = (function()
+    local memory = stand_in_memory()
+    return memory.module_hash(memory.module())
+end)()
+local TEST_BUILD = {exe_sha256 = test_hash, game_sha256 = test_hash}
+local function known_build() return real_verify_build(stand_in_memory()) end
+
 -- The addon installed on one world. Every call it makes is counted. With
 -- plain, it runs on plain_platform instead of the real platform.
 local function new_session(route, plain)
@@ -200,6 +218,7 @@ local function new_session(route, plain)
     local input = {now = 1000, down = false, x = 200, y = 600}
     local windows = new_windows(input)
     local counted = {}
+    module.BUILD, module.verify_build = TEST_BUILD, known_build
     module.native_api = function()
         local api = module.native_reader()
         api.module = function(name)
@@ -369,6 +388,51 @@ for _, route in ipairs({'grid', 'loadout', 'career', 'bindings', 'settings'}) do
     s.frame()
     assert(s.state.errors == 0, route .. ': ' .. tostring(s.state.last_error))
     assert(s.state.drags == 2 and s.state.pages == 1, route .. ': gestures not completed')
+end
+
+-- ------------------------------------------------- an unsupported game build
+
+-- On another build install stops at the gate: no platform (none of its test
+-- calls to GetAsyncKeyState, GetForegroundWindow and the rest), no UI bridge,
+-- no reader, no game routine and no hook, so each later update is the game's
+-- own and makes no call. Two builds: build 25480438's hashes against this
+-- process's executable standing in for both modules, and this process as it
+-- is, without game.dll. The left button is held throughout.
+local ZERO = {}
+for _, names in pairs(module.platform_functions) do
+    for _, name in ipairs(names) do ZERO[name] = 0 end
+end
+for _, name in ipairs({'read', 'read_into', 'pointer', 'module', 'stop', 'scroll', 'position', 'solve',
+                       'consume'}) do
+    ZERO[name] = 0
+end
+local unsupported = 0
+for _, case in ipairs({{stand_in_memory, 'disabled: unsupported game build (needs Steam build 25480438)'},
+                       {nil, 'disabled: game modules unavailable'}}) do
+    local input = {now = 1000, down = true, x = 200, y = 600}
+    local windows = new_windows(input)
+    local counts = budget.wrap(windows)
+    local platforms, readers, bridges = 0, 0, 0
+    module.native_api = function() readers = readers + 1 end
+    module.BUILD = PINNED_BUILD
+    module.verify_build = function() return real_verify_build(case[1] and case[1]()) end
+    local function game_update() end
+    local environment = {update = game_update, shutdown = function() end,
+                         create_api = function() bridges = bridges + 1 end,
+                         CowboyBingusModLoader = {api = 1, open_log = function() return nil end}}
+    local install_frame, state, reason = budget.frame(counts, module.install, function()
+        platforms = platforms + 1
+        return module.create_platform({user32 = windows, kernel32 = windows})
+    end, environment)
+    assert(state == nil and reason == case[2], tostring(reason))
+    budget.check(install_frame, ZERO, 'unsupported build: install')
+    assert(platforms == 0 and readers == 0 and bridges == 0, 'nothing but the gate runs')
+    assert(environment.update == game_update and environment.ClickableScrollbars.status == case[2], 'no hook')
+    for frame = 1, 100 do
+        input.now = input.now + 16
+        budget.check(budget.frame(counts, environment.update, 1 / 60), ZERO, 'unsupported build: update ' .. frame)
+    end
+    unsupported = unsupported + 1
 end
 
 -- ------------------------------------------------- garbage per held frame
@@ -731,6 +795,8 @@ kernel.hd2cs_test_VirtualFree(image_base, 0, 0x8000)
 if not PRINT then
     print('frame budget: ' .. checked .. ' frames on 5 routes within their pinned calls (idle, hover, press, held, '
           .. 'verification, release, track press)')
+    print('build gate: ' .. unsupported .. ' unsupported builds (another build, no game.dll) stop install before the '
+          .. 'platform, bridge and reader: 0 input, window, read and game-routine calls at install and in 100 updates')
     print('held drags: ' .. held_cases .. ' changes between held frames cancel the drag before it writes, or keep '
           .. 'it when only the reads behind its owner changed')
     print('held garbage: ' .. held_checked .. ' held-frame measurements within budget (still: 0 B; moving: at most '

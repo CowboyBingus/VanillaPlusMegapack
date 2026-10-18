@@ -253,6 +253,8 @@ local function fake_platform(options)
 end
 
 local function boot(platform)
+    -- The known game build (test_frame_budget.lua runs the real build gate).
+    module.verify_build = function() return true end
     local environment = {update = function() end, shutdown = function() end,
                          CowboyBingusModLoader = {api = 1, open_log = function() return nil end}}
     local state = module.install(function() return platform end, environment)
@@ -437,6 +439,7 @@ assert(type(sandboxed) == 'table' and sandboxed.analyse, 'sandboxed module did n
 -- Exercise the paths that a press takes, inside the sandbox, with a fake
 -- platform, so any unknown global read anywhere in those paths is recorded.
 local sandbox_platform = fake_platform()
+sandboxed.verify_build = function() return true end -- the known game build
 local sandbox_environment = {update = function() end, shutdown = function() end,
                              CowboyBingusModLoader = {api = 1, open_log = function() return nil end}}
 local sandbox_state = sandboxed.install(function() return sandbox_platform end, sandbox_environment)

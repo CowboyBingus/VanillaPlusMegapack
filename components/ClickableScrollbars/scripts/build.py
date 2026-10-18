@@ -32,8 +32,8 @@ _spec.loader.exec_module(_package)
 package_release = _package.package_release
 
 MODULE = 'mods/cowboybingus/clickable_scrollbars'
-REVISION = 'v2.15'
-VERSION = 'v2.15'
+REVISION = 'v2.15.1'
+VERSION = 'v2.15.1'
 # In-game confirmation applies only to these exact runtime bytes.
 VERIFIED_SOURCE_SHA256 = 'FEF9C8287C6E17DB5004EFCA4FA57372C3E663C4A622D3035895DD3D8E0268ED'
 DECLARATION = '-- HD2-Addon: ' + MODULE + '\n'

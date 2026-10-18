@@ -38,7 +38,7 @@ def check_luajit(lua, path):
 
 def check_bindings(lua, path):
     test = Path(__file__).parent / "tests" / "test_bindings.lua"
-    for scenario in ("clean", "predeclared", "game-present", "sdk-declared"):
+    for scenario in ("clean", "predeclared", "game-present", "sdk-declared", "other-build"):
         result = subprocess.run([str(lua), str(test), str(path), scenario],
                                 capture_output=True, text=True)
         if result.returncode != 0:
@@ -54,6 +54,14 @@ def check_work_budget(lua, path):
                                 capture_output=True, text=True)
         if result.returncode:
             raise SystemExit("Work-budget regression failed:\n" + result.stdout + result.stderr)
+        print(result.stdout.strip())
+    # The game build gate: on another build, or when the module files cannot be hashed, the addon
+    # makes no game-facing call at all.
+    for scenario in ("unsupported-build", "hash-unreadable"):
+        result = subprocess.run([str(lua), str(test), str(path), "budget", scenario],
+                                capture_output=True, text=True)
+        if result.returncode:
+            raise SystemExit("Build-gate regression failed:\n" + result.stdout + result.stderr)
         print(result.stdout.strip())
 
 

@@ -1,3 +1,5 @@
+- Arc Thrower Revamped v1.7.1: does nothing on a game build it does not know; it now checks the game's files before anything else.
+- Clickable Scrollbars v2.15.1: does nothing on a game build it does not know; it now checks the game's files before anything else.
 - Mod Bindings Menu v2.3: no fixed limit on mod bindings; bindings past the 36 native actions go on a new MORE MODS tab, offered outside missions only.
 - Mod Bindings Menu v2.3: extended bindings support Press, Release and Hold, modifiers, and keyboard, mouse and controller.
 - Mod Bindings Menu v2.3: two older mods that both ask for slot 2 no longer swap keys when their load order changes.

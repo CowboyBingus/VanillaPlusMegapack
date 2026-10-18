@@ -1,4 +1,4 @@
-> Release v1.7 for Steam build 25480438 / EXE 1.8.46015.0. Offline checks passed; in live play the addon loads and finds the Arc Thrower's charge record.
+> Release v1.7.1 for Steam build 25480438 / EXE 1.8.46015.0. Offline checks passed; in live play the addon loads and finds the Arc Thrower's charge record.
 
 # Arc Thrower Revamped
 
@@ -14,7 +14,7 @@ held and an arc thrower is the weapon the engine issued a fire command for.
 ## Install
 
 1. Close Helldivers 2.
-2. Import `Arc-Thrower-Revamped-v1.7.zip` and **Bingus Shared Loader v18 or newer**
+2. Import `Arc-Thrower-Revamped-v1.7.1.zip` and **Bingus Shared Loader v18 or newer**
    into Arsenal or HD2MM, then enable both.
 3. With Arsenal's default priority, put the loader last at the bottom of the
    load order.
@@ -35,8 +35,10 @@ loader should be removed before deploying this one.
 - A second arc thrower called down later has its own entity and charge entry,
   so the addon follows whichever thrower the engine issued a fire command for.
 - No executable code is modified. The addon writes the thrower's charge record
-  (`auto_fire_in_safety`) and its runtime charge entry, and verifies a known
-  `game.dll` fingerprint before touching anything. Every write is checked
+  (`auto_fire_in_safety`) and its runtime charge entry. Before anything else it
+  checks the SHA-256 of `helldivers2.exe` and `game.dll`; on any other game
+  build it logs why and does nothing more. It also verifies a known `game.dll`
+  fingerprint before touching anything. Every write is checked
   first: the charge entry must be private read-write game data, and the
   record's page private memory the game keeps read-only, which is made
   writable for that one write and read-only again right after.
@@ -61,13 +63,14 @@ its `-- HD2-Addon:` declaration. Package it from this checkout:
 
 ```powershell
 python -B scripts/build.py --loader ..\BingusSharedLoader `
-  --output releases\Arc-Thrower-Revamped-v1.7.zip
+  --output releases\Arc-Thrower-Revamped-v1.7.1.zip
 ```
 
 The builder runs `python check.py --archive <zip>` before finishing. The check
 validates the source and packaged entry with Windows x64 LuaJIT (set
 `HD2_LUAJIT` or have `luajit` on `PATH`). It runs the first update and render
-callbacks with clean and predeclared native bindings, checks that a synthetic
+callbacks with clean and predeclared native bindings, checks that another game
+build stops the addon before it binds or reads anything, that a synthetic
 unsupported game image is rejected without writes, and, with Windows SDK-style
 prototypes declared first by another mod, scans the test process and patches a
 synthetic charge record in a real read-only region. These offline checks do not
@@ -92,7 +95,7 @@ accepts up to 4096 entries and examines at most 64 active candidates per attempt
 Recovery, release, changed-weapon, work-budget, and packaged-payload checks run
 offline; the recovery paths have not been reproduced in live play.
 
-Current version: **v1.7**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).
+Current version: **v1.7.1**, for game build **25480438**. See [changes](CHANGELOG.md) and [validation coverage](docs/MIGRATION_VALIDATION.md).
 
 **AI disclosure:** Claude Opus 5.5 assisted with research, implementation, tests and documentation.
 

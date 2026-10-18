@@ -6,6 +6,8 @@ return function(module, options)
         captures=0, wheels=0, writes=0, logs=0, resolves=0, binds=0, reads=0,
         updates=0, renders=0, closed=false, content=5000, span=4000, items=80,
         gate=0.504, gate_writes=0, consumes=0, row_activations=0, tab_activations=0}
+    -- The known game build (test_frame_budget.lua runs the real build gate).
+    module.verify_build = function() return true end
     module.native_api = function()
         f.binds = f.binds + 1
         if options.unsupported then return nil, 'unsupported native scroll routine' end

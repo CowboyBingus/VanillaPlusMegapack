@@ -2,6 +2,31 @@
 -- policy, in the game's update callback.
 local module, cs = ...
 local clamp, DEFAULTS, keep_interpreted, runtime = cs.clamp, cs.DEFAULTS, cs.keep_interpreted, cs.runtime
+local bingus_memory = cs.bingus_memory
+
+-- ---------------------------------------------------------------- build gate
+
+-- Build 25480438's module hashes: helldivers2.exe and game.dll.
+module.BUILD = {exe_sha256 = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06',
+                game_sha256 = '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'}
+
+-- Bingus Shared Runtime's read side (bingus_memory.lua, vendored), used only
+-- for the build check.
+function module.build_memory()
+    return bingus_memory.new(runtime)
+end
+
+-- True, or false and why. Hashes the two module files once per session for
+-- every mod that asks (BingusRuntime.hashes). memory: for tests.
+function module.verify_build(memory)
+    local ran, verified, why = pcall(function()
+        return (memory or module.build_memory()).verify_build(module.BUILD)
+    end)
+    if not ran then return false, tostring(verified) end
+    if verified then return true end
+    if why == 'unsupported game build' then return false, 'unsupported game build (needs Steam build 25480438)' end
+    return false, tostring(why)
+end
 
 -- ------------------------------------------------------------------ install
 
@@ -70,6 +95,15 @@ function module.install(create_platform, environment)
         pixels_per_notch = nil, calibration = {},
     }
     rawset(environment, 'ClickableScrollbars', state)
+
+    -- The build gate, before the platform, the UI bridge, the reader or the
+    -- ini: on any other build the addon only logs why (the caller writes the
+    -- status) and hooks nothing. The game.dll signature checks stay after it.
+    local verified, why = module.verify_build()
+    if not verified then
+        state.status = 'disabled: ' .. why
+        return nil, state.status
+    end
 
     local function read_settings()
         local base = os.getenv('LOCALAPPDATA')

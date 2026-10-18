@@ -3,7 +3,13 @@ local path, scenario = assert(arg[1]), assert(arg[2])
 local ffi = require('ffi')
 assert(ffi.os == 'Windows' and ffi.arch == 'x64', 'Windows x64 LuaJIT required')
 assert(scenario == 'clean' or scenario == 'predeclared' or scenario == 'game-present'
-       or scenario == 'sdk-declared')
+       or scenario == 'sdk-declared' or scenario == 'other-build')
+-- clean, predeclared: this process has no game.dll, so the build gate stops
+-- the addon before anything else. game-present, sdk-declared: a synthetic
+-- game.dll whose file the session's hash table lists as build 25480438's, so
+-- the gate passes and the addon's own signature check decides. other-build:
+-- the same synthetic game.dll, whose file is this process's executable: the
+-- gate hashes both files for real and finds another build.
 if scenario == 'predeclared' then
     ffi.cdef [[void *GetModuleHandleA(const char *name);]] -- lint-ok: R1 a neighbour's declaration under test
     local kernel = ffi.load('kernel32')
@@ -44,6 +50,7 @@ void *atrtest_VirtualAlloc(void *address, size_t size, uint32_t type, uint32_t p
 int atrtest_VirtualFree(void *address, size_t size, uint32_t type) __asm__("VirtualFree");
 int atrtest_VirtualProtect(void *address, size_t size, uint32_t protect, uint32_t *old) __asm__("VirtualProtect");
 size_t atrtest_VirtualQuery(const void *address, void *region, size_t size) __asm__("VirtualQuery");
+uint32_t atrtest_GetModuleFileNameW(void *module, uint16_t *path, uint32_t capacity) __asm__("GetModuleFileNameW");
 ]]
 local system = ffi.load('kernel32')
 local MEM_COMMIT_RESERVE, MEM_RELEASE, PAGE_READONLY, PAGE_READWRITE = 0x3000, 0x8000, 0x02, 0x04
@@ -60,14 +67,32 @@ local function page(address)
     return words[8], words[9], words[10]
 end
 
-local bindings, lookups = ffi, {}
+local bindings, lookups, gate_lookups = ffi, {}, 0
 local fixture, module_handle, record
+-- The session's module hashes (BingusRuntime.hashes), keyed by file path.
+local hashes = {}
+local function file_name(module)
+    local path = ffi.new('uint16_t[32768]')
+    local length = system.atrtest_GetModuleFileNameW(module, path, 32768)
+    assert(length > 0 and length < 32768, 'GetModuleFileNameW failed')
+    return path, length
+end
+local exe_path, exe_length = file_name(nil)
+local FIXTURE_FILE = 'C:\\Fixture\\data\\game\\game.dll'
+local fixture_path = ffi.new('uint16_t[?]', #FIXTURE_FILE + 1)
+for index = 1, #FIXTURE_FILE do fixture_path[index - 1] = FIXTURE_FILE:byte(index) end
 if scenario == 'game-present' or scenario == 'sdk-declared' then
+    hashes['sha256:' .. ffi.string(exe_path, exe_length * 2)] =
+        'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
+    hashes['sha256:' .. ffi.string(fixture_path, #FIXTURE_FILE * 2)] =
+        '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
+end
+if scenario == 'game-present' or scenario == 'sdk-declared' or scenario == 'other-build' then
     -- Only the game handle is synthetic. Native process, timer and memory
     -- calls operate on this process: a zero-filled image (unsupported) or one
     -- carrying the build signature (sdk-declared, so the addon scans this
     -- process and patches a charge record in a real read-only region).
-    if scenario == 'game-present' then
+    if scenario ~= 'sdk-declared' then
         fixture = ffi.new('uint8_t[?]', 0x755f90 + 16)
     else
         fixture = allocate(0x3470000) -- covers every global the addon reads
@@ -86,10 +111,33 @@ if scenario == 'game-present' or scenario == 'sdk-declared' then
         assert(ffi.string(name) == 'game.dll')
         return fixture
     end)
+    -- The build gate's copy of the runtime (bingus_memory1_* names): game.dll
+    -- is the fixture, whose file name is FIXTURE_FILE, or for other-build this
+    -- process's executable. Every other function is the real one.
+    local function gate_function(native, symbol, real)
+        gate_lookups = gate_lookups + 1
+        local resolved = native[symbol]
+        if real == 'GetModuleHandleA' then
+            return function(name)
+                if name ~= nil and ffi.string(name) == 'game.dll' then return ffi.cast('void *', fixture) end
+                return resolved(name)
+            end
+        elseif real == 'GetModuleFileNameW' then
+            return function(module, path, capacity)
+                if module ~= ffi.cast('void *', fixture) then return resolved(module, path, capacity) end
+                if scenario == 'other-build' then return resolved(nil, path, capacity) end
+                ffi.copy(path, fixture_path, (#FIXTURE_FILE + 1) * 2)
+                return #FIXTURE_FILE
+            end
+        end
+        return resolved
+    end
     bindings = setmetatable({load = function(name)
         local native = ffi.load(name)
         if name ~= 'kernel32' then return native end
         return setmetatable({}, {__index = function(_, symbol)
+            local gate = symbol:match('^bingus_memory1_(.+)$')
+            if gate then return gate_function(native, symbol, gate) end
             local real = symbol:match('^atr1_(.+)$')
             assert(real, 'kernel32 used without a private name: ' .. tostring(symbol))
             local resolved = native[symbol] -- Requires a real declaration.
@@ -107,6 +155,7 @@ end
 local lines, updates, renders = {}, 0, 0
 local env = setmetatable({}, {__index = _G})
 env._G = env
+env.BingusRuntime = {hashes = hashes}
 env.require = function(name)
     if name == 'ffi' then return bindings end
     return require(name)
@@ -125,8 +174,22 @@ env.render = function(value)
     return 'rendered', nil, 7
 end
 local function load_addon() setfenv(assert(loadfile(path)), env)() end
+local game_update, game_render = env.update, env.render
 load_addon()
-assert(#lines == 1 and lines[1]:find('initialised', 1, true))
+local gated = scenario == 'clean' or scenario == 'predeclared' or scenario == 'other-build'
+if gated then
+    -- The gate stopped the addon: one log line, nothing of its own bound and
+    -- no hook, so the game's callbacks run directly.
+    local why = scenario == 'other-build' and 'unsupported game build (needs Steam build 25480438)'
+        or 'game modules unavailable'
+    assert(#lines == 1 and lines[1] == 'Disabled: ' .. why .. '; the addon does nothing this session.\n',
+           table.concat(lines))
+    assert(next(lookups) == nil, 'no binding of the addon on another build')
+    assert(env.update == game_update and env.render == game_render and env.shutdown == nil, 'no hook')
+    assert(scenario ~= 'other-build' or gate_lookups > 0, 'the gate bound its own functions')
+else
+    assert(#lines == 1 and lines[1]:find('initialised on game build 25480438', 1, true), table.concat(lines))
+end
 for _ = 1, 2 do
     local a, b, c = env.update(0.016)
     assert(a == 1 and b == nil and c == 3)
@@ -149,14 +212,17 @@ if scenario == 'sdk-declared' then
     for _ = 1, 40 do env.update(0.016) end -- record checks every 0.25 s
     assert(#lines == 2, table.concat(lines, ' | '))
     assert(lookups.VirtualProtectEx and lookups.WriteProcessMemory and lookups.VirtualQueryEx)
-else
+elseif scenario == 'game-present' then
+    -- The gate passed; the game.dll signature check after it still refuses.
     assert(#lines == 2, table.concat(lines))
-    local expected = scenario == 'game-present' and 'Unsupported game build; the addon is disabled.'
-        or 'game.dll not loaded'
-    assert(lines[2]:find(expected, 1, true), table.concat(lines))
+    assert(lines[2]:find('Unsupported game build; the addon is disabled.', 1, true), table.concat(lines))
+else
+    assert(#lines == 1, table.concat(lines))
 end
-assert(not lines[2]:find('kernel32 bindings unavailable', 1, true))
-assert(not lines[2]:find('missing declaration', 1, true))
+for _, line in ipairs(lines) do
+    assert(not line:find('kernel32 bindings unavailable', 1, true))
+    assert(not line:find('missing declaration', 1, true))
+end
 if scenario == 'game-present' then
     assert(lookups.GetCurrentProcess == 1, 'initialize process once')
     assert(lookups.QueryPerformanceFrequency == 1, 'initialize timer once')

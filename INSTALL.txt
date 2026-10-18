@@ -55,8 +55,8 @@ Included revisions:
 - Controllable Hover Pack v1.8
 - Know Your Constellation v4.1
 - Armory Preview Cache v23
-- Clickable Scrollbars v2.15
-- Arc Thrower Revamped v1.7
+- Clickable Scrollbars v2.15.1
+- Arc Thrower Revamped v1.7.1
 - Ship Station Hotkeys v1.9
 - Flame Damage Fixed v1.2
 - Mod Options Menu v1.2

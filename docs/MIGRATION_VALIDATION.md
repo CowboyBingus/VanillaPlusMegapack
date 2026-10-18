@@ -28,6 +28,12 @@ loader v19; Mod Bindings Menu reported version 4, its guard ran without errors,
 its mission check read true in the mission and false on the ship, and its MORE
 MODS panel never drew. The bindings pages and MORE MODS with a player have not
 been checked in game yet.
+v42 also updates Arc Thrower Revamped to v1.7.1 and Clickable Scrollbars to
+v2.15.1, which check the game build first: the package with all twenty-five
+options ran to the ship, into a solo mission and back, and quit cleanly with
+loader v19; Arc Thrower Revamped logged that it initialised on game build
+25480438 and Clickable Scrollbars reported running, both without errors. Their
+refusal on another game build is checked by their tests only.
 v42 also gives each option its own cover: every file a manager deploys is byte
 for byte the previous v42 package's, and Arsenal 0.36.0 and HD2MM 1.3
 imported it and resolved each option's own image.

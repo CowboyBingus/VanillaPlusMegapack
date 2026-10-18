@@ -130,7 +130,25 @@ local function memory(address,size)
     return nil
 end
 local kernel={}
-function kernel.GetModuleHandleA() return ffi.cast('void *',GAME) end
+-- The build gate (bingus_memory.lua) asks for the executable (no name) and
+-- game.dll, then their file names; the hashes come from the session's shared
+-- table, seeded below, so no file is read. The file functions it binds fail.
+local EXE=0x7ff600000000
+local FILES={[EXE]='C:\\Game\\bin\\helldivers2.exe',[GAME]='C:\\Game\\data\\game\\game.dll'}
+local function utf16(text) return (text:gsub('.','%0\0')) end
+function kernel.GetModuleHandleA(name) return ffi.cast('void *',name==nil and EXE or GAME) end
+function kernel.GetModuleFileNameW(module,path,capacity)
+    local file=assert(FILES[tonumber(ffi.cast('uintptr_t',module))],'file name of an unknown module')
+    assert(#file<capacity)
+    ffi.copy(path,utf16(file)..'\0\0',#file*2+2)
+    return #file
+end
+function kernel.CreateFileW() return ffi.cast('void *',-1) end -- INVALID_HANDLE_VALUE
+function kernel.ReadFile() error('the test reads no module file',0) end
+function kernel.CloseHandle() return 1 end
+local function hash_key(file) return 'sha256:'..utf16(file) end
+local BUILD_EXE='F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
+local BUILD_GAME='2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
 function kernel.GetCurrentProcess() return ffi.cast('void *',1) end
 function kernel.QueryPerformanceFrequency(p) p[0]=1000000;return 1 end
 function kernel.QueryPerformanceCounter(p) p[0]=clock%4294967296;p[1]=math.floor(clock/4294967296);return 1 end
@@ -175,6 +193,8 @@ function kernel.VirtualQueryEx(_,address,info)
     end
     return 0
 end
+-- Bound by the build gate's copy of the runtime, never called by the addon.
+function kernel.VirtualQuery() queries=queries+1;return 0 end
 function kernel.VirtualProtectEx(_,address,size,protection,previous)
     if type(address)~='number' then address=tonumber(ffi.cast('uintptr_t',address)) end
     assert((address==REGION+record+184 or address==REGION+record2+184) and size==1,
@@ -207,14 +227,25 @@ end
 local counts=budget.wrap(kernel) -- per-frame Windows calls, for the budget mode
 -- The addon reaches Windows only through its private names (atr1_*): each one
 -- resolves to the stub of the real export, so counts keep the Windows names.
+-- The build gate's copy of the runtime binds its own private names
+-- (bingus_memory1_*); the addon's names (atr1_*) are recorded as resolved.
+local addon_bindings=0
 local private_kernel=setmetatable({},{__index=function(proxy,symbol)
     local name=type(symbol)=='string' and symbol:match('^atr1_(.+)$')
+    if name then addon_bindings=addon_bindings+1 end
+    name=name or type(symbol)=='string' and symbol:match('^bingus_memory1_(.+)$')
     if not (name and kernel[name]) then error('kernel32 used without a private name: '..tostring(symbol)) end
     rawset(proxy,symbol,kernel[name]) -- resolved once, like a native binding
     return kernel[name]
 end})
+local function no_hashing() error('the test hashes no module file',0) end
+local bcrypt=setmetatable({},{__index=function(_,symbol)
+    assert(type(symbol)=='string' and symbol:match('^bingus_memory1_BCrypt'),'bcrypt used without a private name')
+    return no_hashing
+end})
 local bindings=setmetatable({load=function(name)
     if name=='kernel32' then return private_kernel end
+    if name=='bcrypt' then return bcrypt end
     error('Raw mouse state must not decide the native Fire action: '..name)
 end},{__index=ffi})
 local log_text={}
@@ -237,8 +268,16 @@ end
 env.shutdown=function(...) shutdowns=shutdowns+1;return 'shut',... end
 env.render=function() renders=renders+1;return 4,nil,6 end
 local render=env.render
-setfenv(assert(loadfile(source)),env)()
-assert(env.render==render,'render must not run a second assist')
+-- The session's module hashes, as an earlier mod or the loader left them:
+-- build 25480438, another build's game.dll, or none (the file cannot be read).
+local gate_scenario=scenario=='unsupported-build' or scenario=='hash-unreadable'
+local hashes={}
+if scenario~='hash-unreadable' then
+    hashes[hash_key(FILES[EXE])]=BUILD_EXE
+    hashes[hash_key(FILES[GAME])]=scenario=='unsupported-build' and string.rep('0',64) or BUILD_GAME
+end
+env.BingusRuntime={hashes=hashes}
+local original_update,original_shutdown=env.update,env.shutdown
 local function tick()
     clock=clock+10000
     local old_bytes,old_queries=bytes,queries
@@ -249,6 +288,43 @@ local function tick()
     local x,y,z=env.render();assert(x==4 and y==nil and z==6)
     assert(reads==old_reads and writes==old_writes,'render duplicated native work')
 end
+-- Loading the addon: the build gate only, on every build. It finds the two
+-- modules and their file names (the hashes are cached here); the runtime's
+-- read side binds itself once (the process and the counter's frequency).
+-- Without a cached hash it opens the executable's file, which fails here.
+local load_frame=budget.frame(counts,function() setfenv(assert(loadfile(source)),env)() end)
+local GATE={GetModuleHandleA=2,GetModuleFileNameW=2,GetCurrentProcess=1,QueryPerformanceFrequency=1}
+if scenario=='hash-unreadable' then GATE.GetModuleFileNameW,GATE.CreateFileW=1,1 end
+budget.check(load_frame,GATE,'load')
+for name,n in pairs(GATE) do
+    assert(load_frame[name]==n,'load: '..budget.describe(load_frame)..'; log: '..table.concat(log_text))
+end
+assert(env.render==render,'render must not run a second assist')
+if gate_scenario then
+    -- Another build: the addon logs why and stops. Zero calls of every
+    -- game-facing kind (reads, writes, page queries, protection changes, the
+    -- clock); it binds none of its own functions and hooks nothing, so every
+    -- update and the shutdown reach the game's own callbacks directly.
+    local why=scenario=='unsupported-build' and 'unsupported game build (needs Steam build 25480438)'
+        or 'cannot read the module file'
+    assert(#log_text==1 and log_text[1]=='Disabled: '..why..'; the addon does nothing this session.\n',
+           table.concat(log_text))
+    assert(addon_bindings==0,'no binding of the addon on another build')
+    assert(env.update==original_update and env.shutdown==original_shutdown,'no update or shutdown hook')
+    local ZERO={ReadProcessMemory=0,WriteProcessMemory=0,VirtualQuery=0,VirtualQueryEx=0,VirtualProtectEx=0,
+                QueryPerformanceCounter=0,GetTickCount64=0,GetModuleHandleA=0,GetCurrentProcess=0}
+    for frame=1,100 do
+        budget.check(budget.frame(counts,tick),ZERO,'unsupported build, update '..frame)
+        down=frame%10<5;weapon='arc'
+    end
+    budget.check(budget.frame(counts,env.shutdown),ZERO,'unsupported build, shutdown')
+    assert(reads==0 and writes==0 and patches==0 and queries==0 and #protection_changes==0 and #log_text==1)
+    assert(rawget(env,'ArcThrowerRevampedInstalled')==true,'a second copy still stays out')
+    print('PASS: build gate ('..scenario..'): load '..budget.describe(load_frame)
+          ..'; then 0 game calls in 100 updates and the shutdown')
+    return
+end
+assert(#log_text==1 and log_text[1]:find('initialised on game build 25480438',1,true),table.concat(log_text))
 local startup=budget.frame(counts,tick) -- the first update: binding, build check and scan
 for _=2,20 do tick() end
 if mode=='stale' then

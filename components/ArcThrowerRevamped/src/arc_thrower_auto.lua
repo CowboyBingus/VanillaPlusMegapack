@@ -10,7 +10,7 @@
 if rawget(_G, 'ArcThrowerRevampedInstalled') then return end
 rawset(_G, 'ArcThrowerRevampedInstalled', true)
 
-local module = {revision = 'v1.7'}
+local module = {revision = 'v1.7.1'}
 
 local ffi = require('ffi')
 local bit = require('bit')
@@ -124,6 +124,34 @@ end
 
 local function note(message)
     if log then log:write(message .. '\n'); log:flush() end
+end
+
+-- The game build gate, before anything else touches the game or Windows: the
+-- SHA-256 of helldivers2.exe and game.dll must be build 25480438's. Each file
+-- is hashed once per session for every mod that asks (bingus_memory.lua, the
+-- runtime's read side, vendored byte-identical; scripts/entry.py embeds it).
+-- On any other build the addon logs why and does nothing more: no binding,
+-- read, write, page query or update hook. The game.dll signature check in
+-- ready() still runs after this gate.
+local EXE_SHA256 = 'F5FEE03DCFDB2E553A4752C283590950AC13316B376D8196AA556FF0400D5F06'
+local GAME_SHA256 = '2E2C3B7C2500646DADD5F2B4C6E0504DBB7E7896139F64CDDC0D1813C718F51E'
+
+-- True, or false and why.
+local function verified_build()
+    local ran, verified, why = pcall(function()
+        local memory = bingus_memory.new(runtime)
+        return memory.verify_build({exe_sha256 = EXE_SHA256, game_sha256 = GAME_SHA256})
+    end)
+    if not ran then return false, tostring(verified) end
+    if verified then return true end
+    if why == 'unsupported game build' then return false, 'unsupported game build (needs Steam build 25480438)' end
+    return false, tostring(why)
+end
+
+local build_verified, build_problem = verified_build()
+if not build_verified then
+    note('Disabled: ' .. build_problem .. '; the addon does nothing this session.')
+    return
 end
 
 local function log_line(message)
@@ -1099,5 +1127,5 @@ if jit and jit.off then
     end
 end
 
-note('Arc Thrower Revamped ' .. module.revision .. ' initialised (loader API ' ..
+note('Arc Thrower Revamped ' .. module.revision .. ' initialised on game build 25480438 (loader API ' ..
      tostring(loader and loader.api or '?') .. ')')

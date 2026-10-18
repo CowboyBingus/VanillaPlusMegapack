@@ -245,6 +245,8 @@ local function boot(game, fallback)
     -- Only the addon's writes can move the native model. The simulated game
     -- must not implement a working drag on the addon's behalf.
     game.key, game.writes = 'grid-1', 0
+    -- The known game build (test_frame_budget.lua runs the real build gate).
+    module.verify_build = function() return true end
     module.native_api = function() return {} end
     module.native_locate = function()
         if fallback or not game.key then return nil end

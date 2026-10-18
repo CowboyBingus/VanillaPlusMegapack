@@ -99,10 +99,12 @@ def tool_commands(mods, build):
     commands = []
     arc = mods / 'ArcThrowerRevamped'
     arc_entry = build / 'ArcThrowerRevamped/entry.lua'
-    for scenario in ('clean', 'predeclared', 'game-present', 'sdk-declared'):
+    for scenario in ('clean', 'predeclared', 'game-present', 'sdk-declared', 'other-build'):
         commands.append([arc / 'tests/test_bindings.lua', arc_entry, scenario])
     for scenario in ('normal', 'slow', 'stale', 'budget'):
         commands.append([arc / 'tests/test_work_budget.lua', arc_entry, scenario])
+    for scenario in ('unsupported-build', 'hash-unreadable'):  # the game build gate
+        commands.append([arc / 'tests/test_work_budget.lua', arc_entry, 'budget', scenario])
     for mode in ('normal', 'slow'):
         for scenario in ARC_RECOVERY:
             commands.append([arc / 'tests/test_work_budget.lua', arc_entry, mode, scenario])

@@ -39,8 +39,8 @@ The game runs every Lua mod in its own LuaJIT, whose code cache keeps its 2015 l
 | [Controllable Hover Pack](https://github.com/CowboyBingus/ControllableHoverPack) | v1.8 | Press the Jump Pack action again to descend early while retaining native landing assistance. |
 | [Know Your Constellation](https://github.com/CowboyBingus/KnowYourConstellation) | v4.1 | Shows every enemy a mission can spawn, named as on the Helldivers wiki and weighted by how often it spawns, on the war table and the briefing screen. |
 | [Armory Preview Cache](https://github.com/CowboyBingus/ArmoryPreviewCache) | v23 | Caches equipment thumbnails and preloads their assets in Armory and mission briefing. |
-| [Arc Thrower Revamped](https://github.com/CowboyBingus/ArcThrowerRevamped) | v1.7 | Hold the fire button to keep the Arc Thrower firing; stock charge, damage and arc settings. |
-| [Clickable Scrollbars](https://github.com/CowboyBingus/ClickableScrollbars) | v2.15 | Drag equipment, Career, bindings and settings scrollbars. |
+| [Arc Thrower Revamped](https://github.com/CowboyBingus/ArcThrowerRevamped) | v1.7.1 | Hold the fire button to keep the Arc Thrower firing; stock charge, damage and arc settings. |
+| [Clickable Scrollbars](https://github.com/CowboyBingus/ClickableScrollbars) | v2.15.1 | Drag equipment, Career, bindings and settings scrollbars. |
 | [Ship Station Hotkeys](https://github.com/CowboyBingus/ShipStationHotkeys) | v1.9 | Shortcuts aboard the ship: Tab map, F1 Armory, F5 Control Center, F6 Ship Management, F7 Stratagem Hero, F8 instant Hellpod entry. |
 | [Flame Damage Fixed](https://github.com/CowboyBingus/FlameDamageFixed) | v1.2 | Fixes the Lumberer's and Flame Sentry's flame: two flame parts spawn again, the flame starts at the Cremator's distances and no longer hits the weapon that fires it, while still hitting Chargers and every other target. |
 | [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) | v1.2 | Native MODS tab on the Options screen, where mods such as Shallow Water Diving offer their settings. |
