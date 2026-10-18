@@ -7,7 +7,9 @@ local bit = require('bit')
 local state, note = mbm.state, mbm.note
 local DORMANT_ACTIONS, SLOTS, ASSIGNMENTS_FILE = mbm.DORMANT_ACTIONS, mbm.SLOTS, mbm.ASSIGNMENTS_FILE
 
-local function assignments_path()
+-- The path of one of Mod Bindings Menu's settings files, in the loader's log
+-- folder, or nil without one.
+local function settings_path(name)
     local loader_api = rawget(_G, 'CowboyBingusModLoader')
     local directory = type(loader_api) == 'table' and loader_api.log_directory
     if type(directory) ~= 'string' or directory == '' then
@@ -15,8 +17,9 @@ local function assignments_path()
         if not local_app_data then return nil end
         directory = local_app_data .. '/CowboyBingus/Helldivers2'
     end
-    return directory .. '/' .. ASSIGNMENTS_FILE
+    return directory .. '/' .. name
 end
+local function assignments_path() return settings_path(ASSIGNMENTS_FILE) end
 
 -- Automatic bindings keep their native action across sessions, because the
 -- game saves each action's keys under the action's name. The assignments file,
@@ -33,11 +36,15 @@ end
 --                                       the list it last left (src/sweep.lua)
 --   action <group>:<action> clear       handed over from an expired binding:
 --                                       to be cleared entirely
+--   slot <slot> <seen> <id>             the owner of a shared fixed slot (slot 2,
+--                                       the v1 third-party slot) and the last
+--                                       session it registered in (v2.3)
 --   end                                 a complete file always ends with it
--- v2.1 wrote only "<id>\t<group>\t<action>" lines.
+-- v2.1 wrote only "<id>\t<group>\t<action>" lines. v2.2.1 and older ignore
+-- slot lines and drop them at their next save.
 local function new_book()
-    return {bindings = {}, holders = {}, actions = {}, saved = 0, counted = false, dirty = false, failed = false,
-            retry = 0, damaged = false}
+    return {bindings = {}, holders = {}, actions = {}, owners = {}, saved = 0, counted = false, dirty = false,
+            failed = false, retry = 0, damaged = false}
 end
 
 -- A binding read from the file: bindings = {[id] = {code, seen}} and
@@ -68,11 +75,19 @@ local function read_action(book, code, record)
     end
 end
 
+-- A shared slot's owner: {id, seen}, for the slots in SHARED_SLOTS only.
+local SHARED_SLOTS = {[2] = true}
+local function read_owner(book, slot, seen, id)
+    if SHARED_SLOTS[slot] then book.owners[slot] = {id = id, seen = seen} end
+end
+
 local function read_line(book, line)
     local id, group, action, seen = line:match('^([^\t]+)\t(%d+)\t(%d+)\t?(%d*)$')
     if id then return read_binding(book, id, tonumber(group) * 65536 + tonumber(action), tonumber(seen)) end
     group, action, seen = line:match('^action (%d+):(%d+) (.+)$')
     if group then return read_action(book, tonumber(group) * 65536 + tonumber(action), seen) end
+    local slot, owner_seen, owner = line:match('^slot (%d+) (%d+) ([^\t]+)$')
+    if slot then return read_owner(book, tonumber(slot), tonumber(owner_seen), owner) end
     if line == 'end' then
         book.complete = true
         return
@@ -173,6 +188,10 @@ local function assignments_text(book)
     for _, entry in ipairs(DORMANT_ACTIONS) do
         local code = entry[1] * 65536 + entry[2]
         if book.actions[code] then lines[#lines + 1] = action_line(code, book.actions[code]) end
+    end
+    for slot = 1, SLOTS do
+        local owner = book.owners[slot]
+        if owner then lines[#lines + 1] = 'slot ' .. slot .. ' ' .. owner.seen .. ' ' .. owner.id end
     end
     lines[#lines + 1] = 'end'
     return table.concat(lines, '\n') .. '\n'
@@ -301,22 +320,23 @@ local function hand_over(book, id, code)
 end
 
 -- Why no action is left: reservations of mods not loaded this session, or
--- every automatic action in use. Logged once per id.
-local function refuse(book, id)
+-- every automatic action in use. Logged once per id, unless quiet (the
+-- registration falls back to an extended binding instead).
+local function refuse(book, id, quiet)
     local reason = REASON_FULL
     for index = SLOTS + 1, #DORMANT_ACTIONS do
         local code = auto_code(index)
         if not state.used[code] and book.holders[code] then reason = REASON_RESERVED end
     end
-    if not state.refused[id] then
+    if not quiet and not state.refused[id] then
         state.refused[id] = true
         note('Cannot register ' .. id .. ': ' .. reason .. '.')
     end
     return reason
 end
 
--- The automatic action for id, or nil and the reason.
-local function assign_action(id)
+-- The automatic action for id, or nil and the reason (see refuse for quiet).
+local function assign_action(id, quiet)
     local book = load_assignments()
     count_session(book)
     local own = book.bindings[id]
@@ -326,7 +346,47 @@ local function assign_action(id)
     end
     local code = free_action(book) or expired_action(book)
     if code then return hand_over(book, id, code) end
-    return nil, refuse(book, id)
+    return nil, refuse(book, id, quiet)
+end
+
+-- The native action for a request of a shared fixed slot (slot 2), or nil and
+-- the reason. The slot's action, and the keys the game saved on it, belong to
+-- one id across sessions, whatever order the mods load in: its owner, saved in
+-- the assignments file. v2.2.1 and older gave the slot to the first caller of
+-- each session, so reversing two v1.1 mods moved both, and one inherited the
+-- other's keys (the 2026-10-13 plan audit).
+-- - The owner gets the slot's action, also in a session where it registers late.
+-- - An id with an automatic reservation keeps it. Files written before owners
+--   were saved have none; such a reservation shows the id was the one moved.
+-- - Any other id, while the owner's reservation lasts, gets an automatic action.
+-- - With no owner, or one that has not registered for EXPIRY_SESSIONS sessions
+--   that count, the caller becomes the owner, and the expired owner's keys are
+--   cleared so they do not carry over.
+-- A shared-slot request counts its session, as an automatic request does.
+local function assign_shared(id, slot, fixed_code, quiet)
+    local book = load_assignments()
+    count_session(book)
+    local owner = book.owners[slot]
+    if owner and owner.id == id and not state.used[fixed_code] then
+        if owner.seen ~= book.session then owner.seen, book.dirty = book.session, true end
+        return fixed_code
+    end
+    if book.bindings[id] or state.used[fixed_code] or owner and owner.id ~= id and not expired(book, owner) then
+        return assign_action(id, quiet)
+    end
+    if owner and owner.id ~= id then
+        note('Slot ' .. slot .. ' goes to ' .. id .. ': ' .. owner.id .. ' has not registered for ' ..
+             (book.session - owner.seen - 1) .. ' sessions; its keys are cleared.')
+        book.actions[fixed_code] = {clear = true}
+    end
+    book.owners[slot], book.dirty = {id = id, seen = book.session}, true
+    return fixed_code
 end
 
 mbm.load_assignments, mbm.flush_assignments, mbm.assign_action = load_assignments, flush_assignments, assign_action
+mbm.assign_shared, mbm.SHARED_SLOTS = assign_shared, SHARED_SLOTS
+mbm.POOL_REASONS = {[REASON_RESERVED] = true, [REASON_FULL] = true}
+-- Whether id holds an automatic reservation (kept native, never extended).
+function mbm.reserved(id) return load_assignments().bindings[id] ~= nil end
+-- Shared with the extended bindings' file (src/extended_store.lua).
+mbm.settings_path, mbm.replace_file, mbm.file_exists, mbm.SAVE_RETRY = settings_path, replace_file, file_exists, SAVE_RETRY

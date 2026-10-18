@@ -101,7 +101,8 @@ assert(not host.register_binding('control', 0x3ef7f7ad, 4))
 assert(not host.register_binding('control', 0x3ef7f7ad, 5))
 assert(state.registry.control.text == 'CONTROL CENTER')
 assert(state.registry.arcade.text == 'STRATAGEM HERO')
-assert(host.version == 3) -- version 3: texts may be functions
+-- version 3: texts may be functions; version 4: extended bindings. api stays 1.
+assert(host.version == 4 and host.api == 1)
 -- Callers outside a mods/<author>/<entry> resource fall back to MODS.
 assert(state.registry.map.category == 'MODS')
 -- revision grows by one per binding registered; a repeated or refused
@@ -150,9 +151,12 @@ print('Persistent automatic assignments OK')
 -- 29 automatic actions in total. The two reserved for 'other' and 'new', which
 -- have not registered this session, stay theirs: the fill stops two short and
 -- says why. Nothing is queued for clearing.
+-- The pool's refusals stay for addons that ask for a native action only
+-- (version 4: otherwise the registration gets an extended binding).
+local NATIVE = {backend = 'native'}
 local count, reason = 3, nil -- auto_a, auto_b and fresh are registered in this session.
 while true do
-    local ok, why = host.register_binding('fill_' .. count, 'Fill')
+    local ok, why = host.register_binding('fill_' .. count, 'Fill', nil, NATIVE)
     if not ok then
         reason = why
         break
@@ -166,9 +170,9 @@ assert(queued_clears() == 0, 'no keys queued for clearing')
 assert(host.register_binding('other', 0x3ef7f7ad) and state.registry.other.code == 10 * 65536)
 assert(host.register_binding('new', 'FREE TEXT') and state.registry.new.code == 10 * 65536 + 2)
 -- Every automatic action is now used by a binding registered this session.
-local ok, why = host.register_binding('overflow', 'Overflow')
+local ok, why = host.register_binding('overflow', 'Overflow', nil, NATIVE)
 assert(not ok and why == FULL, tostring(why))
-assert(select(2, host.register_binding('overflow', 'Overflow')) == FULL)
+assert(select(2, host.register_binding('overflow', 'Overflow', nil, NATIVE)) == FULL)
 print('Reservations: absent and late bindings keep their actions; a full pool says why OK')
 
 -- The audit's reproduction (mod family audit 2026-10-03): fill the 29
@@ -181,7 +185,7 @@ for index = 1, 29 do assert(host.register_binding('repro_' .. index, 'Repro ' ..
 local held = {}
 for index = 1, 29 do held[index] = state.registry['repro_' .. index].code end
 new_session()
-ok, why = host.register_binding('replacement', 'Replacement')
+ok, why = host.register_binding('replacement', 'Replacement', nil, NATIVE)
 assert(not ok and why == RESERVED, tostring(why))
 for index = 1, 28 do
     assert(host.register_binding('repro_' .. index, 'Repro ' .. index))
@@ -189,7 +193,7 @@ for index = 1, 28 do
 end
 assert(queued_clears() == 0, 'nothing of theirs is queued for clearing')
 assert(state.assignments.bindings.repro_29.code == held[29], 'the absent binding keeps its reservation')
-ok, why = host.register_binding('replacement', 'Replacement')
+ok, why = host.register_binding('replacement', 'Replacement', nil, NATIVE)
 assert(not ok and why == RESERVED)
 print('Audit reproduction: the new binding registered first takes no reserved action; all 28 retained bindings ' ..
       'keep theirs and nothing is cleared OK')
@@ -203,19 +207,19 @@ for session = 3, 31 do
     assert(host.register_binding('fixed', 0xb46c8096, 1) and state.assignments == nil)
     new_session()
     for index = 1, 28 do assert(host.register_binding('repro_' .. index, 'Repro ' .. index)) end
-    ok, why = host.register_binding('replacement', 'Replacement')
+    ok, why = host.register_binding('replacement', 'Replacement', nil, NATIVE)
     assert(not ok and why == RESERVED and state.assignments.session == session, 'session ' .. session)
 end
 new_session()
 for index = 1, 28 do assert(host.register_binding('repro_' .. index, 'Repro ' .. index)) end
 assert(state.assignments.session == 32)
-assert(host.register_binding('replacement', 'Replacement'))
+assert(host.register_binding('replacement', 'Replacement', nil, NATIVE))
 assert(state.registry.replacement.code == held[29] and state.assignments.actions[held[29]].clear,
        'expired action handed over, its keys to be cleared')
 assert(queued_clears() == 1)
 assert(state.assignments.bindings.repro_29 == nil and state.assignments.holders[held[29]] == 'replacement')
 -- The binding that expired comes back: a new id now, with every action in use.
-ok, why = host.register_binding('repro_29', 'Repro 29')
+ok, why = host.register_binding('repro_29', 'Repro 29', nil, NATIVE)
 assert(not ok and why == FULL)
 print('Reservations end after 30 sessions without their binding; the next new binding gets the action OK')
 
@@ -228,13 +232,91 @@ for index = 1, 29 do assert(host.register_binding('gone_' .. index, 'Gone ' .. i
 local first_action = state.registry.gone_1.code
 for session = 2, 31 do
     new_session()
-    ok, why = host.register_binding('alone', 'Alone')
+    ok, why = host.register_binding('alone', 'Alone', nil, NATIVE)
     assert(not ok and why == RESERVED and state.assignments.session == session, 'session ' .. session)
 end
 new_session()
-assert(host.register_binding('alone', 'Alone') and state.registry.alone.code == first_action)
+assert(host.register_binding('alone', 'Alone', nil, NATIVE) and state.registry.alone.code == first_action)
 assert(state.assignments.session == 32 and state.assignments.actions[first_action].clear)
 print('A refused registration counts its session, so the reservations of mods that are gone expire OK')
+
+-- Reported case (MBM v2 plan audit, 2026-10-13): two v1.1 addons both ask for
+-- slot 2. v2.2.1 gave the slot to the first caller of each session, so with
+-- the load order reversed A moved to an automatic action, B took slot 2's
+-- action, and B inherited A's saved keys while A lost them. Keys are saved by
+-- the game per native action, so a binding must stay on its action.
+local SLOT2 = 12 * 65536
+local function code_of(id) return state.registry[id].code end
+reset_registry()
+remove_assignments()
+assert(host.register_binding('legacy.a', 0x3ef7f7ad, 2) and code_of('legacy.a') == SLOT2)
+assert(host.register_binding('legacy.b', 0x3ef7f7ad, 2) and state.auto_codes[code_of('legacy.b')])
+local a_code, b_code = code_of('legacy.a'), code_of('legacy.b')
+new_session()
+do
+    local file = assert(io.open(assignments, 'rb'))
+    local text = file:read('*a')
+    file:close()
+    assert(text:find('\nslot 2 1 legacy.a\n', 1, true), text)
+end
+assert(host.register_binding('legacy.b', 0x3ef7f7ad, 2))
+assert(host.register_binding('legacy.a', 0x3ef7f7ad, 2))
+assert(code_of('legacy.a') == a_code and code_of('legacy.b') == b_code,
+       'reversed load order: each v1.1 addon keeps its own native action and keys')
+-- The owner absent for a session: the slot stays its own; another caller
+-- keeps (or gets) an automatic action and never the owner's keys.
+new_session()
+assert(host.register_binding('legacy.b', 0x3ef7f7ad, 2) and code_of('legacy.b') == b_code)
+assert(host.register_binding('legacy.c', 0x3ef7f7ad, 2) and code_of('legacy.c') ~= SLOT2)
+assert(not state.used[SLOT2], 'the absent owner\'s action is not handed out')
+-- The owner registers late, after both: it still gets its action.
+assert(host.register_binding('legacy.a', 0x3ef7f7ad, 2) and code_of('legacy.a') == SLOT2)
+local c_code = code_of('legacy.c')
+new_session()
+for _, id in ipairs({'legacy.c', 'legacy.a', 'legacy.b'}) do assert(host.register_binding(id, 0x3ef7f7ad, 2)) end
+assert(code_of('legacy.a') == SLOT2 and code_of('legacy.b') == b_code and code_of('legacy.c') == c_code)
+assert(queued_clears() == 0, 'no keys queued for clearing')
+-- The owner once registers without a slot (an automatic reservation of its
+-- own), then asks for slot 2 again: its keys are on slot 2's action, so the
+-- owner gets that action back.
+new_session()
+assert(host.register_binding('legacy.a', 0x3ef7f7ad) and state.auto_codes[code_of('legacy.a')])
+new_session()
+assert(host.register_binding('legacy.a', 0x3ef7f7ad, 2) and code_of('legacy.a') == SLOT2)
+print('Reported case: two v1.1 addons on slot 2 keep their own actions in any load order, absent or late OK')
+
+-- A file written by v2.2.1 has no owner line. After the session the audit
+-- reproduced (A on slot 2, B moved to 10:0), the reservation shows B was the
+-- addon moved: B keeps 10:0 even when it registers first, and A becomes the
+-- slot's owner.
+reset_registry()
+remove_assignments()
+do
+    local file = assert(io.open(assignments, 'wb'))
+    assert(file:write('format 2\nsession 1\nlegacy.b\t10\t0\t1\nend\n'))
+    assert(file:close())
+end
+assert(host.register_binding('legacy.b', 0x3ef7f7ad, 2) and code_of('legacy.b') == 10 * 65536)
+assert(host.register_binding('legacy.a', 0x3ef7f7ad, 2) and code_of('legacy.a') == SLOT2)
+assert(state.assignments.owners[2].id == 'legacy.a')
+print('A v2.2.1 assignments file: the addon it moved keeps its action, the other becomes slot 2\'s owner OK')
+
+-- The owner's reservation ends like an automatic one: after 30 sessions that
+-- count without it, a new caller becomes the owner and the old keys are
+-- cleared. An addon with an automatic reservation keeps it meanwhile.
+new_session()
+for session = 3, 32 do
+    assert(host.register_binding('legacy.b', 0x3ef7f7ad, 2) and code_of('legacy.b') == 10 * 65536)
+    assert(state.assignments.session == session, 'session ' .. tostring(state.assignments.session))
+    new_session()
+end
+assert(host.register_binding('legacy.d', 0x3ef7f7ad, 2) and code_of('legacy.d') == SLOT2)
+assert(state.assignments.actions[SLOT2].clear and state.assignments.owners[2].id == 'legacy.d',
+       'expired owner: the slot goes to the new caller, its old keys to be cleared')
+assert(host.register_binding('legacy.a', 0x3ef7f7ad, 2) and state.auto_codes[code_of('legacy.a')])
+print('Slot 2\'s owner expires after 30 sessions without it; the next caller gets the slot, cleared OK')
+reset_registry()
+remove_assignments()
 
 -- Version 2 categories: explicit, derived from the addon entry, validated.
 new_session()

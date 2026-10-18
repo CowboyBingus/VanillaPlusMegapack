@@ -1,7 +1,7 @@
 Supports Helldivers 2 Steam build 25480438 / EXE 1.8.46015.0.
 
 Offline source, package and read-only module checks passed. v42 updates Mod
-Bindings Menu to v2.2.1, whose label fix is not yet checked in game in another
+Bindings Menu to v2.3, whose label fix is not yet checked in game in another
 language, and Match Your Colors to v1.5, whose test builds were checked in the
 game in the Armory, on the ship and in one solo mission. v42 also adds
 Stratagem Hero Expanded (v1.0): its release build and the refreshed package
@@ -22,6 +22,12 @@ with all twenty-five options ran to the ship and quit cleanly with loader v19;
 each checked the first bytes of the three game functions it calls and found the
 local Helldiver, and its release build also found it in a solo mission. A
 shield stowed or drawn in play has not been observed yet.
+v42 also updates Mod Bindings Menu to v2.3: the package with all twenty-five
+options ran to the ship, into a solo mission and back, and quit cleanly with
+loader v19; Mod Bindings Menu reported version 4, its guard ran without errors,
+its mission check read true in the mission and false on the ship, and its MORE
+MODS panel never drew. The bindings pages and MORE MODS with a player have not
+been checked in game yet.
 v42 also gives each option its own cover: every file a manager deploys is byte
 for byte the previous v42 package's, and Arsenal 0.36.0 and HD2MM 1.3
 imported it and resolved each option's own image.

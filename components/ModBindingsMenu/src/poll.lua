@@ -14,6 +14,7 @@
 local mbm = ...
 local ffi, bit = require('ffi'), require('bit')
 local state, live_header, active_screen = mbm.state, mbm.live_header, mbm.active_screen
+local extended_down = mbm.extended_down
 local sweep_bindings, read_words, read_into = mbm.sweep_bindings, mbm.read_words, mbm.read_into
 local word_pointer, words = mbm.word_pointer, mbm.words
 local INPUT_OWNER_PTR_RVA, STATE_OFFSET, STRIDE = mbm.INPUT_OWNER_PTR_RVA, mbm.ACTION_STATE_OFFSET,
@@ -46,13 +47,11 @@ local function arrays(out)
     return true
 end
 
--- One binding's record header, checked as is_down checks it: its state entry
--- index, false when its mapping count changed outside the binding pages (the
--- game restored a list: the sweep runs now, and the state is not read), or nil
--- (no binding).
-local function header(id)
-    local record = state.registry[id]
-    if not record then return nil end
+-- One native binding's record header, checked as is_down checks it: its state
+-- entry index, false when its mapping count changed outside the binding pages
+-- (the game restored a list: the sweep runs now, and the state is not read),
+-- or nil (no binding).
+local function header(record)
     local bucket, count = live_header(record)
     if not bucket then return nil end
     if count ~= state.swept_counts[record.code] and not active_screen() then
@@ -64,18 +63,34 @@ end
 
 -- Every header, in order. Sets pending and, for the bindings whose state is
 -- not read, down; returns the lowest and highest state index to read (low >
--- high: none) and whether a sweep ran.
+-- high: none) and whether a sweep ran. Extended bindings answer as is_down
+-- does; native ones read false while a key capture suppresses mod bindings.
+-- One binding's state index to read; else false, its answer now (an extended
+-- binding's, false for a native one while mod bindings are suppressed, nil for
+-- an unknown id, before native input or for a record not found, false after a
+-- sweep) and whether a sweep ran.
+local function entry_of(record, ready)
+    if record and record.extended then
+        if state.unsupported then return false, nil, false end
+        return false, extended_down(record), false
+    end
+    if not (record and ready) then return false, nil, false end
+    if state.suppressed then return false, false, false end
+    local index = header(record)
+    if index then return index end
+    return false, index, index == false
+end
+
 local function headers(ids, n, down)
     local ready, low, high, swept = state.build_rows ~= nil, LAST, FIRST, false
     for i = 1, n do
-        local index = nil
-        if ready then index = header(ids[i]) end
+        local index, answer, sweep = entry_of(state.registry[ids[i]], ready)
         if index then
             low, high = math.min(low, index), math.max(high, index)
         else
-            down[i], swept = index, swept or index == false
+            down[i], swept = answer, swept or sweep
         end
-        pending[i] = index or false
+        pending[i] = index
     end
     return low, high, swept
 end

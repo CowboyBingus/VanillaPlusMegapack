@@ -168,6 +168,22 @@ assert(read_file(path) == saved(1, 'legacy.a\t10\t0\t1', 'legacy.b\t10\t2\t0'))
 print('Sessions: each binding saves its last session; a session counts once from its first automatic registration, '
       .. 'late or not; inert sessions and sessions without one keep every age; v2.1 files load OK')
 
+-- Slot 2's owner (v2.3): saved after the action lines as "slot 2 <seen> <id>"
+-- (ids may hold spaces), read back in the next session; an owner line for a
+-- slot that is not shared is ignored. A slot 2 request counts its session.
+remove_files()
+local owner_menu, owner_state, owner_flush = session()
+assert(owner_menu.register_binding('Owner With Spaces', 0x3ef7f7ad, 2))
+assert(owner_state.assignments.counted)
+owner_flush(0)
+assert(read_file(path) == saved(1, 'slot 2 1 Owner With Spaces'), read_file(path))
+write_file(path, saved(4, 'slot 2 3 Owner With Spaces', 'slot 3 4 not.shared'))
+local _, next_state, _, _, next_load = session()
+local owners = next_load().owners
+assert(owners[2].id == 'Owner With Spaces' and owners[2].seen == 3 and owners[3] == nil)
+assert(next_state.assignments.session == 5)
+print('Slot 2 owner lines: saved, read back with spaces in the id, other slots ignored OK')
+
 -- Interrupted saves, as each crash leaves the folder, then a new session.
 local old = saved(4, 'kept.a\t10\t0\t4', 'kept.b\t10\t2\t4')
 -- 1. Crashed while writing the temporary file or before setting the old file

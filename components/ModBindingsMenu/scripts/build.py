@@ -34,7 +34,7 @@ import translations  # noqa: E402
 
 HERE = Path(__file__).resolve().parents[1]
 BASE_CONFIG = Path(os.environ.get("HD2_INPUT_CONFIG", str(HERE / "research" / "input.config")))
-VERSION = "2.2.1"
+VERSION = "2.3"
 CONFIG_SHA256 = "E509D85AC3603721E5AFE5686C7041798587A108AA86E2DA961A2EA451881A1B"
 CONFIG_NAME = resource_hash("content/input")
 CONFIG_TYPE = resource_hash("config")
@@ -169,7 +169,9 @@ def suites() -> list[tuple[str, list]]:
     return [("test_api.lua", [source]), ("test_assignments.lua", []), ("test_sweep.lua", []),
             ("test_mods_tab.lua", [source]), ("test_poll.lua", [source]), ("test_ffi_names.lua", []),
             ("test_ffi_names_hostile_first.lua", []), ("test_ffi_names_mbm_first.lua", []),
-            ("test_bingus_text.lua", [HERE / "src"])]
+            ("test_bingus_text.lua", [HERE / "src"]), ("test_extended.lua", [source]),
+            ("test_extended_store.lua", [source]), ("test_capture.lua", [source]),
+            ("test_panel.lua", [source])]
 
 
 def run(label: str, command: list) -> list[str]:
@@ -216,7 +218,7 @@ def build(output: Path) -> Path:
     manifest = {
         "Version": 1, "Guid": str(uuid.UUID(GUID)), "Name": "Mod Bindings Menu v" + VERSION,
         "IconPath": "thumbnail.png",
-        "Description": "Adds a native MODS tab to the keyboard and controller binding pages: up to 36 mod bindings grouped by mod, with every activation type and controller buttons. Requires Bingus Shared Loader v18+.",
+        "Description": "Adds a native MODS tab to the keyboard and controller binding pages: 36 mod bindings grouped by mod, with every activation type and controller buttons, and a MORE MODS tab outside missions for any bindings beyond them. Requires Bingus Shared Loader v18+.",
         "Options": [{"Name": "Mod Bindings Menu", "Description": "Native MODS tab for mod bindings", "Image": "thumbnail.png", "Include": ["Addon"]}],
     }
     files = {

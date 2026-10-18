@@ -57,7 +57,7 @@ end
 local state = upvalue(host.register_binding, 'state')
 local step = upvalue(update, 'step')
 local ensure_mods_tab = internal(step, 'ensure_mods_tab')
-local fill_mods_tab = internal(step, 'fill_mods_tab')
+local fill_tab = internal(step, 'fill_tab')
 -- One binding-page frame (dt 0): the selected tab is read once and passed on.
 local page_frame = internal(step, 'page_frame')
 local function show_page(screen) page_frame(screen, 0) end
@@ -305,7 +305,7 @@ print('Restored developer defaults removed before is_down answers OK')
 -- game can still see.
 put64(base + 0x347cf18, owner_address)
 state.buckets = {}
-local claim_label = upvalue(upvalue(fill_mods_tab, 'mods_layout'), 'claim_label')
+local claim_label = upvalue(upvalue(upvalue(fill_tab, 'tab_layout'), 'mods_layout'), 'claim_label')
 local write_memory = upvalue(upvalue(claim_label, 'write_u64'), 'write_memory')
 local real_kernel32 = upvalue(write_memory, 'kernel32')
 local refuse = false
@@ -831,6 +831,11 @@ do
         put32(ui + 0x429c, open and 26 or 1)
     end
     page(false)
+    -- The mission-mode record as on the ship (+8 zero; +0x40 keeps the last
+    -- mission's mode), read when a binding page opens.
+    local mission_memory = ffi.new('uint8_t[?]', 0x44)
+    put64(base + 0x33266a0, tonumber(ffi.cast('uint64_t', mission_memory)))
+    put32(tonumber(ffi.cast('uint64_t', mission_memory)) + 0x40, 2)
     ffi.cast('uint64_t *', base + 0x3328420)[0] = 0
     local map_state = 808 + 32 * (97 * 12 + 1)
     owner[map_state] = 0
@@ -913,8 +918,10 @@ do
     -- each 0.5 s.
     put32(bar + 57448, 3); put32(bar + 57452, 1); put32(screen + 8, 0)
     page(true)
-    -- Check the six reset sources before the user can revert this page.
-    frame('binding page opens on a native tab', {ReadProcessMemory = 17, VirtualQuery = 1, set_tab_labels = 1})
+    -- Check the six reset sources before the user can revert this page, and
+    -- whether a mission runs (2 reads: the record's pointer and the record;
+    -- v2.3's MORE MODS gate, once per page visit and every 60 page frames).
+    frame('binding page opens on a native tab', {ReadProcessMemory = 19, VirtualQuery = 1, set_tab_labels = 1})
     for index = 1, 2 do frame('binding page on a native tab ' .. index, {ReadProcessMemory = 11}) end
     put32(screen + 8, 3)
     frame('MODS tab, first frame', {ReadProcessMemory = 36, VirtualQuery = 7, build_rows = 1, reset_list = 1})

@@ -179,7 +179,8 @@ place()
 install(game)
 local menu, st = one.menu, one.st
 assert(type(menu.poll) == 'function' and type(menu.is_down) == 'function', 'feature test: the field is there')
-assert(menu.version == 3 and menu.api == 1, 'poll is a field: no version change')
+-- poll came as a field with no version change; version 4 is extended bindings.
+assert(menu.version == 4 and menu.api == 1, 'poll is a field: no version change')
 local MAP, ARMORY, AUTO1, AUTO2 = code_of(12, 1), code_of(10, 1), code_of(10, 0), code_of(10, 2)
 assert(menu.register_binding('map', 0xb46c8096, 1) and menu.register_binding('armory', 0x19e97f02, 3))
 assert(menu.register_binding('auto.1', 'Auto 1') and menu.register_binding('auto.2', 'Auto 2'))

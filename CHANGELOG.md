@@ -1,8 +1,11 @@
 # v42
 
-- Mod Bindings Menu v2.2.1: prevent Revert from restoring hidden developer mouse and controller inputs that could make mission-selection clicks reopen the Galactic Map with Ship Station Hotkeys.
-- Mod Bindings Menu v2.2.1: the MODS tab's first section header is no longer blank in game languages other than English, Japanese and Simplified Chinese.
-- Mod Bindings Menu v2.2.1: every game text ID it borrows now exists in all of the game's languages; up to 59 different texts show on the MODS tab at once, down from 65.
+- Mod Bindings Menu v2.3: no fixed limit on mod bindings; bindings past the 36 native actions go on a new MORE MODS tab, offered outside missions only.
+- Mod Bindings Menu v2.3: extended bindings support Press, Release and Hold, modifiers, and keyboard, mouse and controller.
+- Mod Bindings Menu v2.3: two older mods that both ask for slot 2 no longer swap keys when their load order changes.
+- Mod Bindings Menu v2.3: prevent Revert from restoring hidden developer mouse and controller inputs that could make mission-selection clicks reopen the Galactic Map with Ship Station Hotkeys.
+- Mod Bindings Menu v2.3: the MODS tab's first section header is no longer blank in game languages other than English, Japanese and Simplified Chinese.
+- Mod Bindings Menu v2.3: every game text ID it borrows now exists in all of the game's languages; up to 59 different texts show on the MODS tab at once, down from 65.
 - Match Your Colors v1.5: new Recolor Squadmates option: squadmates without the mod, or every squadmate, are recolored with your settings, on your screen only.
 - Match Your Colors v1.5: Match Materials now also turns a painted hard part into the metal it takes, such as the B-22 Model Citizen's chrome or the Eye of Liberty cape's gold; cloth never turns into metal.
 - Match Your Colors v1.5: with Helmet and Armor Match Cape your gear matches the cape as it looks in the game, so the default black capes give a black armor, not a grey one.

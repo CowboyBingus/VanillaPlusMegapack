@@ -30,6 +30,7 @@ typedef struct {
     void *BaseAddress; void *AllocationBase; MBM_u32 AllocationProtect;
     MBM_u16 PartitionId; size_t RegionSize; MBM_u32 State; MBM_u32 Protect; MBM_u32 Type;
 } MBM_MEMORY_BASIC_INFORMATION;
+typedef void (__fastcall *MBM_consume_action)(void *input, MBM_u64 action, float seconds);
 void *MBM_GetCurrentProcess(void) __asm__("GetCurrentProcess");
 int MBM_ReadProcessMemory(void *process, const void *address, void *buffer,
                           size_t size, size_t *received) __asm__("ReadProcessMemory");
@@ -67,6 +68,15 @@ local BUILD_ROWS_RVA = 0x1812940
 local ACTION_STATE_OFFSET, ACTION_STATE_STRIDE = 808, 32
 local MODS_TITLE_PTR_RVA = 0x3328420
 local MODS_TITLE_ID = 0x781e104c
+-- The mission-mode record (Consistent Vaulting and Reinforcement Beacons Fixed
+-- read it in missions): a mission runs while +8 is not zero and the mode at
+-- +0x40 is 1-7. The MORE MODS tab is offered only outside missions, since Gui
+-- text with the game's body font has crashed missions.
+local MISSION_MODE_PTR_RVA, MISSION_CHECK_FRAMES = 0x33266a0, 60
+-- The game's routine that consumes an input action until it is released
+-- (Clickable Scrollbars calls it for select): the extended panel's key capture
+-- consumes the page's UI actions with it (src/panel.lua).
+local INPUT_CONSUME_RVA = 0x12fde90
 -- Native actions of developer-only input groups (Debugmenu 12, CinematicCamera
 -- 10, DebugAvatar 11, Freeflight 9). They are in the game's 235-action list, so
 -- the game evaluates every trigger type for them on any device and saves their
@@ -140,7 +150,7 @@ local SELECTED_TAB_OFFSET = 8
 local TAB_BAR_OFFSET = 1248
 local TAB_COUNT, TAB_CURRENT = 57448, 57452
 local TAB_BUTTON_STATE, TAB_BUTTON_ACTIVE, TAB_BUTTON_STRIDE = 11004, 11021, 3400
-local NATIVE_TABS, MODS_TAB = 3, 3
+local NATIVE_TABS, MODS_TAB, MORE_TAB = 3, 3, 4
 local state = {initialized = false, base = nil, build_rows = nil,
                screen = nil, last_action = nil,
                registry = {}, order = {}, input_logged = false,
@@ -155,7 +165,23 @@ local state = {initialized = false, base = nil, build_rows = nil,
                -- page shows the tab; replaced only while no slot points at it.
                -- Earlier buffers stay referenced in titles.
                mods_text = ffi.new('char[5]', 'MODS'), titles = {},
-               empty_text = 'NO MOD BINDINGS INSTALLED', page_open = false, language = nil}
+               empty_text = 'NO MOD BINDINGS INSTALLED', page_open = false, language = nil,
+               -- Extended bindings (src/extended.lua): their records in display
+               -- order, how many registered, the step's frame number (extended
+               -- bindings are evaluated once per frame), the input epoch (a key
+               -- capture ending or a binding changing starts a new one), whether
+               -- a key capture suppresses every mod binding, the bindings file
+               -- (src/extended_store.lua), why it last failed to save, and
+               -- whether the build check refused this game build, and a
+               -- number that grows whenever an extended binding's keys change.
+               extended_order = {}, extended_count = 0, frame = 0, input_epoch = 0, suppressed = false,
+               extended_store = nil, save_problem = nil, unsupported = false, bindings_version = 0,
+               -- The MORE MODS tab (extended bindings, src/panel.lua): its
+               -- title, its list's header text and the layout built from it.
+               more_text = 'MORE MODS', more_header_text = 'MORE MOD BINDINGS', more_layout = nil,
+               -- Whether a mission runs (unknown counts as one), checked when a
+               -- binding page opens and every MISSION_CHECK_FRAMES page frames.
+               in_mission = true, mission_check = 0}
 for index, entry in ipairs(DORMANT_ACTIONS) do
     local code = entry[1] * 65536 + entry[2]
     state.code_order[code] = index
@@ -166,7 +192,8 @@ end
 -- revision grows by one whenever something other mods can see changes: a
 -- binding registered, native input became ready, or the bindings' texts
 -- changed. A mod that retries a failed registration can retry when it changed.
-local api = {api = 1, version = 3, capacity = #DORMANT_ACTIONS, revision = 0}
+-- version 4: extended bindings (README: "More bindings than native actions").
+local api = {api = 1, version = 4, capacity = #DORMANT_ACTIONS, revision = 0}
 local function revise()
     state.revision = state.revision + 1
     api.revision = state.revision
@@ -260,6 +287,19 @@ local function read_into(address, buffer, size)
     return kernel32.MBM_read_at(process, address, buffer, size, words_read) ~= 0
         and words_read_low[0] == size
 end
+-- Whether a mission runs: the record's pointer, then the record (two reads,
+-- one when the pointer is null: no mission state, as on the title screen). A
+-- read that fails counts as a mission, so the MORE MODS panel never draws
+-- when the answer is unknown.
+local mission_record = ffi.new('MBM_u32[17]')
+local function in_mission()
+    if not read_words(state.base + MISSION_MODE_PTR_RVA, 8) then return true end
+    if words[0] == 0 and words[1] == 0 then return false end
+    local record = word_pointer(0)
+    if not record or not read_into(record, mission_record, 0x44) then return true end
+    local mode = mission_record[0x40 / 4]
+    return mission_record[2] ~= 0 and mode >= 1 and mode <= 7
+end
 -- Finds the record of every dormant action in a binding map, 32 records per
 -- read, and caches their addresses. False when the map cannot be read.
 local function index_map(map_offset, cache)
@@ -303,7 +343,18 @@ end
 local mbm = {state = state, note = note, DORMANT_ACTIONS = DORMANT_ACTIONS, SLOTS = SLOTS,
              ASSIGNMENTS_FILE = ASSIGNMENTS_FILE}
 mbm_files.assignments(mbm)
-local flush_assignments, assign_action = mbm.flush_assignments, mbm.assign_action
+local flush_assignments, assign_action, assign_shared = mbm.flush_assignments, mbm.assign_action, mbm.assign_shared
+local SHARED_SLOTS = mbm.SHARED_SLOTS
+-- Extended bindings and their file (src/extended_store.lua, src/extended.lua).
+mbm_files.extended_store(mbm)
+mbm_files.extended(mbm)
+-- Key capture for extended bindings on the MODS tab (src/capture.lua).
+mbm_files.capture(mbm)
+local flush_extended, register_extended, extended_known = mbm.flush_extended, mbm.register_extended,
+                                                         mbm.extended_known
+local extended_down, parse_spec = mbm.extended_down, mbm.parse_spec
+api.extended = {devices = mbm.EXTENDED_DEVICES, triggers = mbm.EXTENDED_TRIGGERS, count = 0}
+api.set_binding, api.binding, api.binding_info = mbm.set_binding, mbm.binding, mbm.binding_info
 -- The sweep of the bindings' native actions (src/sweep.lua).
 mbm.read_into, mbm.map_bucket = read_into, map_bucket
 mbm.BINDING_MAP, mbm.DEFAULTS_MAP, mbm.RECORD_SIZE = BINDING_MAP, DEFAULTS_MAP, RECORD_SIZE
@@ -380,6 +431,9 @@ local function initialize()
         check(read(state.base + TAB_LABELS_RVA, 12) ==
               '\x51\xf4\x70\x8d\x60\x5c\x5e\xf1\xeb\x7f\x84\x00',
               'binding tab labels changed')
+        check(read(state.base + INPUT_CONSUME_RVA, 20) ==
+              '\x40\x53\x48\x83\xec\x20\x4c\x8b\xd1\x4c\x8b\xca\x48\x8b\xca\xe8\xdc\x7c\x28\xff',
+              'input consume routine changed')
         for _, entry in ipairs(DORMANT_ACTIONS) do
             check(u32(read(state.base + ACTION_LABELS_RVA +
                   (entry[1] * 97 + entry[2]) * 4, 4)) == entry[3],
@@ -390,7 +444,7 @@ local function initialize()
         note('Native binding layout verified for current game build.')
         return
     end
-    state.base = nil
+    state.base, state.unsupported = nil, true
     guard.stop(tostring(err))
     note(INPUT_CONFIG_WARNING)
 end
@@ -403,6 +457,9 @@ local function activate_actions()
                                     state.base + SET_TAB_LABELS_RVA)
     state.reset_list = ffi.cast('void (__fastcall *)(void *, int)',
                                 state.base + LIST_RESET_RVA)
+    -- -1: consumed until released, as the game's buttons do.
+    local consume = ffi.cast('MBM_consume_action', state.base + INPUT_CONSUME_RVA)
+    mbm.consume_action = function(owner, code) consume(ffi.cast('void *', owner), code, -1) end
     note('Mod input actions loaded; native keyboard and controller bindings ready.')
     revise()
     log_input_probe()
@@ -456,6 +513,21 @@ function translation.resolve(value, limit)
     return text
 end
 
+-- A registered binding's texts given as functions, called again. Returns
+-- whether one changed; a function that fails keeps the text shown before.
+function translation.refresh_record(record)
+    local changed = false
+    if type(record.label) == 'function' then
+        local text = translation.resolve(record.label, 127)
+        if text and text ~= record.text then record.text, changed = text, true end
+    end
+    if type(record.category_source) == 'function' then
+        local text = translation.resolve(record.category_source, 64)
+        if text and text ~= record.category then record.category, changed = text, true end
+    end
+    return changed
+end
+
 -- The game's Text Language (5 guarded reads), then the registered texts given
 -- as functions, MBM's own texts and the MODS title: refreshed each time a
 -- binding page opens, never per frame. A function that fails keeps the text
@@ -470,18 +542,12 @@ function translation.refresh()
     local tr = translation.tr
     tr:refresh()
     local changed = false
-    for _, record in ipairs(state.order) do
-        if type(record.label) == 'function' then
-            local text = translation.resolve(record.label, 127)
-            if text and text ~= record.text then record.text, changed = text, true end
-        end
-        if type(record.category_source) == 'function' then
-            local text = translation.resolve(record.category_source, 64)
-            if text and text ~= record.category then record.category, changed = text, true end
-        end
+    for _, list in ipairs({state.order, state.extended_order}) do
+        for _, record in ipairs(list) do changed = translation.refresh_record(record) or changed end
     end
     local empty = display_text(tr('section.none'))
     if empty ~= state.empty_text then state.empty_text, changed = empty, true end
+    state.more_text, state.more_header_text = display_text(tr('tab.more')), display_text(tr('section.more'))
     local title = display_text(tr('tab.mods'))
     if not state.title_active and title ~= ffi.string(state.mods_text) then
         state.titles[#state.titles + 1] = state.mods_text
@@ -512,14 +578,57 @@ end
 local active_screen -- Defined with the page code below.
 
 -- slot: 1-7 selects a fixed v1 slot; nil or 0 (version 2) assigns a free native
--- action automatically and keeps it for this id in later sessions. A slot 2
--- request that another addon already holds is assigned automatically too.
+-- action automatically and keeps it for this id in later sessions. Slot 2 is
+-- shared by v1.1 addons: it belongs to one id across sessions (the owner in the
+-- assignments file), and any other id asking for it is assigned automatically.
 -- options (optional, version 2): {category = 'Mod display name'}. Bindings are
 -- grouped under one native section header per category on the MODS tab.
 -- label: a game localization ID (number) or text; text and category are UTF-8
 -- in any script, limited in characters (127 and 64) and shown upper-cased.
 -- Version 3: both may be functions returning the text in the current
 -- language, called now and whenever a binding page opens.
+-- Version 4 (extended bindings, README "More bindings than native actions"):
+-- when every native action is held, the registration succeeds with an extended
+-- binding instead of failing. options.backend = 'extended' asks for one, and
+-- 'native' keeps the version 3 refusal. options.default (extended bindings
+-- only): the keys it starts with, as ModBindingsMenu.set_binding takes them.
+
+-- The version 4 options: the backend asked for ('native', 'extended' or false
+-- for either) and the parsed default, or nil and the reason.
+local function extended_options(slot, options)
+    local backend = options and options.backend
+    if backend ~= nil and backend ~= 'native' and backend ~= 'extended' or backend == 'extended' and slot then
+        return nil, 'invalid binding backend'
+    end
+    local default = options and options.default
+    local spec = default ~= nil and parse_spec(default) or nil
+    if default ~= nil and not spec then return nil, 'invalid binding default' end
+    return backend or false, spec
+end
+
+-- The native action for a registration, false to make it extended, or nil and
+-- the reason. A binding never changes backend: an id the bindings file knows
+-- stays extended, one with an automatic reservation stays native.
+local function choose_action(id, slot, backend)
+    local fallback = backend ~= 'native'
+    if backend == 'extended' then return false end
+    local fixed_code = slot and SLOT_CODES[slot][1] * 65536 + SLOT_CODES[slot][2]
+    local code, reason
+    if slot and SHARED_SLOTS[slot] then
+        code, reason = assign_shared(id, slot, fixed_code, fallback)
+    elseif slot then
+        if state.used[fixed_code] then return nil, 'slot already in use' end
+        return fixed_code
+    elseif fallback and extended_known(id) and not mbm.reserved(id) then
+        return false
+    else
+        code, reason = assign_action(id, fallback)
+    end
+    if code then return code end
+    if fallback and mbm.POOL_REASONS[reason] then return false end
+    return nil, reason
+end
+
 function api.register_binding(id, label, slot, options)
     if slot == 0 then slot = nil end
     local text = type(label) ~= 'number' and translation.resolve(label, 127) or nil
@@ -544,28 +653,20 @@ function api.register_binding(id, label, slot, options)
         end
         return false, 'binding already registered differently'
     end
-    local code
-    if slot then
-        local taken = false
-        for _, record in ipairs(state.order) do
-            if record.slot == slot then taken = true end
-        end
-        if not taken then
-            code = SLOT_CODES[slot][1] * 65536 + SLOT_CODES[slot][2]
-        elseif slot ~= 2 then
-            return false, 'slot already in use'
-        end
-    end
-    if not code then
-        local reason
-        code, reason = assign_action(id)
-        if not code then return false, reason end
-    end
-    local record = {id = id, label = label, requested = slot,
-                    slot = not state.auto_codes[code] and slot or nil, code = code,
-                    group = math.floor(code / 65536), action = code % 65536,
+    local backend, spec = extended_options(slot, options)
+    if backend == nil then return false, spec end
+    local code, reason = choose_action(id, slot, backend)
+    if code == nil then return false, reason end
+    local record = {id = id, label = label, requested = slot, text = text,
                     category = category_text or caller_category(), category_source = category}
-    record.text = text
+    if code == false then
+        register_extended(record, spec, backend == 'extended' and 'asked for' or 'every native action is held')
+        api.extended.count = state.extended_count
+        revise()
+        return true
+    end
+    record.slot = not state.auto_codes[code] and slot or nil
+    record.code, record.group, record.action = code, math.floor(code / 65536), code % 65536
     state.registry[id] = record
     state.order[#state.order + 1] = record
     state.used[code] = record
@@ -597,9 +698,17 @@ end
 -- action's mappings satisfies its own trigger (Press, Hold, Tap, DoubleTap,
 -- LongPress, ...) on keyboard, mouse or controller. Three reads (the record
 -- header, the input owner, the state byte) and no allocation per call.
+-- An extended binding (src/extended.lua) is never nil while this release
+-- supports the game build: false until engine input exists, without keys, or
+-- while a key capture suppresses mod bindings. A native one reads false then too.
 function api.is_down(id)
     local record = state.registry[id]
+    if record and record.extended then
+        if state.unsupported then return nil end
+        return extended_down(record)
+    end
     if not record or not state.build_rows then return nil end
+    if state.suppressed then return false end
     local bucket, count = live_header(record)
     if not bucket then return nil end
     -- A config re-parse (device change) or a Revert can restore inherited
@@ -639,6 +748,11 @@ mbm.INPUT_OWNER_PTR_RVA, mbm.ACTION_STATE_OFFSET, mbm.ACTION_STATE_STRIDE =
     INPUT_OWNER_PTR_RVA, ACTION_STATE_OFFSET, ACTION_STATE_STRIDE
 mbm_files.poll(mbm)
 api.poll = mbm.poll
+-- The MORE MODS tab's panel for extended bindings (src/panel.lua).
+mbm.MENU_SYSTEM_PTR_RVA, mbm.upper = MENU_SYSTEM_PTR_RVA, translation.T.upper
+function mbm.text(key) return display_text(translation.tr(key)) end
+mbm_files.panel(mbm)
+local panel_frame, panel_hide = mbm.panel_frame, mbm.panel_hide
 
 local function write_u64(address, value)
     return write_memory(address, 8, function() ffi.cast('MBM_u64 *', address)[0] = value end)
@@ -762,26 +876,48 @@ end
 -- Adds MODS as the fourth native tab. The game draws the tab, its index and
 -- Q/E (LB/RB) cycling itself; relabelling resets every button's state, so
 -- the current tab's selected state is restored as the page's opener does.
+-- While extended bindings are registered a fifth tab, MORE MODS, follows (its
+-- title borrows a text slot, else it shows the MODS title); a binding page
+-- already showing four tabs gets the fifth when the first one registers.
+-- In a mission MORE MODS is not offered; should a page show it as a mission
+-- starts, it is removed unless selected (then it stays, its panel hidden).
+-- The tab count a binding page should show: MODS, and MORE MODS while extended
+-- bindings exist outside a mission.
+local function wanted_tabs()
+    if state.extended_count > 0 and not state.in_mission then return MORE_TAB + 1 end
+    return MODS_TAB + 1
+end
+-- Whether a tab bar of count tabs is the native one or one this addon set.
+local function own_tab_count(count)
+    return count == NATIVE_TABS or count == MODS_TAB + 1 or count == MORE_TAB + 1 and state.extended_count > 0
+end
+local function tab_note(count, wanted, current)
+    local change = count > wanted and 'Removed MORE MODS tab'
+        or wanted > MORE_TAB and 'Added native MODS tab and MORE MODS tab' or 'Added native MODS tab'
+    note(change .. ' (current tab ' .. current .. ').')
+end
 local function ensure_mods_tab(screen)
     local bar = screen + TAB_BAR_OFFSET
-    local count = word_at(bar + TAB_COUNT)
-    if count == NATIVE_TABS + 1 then return true end
-    if count ~= NATIVE_TABS then return false end
+    local count, wanted = word_at(bar + TAB_COUNT), wanted_tabs()
+    if count == wanted then return true end
+    if not own_tab_count(count) then return false end
     local current = word_at(bar + TAB_CURRENT)
-    if not current or current >= NATIVE_TABS then return false end
+    if not current or current >= count then return false end
+    if current >= wanted then return true end
     mods_title(true)
     if not state.title_active then return false end
-    local labels = ffi.new('MBM_u32[?]', NATIVE_TABS + 1)
+    local labels = ffi.new('MBM_u32[?]', wanted)
     for index = 0, NATIVE_TABS - 1 do
         labels[index] = assert(u32(read(state.base + TAB_LABELS_RVA + index * 4, 4)))
     end
-    labels[NATIVE_TABS] = MODS_TITLE_ID
+    labels[MODS_TAB] = MODS_TITLE_ID
+    if wanted > MORE_TAB then labels[MORE_TAB] = claim_label(state.more_text) or MODS_TITLE_ID end
     state.tab_labels = labels
-    state.set_tab_labels(ffi.cast('void *', bar), labels, NATIVE_TABS + 1)
+    state.set_tab_labels(ffi.cast('void *', bar), labels, wanted)
     local button = bar + TAB_BUTTON_STRIDE * current
     ffi.cast('MBM_u32 *', button + TAB_BUTTON_STATE)[0] = 3
     ffi.cast('MBM_u8 *', button + TAB_BUTTON_ACTIVE)[0] = 1
-    note('Added native MODS tab (current tab ' .. current .. ').')
+    tab_note(count, wanted, current)
     return true
 end
 
@@ -820,18 +956,33 @@ local function rows_built(listing, layout, seconds)
     return true
 end
 
--- The game's tab switch leaves the previous tab's rows in place for tabs it
--- does not know, so the MODS tab rebuilds the list with the native builder:
--- one native section header per mod, followed by that mod's bindings.
-local function fill_mods_tab(screen, seconds)
-    if not state.layout or state.layout_revision ~= state.revision then
-        state.layout = mods_layout()
-        state.layout_revision = state.revision
-        if not state.layout then return end
+-- The native rows of a mod tab: on MODS one native section header per mod,
+-- followed by that mod's bindings; on MORE MODS one section header, below which
+-- src/panel.lua draws the extended bindings.
+local function tab_layout(tab)
+    if tab == MODS_TAB then
+        if not state.layout or state.layout_revision ~= state.revision then
+            state.layout = mods_layout()
+            state.layout_revision = state.revision
+        end
+        return state.layout
     end
-    local layout = state.layout
+    if not state.more_layout then
+        local header = claim_label(state.more_header_text) or state.title_active and MODS_TITLE_ID
+        state.more_layout = header and {{13, 0, header}} or nil
+    end
+    return state.more_layout
+end
+
+-- The game's tab switch leaves the previous tab's rows in place for tabs it
+-- does not know, so a mod tab rebuilds the list with the native builder.
+-- Returns the listing once its rows are built (not on the frame it builds
+-- them, before the game has laid them out), else nil.
+local function fill_tab(screen, tab, seconds)
+    local layout = tab_layout(tab)
+    if not layout then return nil end
     local listing = screen + ROW_LIST_OFFSET
-    if rows_built(listing, layout, seconds) then return end
+    if rows_built(listing, layout, seconds) then return listing end
     local rows = ffi.new('MBM_u32[?]', #layout * 3)
     for index, descriptor in ipairs(layout) do
         for field = 1, 3 do rows[(index - 1) * 3 + field - 1] = descriptor[field] end
@@ -842,21 +993,40 @@ local function fill_mods_tab(screen, seconds)
     state.build_rows(ffi.cast('void *', listing), rows)
     state.reset_list(ffi.cast('void *', listing), MODS_TAB)
     state.screen = screen
-    note('Filled MODS tab: ' .. #state.order .. ' bindings in ' .. #sections() .. ' sections.')
+    if tab == MODS_TAB then
+        note('Filled MODS tab: ' .. #state.order .. ' bindings in ' .. #sections() .. ' sections.')
+    else
+        note('Filled MORE MODS tab: ' .. state.extended_count .. ' extended bindings.')
+    end
+    return nil
 end
 
 local SWEEP_INTERVAL = 2
 
--- A frame with a binding page on top of the UI: the MODS tab. The selected tab
--- is read once; adding the MODS tab relabels the tab bar but does not select
--- a tab.
+-- A frame with a binding page on top of the UI: the MODS tab, and MORE MODS
+-- with its panel. The selected tab is read once; adding the tabs relabels the
+-- tab bar but does not select a tab. Any other tab closes the panel, and so
+-- does a mission: the mission check runs on the page's first frame and every
+-- MISSION_CHECK_FRAMES page frames, never on frames without a binding page.
 local function page_frame(screen, seconds)
+    state.mission_check = state.mission_check - 1
+    if state.mission_check <= 0 then
+        state.mission_check = MISSION_CHECK_FRAMES
+        local mission = in_mission()
+        if mission ~= state.in_mission then
+            state.in_mission = mission
+            note(mission and 'In a mission: MORE MODS not offered.' or 'Outside missions: MORE MODS offered.')
+        end
+    end
     local tab = word_at(screen + SELECTED_TAB_OFFSET)
-    if ensure_mods_tab(screen) and tab == MODS_TAB then
-        fill_mods_tab(screen, seconds)
+    local listing
+    local more = tab == MORE_TAB and state.extended_count > 0 and not state.in_mission
+    if ensure_mods_tab(screen) and (tab == MODS_TAB or more) then
+        listing = fill_tab(screen, tab, seconds)
     else
         forget_rows()
     end
+    if more and listing then panel_frame(listing, seconds) else panel_hide('tab changed') end
     if tab ~= state.last_tab then
         state.last_tab = tab
         note('Bindings tab ' .. tostring(tab) .. ' selected.')
@@ -876,18 +1046,23 @@ local function away_frame()
         sweep_bindings()
     end
     state.last_tab = nil
-    state.layout = nil
+    state.layout, state.more_layout = nil, nil
     forget_rows()
+    panel_hide('page closed')
     mods_title(false)
     release_labels()
 end
 
 local function step(dt)
+    -- Extended bindings are evaluated at most once per frame (src/extended.lua).
+    state.frame = state.frame + 1
     if not state.initialized then initialize() end
     if not state.base then return end
     local seconds = type(dt) == 'number' and dt or 0
     local book = state.assignments
     if book and book.dirty then flush_assignments(seconds) end
+    local store = state.extended_store
+    if store and store.dirty then flush_extended(seconds) end
     activate_actions()
     if not state.build_rows then return end
     local screen = active_screen()
@@ -905,18 +1080,21 @@ local function step(dt)
     if screen and not state.page_open then
         -- A binding page just opened: the game's Text Language may have changed
         -- since the last one, so the texts are refreshed here, once.
-        state.page_open = true
+        state.page_open, state.mission_check = true, 0
         translation.refresh()
     end
     if screen then page_frame(screen, seconds) else away_frame() end
 end
 
--- The update stops (the 8th error of a burst) or the game shuts down: the MODS
--- title and the borrowed text slots go back to the game, as when a binding page
--- closes. While a page is open they stay borrowed for the session, and their
--- buffers with them, since the page may still show them.
+-- The update stops (the 8th error of a burst) or the game shuts down: the
+-- extended panel closes (a key capture ends), the MODS title and the borrowed
+-- text slots go back to the game, as when a binding page closes. While a page
+-- is open they stay borrowed for the session, and their buffers with them,
+-- since the page may still show them.
 local function shut_down()
     if not state.base then return end
+    local closed, problem = pcall(panel_hide, 'stopped')
+    if not closed then note('Closing the extended panel failed: ' .. tostring(problem)) end
     if active_screen() then
         note('A binding page is open; its borrowed text slots stay borrowed.')
         return
@@ -933,7 +1111,7 @@ end
 -- reservations and the assignments file stay as they are; nothing is swept here.
 local function pause_menu()
     if state.page_open then state.page_open, state.page_visited = false, true end
-    state.last_tab, state.layout = nil, nil
+    state.last_tab, state.layout, state.more_layout = nil, nil, nil
     forget_rows()
     shut_down()
 end

@@ -60,7 +60,7 @@ Included revisions:
 - Ship Station Hotkeys v1.9
 - Flame Damage Fixed v1.2
 - Mod Options Menu v1.2
-- Mod Bindings Menu v2.2.1
+- Mod Bindings Menu v2.3
 - Better Lobby Management v1.2
 - Hellpod Drop Hold v1.2
 - Laser Sentry Cooldown v1.1
