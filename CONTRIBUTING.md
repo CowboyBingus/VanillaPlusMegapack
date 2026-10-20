@@ -27,7 +27,7 @@ To test the actual compiled loader with the pack, first build Bingus Shared Load
 & $env:HD2_LUAJIT tests/test_loader.lua build $env:HD2_SHARED_LOADER_BUILD
 ```
 
-For future component updates, import the reviewed source/tests, rebuild the standalone mod, then update its lock entry from that verified release. Do not update hashes merely to bypass a mismatch. Keep the manager GUID and resource names stable. Never commit build outputs, compiler binaries, private recordings or game files. The Enemy Collision Synchronized component uses the public synthetic suite. raw recorded snapshots are excluded. No repository-wide license has been selected.
+For future component updates, import the reviewed source/tests, rebuild the standalone mod, then update its lock entry from that verified release. Do not update hashes merely to bypass a mismatch. Keep the manager GUID and resource names stable. Never commit build outputs, compiler binaries, private recordings or game files. The Enemy Collision Synchronized component uses the public synthetic suite. raw recorded snapshots are excluded. This repository is licensed under the BSD Zero Clause License (0BSD); see LICENSE.
 
 ## Optional manager backend checks
 
