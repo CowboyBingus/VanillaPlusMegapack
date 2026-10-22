@@ -6,4 +6,7 @@ target-version = "py310"
 # Start lenient: catch real bugs (unused imports/vars, undefined names) without
 # relitigating the existing codebase's style. Tighten incrementally later.
 select = ["E9", "F"]
-ignore = []
+# F401 (unused import): upstream-owned component build scripts carry a few; flagging
+# them only creates churn/merge conflicts for forks tracking upstream, and unused
+# imports are not a correctness risk. Everything else in F (undefined names, etc.) stays on.
+ignore = ["F401"]

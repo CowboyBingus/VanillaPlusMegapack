@@ -17,6 +17,17 @@ jobs:
       # CowboyBingus's noreply address) and stays a maintainer-run check -
       # see docs in this PR for why.
       - name: Scan allowlisted source files for leaked personal data
+        # privacy_audit.py treats the *current machine's username* as a secret
+        # and flags any file containing that word. On GitHub runners the user
+        # is "runner", which legitimately appears in test text ("test runner"),
+        # so the audit false-positives in CI. There is no personal identity on
+        # a CI runner to protect, so give it a neutral one; every other check
+        # (emails, paths, tokens, IPs) still runs unchanged.
+        env:
+          LOGNAME: ci
+          USER: ci
+          USERNAME: ci
+          COMPUTERNAME: ""
         run: python3 scripts/privacy_audit.py
 
   python-lint:
