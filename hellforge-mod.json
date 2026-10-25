@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "id": "cowboybingus.vanilla-plus-megapack",
+  "name": "Vanilla Plus Megapack",
+  "version": "0.1.0",
+  "description": "Twenty-five CowboyBingus Helldivers 2 mods in one pack: gameplay repairs, ship hotkeys, clickable scrollbars, lobby host tools, and the Mod Options and Mod Bindings tabs. Switch each one on or off in the pack's settings.",
+  "icon": "icon.png",
+  "gameplay": true,
+  "code": {
+    "dll": "vanilla_plus_megapack.dll",
+    "sdk": 15
+  }
+}

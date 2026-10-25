@@ -1,0 +1,152 @@
+[
+  {
+    "id": "better_stratagem_bounce",
+    "name": "Better Stratagem Bounce",
+    "version": "15.4.1",
+    "lua": "BetterStratagemBounce"
+  },
+  {
+    "id": "hellpod_steering_unlocked",
+    "name": "Hellpod Steering Unlocked",
+    "version": "7.5.1",
+    "lua": "HellpodSteeringUnlocked"
+  },
+  {
+    "id": "reinforcement_beacons_fixed",
+    "name": "Reinforcement Beacons Fixed",
+    "version": "4.6.1",
+    "lua": "ReinforcementBeaconsFixed"
+  },
+  {
+    "id": "consistent_vaulting",
+    "name": "Consistent Vaulting",
+    "version": "8.9.1",
+    "lua": "ConsistentVaulting"
+  },
+  {
+    "id": "shallow_water_diving",
+    "name": "Shallow Water Diving",
+    "version": "3.10.1",
+    "lua": "ShallowWaterDiving"
+  },
+  {
+    "id": "sentry_aim_retention",
+    "name": "Sentry Aim Retention",
+    "version": "1.1.1",
+    "lua": "SentryAimRetention"
+  },
+  {
+    "id": "enemy_collision_synchronized",
+    "name": "Enemy Collision Synchronized",
+    "version": "2.13.0",
+    "lua": "EnemyCollisionSynchronized"
+  },
+  {
+    "id": "controllable_hover_pack",
+    "name": "Controllable Hover Pack",
+    "version": "1.8.1",
+    "lua": "ControllableHoverPack"
+  },
+  {
+    "id": "know_your_constellation",
+    "name": "Know Your Constellation",
+    "version": "4.1.1",
+    "lua": "KnowYourConstellation"
+  },
+  {
+    "id": "armory_preview_cache",
+    "name": "Armory Preview Cache",
+    "version": "23.1",
+    "lua": "ArmoryPreviewCache"
+  },
+  {
+    "id": "arc_thrower_revamped",
+    "name": "Arc Thrower Revamped",
+    "version": "1.7.1",
+    "lua": "ArcThrowerRevamped"
+  },
+  {
+    "id": "clickable_scrollbars",
+    "name": "Clickable Scrollbars",
+    "version": "2.15.1",
+    "lua": "ClickableScrollbars"
+  },
+  {
+    "id": "ship_station_hotkeys",
+    "name": "Ship Station Hotkeys",
+    "version": "1.9.1",
+    "lua": "GalacticMenuHotkey"
+  },
+  {
+    "id": "flame_damage_fixed",
+    "name": "Flame Damage Fixed",
+    "version": "1.2",
+    "lua": "FlameDamageFixed"
+  },
+  {
+    "id": "mod_options_menu",
+    "name": "Mod Options Menu",
+    "version": "1.2.1",
+    "lua": "ModOptionsMenu"
+  },
+  {
+    "id": "mod_bindings_menu",
+    "name": "Mod Bindings Menu",
+    "version": "2.3",
+    "lua": "ModBindingsMenu"
+  },
+  {
+    "id": "better_lobby_management",
+    "name": "Better Lobby Management",
+    "version": "1.2.1",
+    "lua": "BetterLobbyManagement"
+  },
+  {
+    "id": "hellpod_drop_hold",
+    "name": "Hellpod Drop Hold",
+    "version": "1.2.1",
+    "lua": "HellpodDropHold"
+  },
+  {
+    "id": "laser_sentry_cooldown",
+    "name": "Laser Sentry Cooldown",
+    "version": "1.1.1",
+    "lua": "LaserSentryCooldown"
+  },
+  {
+    "id": "match_your_colors",
+    "name": "Match Your Colors",
+    "version": "1.5",
+    "lua": "MatchYourColors"
+  },
+  {
+    "id": "sticky_grenade_handles",
+    "name": "Sticky Grenade Handles",
+    "version": "1.0.1",
+    "lua": "StickyGrenadeHandles"
+  },
+  {
+    "id": "stratagem_hero_expanded",
+    "name": "Stratagem Hero Expanded",
+    "version": "1.0",
+    "lua": "StratagemHeroExpanded"
+  },
+  {
+    "id": "sound_systems_rebalanced",
+    "name": "Sound Systems Rebalanced",
+    "version": "1.0",
+    "lua": "SoundSystemsRebalanced"
+  },
+  {
+    "id": "foliage_pass_through",
+    "name": "Foliage Pass-Through",
+    "version": "1.0",
+    "lua": "FoliagePassThrough"
+  },
+  {
+    "id": "holster_your_shield",
+    "name": "Holster Your Shield",
+    "version": "1.0",
+    "lua": "HolsterYourShield"
+  }
+]

@@ -1,0 +1,80 @@
+/* A stand-in for HellForge and the game, for the pack's tests: an HfApi whose memory calls work on fake game.dll and exe
+ * images (zeroed, as large as build 25480438's) and a fake heap, whose events, ticks and live edits the test drives,
+ * and which counts every call so a test can pin a component's calls per frame.
+ *
+ * Reads and writes through the API succeed only inside the fake images and the fake heap, outside any hole the test made
+ * (fake_hole): what ReadProcessMemory would answer for a bad pointer. Plain loads by components into the images are
+ * ordinary memory. */
+#ifndef FAKE_HF_H
+#define FAKE_HF_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include "hellforge_mod.h"
+#include "core/vpm_core.h"
+
+#define FAKE_GAME_SIZE 0x4744000u /* game.dll's SizeOfImage on 25480438 */
+#define FAKE_EXE_SIZE 0x39E8000u  /* helldivers2.exe's */
+
+typedef struct FakeCounts
+{
+    uint32_t read, write, code_matches, find_pattern, get_live, set_live, hook, log, subscribe, on, other;
+} FakeCounts;
+
+/* A fresh HellForge and game: zeroed images and heap, no events fired, no logs, counts 0, the core reset, game state
+ * HF_STATE_NONE, build 25480438, no other mods. */
+void fake_setup(void);
+const HfApi* fake_api(void);
+HfMod* fake_mod(void);
+/* vpm_core_init with the fake API and these components. */
+int fake_start(const VpmComponentDef* const* defs, int count);
+/* The component started from defs[index] by fake_start. */
+VpmComponent* fake_component(int index);
+
+uintptr_t fake_game(void);
+uintptr_t fake_exe(void);
+/* Zeroed, 16-byte aligned memory the API reads and writes (a 256 MB arena; reset by fake_setup). */
+void* fake_heap(size_t size);
+/* API reads and writes touching [address, address + size) fail from now on. */
+void fake_hole(uintptr_t address, size_t size);
+/* The API's write fails from now on (protection refused). */
+void fake_refuse_writes(int refuse);
+
+/* Fires a load event: its registered callbacks run, later registrations get it at once. */
+void fake_fire(HfEvent event);
+/* Runs the game-thread callback n times. */
+void fake_frames(int n, float dt);
+/* Delivers a game event to its listeners (event->kind). */
+void fake_emit(const HfEventInfo* event);
+void fake_set_state(uint32_t state);
+void fake_set_build(const char* build);
+void fake_add_mod(const char* id, uint32_t kind);
+
+FakeCounts fake_counts(void);
+void fake_counts_reset(void);
+
+/* The log: every line since fake_setup or fake_log_clear. */
+int fake_log_has(const char* text);
+const char* fake_log_text(void);
+void fake_log_clear(void);
+/* Prints the log lines as they come (for debugging a test). */
+void fake_log_echo(int echo);
+
+/* Live fields (get_live, set_live), by target, component record name and offset. */
+void fake_live_put(uint64_t target, const char* component, uint16_t offset, HfValue value);
+int fake_live_now(uint64_t target, const char* component, uint16_t offset, HfValue* out);
+
+/* Hooks the code made (hook, hook_ex), and the original a test gives a hooked target. */
+typedef struct FakeHook { uintptr_t target; void* detour; int32_t priority; } FakeHook;
+int fake_hook_count(void);
+FakeHook fake_hook_at(int index);
+void fake_set_original(uintptr_t target, void* original);
+
+/* What projectile_row, damage_row, stratagem_row, difficulty_row ("projectile", "damage", "stratagem", "difficulty"),
+ * component_record and record (the component's name, by resource) answer for an id. */
+void fake_set_row(const char* table, uint64_t id, uintptr_t row);
+
+/* MurmurHash64A, seed 0: the game's resource name hash (resource_hash). */
+uint64_t fake_murmur64(const void* data, size_t size);
+
+#endif
