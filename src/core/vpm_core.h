@@ -6,10 +6,8 @@
 #include <windows.h>
 #include "vpm.h"
 
-#define VPM_MAX_COMPONENTS 32
 #define VPM_MAX_LOADS 128
 #define VPM_MAX_LISTENS 128
-#define VPM_MAX_OPTIONS 256
 #define VPM_MAX_BINDINGS 64
 #define VPM_STATUS_SIZE 192
 
@@ -26,6 +24,7 @@ struct VpmComponent
     int state;           /* VPM_STATE_... */
     int started;         /* start() returned 0, so stop() may undo it */
     VpmTickFn tick;      /* NULL: not ticking */
+    VpmTickFn post_tick; /* after game.dll's update; NULL: none */
     char status[VPM_STATUS_SIZE];
     uint64_t cycles;     /* time-stamp counter cycles spent in its tick this mission */
     uint64_t calls;      /* tick calls this mission */
@@ -44,6 +43,8 @@ typedef struct VpmFault
 void vpm_guard_install(void);
 /* Runs fn(arg) under the guard: 0, or the code of the fault that ended it (described in *fault). */
 DWORD vpm_guard_call(void (*fn)(void*), void* arg, VpmFault* fault);
+/* Plain loads under a guard of their own (vpm_read): 1 read, 0 unreadable, -1 no guard installed. */
+int vpm_guard_copy(void* out, uintptr_t from, size_t size);
 void vpm_fault_text(const VpmFault* fault, char* out, size_t size);
 uintptr_t vpm_self_base(void);
 
@@ -67,6 +68,28 @@ void vpm_bindings_reset(void);
 
 /* Windows functions (core.c) */
 void vpm_user32_init(void);
+
+/* Tests: stand-ins for what the harness cannot fake through HfApi (memory.c). NULL members: the real calls. */
+typedef struct VpmTestHooks
+{
+    void (*writable_query)(void);                                 /* called before each VirtualQuery of vpm_writable */
+    void* (*module_export)(const char* module, const char* name); /* answers vpm_module_export */
+    int (*read)(uintptr_t address, void* out, size_t size);       /* answers vpm_read's plausible reads: 1 read, 0 not */
+} VpmTestHooks;
+/* The game's whole-frame update the core hooks for its ticks (core.c): game.dll + VPM_FRAME_UPDATE, its first bytes as
+ * shipped on 25480438 (read from the decoded image: mov r11, rsp; push rbp; push r14; lea rbp, [r11 - 0x6A8];
+ * sub rsp, 0x798), and how long the core retries while game.dll's code is still being decoded. */
+#define VPM_FRAME_UPDATE 0xAB5000u
+#define VPM_FRAME_UPDATE_BYTES \
+    {0x4C, 0x8B, 0xDC, 0x55, 0x41, 0x56, 0x49, 0x8D, 0xAB, 0x58, 0xF9, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0x98, 0x07, 0x00, 0x00}
+#define VPM_FRAME_WAIT_SECONDS 60.0f
+/* 1 while the pack's ticks run from its hook of the frame update, 0 while they run from HellForge's game-thread
+ * callback (before the hook, or without it), -1 after it was given up. */
+int vpm_frame_hooked(void);
+
+/* Tests: the user32 functions vpm_user32() answers. */
+void vpm_user32_set(const VpmUser32* table);
+void vpm_core_test_hooks(const VpmTestHooks* hooks);
 
 /* The pack's entry with a given component list: hellforge_mod_init passes src/components.c's; the tests pass their
  * own. 0 loaded, 1 refused (an SDK older than 15). */

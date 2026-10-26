@@ -2,9 +2,10 @@
  * the one registration of each kind (load events, the game-thread tick, game events) that the core makes with HellForge
  * for the whole pack and passes on.
  *
- * Per frame (the pack's game-thread callback): the frame's settings countdown (one compare while nothing waits to be
- * saved), then each ticking component's tick under one guard, with two time-stamp counter reads around each (the
- * per-component cost the log reports at a mission's end). No Windows call and no allocation per frame. */
+ * Per frame (the frame update's detour, or HellForge's game-thread callback until it is in): the frame's settings
+ * countdown (one compare while nothing waits to be saved), then each ticking component's tick under one guard, and after
+ * game.dll's update each post-update tick, with two time-stamp counter reads around each (the per-component cost the
+ * log reports at a mission's end). No Windows call and no allocation per frame. */
 #include <intrin.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -15,6 +16,7 @@ static const HfApi* g_hf;
 static HfMod* g_mod;
 static VpmComponent g_components[VPM_MAX_COMPONENTS];
 static int g_componentCount;
+static void CoreLog(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
 typedef struct LoadReg { VpmComponent* component; HfEvent event; VpmLoadFn fn; } LoadReg;
 typedef struct ListenReg { VpmComponent* component; VpmListenFn fn; } ListenReg;
@@ -23,15 +25,7 @@ static int g_loadCount;
 static ListenReg g_listens[VPM_MAX_LISTENS];
 static int g_listenCount;
 
-/* The ticking components, in start order. vpm_tick_stop clears a component's tick; the list is compacted after the
- * frame's ticks. g_tickAt and g_tickCurrent live in memory: after a fault the guard resumes in RunTicks, which goes
- * on from the next. */
-static VpmComponent* g_ticks[VPM_MAX_COMPONENTS];
-static int g_tickCount;
-static volatile int g_tickAt;
-static VpmComponent* volatile g_tickCurrent;
-static int g_tickHooked;
-static uint64_t g_frames;      /* game updates this mission */
+static uint64_t g_frames;      /* frames this mission */
 static uint64_t g_tscStart;    /* the time-stamp counter and performance counter when the mission started */
 static LARGE_INTEGER g_qpcStart;
 
@@ -61,7 +55,6 @@ void vpm_log(VpmComponent* self, const char* format, ...)
     va_end(args);
 }
 
-static void CoreLog(const char* format, ...) __attribute__((format(printf, 1, 2)));
 static void CoreLog(const char* format, ...)
 {
     va_list args;
@@ -85,6 +78,7 @@ void vpm_core_stop(VpmComponent* component, const char* reason)
     int started = component->started;
     component->state = VPM_STATE_STOPPED;
     component->tick = NULL;
+    component->post_tick = NULL;
     snprintf(component->status, sizeof component->status, "disabled: %s", reason);
     vpm_log(component, "disabled: %s", reason);
     if (started && component->def->stop != NULL)
@@ -110,6 +104,8 @@ int vpm_fail(VpmComponent* self, const char* format, ...)
     vpm_core_stop(self, reason);
     return 1;
 }
+
+int vpm_guarded(VpmComponent* self, void (*fn)(void*), void* arg) { return vpm_core_guarded(self, fn, arg); }
 
 int vpm_core_guarded(VpmComponent* component, void (*fn)(void*), void* arg)
 {
@@ -169,34 +165,70 @@ int vpm_listen(VpmComponent* self, uint32_t kind, VpmListenFn fn, int32_t priori
     return 1;
 }
 
-/* ---- the game-thread tick ---------------------------------------------------------------------------------------- */
+/* ---- the game-thread ticks --------------------------------------------------------------------------------------- *
+ * Two lists of ticking components, in start order: the ticks at the start of game.dll's frame update, and the
+ * post-update ticks after it. A stop clears a component's slot; a list is compacted after the frame ran it. g_tickList,
+ * g_tickAt and g_tickCurrent live in memory: after a fault the guard resumes in RunTicks, which goes on from the next.
+ *
+ * Where they run: the core hooks game.dll's whole-frame update (VPM_FRAME_UPDATE, called once per frame by the engine
+ * right after the Lua update: KB squad-join-pipeline-research section 1) and runs the ticks before it and the post-update
+ * ticks after it. Until that hook is in (game.dll's code is decoded in parts after HF_EVENT_GAME_LOADED), or if it is
+ * given up, both run from HellForge's game-thread callback, which HellForge hooks on the menu sound manager's update
+ * inside the same frame update (game.dll 0x13270B0, called at 0xAB4BE7). That function also has a second caller, in
+ * the late update (0x13F8938, another sound manager): once the frame hook is in, the callback does nothing, so the
+ * ticks run exactly once per frame whether HellForge's callback runs once or twice. */
 
-int vpm_tick_start(VpmComponent* self, VpmTickFn fn)
+#define LIST_PRE 0
+#define LIST_POST 1
+typedef struct TickList { VpmComponent* items[VPM_MAX_COMPONENTS]; int count; } TickList;
+static TickList g_lists[2];
+static volatile int g_tickList;
+static volatile int g_tickAt;
+static VpmComponent* volatile g_tickCurrent;
+static int g_tickHooked;     /* HellForge's game-thread callback registered */
+static int g_frameState;     /* the frame hook: 0 not yet, 1 in, -1 given up */
+static float g_frameWaited;  /* seconds of game-thread callbacks while waiting for the frame update's code */
+typedef void (*FrameUpdateFn)(void* game, float dt);
+static FrameUpdateFn g_frameOriginal;
+
+int vpm_frame_hooked(void) { return g_frameState; }
+
+static VpmTickFn* Slot(VpmComponent* c, int list) { return list == LIST_PRE ? &c->tick : &c->post_tick; }
+
+static int TickStart(VpmComponent* self, int list, VpmTickFn fn)
 {
-    if (!g_tickHooked || !vpm_running(self) || fn == NULL) return 0;
+    /* Ticks need a way to run: HellForge's game-thread callback (it also retries the frame hook), or the hook itself. */
+    if ((!g_tickHooked && g_frameState != 1) || !vpm_running(self) || fn == NULL) return 0;
+    TickList* l = &g_lists[list];
     int listed = 0;
-    for (int i = 0; i < g_tickCount; i++) listed |= g_ticks[i] == self;
-    if (!listed && g_tickCount < VPM_MAX_COMPONENTS) g_ticks[g_tickCount++] = self;
-    self->tick = fn;
+    for (int i = 0; i < l->count; i++) listed |= l->items[i] == self;
+    if (!listed && l->count < VPM_MAX_COMPONENTS) l->items[l->count++] = self;
+    *Slot(self, list) = fn;
     return 1;
 }
 
+int vpm_tick_start(VpmComponent* self, VpmTickFn fn) { return TickStart(self, LIST_PRE, fn); }
 void vpm_tick_stop(VpmComponent* self) { self->tick = NULL; }
 int vpm_ticking(const VpmComponent* self) { return self->tick != NULL; }
+int vpm_post_tick_start(VpmComponent* self, VpmTickFn fn) { return TickStart(self, LIST_POST, fn); }
+void vpm_post_tick_stop(VpmComponent* self) { self->post_tick = NULL; }
+int vpm_post_ticking(const VpmComponent* self) { return self->post_tick != NULL; }
 
 typedef struct TickCall { float dt; } TickCall;
 
 static void RunTickList(void* arg)
 {
     float dt = ((TickCall*)arg)->dt;
-    while (g_tickAt < g_tickCount)
+    TickList* l = &g_lists[g_tickList];
+    while (g_tickAt < l->count)
     {
-        VpmComponent* c = g_ticks[g_tickAt];
+        VpmComponent* c = l->items[g_tickAt];
         g_tickCurrent = c;
-        if (c->tick != NULL)
+        VpmTickFn fn = *Slot(c, g_tickList);
+        if (fn != NULL)
         {
             uint64_t start = __rdtsc();
-            c->tick(c, dt);
+            fn(c, dt);
             c->cycles += __rdtsc() - start;
             c->calls++;
         }
@@ -204,23 +236,24 @@ static void RunTickList(void* arg)
     }
 }
 
-static void CompactTicks(void)
+static void CompactTicks(int list)
 {
+    TickList* l = &g_lists[list];
     int kept = 0;
-    for (int i = 0; i < g_tickCount; i++)
-        if (g_ticks[i]->tick != NULL) g_ticks[kept++] = g_ticks[i];
-    g_tickCount = kept;
+    for (int i = 0; i < l->count; i++)
+        if (*Slot(l->items[i], list) != NULL) l->items[kept++] = l->items[i];
+    l->count = kept;
 }
 
-/* The pack's game-thread callback. */
-static void PackTick(HfMod* mod, float dt, void* user)
+/* One list's ticks under one guard; a fault stops the component it happened in and the list goes on from the next. */
+static void RunTicks(int list, float dt)
 {
-    g_frames++;
-    vpm_settings_tick(dt);
-    if (g_tickCount == 0) return;
+    TickList* l = &g_lists[list];
+    if (l->count == 0) return;
     TickCall call = {dt};
+    g_tickList = list;
     g_tickAt = 0;
-    while (g_tickAt < g_tickCount)
+    while (g_tickAt < l->count)
     {
         VpmFault fault;
         if (vpm_guard_call(RunTickList, &call, &fault) == 0) break;
@@ -229,8 +262,74 @@ static void PackTick(HfMod* mod, float dt, void* user)
         vpm_core_stop(g_tickCurrent, text);
         g_tickAt = g_tickAt + 1;
     }
-    for (int i = 0; i < g_tickCount; i++)
-        if (g_ticks[i]->tick == NULL) { CompactTicks(); break; }
+    for (int i = 0; i < l->count; i++)
+        if (*Slot(l->items[i], list) == NULL) { CompactTicks(list); break; }
+}
+
+static void PreFrame(float dt)
+{
+    g_frames++;
+    vpm_settings_tick(dt);
+    RunTicks(LIST_PRE, dt);
+}
+
+static void PostFrame(float dt) { RunTicks(LIST_POST, dt); }
+
+/* The frame update's detour: the ticks, game.dll's whole update, the post-update ticks. lint: per-frame */
+static void FrameDetour(void* game, float dt)
+{
+    PreFrame(dt);
+    g_frameOriginal(game, dt);
+    PostFrame(dt);
+}
+
+/* The frame update's first bytes as shipped (VPM_FRAME_UPDATE_CODE), for the cheap check while it is not decoded yet. */
+static const uint8_t kFrameBytes[] = VPM_FRAME_UPDATE_BYTES;
+
+static void HookFrame(void)
+{
+    if (g_hf->hook_ex(g_mod, vpm_game() + VPM_FRAME_UPDATE, (void*)FrameDetour, (void**)&g_frameOriginal, 0) != 0)
+    {
+        g_frameState = -1;
+        CoreLog("the game's frame update could not be hooked (%s): ticks stay in HellForge's game-thread callback", g_hf->last_log(g_mod));
+        return;
+    }
+    g_frameState = 1;
+    CoreLog("ticks run at the start and the end of the game's frame update (game.dll 0x%X)", VPM_FRAME_UPDATE);
+}
+
+/* Hooks the frame update once game.dll's code there is decoded (it is decoded in parts after HF_EVENT_GAME_LOADED).
+ * Tried at that event, then at each game-thread callback: a plain-load compare of its first bytes with the shipped ones
+ * (no call, no API read), and the hook as soon as they match: bytes as shipped mean no other hook is there either.
+ * After VPM_FRAME_WAIT_SECONDS without them (still not decoded, or another mod hooked it first) it is given up and the
+ * ticks stay in HellForge's callback. */
+static void TryFrameHook(float waited)
+{
+    if (g_frameState != 0 || vpm_game() == 0) return;
+    uint8_t now[sizeof kFrameBytes];
+    if (vpm_game_read(VPM_FRAME_UPDATE, now, sizeof now) && memcmp(now, kFrameBytes, sizeof now) == 0)
+    {
+        HookFrame();
+        return;
+    }
+    if (waited < VPM_FRAME_WAIT_SECONDS) return;
+    g_frameState = -1;
+    CoreLog("the game's frame update (game.dll 0x%X) did not read as shipped within %.0f s: ticks stay in HellForge's game-thread callback",
+        VPM_FRAME_UPDATE, VPM_FRAME_WAIT_SECONDS);
+}
+
+/* HellForge's game-thread callback: the ticks until the frame hook is in (both lists, the post-update ticks right after
+ * the others), nothing afterwards. */
+static void PackTick(HfMod* mod, float dt, void* user)
+{
+    if (g_frameState == 1) return;
+    if (g_frameState == 0)
+    {
+        g_frameWaited += dt;
+        TryFrameHook(g_frameWaited);
+    }
+    PreFrame(dt);
+    PostFrame(dt);
 }
 
 /* ---- costs: per component, at each mission's end --------------------------------------------------------------- */
@@ -266,7 +365,11 @@ static void CoreMissionEnd(HfMod* mod, const HfEventInfo* event, void* user) { C
 
 /* ---- start-up ---------------------------------------------------------------------------------------------------- */
 
-static void CoreGameLoaded(HfMod* mod, HfEvent event, void* user) { vpm_memory_game_loaded(); }
+static void CoreGameLoaded(HfMod* mod, HfEvent event, void* user)
+{
+    vpm_memory_game_loaded();
+    TryFrameHook(0);
+}
 
 static int VanillaPlusInSession(void)
 {
@@ -367,9 +470,12 @@ int vpm_core_init(const HfApi* api, HfMod* mod, const VpmComponentDef* const* de
 void vpm_core_reset(void)
 {
     memset(g_components, 0, sizeof g_components);
-    g_componentCount = g_loadCount = g_listenCount = g_tickCount = g_tickHooked = 0;
-    g_tickAt = 0;
+    g_componentCount = g_loadCount = g_listenCount = g_tickHooked = g_frameState = 0;
+    memset(g_lists, 0, sizeof g_lists);
+    g_tickList = g_tickAt = 0;
     g_tickCurrent = NULL;
+    g_frameWaited = 0;
+    g_frameOriginal = NULL;
     g_frames = 0;
     vpm_options_reset();
     vpm_bindings_reset();
@@ -379,6 +485,7 @@ void vpm_core_reset(void)
 
 static VpmUser32 g_user32;
 const VpmUser32* vpm_user32(void) { return &g_user32; }
+void vpm_user32_set(const VpmUser32* table) { g_user32 = *table; }
 
 void vpm_user32_init(void)
 {

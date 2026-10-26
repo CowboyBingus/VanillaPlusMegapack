@@ -20,9 +20,9 @@ typedef struct FakeModStruct { const HfApi* api; } FakeModStruct;
 typedef struct Hole { uintptr_t at; size_t size; } Hole;
 typedef struct Load { HfEvent event; HfEventCallback callback; void* user; } Load;
 typedef struct Listener { uint32_t kind; HfListener listener; void* user; int32_t priority; } Listener;
-typedef struct Live { uint64_t target; char component[64]; uint16_t offset; HfValue now, base; int changed; } Live;
+typedef struct Live { uint64_t target; char component[64]; uint16_t offset; HfValue now, base; int changed; uintptr_t memory; } Live;
 typedef struct Original { uintptr_t target; void* original; } Original;
-typedef struct Row { char table[32]; uint64_t id; uintptr_t row; } Row;
+typedef struct Row { char table[32]; uint64_t id; uintptr_t row; uint32_t stride; } Row;
 
 static uint8_t* g_game;
 static uint8_t* g_exe;
@@ -75,19 +75,47 @@ static int Mapped(uintptr_t at, size_t size)
     return 1;
 }
 
+/* fake_after_read's hook */
+static uintptr_t g_afterAt;
+static int g_afterLeft;
+static void (*g_afterFn)(void*);
+static void* g_afterUser;
+
+void fake_after_read(uintptr_t address, int nth, void (*fn)(void*), void* user)
+{
+    g_afterAt = address;
+    g_afterLeft = nth;
+    g_afterFn = fn;
+    g_afterUser = user;
+}
+
+static void AfterRead(uintptr_t address, size_t size)
+{
+    if (g_afterFn == NULL || g_afterAt < address || g_afterAt >= address + size || --g_afterLeft > 0) return;
+    void (*fn)(void*) = g_afterFn;
+    g_afterFn = NULL;
+    fn(g_afterUser);
+}
+
 static int FakeRead(uintptr_t address, void* buffer, size_t size)
 {
     g_counts.read++;
-    if (!Mapped(address, size)) return 1;
+    if (!Mapped(address, size)) { AfterRead(address, size); return 1; }
     memcpy(buffer, (const void*)address, size);
+    AfterRead(address, size);
     return 0;
 }
 
+/* As HellForge's write: the bytes are made writable for the write, then their protection is put back. */
 static int FakeWrite(uintptr_t address, const void* data, size_t size)
 {
     g_counts.write++;
     if (g_refuseWrites || !Mapped(address, size)) return 1;
+    DWORD old;
+    if (!VirtualProtect((void*)address, size, PAGE_EXECUTE_READWRITE, &old)) return 1; /* lint-ok: C3 the fake of HfApi.write */
     memcpy((void*)address, data, size);
+    DWORD ignored;
+    (void)VirtualProtect((void*)address, size, old, &ignored); /* lint-ok: C3 the fake of HfApi.write */
     return 0;
 }
 
@@ -111,6 +139,12 @@ void* fake_heap(size_t size)
 void fake_hole(uintptr_t address, size_t size)
 {
     if (g_holeCount < MAX_HOLES) g_holes[g_holeCount++] = (Hole){address, size};
+}
+
+void fake_unhole(uintptr_t address)
+{
+    for (int i = 0; i < g_holeCount; i++)
+        if (g_holes[i].at == address) { g_holes[i--] = g_holes[--g_holeCount]; }
 }
 
 void fake_refuse_writes(int refuse) { g_refuseWrites = refuse; }
@@ -165,15 +199,90 @@ static uintptr_t FakeFindPattern(const char* module, const char* pattern)
     return 0;
 }
 
+/* fake_stand_in's functions: their bytes as shipped, which code_matches and read_code see. */
+#define MAX_STAND_INS 64
+typedef struct StandIn { uintptr_t at; uint8_t shipped[64]; int size; } StandIn;
+static StandIn g_standIns[MAX_STAND_INS];
+static int g_standInCount;
+
+/* The code bytes at [address, address + size) as the game shipped them: a stand-in's, else the image's. */
+static void ShippedBytes(uintptr_t address, uint8_t* out, size_t size)
+{
+    memcpy(out, (const void*)address, size);
+    for (int i = 0; i < g_standInCount; i++)
+        for (size_t k = 0; k < size; k++)
+        {
+            uintptr_t at = address + k;
+            if (at >= g_standIns[i].at && at < g_standIns[i].at + (uintptr_t)g_standIns[i].size) out[k] = g_standIns[i].shipped[at - g_standIns[i].at];
+        }
+}
+
 static int FakeCodeMatches(uintptr_t address, const char* pattern)
 {
     g_counts.code_matches++;
-    uint8_t bytes[512], mask[512];
+    uint8_t bytes[512], mask[512], code[512];
     int n = ParsePattern(pattern, bytes, mask, 512);
-    return n > 0 && Mapped(address, (size_t)n) && MatchAt((const uint8_t*)address, bytes, mask, n);
+    if (n <= 0 || !Mapped(address, (size_t)n)) return 0;
+    ShippedBytes(address, code, (size_t)n);
+    return MatchAt(code, bytes, mask, n);
 }
 
-static int FakeReadCode(uintptr_t address, void* buffer, size_t size) { return FakeRead(address, buffer, size); }
+static int FakeReadCode(uintptr_t address, void* buffer, size_t size)
+{
+    g_counts.read++;
+    if (!Mapped(address, size)) return 1;
+    ShippedBytes(address, buffer, size);
+    return 0;
+}
+
+void fake_stand_in(uint32_t rva, const char* shipped, void* fn)
+{
+    uint8_t bytes[64], mask[64];
+    int n = ParsePattern(shipped, bytes, mask, 64);
+    if (n < 14 || g_standInCount >= MAX_STAND_INS) { fprintf(stderr, "fake_stand_in: %d bytes (14 to 64)\n", n); exit(2); }
+    StandIn* s = &g_standIns[g_standInCount++];
+    s->at = (uintptr_t)g_game + rva;
+    s->size = n;
+    memcpy(s->shipped, bytes, (size_t)n);
+    uint8_t jump[14] = {0xFF, 0x25, 0, 0, 0, 0};
+    uint64_t target = (uint64_t)(uintptr_t)fn;
+    memcpy(jump + 6, &target, 8);
+    memcpy((void*)s->at, jump, sizeof jump);
+    DWORD old;
+    if (!VirtualProtect((void*)s->at, sizeof jump, PAGE_EXECUTE_READWRITE, &old)) /* lint-ok: C3 the test's stand-in page */
+    {
+        fprintf(stderr, "fake_stand_in: the page could not be made executable\n");
+        exit(2);
+    }
+}
+
+/* fake_export's table */
+#define MAX_EXPORTS 32
+typedef struct Export { char module[64], name[128]; void* fn; } Export;
+static Export g_exports[MAX_EXPORTS];
+static int g_exportCount;
+
+void fake_export(const char* module, const char* name, void* fn)
+{
+    if (g_exportCount >= MAX_EXPORTS) return;
+    snprintf(g_exports[g_exportCount].module, 64, "%s", module);
+    snprintf(g_exports[g_exportCount].name, 128, "%s", name);
+    g_exports[g_exportCount++].fn = fn;
+}
+
+static void* FakeModuleExport(const char* module, const char* name)
+{
+    g_counts.exports++;
+    for (int i = 0; i < g_exportCount; i++)
+        if (_stricmp(g_exports[i].module, module) == 0 && strcmp(g_exports[i].name, name) == 0) return g_exports[i].fn;
+    return NULL;
+}
+
+static void FakeWritableQuery(void) { g_counts.writable++; }
+
+/* vpm_read in tests: the read of the API the core was started with (the fake's, or a test's copy of it wrapping it), so
+ * the fake's regions, holes and counts apply. */
+static int FakeCoreRead(uintptr_t address, void* out, size_t size) { return vpm_core_hf()->read(address, out, size) == 0; }
 
 /* ---- logging ----------------------------------------------------------------------------------------------------- */
 
@@ -196,6 +305,13 @@ static void FakeLog(HfMod* mod, const char* format, ...)
 }
 
 int fake_log_has(const char* text) { return strstr(g_log, text) != NULL; }
+
+int fake_log_count(const char* text)
+{
+    int n = 0;
+    for (const char* at = strstr(g_log, text); at != NULL; at = strstr(at + 1, text)) n++;
+    return n;
+}
 const char* fake_log_text(void) { return g_log; }
 void fake_log_clear(void) { g_logUsed = 0; g_log[0] = 0; }
 void fake_log_echo(int echo) { g_echo = echo; }
@@ -250,9 +366,66 @@ static int FakeOnGameThread(HfMod* mod, HfTickCallback callback, void* user)
     return 1;
 }
 
+static void (*g_afterTick)(float dt);
+void fake_after_tick(void (*fn)(float dt)) { g_afterTick = fn; }
+
 void fake_frames(int n, float dt)
 {
-    for (int i = 0; i < n && g_tick != NULL; i++) g_tick(fake_mod(), dt, g_tickUser);
+    for (int i = 0; i < n && g_tick != NULL; i++)
+    {
+        g_tick(fake_mod(), dt, g_tickUser);
+        if (g_afterTick != NULL) g_afterTick(dt);
+    }
+}
+
+void fake_user32(const VpmUser32* table) { vpm_user32_set(table); }
+
+/* ---- the engine's frame: game.dll's whole update, with HellForge's game-thread callback inside it ------------------ */
+
+static int g_doubleTick;
+static uint8_t g_gameObject[64];
+static void* g_lastGame;
+static float g_lastDt;
+static int g_gameUpdates;
+
+void fake_double_tick(int twice) { g_doubleTick = twice; }
+int fake_game_updates(void) { return g_gameUpdates; }
+
+/* game.dll's frame update as the fake runs it: HellForge's callback (once, or twice as with the late update's second
+ * caller), then the game's own update (fake_after_tick). */
+static void FakeFrameUpdate(void* game, float dt)
+{
+    g_lastGame = game;
+    g_lastDt = dt;
+    g_gameUpdates++;
+    if (g_tick != NULL) g_tick(fake_mod(), dt, g_tickUser);
+    if (g_tick != NULL && g_doubleTick) g_tick(fake_mod(), dt, g_tickUser);
+    if (g_afterTick != NULL) g_afterTick(dt);
+}
+
+void fake_frame_update(int decoded)
+{
+    static const uint8_t shipped[] = VPM_FRAME_UPDATE_BYTES;
+    if (decoded) memcpy(g_game + VPM_FRAME_UPDATE, shipped, sizeof shipped);
+    else memset(g_game + VPM_FRAME_UPDATE, 0xCC, sizeof shipped);
+}
+
+void fake_engine_frames(int n, float dt)
+{
+    for (int i = 0; i < n; i++)
+    {
+        void (*detour)(void*, float) = (void (*)(void*, float))fake_hook_detour((uintptr_t)g_game + VPM_FRAME_UPDATE);
+        if (detour != NULL) detour(g_gameObject, dt);
+        else FakeFrameUpdate(g_gameObject, dt);
+        if (g_lastGame != g_gameObject || g_lastDt != dt) { fprintf(stderr, "fake: the frame update got other arguments\n"); exit(2); }
+    }
+}
+
+void* fake_hook_detour(uintptr_t target)
+{
+    for (int i = g_hookCount - 1; i >= 0; i--)
+        if (g_hooks[i].target == target) return g_hooks[i].detour;
+    return NULL;
 }
 
 static int FakeSubscribe(HfMod* mod, uint32_t kind, HfListener listener, void* user, int32_t priority)
@@ -306,6 +479,27 @@ int fake_live_now(uint64_t target, const char* component, uint16_t offset, HfVal
     return 1;
 }
 
+/* A live field bound to memory (fake_live_bind): set_live stores its value there too, as HellForge's edit does. */
+static void StoreLive(const Live* live)
+{
+    if (live->memory == 0) return;
+    const HfValue* v = &live->now;
+    uint8_t bytes[8];
+    size_t size = v->type == HF_TYPE_U8 ? 1 : v->type == HF_TYPE_U16 ? 2 : v->type == HF_TYPE_U64 ? 8 : 4;
+    if (v->type == HF_TYPE_F32) { float f = (float)v->number; memcpy(bytes, &f, 4); }
+    else if (v->type == HF_TYPE_I32) { int32_t i = (int32_t)v->number; memcpy(bytes, &i, 4); }
+    else if (v->type == HF_TYPE_U64) memcpy(bytes, &v->u64, 8);
+    else { uint64_t u = (uint64_t)v->number; memcpy(bytes, &u, size); }
+    (void)FakeWrite(live->memory, bytes, size);
+    g_counts.write--; /* HellForge's own store, not the component's call */
+}
+
+void fake_live_bind(uint64_t target, const char* component, uint16_t offset, uintptr_t memory)
+{
+    Live* live = FindLive(target, component, offset);
+    if (live != NULL) live->memory = memory;
+}
+
 static int FakeGetLive(HfMod* mod, HfRef target, const HfField* field, HfLiveValue* out)
 {
     g_counts.get_live++;
@@ -322,10 +516,11 @@ static int FakeSetLive(HfMod* mod, HfRef target, const HfField* field, const HfV
     g_counts.set_live++;
     Live* live = FindLive(target, field->component, field->offset);
     if (live == NULL) { snprintf(g_lastLog, sizeof g_lastLog, "fake: no such field"); return 0; }
-    if (value == NULL) { live->now = live->base; return HF_APPLIES_NOW; }
+    if (value == NULL) { live->now = live->base; StoreLive(live); return HF_APPLIES_NOW; }
     if (value->type != field->type) { snprintf(g_lastLog, sizeof g_lastLog, "fake: the value's type is not the field's"); return 0; }
     live->now = *value;
     live->changed = 1;
+    StoreLive(live);
     return HF_APPLIES_NOW;
 }
 
@@ -341,7 +536,9 @@ static int FakeHookEx(HfMod* mod, uintptr_t target, void* detour, void** origina
     g_counts.hook++;
     if (g_hookCount >= MAX_HOOKS) return 1;
     g_hooks[g_hookCount++] = (FakeHook){target, detour, priority};
-    *original = NULL;
+    /* The function itself goes on, unless the test named another original: a stand-in's jump reaches the test's
+     * function, as HellForge's chain would reach the game's. */
+    *original = (void*)target;
     for (int i = 0; i < g_originalCount; i++)
         if (g_originals[i].target == target) *original = g_originals[i].original;
     return 0;
@@ -360,15 +557,27 @@ static uintptr_t FindRow(const char* table, uint64_t id)
     return 0;
 }
 
-void fake_set_row(const char* table, uint64_t id, uintptr_t row)
+void fake_set_record(const char* table, uint64_t id, uintptr_t row, uint32_t stride)
 {
-    if (g_rowCount < MAX_ROWS) { snprintf(g_rows[g_rowCount].table, 32, "%s", table); g_rows[g_rowCount].id = id; g_rows[g_rowCount++].row = row; }
+    if (g_rowCount >= MAX_ROWS) return;
+    snprintf(g_rows[g_rowCount].table, 32, "%s", table);
+    g_rows[g_rowCount].id = id;
+    g_rows[g_rowCount].stride = stride;
+    g_rows[g_rowCount++].row = row;
 }
+
+void fake_set_row(const char* table, uint64_t id, uintptr_t row) { fake_set_record(table, id, row, 0); }
 
 static uintptr_t FakeComponentRecord(const char* component, uint64_t resource, uint32_t* stride)
 {
     if (stride) *stride = 0;
-    return FindRow(component, resource);
+    for (int i = 0; i < g_rowCount; i++)
+        if (g_rows[i].id == resource && strcmp(g_rows[i].table, component) == 0)
+        {
+            if (stride) *stride = g_rows[i].stride;
+            return g_rows[i].row;
+        }
+    return 0;
 }
 static uintptr_t FakeProjectileRow(uint32_t type) { return FindRow("projectile", type); }
 static uintptr_t FakeDamageRow(uint32_t id) { return FindRow("damage", id); }
@@ -514,14 +723,37 @@ void fake_setup(void)
     g_loadCount = g_listenerCount = g_liveCount = g_hookCount = g_originalCount = g_rowCount = g_modCount = 0;
     g_tick = NULL;
     g_tickUser = NULL;
+    g_afterTick = NULL;
+    g_doubleTick = 0;
+    g_gameUpdates = 0;
+    g_lastGame = NULL;
     g_state = HF_STATE_NONE;
     snprintf(g_build, sizeof g_build, "25480438");
     memset(&g_counts, 0, sizeof g_counts);
     fake_log_clear();
     g_lastLog[0] = 0;
     g_modStruct.api = &g_api;
+    g_standInCount = g_exportCount = 0;
+    g_afterFn = NULL;
+    static const VpmTestHooks hooks = {FakeWritableQuery, FakeModuleExport, FakeCoreRead};
+    vpm_core_test_hooks(&hooks);
+    /* A hook of the frame update goes on to the fake's frame update. */
+    fake_set_original((uintptr_t)g_game + VPM_FRAME_UPDATE, (void*)FakeFrameUpdate);
     vpm_core_reset();
     DeleteFileW(L"vpm-test-settings.ini");
+    vpm_settings_path_override(L"vpm-test-settings.ini");
+}
+
+void fake_next_session(void)
+{
+    g_loadCount = g_listenerCount = g_hookCount = 0;
+    g_tick = NULL;
+    g_tickUser = NULL;
+    g_afterTick = NULL;
+    memset(g_fired, 0, sizeof g_fired);
+    memset(&g_counts, 0, sizeof g_counts);
+    fake_log_clear();
+    vpm_core_reset();
     vpm_settings_path_override(L"vpm-test-settings.ini");
 }
 
