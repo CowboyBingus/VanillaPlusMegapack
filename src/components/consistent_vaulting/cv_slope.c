@@ -14,6 +14,7 @@
  * on that frame. Every 10th frame of a mission (about 0.17 s at 60 FPS) the full check verifies the identity; outside a
  * mission every 60th looks for one. A check that raised is not gated. */
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include "cv.h"
 
@@ -31,8 +32,11 @@ static uintptr_t g_gateInput, g_gateDueInput;
 static const int kSlopeCells[3] = {CV_ENTER, CV_EXIT, CV_SLOPE};
 static const int kLedgeCells[1] = {CV_HEIGHT};
 
+static char g_candidateSaid[96]; /* the last candidate refusal a detailed line said */
+
 void cv_slope_reset(void)
 {
+    g_candidateSaid[0] = 0;
     g_gateFrames = g_gateDue = 0;
     g_gateInput = g_gateDueInput = 0;
     g_cosLimit = cos(65 * CV_PI / 180);
@@ -279,6 +283,15 @@ static int Candidate(CvState* st, const CvSlope* s, int* kind, const char** reas
     return cv_assist_candidate(st, s, kind, reason);
 }
 
+/* Why a press window's candidate search found no assist, in a detailed line on a change of reason (it runs up to every
+ * 0.1 s while the window is open). */
+static void SayCandidate(const char* why)
+{
+    if (!vpm_detailed() || strncmp(g_candidateSaid, why, sizeof g_candidateSaid - 1) == 0) return;
+    snprintf(g_candidateSaid, sizeof g_candidateSaid, "%s", why);
+    vpm_log_detail(cv_self, "assist candidate: no assist, %s", why);
+}
+
 /* The assist a fresh native candidate check allows here: CV_KIND_*, 0 none, CV_RAISED. */
 static int ValidatedKind(CvState* st, const CvSlope* s)
 {
@@ -287,7 +300,13 @@ static int ValidatedKind(CvState* st, const CvSlope* s)
     st->counters.candidate_checks++;
     int found = Candidate(st, s, &kind, &reason);
     if (found < 0) return found;
-    if (found != 1 || LedgeUnfit(kind, s) || !cv_slope_guarded(s)) return 0;
+    if (found != 1)
+    {
+        SayCandidate(reason != NULL ? reason : "none found");
+        return 0;
+    }
+    if (LedgeUnfit(kind, s)) { SayCandidate("a ledge without ground contact or the default climb height"); return 0; }
+    if (!cv_slope_guarded(s)) { SayCandidate("the avatar's data changed during the search"); return 0; }
     return kind;
 }
 
@@ -370,6 +389,10 @@ static int Arm(CvState* st, const CvSlope* s, int kind, double now, const char**
     st->counters.slope_arms++;
     if (kind == CV_KIND_LEDGE) st->counters.ledge_arms++;
     st->slope_status = "attempt";
+    g_candidateSaid[0] = 0;
+    vpm_log_detail(cv_self, "%s assist armed: %d settings cells written (avatar index %u, mover %08X, at %.2f %.2f %.2f; "
+        "ground %d, normal z %.3f)", kind == CV_KIND_LEDGE ? "ledge" : "slope", lease->count, s->ai, s->mover_name,
+        s->root[0], s->root[1], s->root[2], s->ground, s->normal_z);
     return 1;
 }
 

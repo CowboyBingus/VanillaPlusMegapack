@@ -127,10 +127,16 @@ static int FollowSelection(SarFireRecord* r, const SarRow* s, int tracking, cons
     {
         if (!sar_release_selection(r)) return Fail(why, "selection_restore_failed");
         r->requested = 0;
+        vpm_log_detail(sar_state.self, "sentry %u: search request released (%s)", s->id,
+            tracking ? "it tracks a target" : !s->enabled ? "it was disabled" : "it left the firing node");
         return 1;
     }
     if (!sar_load(s->selection.address, current, 8)) return Fail(why, "selection_read_failed");
-    if (memcmp(current, r->after, 8) != 0) r->requested = 0;
+    if (memcmp(current, r->after, 8) != 0)
+    {
+        r->requested = 0;
+        vpm_log_detail(sar_state.self, "sentry %u: the game set its own search deadline: the request is done", s->id);
+    }
     return 1;
 }
 
@@ -163,6 +169,10 @@ static int RequestSelection(SarFireRecord* r, const SarRow* s, double due, const
     r->completed = 1;
     r->last_selection = due;
     sar_state.reselections++;
+    uint64_t before;
+    memcpy(&before, r->before, 8);
+    vpm_log_detail(sar_state.self, "%s sentry %u lost its target on the firing node: target search %.3f s sooner",
+        s->profile->name, s->id, ((double)before - due) / 1000000.0);
     return 1;
 }
 
@@ -246,6 +256,14 @@ static void FireTerrain(SarFireRecord* r, const SarRow* s, int synced, double no
     r->terrain_target = s->target;
     if (synced && s->fire.terrain_blocked != SAR_UNKNOWN)
     {
+        /* A block and its end are said, with the query's result; a clear first query is no line. */
+        if (s->fire.terrain_blocked == 1 && r->terrain_blocked != 1)
+            vpm_log_detail(sar_state.self, "sentry %u: target %u behind terrain (%s: hit unit %08X actor %08X at %.2f of "
+                "%.2f m, %u hits)", s->id, s->target, sar_hit_name(sar_last_hit.reason), sar_last_hit.hit_unit,
+                sar_last_hit.actor, sar_last_hit.distance, sar_last_hit.length, sar_last_hit.hits);
+        else if (s->fire.terrain_blocked == 0 && r->terrain_blocked == 1)
+            vpm_log_detail(sar_state.self, "sentry %u: target %u clear again (%s)", s->id, s->target,
+                sar_hit_name(sar_last_hit.reason));
         r->terrain_blocked = s->fire.terrain_blocked;
         r->terrain_checked_at = now;
         r->has_checked = 1;
@@ -317,14 +335,41 @@ static int Assess(SarFireRecord* r, const SarRow* s, double now, Assessment* a, 
  * broad turn or an obstruction was seen during the pause. */
 static int FireHandoff(SarFireRecord* r, const SarRow* s, int broad, int obstructed)
 {
-    if (r->paused && s->fire.mode != 0) r->paused = 0; /* the engine or another mod changed the mode */
+    if (r->paused && s->fire.mode != 0) /* the engine or another mod changed the mode */
+    {
+        r->paused = 0;
+        vpm_log_detail(sar_state.self, "sentry %u: its fire mode was changed to %u by the game or another mod: no longer "
+            "paused here", s->id, s->fire.mode);
+    }
     if (r->paused && (broad || obstructed)) r->handoff = 0;
     return r->paused && r->handoff && r->synced && s->fire.terrain_blocked == 0 && r->error <= s->fire.pause && !broad;
 }
 
-static int ResumeFire(SarFireRecord* r, const double forward[3], const char** why)
+static const char* ReasonName(int reason)
+{
+    switch (reason)
+    {
+    case SAR_REASON_AIM_PENDING: return "aim pending";
+    case SAR_REASON_TARGET_LOST: return "target lost";
+    case SAR_REASON_TERRAIN_BLOCKED: return "terrain blocked";
+    case SAR_REASON_SWEEP: return "sweep";
+    default: return "tracking or settling";
+    }
+}
+
+/* The Lua's fire record line: the pause or resume, why, and the aim. */
+static void FireLine(const SarFireRecord* r, const SarRow* s, const char* what)
+{
+    vpm_log_detail(sar_state.self, "%s sentry %u: fire %s (%s; error %.2f degrees, travel %.2f, terrain %s, synced %d, "
+        "target %u, runtime target %u)", s->profile->name, s->id, what, ReasonName(r->reason), r->error, r->travel,
+        r->terrain_blocked == SAR_UNKNOWN ? "unknown" : r->terrain_blocked ? "blocked" : "clear", r->synced, s->target,
+        s->runtime_target);
+}
+
+static int ResumeFire(SarFireRecord* r, const SarRow* s, const char* why_resumed, const double forward[3], const char** why)
 {
     if (!sar_release_fire(r)) return Fail(why, "fire_restore_failed");
+    FireLine(r, s, why_resumed);
     r->paused = 0;
     SetAnchor(r, forward);
     r->has_sweep = 0;
@@ -343,6 +388,7 @@ static int PauseFire(SarFireRecord* r, const SarRow* s, int handoff, const char*
     sar_natives()->fire_mode((void*)s->fire.manager, s->id, 0);
     if (!ReadEquals(s->fire.mode_address, kZero, 4)) return Fail(why, "fire_pause_failed");
     sar_state.fire_pauses++;
+    FireLine(r, s, handoff ? "paused, a close replacement may resume it" : "paused");
     return 1;
 }
 
@@ -363,6 +409,15 @@ static int FireRecordFor(const SarRow* s, SarFireRecord** out, const char** why)
     return 1;
 }
 
+/* Why a pause ends, for the detailed line. */
+static const char* ResumeWhy(const Assessment* a, int handoff, const SarRow* s)
+{
+    if (a->settled) return "resumed, aim settled";
+    if (handoff) return "resumed for a close replacement";
+    if (!s->enabled) return "resumed, disabled";
+    return "resumed, no target and the trigger released";
+}
+
 static int FireRow(const SarRow* s, double now, SarFireRecord** out, const char** why)
 {
     SarFireRecord* r;
@@ -370,7 +425,8 @@ static int FireRow(const SarRow* s, double now, SarFireRecord** out, const char*
     if (!FireRecordFor(s, &r, why) || !Assess(r, s, now, &a, why)) return 0;
     *out = r;
     int handoff = FireHandoff(r, s, a.broad, a.obstructed);
-    if (r->paused && (a.settled || handoff || (!a.tracking && !s->fire.trigger) || !s->enabled)) return ResumeFire(r, a.forward, why);
+    if (r->paused && (a.settled || handoff || (!a.tracking && !s->fire.trigger) || !s->enabled))
+        return ResumeFire(r, s, ResumeWhy(&a, handoff, s), a.forward, why);
     if (!r->paused && (a.broad || a.unavailable || a.obstructed) && s->enabled && s->fire.mode != 0)
         return PauseFire(r, s, a.unavailable && !a.broad && !a.obstructed, why);
     return 1;

@@ -20,6 +20,11 @@ static EcsAction g_actions[ECS_MAX_ACTORS];
 static EcsGuard g_actorGuards[4];
 static uint8_t g_actorBytes[56];
 
+/* What one unit's commands did, for its detailed line. */
+typedef struct Done { uint32_t realigned, disabled, skipped, deferred, actor; double gap, degrees; } Done;
+
+static const char* Kind(const EcsUnit* u) { return u->corpse ? "corpse" : "ragdoll"; }
+
 static int SameSignature(const EcsSignature* a, const EcsSignature* b)
 {
     return a->count == b->count && memcmp(a->ids, b->ids, sizeof(uint32_t) * a->count) == 0;
@@ -92,23 +97,37 @@ static void Realigned(const EcsUnit* u, const EcsAction* action, const EcsActor*
     Ecs.last_actor = actor->id;
 }
 
-static void RunActions(EcsUnit* u, uint32_t n, double now)
+static void RunActions(EcsUnit* u, uint32_t n, double now, Done* done)
 {
     for (uint32_t i = 0; i < n; i++)
     {
         const EcsAction* action = &g_actions[i];
         const EcsActor* actor = &u->actors[action->actor];
-        if (!Holds(u) || !ActorHolds(actor)) { Ecs.skipped++; continue; }
+        if (!Holds(u) || !ActorHolds(actor)) { Ecs.skipped++; done->skipped++; continue; }
         u->verified = 0;
         if (action->kind == ECS_DISABLE)
         {
             EcsDisableActor(actor->id);
             Ecs.claws_disabled++;
+            done->disabled++;
             continue;
         }
         EcsSetPose(actor->id, action->position, action->rotation);
         Realigned(u, action, actor, now);
+        done->realigned++;
+        if (action->gap >= done->gap) { done->gap = action->gap; done->degrees = action->degrees; done->actor = actor->id; }
     }
+}
+
+/* The unit's commands in one detailed line, when any ran or was refused (deferred repeats alone are no line: one
+ * actor's cooldown would repeat it every poll for a second). */
+static void Did(const EcsUnit* u, const Done* done)
+{
+    if (done->realigned + done->disabled + done->skipped == 0) return;
+    vpm_log_detail(Ecs.self, "%s %s unit %08X (entity %08X): realigned %u (largest: actor %08X, %.3f m, %.1f degrees), "
+        "claws disabled %u, refused %u (its guards changed), deferred %u (repeat cooldown)", EcsProfiles[u->profile].name,
+        Kind(u), u->unit, u->id, done->realigned, done->actor, done->gap, done->degrees, done->disabled, done->skipped,
+        done->deferred);
 }
 
 /* Conversion makes a new entity with the same unit handle: observe the phase (a submitted request alone is not
@@ -119,12 +138,16 @@ static EcsStop* KeptStop(EcsUnit* u, EcsStop* stopped)
     {
         Ecs.completion_corpse_observed++;
         EcsTableRemove(&EcsStops, u->unit);
+        vpm_log_detail(Ecs.self, "%s unit %08X completed into a Corpse (entity %08X) after the owner was asked",
+            EcsProfiles[u->profile].name, u->unit, u->id);
         return NULL;
     }
     if (stopped != NULL && (stopped->entity != u->id || stopped->profile != u->profile ||
         !SameSignature(&stopped->members, &u->signature) || u->corpse || u->update_enabled == 1))
     {
         EcsTableRemove(&EcsStops, u->unit);
+        vpm_log_detail(Ecs.self, "%s unit %08X: its stop record no longer describes it (entity %08X, now %08X; %s; update "
+            "byte %d): forgotten", EcsProfiles[u->profile].name, u->unit, stopped->entity, u->id, Kind(u), u->update_enabled);
         return NULL;
     }
     return stopped;
@@ -150,7 +173,12 @@ static void Stop(const EcsUnit* u, const EcsStopCall* stop, double now)
     if (stop->cause == ECS_CAUSE_LANDED_DISABLED) Ecs.landed_disabled_stops++;
     if (stop->distance > Ecs.max_fling_distance) Ecs.max_fling_distance = stop->distance;
     uint8_t update = 1;
-    if (!vpm_read_u8(u->update_address, &update) || update != 0) return;
+    int read = vpm_read_u8(u->update_address, &update);
+    vpm_log_detail(Ecs.self, "%s unit %08X (entity %08X): renewed motion stopped (%s, %.3f m, %.1f degrees; limb %.3f m, "
+        "%.1f degrees): %s", Ecs.last_fling_type, u->unit, u->id, Ecs.last_fling_reason, stop->distance, stop->degrees,
+        Ecs.last_fling_limb_distance, Ecs.last_fling_limb_degrees,
+        !read ? "the update byte is unreadable, not verified" : update != 0 ? "the update byte still reads 1, not verified" : "verified");
+    if (!read || update != 0) return;
     Ecs.fling_stops_verified++;
     EcsTableRemove(&EcsHistories, u->unit);
     int added;
@@ -168,6 +196,8 @@ static int Complete(const EcsUnit* u, EcsStop* stopped, double now)
     Ecs.last_completion_unit = u->unit;
     Ecs.last_completion_entity = u->id;
     Ecs.last_completion_uptime = now;
+    vpm_log_detail(Ecs.self, "%s unit %08X (entity %08X): asked its owner to complete it, %.1f s after the stop",
+        EcsProfiles[u->profile].name, u->unit, u->id, now - stopped->stopped_at);
     return EcsRequestCompletion(u->id);
 }
 
@@ -203,6 +233,8 @@ static int Dispatch(EcsUnit* u, EcsStop* stopped, const Decision* d, double now)
         EcsStopSync(u->manager, u->index);
         Ecs.fling_handoffs++;
         EcsTableRemove(&EcsStops, u->unit);
+        vpm_log_detail(Ecs.self, "%s unit %08X (entity %08X): ownership moved here; its stop finished through the owned "
+            "branch", EcsProfiles[u->profile].name, u->unit, u->id);
         return 1;
     }
     if (d->completion && Holds(u)) return Complete(u, stopped, now);
@@ -220,7 +252,10 @@ int EcsConsume(EcsUnit* u)
     uint32_t n = EcsPlan(u, g_actions);
     EcsStop* stopped = EcsTableFind(&EcsStops, u->unit);
     NoteCorpse(u, n, stopped != NULL);
+    Done done = {0};
+    uint32_t planned_actions = n;
     n = DeferRepeats(u, n, now);
+    done.deferred = planned_actions - n;
     if (n == 0 && stopped == NULL && u->corpse) return 1;
     stopped = KeptStop(u, stopped);
     /* No actions: this identity pass is redundant. The motion sample still validates identity and every pose below. */
@@ -229,9 +264,12 @@ int EcsConsume(EcsUnit* u)
     if (planned && !Holds(u))
     {
         EcsTableRemove(&EcsHistories, u->unit);
+        vpm_log_detail(Ecs.self, "%s %s unit %08X: its guards changed before its %u commands: none ran this poll",
+            EcsProfiles[u->profile].name, Kind(u), u->unit, n);
         return 1;
     }
-    RunActions(u, n, now);
+    RunActions(u, n, now, &done);
+    Did(u, &done);
     Decision d;
     Decide(u, stopped, planned, now, &d);
     return Dispatch(u, stopped, &d, now);

@@ -173,6 +173,25 @@ static CvPending* StartPending(CvState* st, CvVault* s)
     return &st->pending;
 }
 
+/* The chosen hit of a plan, in a detailed line (the Lua's probe rows of the chosen slot). */
+static void SaySelection(const CvVault* s, const CvSelection* selection, int count, const char* what)
+{
+    const CvHit* hit = &s->hits[selection->slot];
+    vpm_log_detail(cv_self, "stage %u: %s: hit %d of %d (unit %08X, actor %08X, normal z %.3f, rise %.2f, at %.2f %.2f "
+        "%.2f)%s; %d writes%s%s", s->stage, what, selection->slot, s->hit_count, hit->unit, hit->actor, hit->normal_z,
+        hit->position[2] - s->root[2], hit->position[0], hit->position[1], hit->position[2],
+        selection->metadata ? ", the manual metadata veto cleared" : "", count, s->reprojected ? ", reprojected" : "",
+        s->prior_step_report ? ", after a step report" : "");
+}
+
+/* A late retry's fresh casts, in a detailed line: ready, refused (why) or raised, and the approach. */
+static void SayRefresh(int refreshed, const char* approach, const char* refused)
+{
+    vpm_log_detail(cv_self, "stage 3: fresh casts %s (approach: %s%s%s)", refreshed == 1 ? "ready" :
+        refreshed == 0 ? "refused" : "raised", approach != NULL ? approach : "none", refused != NULL ? "; " : "",
+        refused != NULL ? refused : "");
+}
+
 /* ---- stage 2: a plan held across checks -------------------------------------------------------------------------- */
 
 static int Prepared(CvState* st, const CvSelection* selection, const char** reason)
@@ -201,6 +220,7 @@ static int Prepare(CvState* st, CvVault* s, const CvWrite* writes, int count, co
         int restored = cv_restore(pending);
         return restored ? Accept(reason, "query_changed_after_commit") : Refuse(reason, "query_restore_failed");
     }
+    SaySelection(s, selection, count, "alternative prepared");
     return Prepared(st, selection, reason);
 }
 
@@ -342,6 +362,8 @@ static int RetryCommit(CvState* st, CvVault* s, const CvWrite* writes, int count
     int restored = cv_restore(&st->pending);
     st->has_pending = 0;
     if (!restored) return Refuse(reason, "query_restore_failed");
+    SaySelection(s, selection, count, started ? "late native retry, the native climb started" :
+        "late native retry, the native driver rejected it");
     if (started) CountStart(&st->counters, s);
     return Accept(reason, started ? "native_local_vault_started" : "native_local_retry_rejected");
 }
@@ -359,6 +381,7 @@ static int RetryConsumed(CvState* st, CvVault* s, const char** reason)
     st->last_retry_at = st->now;
     const char* approach = NULL;
     int refreshed = cv_refresh(s, &st->counters, originals, reason, &approach);
+    SayRefresh(refreshed, approach, refreshed == 0 ? *reason : NULL);
     if (refreshed != 1) return refreshed == 0 ? 1 : CV_RAISED;
     int selected = cv_select(s, &selection);
     if (selected != 1) return selected == 0 ? Accept(reason, "native_vault_checks_retained") : CV_RAISED;

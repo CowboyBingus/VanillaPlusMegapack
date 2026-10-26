@@ -24,13 +24,22 @@
  *   budget's 1 ms deadline still reads the performance counter, as the Lua's api.clock, on frames that inspect a unit.
  * - A failed guard group is compared guard by guard at once: the Lua first read the same span a second time.
  * - The kept records are fixed tables (ecs_tables.c, ecs_listing.c), with room beyond what a mission can use.
- * - Dropped: the developer-only profiler (profiler.lua, CowboyBingusDiagnostics), the status file and its periodic
- *   rewrite (now three log lines at each mission's end and at a stop), the pause after an error in an update below the
+ * - Dropped: the developer-only profiler (profiler.lua, CowboyBingusDiagnostics; the core's costs at a mission's end
+ *   cover its per-poll timing), the status file and its periodic rewrite (now three log lines at each mission's end and
+ *   at a stop, and the detailed lines below), the pause after an error in an update below the
  *   mod (there is no update chain; the core's crash guard stops the component on a fault), the shutdown report, and the
  *   Lua-only parts (pcall guards, string views, JIT notes, the hostile-VM and garbage tests).
  * - Raised polls (a unit despawning mid-read, a changed layout) are retried as in the Lua; 8 in a row stop the component
  *   ("stopped after: <the first one's reason>"). The game state events are not used: the mission check is the Lua's own
  *   mode block (its flag is not HellForge's state machine), and HF_ON_SPAWN does not report entering the managers.
+ *
+ * DIAGNOSTICS. With the pack's Diagnostics set to Detailed (vpm_log_detail; nothing in Normal mode), what the Lua's
+ * status log carried with CowboyBingusDiagnostics, on the poll that saw it: entering or leaving a mission (the mode block
+ * and both managers' addresses and counts), the getter preflight's changes, each unit's commands (realigned, claws
+ * disabled, refused because its guards changed, deferred by the repeat cooldown; the largest gap), a unit skipped and why
+ * (on a change of reason), a settled remote ragdoll armed for renewed motion, a fling stop (cause, distance, verified or
+ * not), an ownership handoff, a completion asked and observed, a stop record forgotten, a raised poll and its reason, a
+ * full record table (once a mission). describe (a mark): the status, what the last poll found and the counters.
  *
  * COST (calls per frame, as the test pins them; the Lua's test_performance.lua pins in brackets, where a view and a read
  * are each one ReadProcessMemory). A frame without a poll (2 of 3 at 60 FPS): one add and one compare, no call (Lua: the
@@ -46,6 +55,10 @@
  * - two such ragdolls behind eight living enemies: 234 reads, 2 QueryPerformanceCounter [211 views, 38 reads, 2 clocks];
  * - a corpse realignment: 106 reads, 1 QueryPerformanceCounter, 2 queued commands [97 views, 22 reads, 1 clock];
  * - a settled corpse waiting for its re-check: 4 reads [1 view, 4 reads].
+ * Diagnostics: a frame without a poll and every idle poll above are unchanged (no call, no detailed check); a poll also
+ * stores the mode block's and the managers' addresses it already read, and compares three of the component's own fields
+ * after it. A poll that acts (a command, a skip, a stop, a raise, a change) adds one global read (the Diagnostics flag)
+ * per detailed line it reaches; in Normal mode nothing else.
  * The work per poll stays bounded as in the Lua: 128 listed entries, 4 inspections, 1 ms from the first inspection. No
  * VirtualQuery, write, allocation or log on a poll frame. Once per session: 8 code comparisons (HfApi.code_matches, 256
  * bytes at most each) at HF_EVENT_GAME_LOADED (the core's wait: again every 30 frames while the code is not decoded, at
@@ -71,6 +84,9 @@ static struct
     uint32_t raised;           /* raised polls in a row */
     char first_raised[192];
     const char* status;
+    int ready_seen;            /* the last poll's mission state a detailed line said (-1: none yet) */
+    const char* preflight_seen;
+    int full_said;             /* a full record table was said this mission */
 } s;
 
 static void Status(VpmComponent* self, const char* status)
@@ -120,6 +136,7 @@ static void PollRaised(VpmComponent* self, const char* why)
     Ecs.retries++;
     snprintf(Ecs.last_skip, sizeof Ecs.last_skip, "%s", why);
     if (++s.raised == 1) snprintf(s.first_raised, sizeof s.first_raised, "%s", why);
+    vpm_log_detail(self, "poll raised (%u in a row; %u stop it): %s", s.raised, ECS_POLL_ERRORS, why);
     if (s.raised < ECS_POLL_ERRORS) { Status(self, kWaitingForStableData); return; }
     vpm_fail(self, "stopped after: %s", s.first_raised);
 }
@@ -133,6 +150,36 @@ static int Bound(VpmComponent* self)
     return 1;
 }
 
+/* The Lua's status log, on change (it rewrote its keys with each status, at most every 2 s): the mission's mode block
+ * and managers, the getter preflight, a full record table. Compares of the component's own state after a poll; a
+ * detailed line only on a change. */
+static void Changes(VpmComponent* self, int ready)
+{
+    if (ready != s.ready_seen)
+    {
+        s.ready_seen = ready;
+        s.full_said = 0;
+        if (ready)
+            vpm_log_detail(self, "in a mission: mode block 0x%llX (flag %u, +0x40 %u); ragdoll manager 0x%llX (%u entries), "
+                "corpse manager 0x%llX (%u entries)", (unsigned long long)Ecs.mode, Ecs.mission_flag, Ecs.mode_field_40,
+                (unsigned long long)Ecs.managers[0], Ecs.ragdoll_count, (unsigned long long)Ecs.managers[1], Ecs.corpse_count);
+        else
+            vpm_log_detail(self, "not in a mission (mode block 0x%llX, flag %u): no unit is read, every record forgotten",
+                (unsigned long long)Ecs.mode, Ecs.mission_flag);
+    }
+    if (Ecs.preflight != s.preflight_seen && Ecs.preflight != NULL &&
+        (s.preflight_seen == NULL || strcmp(Ecs.preflight, s.preflight_seen) != 0))
+        vpm_log_detail(self, "physics getter preflight: %s (checks %u, failures %u%s%s)", Ecs.preflight, Ecs.getter_checks,
+            Ecs.getter_failures, Ecs.last_getter_failure[0] ? "; last: " : "", Ecs.last_getter_failure);
+    s.preflight_seen = Ecs.preflight;
+    if (Ecs.records_full != 0 && !s.full_said)
+    {
+        s.full_said = 1;
+        vpm_log_detail(self, "a record table is full (%u refused): histories %u, stops %u, cooldowns %u, corpse checks %u",
+            Ecs.records_full, EcsHistories.count, EcsStops.count, EcsReposes.count, EcsChecks.count);
+    }
+}
+
 /* The idle gate is the poll clock: a frame without a poll adds its frame time and compares, nothing else. lint: per-frame */
 static void Tick(VpmComponent* self, float dt)
 {
@@ -143,6 +190,7 @@ static void Tick(VpmComponent* self, float dt)
     int ready = 0;
     if (!EcsApply(&ready)) { PollRaised(self, EcsWhy()); return; }
     s.raised = 0;
+    Changes(self, ready);
     Status(self, ready ? kReady : kWaitingForMission);
 }
 
@@ -150,6 +198,17 @@ static void Tick(VpmComponent* self, float dt)
 static void MissionEnd(VpmComponent* self, const HfEventInfo* event)
 {
     if (s.bound) Summary(self, "at the mission's end");
+}
+
+/* Its key state for a mark: the phase, what the last poll found, the counters. */
+static void Describe(VpmComponent* self, char* out, size_t size)
+{
+    snprintf(out, size, "%s; polls %u; mission flag %u; ragdolls %u, corpses %u; preflight %s; realigned %u, claws %u, "
+        "stops %u (%u verified), completions asked %u (%u pending); watching %u, stops kept %u; retries %u; last skip %s",
+        s.status != NULL ? s.status : "starting", Ecs.polls, Ecs.mission_flag, Ecs.ragdoll_count, Ecs.corpse_count,
+        Ecs.preflight != NULL ? Ecs.preflight : "none", Ecs.realignments, Ecs.claws_disabled, Ecs.fling_stops,
+        Ecs.fling_stops_verified, Ecs.completion_requests, Ecs.completion_pending, EcsHistories.count, EcsStops.count,
+        Ecs.retries, Ecs.last_skip[0] ? Ecs.last_skip : "none");
 }
 
 static void Stop(VpmComponent* self)
@@ -161,6 +220,8 @@ static int Start(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
     memset(&Ecs, 0, sizeof Ecs);
+    Ecs.self = self;
+    s.ready_seen = -1;
     s.elapsed = 1e300; /* the first poll is due at once */
     EcsReset();
     EcsReadsBegin();
@@ -172,4 +233,4 @@ static int Start(VpmComponent* self)
     return 0;
 }
 
-const VpmComponentDef vpm_component_enemy_collision_synchronized = {"enemy_collision_synchronized", "Enemy Collision Synchronized", "2.13.0", 0, Start, Stop};
+const VpmComponentDef vpm_component_enemy_collision_synchronized = {"enemy_collision_synchronized", "Enemy Collision Synchronized", "2.13.0", 0, Start, Stop, Describe};

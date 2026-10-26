@@ -227,6 +227,9 @@ typedef struct SarCast
 } SarCast;
 /* api.cast_terrain: 1 blocked, 0 clear (*hit says why; hit->reason SAR_UNKNOWN: the points are within 5 cm), -1 *why. */
 int sar_cast_terrain(const SarCast* cast, SarHit* hit, const char** why);
+/* The last terrain query's result (for the detailed lines), and a result's name. */
+extern SarHit sar_last_hit;
+const char* sar_hit_name(int reason);
 /* api.actor_filter: 1 with the hit actor's collision filter name, 0 unknown (unverified handle, body or table). */
 int sar_actor_filter(uint32_t actor, uint32_t unit, uint32_t* filter);
 /* terrain_path: 1 with *blocked, 0 no query now (native ray work pending), -1 *why. */
@@ -258,6 +261,7 @@ typedef struct SarAimRecord
     uint8_t raw[12], computed[12];   /* the tracked aim to hold */
     SarLease lease;
     uint32_t seen;
+    int refusal_said;                /* a detailed line said why a hold was refused (once per record) */
 } SarAimRecord;
 
 int sar_aim_step(SarRow* const* rows, int count, const char** why);
@@ -315,6 +319,7 @@ int sar_fire_stop(void);
 
 typedef struct SarState
 {
+    VpmComponent* self;              /* for the detailed lines (vpm_log_detail); NULL in the tests that never start it */
     uint32_t updates, polls, observed, holding, holds, releases, late_aim;
     uint32_t fire_paused, fire_pauses, fire_resumes, reselections, selections;
     uint32_t aim_stamp, fire_stamp;

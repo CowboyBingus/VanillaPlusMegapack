@@ -61,10 +61,21 @@
  * - Raised errors (a snapshot that could not be read, an invalid native result) keep the Lua's outcomes: a waiting
  *   status, a refusal that stops the component, or an error of the check, which restores everything and starts fresh;
  *   8 in a burst (a burst ends after 3600 clean frames) stop the component. The Lua's pcall guards, its pause after an
- *   error in another mod's update, its shutdown restore, the diagnostics heartbeat file and the probe traces are
- *   dropped (no shutdown event; developer-only); the counters its tests check are kept, not logged.
+ *   error in another mod's update and its shutdown restore are dropped (no shutdown event); its diagnostics heartbeat
+ *   file (status, counters, last reasons, the candidate probe rows) is now the detailed lines below; the full probe
+ *   table of every pass is not kept.
  * - A write that fails partway cannot happen with plain stores (a fault is the crash guard's); the read-backs and the
  *   partial-write undo stay for writes another thread replaced.
+ * DIAGNOSTICS. With the pack's Diagnostics set to Detailed (vpm_log_detail; nothing in Normal mode), on the check that
+ * saw it, on a change: each new check outcome ("check: <reason>", the Lua's status); the assist's status (with the
+ * lease's kind, cells, speed cap and age) and how it ended; a slope or ledge assist armed (the avatar index, mover,
+ * position, ground); why a press window's candidate search found no assist (on a change of reason); a stage-2 plan
+ * prepared and a stage-3 late retry (the chosen hit: slot, unit, actor, normal, rise; the writes; reprojection; whether
+ * the native climb started), the fresh casts and their approach; the counters that moved (polls, prepared,
+ * metadata_fallbacks and candidate_checks left out: they move on checks with nothing new); a raised check with its
+ * burst count (its first line stays in the log in both modes). At each mission's end and at a mark the core logs the
+ * counters (vpm_on_summary); describe (a mark) gives the status, the assist and its lease, the press window, the held
+ * vault writes, busy, the post-update check and the burst.
  * Detours on the selector (game.dll 0xA9E450) and the settings lookup would replace the per-frame checks: a later
  * improvement, not built.
  *
@@ -92,6 +103,11 @@
  * - Native calls only on checks past the idle gates, as the Lua: per vault check a mover position (3 calls), an actor
  *   check (up to 4) and an exit validation (3) per candidate hit, the approach detector, two per fresh cast, the driver
  *   once per retry; about 15 per vault. Unmeasured in game.
+ * - Diagnostics: the idle gate's frames are unchanged (no call, no detailed check; pinned in both modes). A check past
+ *   the gate (also the gate's every 10th / 60th frame) compares the assist's status and last release with the last ones
+ *   said and 19 counters with their last line; a check that acts (a new outcome, an assist change, a plan, a retry, a
+ *   refusal, a raise) adds one global read (the Diagnostics flag) per detailed line it reaches. Nothing else in Normal
+ *   mode; the summary runs at a mission's end only.
  * - Once per session: the native binding (9 plain loads, 3 code checks; the override routine's code check before each
  *   override creation). Static memory about 220 KB (the snapshot records with their guards). */
 #include <stdio.h>
@@ -108,7 +124,26 @@ static struct
     int clean;        /* frames without one since the last */
     char burst[160];  /* the burst's first error */
     char status[192]; /* the last check's reason, as the status shows it */
+    const char* slope_said;   /* the assist status and release a detailed line last said */
+    const char* release_said;
+    CvCounters counters_said; /* the counters as the last detailed line of them said */
 } s;
+
+VpmComponent* cv_self;
+
+/* The counters' names, in CvCounters' order (all uint32_t). */
+static const char* const kCounterNames[] = {"polls", "prepared", "metadata_fallbacks", "fresh_queries", "retry_calls",
+    "native_starts", "context_reprojections", "query_rebuilds", "reprojected_retries", "reprojected_starts",
+    "step_report_retries", "step_report_starts", "slope_arms", "slope_overrides", "slope_climbs", "slope_landings",
+    "candidate_checks", "raised_queries", "raised_context_fallbacks", "raised_approach_rebuilds", "ledge_arms",
+    "ledge_climbs", "ledge_attempt_expiries"};
+#define COUNTERS ((int)(sizeof kCounterNames / sizeof kCounterNames[0]))
+_Static_assert(sizeof(CvCounters) == COUNTERS * sizeof(uint32_t), "kCounterNames names every counter");
+/* Counters that move on checks with nothing new to say, left out of the line: polls (every check), prepared and
+ * metadata_fallbacks (every check that keeps a held plan; a new plan has its own line), candidate_checks (every 0.1 s of
+ * a press window; a refusal has its own line). */
+static const uint8_t kQuiet[] = {1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0};
+_Static_assert(sizeof kQuiet == COUNTERS, "kQuiet marks every counter");
 
 #define ERROR_LIMIT 8
 #define CLEAN_FRAMES 3600
@@ -178,6 +213,8 @@ static void OwnError(VpmComponent* self, const char* text)
     s.clean = 0;
     if (!cv_stop(&s.state)) { vpm_fail(self, "%s", problem); return; }
     FreshStart();
+    vpm_log_detail(self, "check raised (%d before it in this burst; %d stop it): %s; everything restored, a fresh start",
+        s.errors, ERROR_LIMIT, problem);
     if (++s.errors == 1)
     {
         snprintf(s.burst, sizeof s.burst, "%s", problem);
@@ -190,7 +227,59 @@ static void Report(VpmComponent* self, const char* reason)
 {
     if (reason == NULL || strncmp(reason, s.status, sizeof s.status - 1) == 0) return;
     snprintf(s.status, sizeof s.status, "%s", reason);
+    vpm_log_detail(self, "check: %s", s.status);
     vpm_set_status(self, s.status);
+}
+
+static int Same(const char* a, const char* b) { return a == b || (a != NULL && b != NULL && strcmp(a, b) == 0); }
+
+/* Whether a counter that says something moved since the last line of them. */
+static int Moved(const CvCounters* now)
+{
+    uint32_t a[COUNTERS], b[COUNTERS];
+    memcpy(a, now, sizeof a);
+    memcpy(b, &s.counters_said, sizeof b);
+    for (int i = 0; i < COUNTERS; i++)
+        if (!kQuiet[i] && a[i] != b[i]) return 1;
+    return 0;
+}
+
+/* The counters that moved since the last line of them (the Lua's diagnostics log kept them all), the quiet ones left
+ * out. */
+static void CounterLine(VpmComponent* self, const CvCounters* now)
+{
+    uint32_t a[COUNTERS], b[COUNTERS];
+    char line[512];
+    size_t at = 0;
+    memcpy(a, now, sizeof a);
+    memcpy(b, &s.counters_said, sizeof b);
+    for (int i = 0; i < COUNTERS && at < sizeof line; i++)
+        if (!kQuiet[i] && a[i] != b[i])
+            at += (size_t)snprintf(line + at, sizeof line - at, "%s%s %u (+%u)", at ? ", " : "", kCounterNames[i], a[i],
+                a[i] - b[i]);
+    if (at > 0) vpm_log_detail(self, "counters: %s", line);
+}
+
+/* The Lua's diagnostics log, on change, after a check past the idle gate: the assist's status and its last release,
+ * and the counters that moved. Compares of the component's own state; a detailed line only on a change. */
+static void Changes(VpmComponent* self)
+{
+    const CvState* st = &s.state;
+    if (!Same(st->slope_status, s.slope_said))
+    {
+        if (st->has_lease)
+            vpm_log_detail(self, "assist: %s (%s lease, %d cells, speed %s, %.2f s since armed)", st->slope_status,
+                st->lease.kind == CV_KIND_LEDGE ? "ledge" : "slope", st->lease.count,
+                st->lease.speed_capped ? "capped" : "not capped", st->now - st->lease.started);
+        else
+            vpm_log_detail(self, "assist: %s", st->slope_status);
+    }
+    s.slope_said = st->slope_status;
+    if (!Same(st->slope_last_release, s.release_said)) vpm_log_detail(self, "assist ended: %s", st->slope_last_release);
+    s.release_said = st->slope_last_release;
+    if (!Moved(&st->counters)) return;
+    if (vpm_detailed()) CounterLine(self, &st->counters);
+    s.counters_said = st->counters;
 }
 
 static void Check(VpmComponent* self)
@@ -201,6 +290,7 @@ static void Check(VpmComponent* self)
     if (accepted == CV_RAISED) OwnError(self, cv_error());
     else if (accepted == 0) vpm_fail(self, "%s", reason != NULL ? reason : "refused");
     else Report(self, reason);
+    if (vpm_running(self)) Changes(self);
 }
 
 /* The frame's last check is done: a frame without an own error counts toward the end of a burst (the guard's
@@ -291,6 +381,27 @@ static void GameLoaded(VpmComponent* self, HfEvent event)
     vpm_log(self, "waiting_for_mission");
 }
 
+/* Its key state for a mark: the status, the assist, the vault writes held, the work in progress. */
+static void Describe(VpmComponent* self, char* out, size_t size)
+{
+    const CvState* st = &s.state;
+    snprintf(out, size, "%s; assist %s%s%s; press window %s; vault writes held %d; busy %d; post-update check %s; "
+        "errors in this burst %d; last assist end %s", s.status[0] ? s.status : "starting", st->slope_status,
+        st->has_lease ? (st->lease.kind == CV_KIND_LEDGE ? ", ledge lease" : ", slope lease") : "",
+        st->has_lease && st->lease.speed_capped ? ", speed capped" : "", st->has_intent ? "open" : "closed",
+        st->has_pending ? st->pending.count : 0, st->busy, s.post ? "registered" : "none", s.errors, st->slope_last_release);
+}
+
+/* The counters of the Lua's diagnostics log, at each mission's end and at a mark. */
+static void Summary(VpmComponent* self, char* out, size_t size)
+{
+    const CvCounters* c = &s.state.counters;
+    snprintf(out, size, "checks %u, queries observed %u, prepared %u, retries %u, native starts %u, slope arms %u "
+        "(climbs %u, landings %u), ledge arms %u (climbs %u, expired %u), candidate checks %u, fresh queries %u",
+        c->polls, s.state.observed_queries, c->prepared, c->retry_calls, c->native_starts, c->slope_arms, c->slope_climbs,
+        c->slope_landings, c->ledge_arms, c->ledge_climbs, c->ledge_attempt_expiries, c->candidate_checks, c->fresh_queries);
+}
+
 /* Puts back the query writes and the lease's cells this session still holds. */
 static void Stop(VpmComponent* self)
 {
@@ -300,7 +411,11 @@ static void Stop(VpmComponent* self)
 static int Start(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
+    cv_self = self;
     cv_state_reset(&s.state);
+    s.slope_said = s.state.slope_status;
+    s.release_said = s.state.slope_last_release;
+    vpm_on_summary(self, Summary);
     cv_memory_reset();
     cv_native_reset();
     cv_identity_reset();
@@ -308,4 +423,4 @@ static int Start(VpmComponent* self)
     return vpm_on_load(self, HF_EVENT_GAME_LOADED, GameLoaded) ? 0 : 1;
 }
 
-const VpmComponentDef vpm_component_consistent_vaulting = {"consistent_vaulting", "Consistent Vaulting", "8.9.1", 0, Start, Stop};
+const VpmComponentDef vpm_component_consistent_vaulting = {"consistent_vaulting", "Consistent Vaulting", "8.9.1", 0, Start, Stop, Describe};

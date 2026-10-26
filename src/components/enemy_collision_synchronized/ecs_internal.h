@@ -344,6 +344,8 @@ void EcsDisableActor(uint32_t actor);
 
 typedef struct EcsState
 {
+    VpmComponent* self;         /* for the detailed lines (vpm_log_detail); NULL in the tests that never start it */
+    uintptr_t mode, managers[2]; /* the mode block and the managers (ragdolls, corpses) the last poll found */
     double now;                 /* session seconds from the frame time (the Lua's api.time) */
     uint32_t fling_scan;        /* polls apply made */
     int forgotten, manager_turn;

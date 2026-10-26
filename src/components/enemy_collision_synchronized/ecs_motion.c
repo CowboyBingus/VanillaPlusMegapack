@@ -197,6 +197,8 @@ int EcsFlingAction(const EcsUnit* u, double now, EcsStopCall* stop)
     {
         previous->armed = 1;
         Ecs.fling_armed++;
+        vpm_log_detail(Ecs.self, "watching settled remote %s unit %08X (entity %08X) for renewed motion",
+            EcsProfiles[u->profile].name, u->unit, u->id);
     }
     return 0;
 }
