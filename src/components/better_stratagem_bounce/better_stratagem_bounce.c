@@ -30,7 +30,12 @@
  *   made when the game loaded its stratagems (before this runs), so each keeps the beacon flags of the stratagem it
  *   copies. The Lua's rule names only the game's 149 types, and it refused any other record.
  * - It runs at HF_EVENT_ENTITIES_READY, on HellForge's thread (the stratagem settings load before the entity data);
- *   the Lua ran on the game's first update after it loaded. After the checks and before the first change, a get_live
+ *   the Lua ran on the game's first update after it loaded. The reader's code is checked first, with
+ *   vpm_when_code_ready from HF_EVENT_GAME_LOADED: game.dll's code is decoded in parts after that event, and nothing
+ *   orders the entity data after the reader's part (HellForge gives its own stratagem pins 20 s after the game loaded
+ *   its stratagems). Until the reader reads as shipped, HF_EVENT_ENTITIES_READY's work waits; the core stops the
+ *   component if it never does within 60 s ("the stratagem list's reader changed (game.dll 0x62F087)"), with nothing
+ *   changed. After the checks and before the first change, a get_live
  *   of the first row to change says whether HellForge can read the stratagem rows (it cannot while it has not settled
  *   the list, and a set_live then would only queue). If not yet, a tick asks again every 30 frames and makes the whole
  *   attempt again once it can, for at most 600 s, where the Lua would have failed.
@@ -38,8 +43,10 @@
  *   pcall guards, the hook's removal, its LuaJIT notes) and its log file (vpm_log takes the same lines).
  *
  * Cost: per frame, none: no tick once applied (the Lua: 0 calls per idle frame, pinned by its frame_budget). Once per
- * session, at the event: 1 code check, 2 plain loads, and reads of the settings (80280 bytes) and the list (1200
- * bytes, 1584 when moved); with something to change, also 1 get_live, a read of the settings before and one after the
+ * session, at HF_EVENT_GAME_LOADED: 1 code check (the core repeats it every 30 frames while the code is not decoded,
+ * for at most 60 s). At HF_EVENT_ENTITIES_READY (or when the code is decoded, if that comes later): 2 plain loads, and
+ * reads of the settings (80280 bytes) and the list (1200 bytes, 1584 when moved); with something to change, also
+ * 1 get_live, a read of the settings before and one after the
  * changes, a page check (1 VirtualQuery for the settings' region) and 1 set_live per row: 4 reads, 1 get_live, 1
  * VirtualQuery and 103 set_live. Each set_live is a protected write inside HellForge (two VirtualProtect calls, an
  * instruction cache flush, two ReadProcessMemory and two GetModuleHandleA: about 7 Windows calls, unmeasured in game),
@@ -61,7 +68,6 @@
 #define AT_FLAGS 0x170u              /* beacon_flags */
 #define OWNED NAVIGATION_OWNED_BIT
 #define LIST_SITE 0x62F087u          /* mov rax, qword ptr [rcx + rdx*8 + 0x37CB600]: a reader of the list */
-#define LIST_SITE_CODE "48 8B 84 D1"
 #define VANILLA_LIST 0x37CB600u
 #define SLOTS 150u                   /* the game's list: types 0 .. 149 */
 #define MOVED_SLOTS 198u             /* HellForge's moved list: 150, and room for 48 that mods add */
@@ -83,6 +89,8 @@ static struct
     Change changes[NAVIGATION_TYPES];
     uint8_t seen[NAVIGATION_TYPES + 1];
     int done;
+    int code_ready;         /* the reader's bytes read as shipped (CodeReady) */
+    int entities_ready;     /* HF_EVENT_ENTITIES_READY came first: CodeReady takes it up */
     int countdown;
     float waited;
     char why[96];
@@ -93,6 +101,9 @@ static uint8_t g_source[DATA_SIZE]; /* the settings as checked, then as they sho
 static uint8_t g_now[DATA_SIZE];    /* a later read of them */
 static uint64_t g_list[MOVED_SLOTS];
 static const HfField kFlags = HF_FIELD(StratagemSettings, beacon_flags);
+static const VpmCodePin kPins[] = {
+    {LIST_SITE, "48 8B 84 D1", "the stratagem list's reader", 0},
+};
 
 /* api.pointer: a value that can be a user-mode pointer, else 0. */
 static uintptr_t Pointer(uint64_t value) { return vpm_plausible((uintptr_t)value) ? (uintptr_t)value : 0; }
@@ -168,10 +179,11 @@ static Why Plan(void)
     return NULL;
 }
 
-/* The list the game reads now, from its reader's displacement (relative to game.dll's base), or 0. */
+/* The list the game reads now, from its reader's displacement (relative to game.dll's base), or 0. The reader's code
+ * was checked before (CodeReady). */
 static uintptr_t CurrentList(void)
 {
-    if (!vpm_game_code_matches(LIST_SITE, LIST_SITE_CODE) || !vpm_game_read(LIST_SITE + 4, &s.displacement, 4)) return 0;
+    if (!vpm_game_read(LIST_SITE + 4, &s.displacement, 4)) return 0;
     s.slots = (uint32_t)s.displacement == VANILLA_LIST ? SLOTS : MOVED_SLOTS;
     return vpm_game() + (uintptr_t)(intptr_t)s.displacement;
 }
@@ -312,6 +324,7 @@ static void Wait(VpmComponent* self, float dt)
 static void EntitiesReady(VpmComponent* self, HfEvent event)
 {
     if (s.done || vpm_ticking(self)) return;
+    if (!s.code_ready) { s.entities_ready = 1; return; }
     int result = Attempt(self);
     if (result == DONE) { Done(self, 0); return; }
     if (result == FAILED) return;
@@ -329,9 +342,17 @@ static void Stop(VpmComponent* self)
         vpm_log(self, "stopped: not every one of the %d beacon flags changed could be put back (a row changed since)", count);
 }
 
+/* The reader's bytes read as shipped: the event's work, if it came first. */
+static void CodeReady(VpmComponent* self, HfEvent event)
+{
+    s.code_ready = 1;
+    if (s.entities_ready) EntitiesReady(self, HF_EVENT_ENTITIES_READY);
+}
+
 static int Start(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
+    if (!vpm_when_code_ready(self, kPins, 1, CodeReady)) return 1;
     return vpm_on_load(self, HF_EVENT_ENTITIES_READY, EntitiesReady) ? 0 : 1;
 }
 

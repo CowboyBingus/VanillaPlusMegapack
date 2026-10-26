@@ -8,9 +8,13 @@
  * broad-phase record directly, and the queue owns copies of the input vectors.
  *
  * On HellForge the code is compared with HfApi.code_matches (the bytes as shipped, through any hook another mod placed;
- * 256 bytes a call, so the long routines are compared in parts). The Lua bound when the game's Lua started, by which time
- * the physics API is set up; the pack starts earlier, so EcsBind waits (a plain load on poll frames) until the table
- * pointer is set, then checks everything once. */
+ * 256 bytes a call, so the long routines are compared in parts), by the core's wait (vpm_when_code_ready, EcsCodePins):
+ * game.dll's code is decoded in parts after HF_EVENT_GAME_LOADED, and the physics API can be set up before the part
+ * these routines are in. The wait checks them at that event and every 30 frames until they read as shipped; the core
+ * stops the component if they never do within 60 s ("Position setter changed (helldivers2.exe 0x799880)"). The Lua
+ * bound when the game's Lua started, by which time the physics API is set up; the pack starts earlier, so EcsBind waits
+ * (nothing while the code is not decoded, then a plain load on poll frames) until the table pointer is set, then checks
+ * the table once. */
 #include <string.h>
 #include <windows.h>
 #include "ecs_internal.h"
@@ -25,20 +29,44 @@
 #define SERVICE_RVA 0x346D500u      /* game.dll: the completion service, resolved on each request */
 #define CHUNK_BYTES 128u
 
-const char EcsSetterCode[] = "48 89 5C 24 08 48 89 6C";
-const char EcsStopCode[] =
-    "48895c2408574883ec60488b4138448bc24969d8b82b00004a8b3cc048035948488bcfe86822d5ff80b8c40600000074558b4f08e807e0"
-    "82004885c07448f64014017442448b480c33d2c6442450000f57c0f30f11442448448bc1488b0d9e17cc02895424408954243888542430"
-    "488d542478f30f11442428c744242001000000e8ba3dc100c683a42b000000488b5c24704883c4605fc3";
-const char EcsCompletionCode[] =
-    "48895c24184889542410564883ec70488bf1418bd8418bc8e8d399c1ff4885c00f8472010000f64014014889bc24800000000f84f20000"
-    "008b501081faff7f0000742e488b05febb0a02488b4808e8eddfc1ff84c0741a488b0d42cb0b028bd3488b89a8b30000e8340c82ffe91f"
-    "010000488b0dc062f6018bd3e8816c56ff84c00f840901000033ff488d461c8bcf9039180f84f8000000ffc14883c04083f92072ed8bcf"
-    "488d86240800000f1f400039180f84d8000000ffc14883c04081f98000000072ea8bcbe82399c1ff4885c00f84ba000000f64014010f84"
-    "b0000000448b480c488d94248800000040887c24500f57c0f30f11442448448bc3f30f100507630001488bce897c2440897c2438c64424"
-    "3001f30f11442428c744242001000000e8c8f6ffffeb668b701081feff7f0000750433ffeb23488b0d785ef601488b4140488bb8600100"
-    "00488b4138ff5008488bc88bd6ffd7488bf88bcbe88d95c1ff41b901000000c7442460010000004c8d442460c744246404000000488bd7"
-    "4889442468b9326c6621e850df81ff488bbc2480000000488b9c24900000004883c4705ec3";
+/* The reviewed bytes, as the core's wait checks them (vpm_when_code_ready): both setters' first 8, the whole stop and
+ * completion routines in parts of at most CHUNK_BYTES (HfApi.code_matches takes 256), in the Lua's order. */
+const VpmCodePin EcsCodePins[] = {
+    {POSITION_RVA, "48 89 5C 24 08 48 89 6C", "Position setter", VPM_PIN_EXE},
+    {ROTATION_RVA, "48 89 5C 24 08 48 89 6C", "Rotation setter", VPM_PIN_EXE},
+    {STOP_RVA,
+        "48 89 5C 24 08 57 48 83 EC 60 48 8B 41 38 44 8B C2 49 69 D8 B8 2B 00 00 4A 8B 3C C0 48 03 59 48 "
+        "48 8B CF E8 68 22 D5 FF 80 B8 C4 06 00 00 00 74 55 8B 4F 08 E8 07 E0 82 00 48 85 C0 74 48 F6 40 "
+        "14 01 74 42 44 8B 48 0C 33 D2 C6 44 24 50 00 0F 57 C0 F3 0F 11 44 24 48 44 8B C1 48 8B 0D 9E 17 "
+        "CC 02 89 54 24 40 89 54 24 38 88 54 24 30 48 8D 54 24 78 F3 0F 11 44 24 28 C7 44 24 20 01 00 00",
+        "Ragdoll stop routine", 0},
+    {0x7ABD80u, /* STOP_RVA + 128 */
+        "00 E8 BA 3D C1 00 C6 83 A4 2B 00 00 00 48 8B 5C 24 70 48 83 C4 60 5F C3",
+        "Ragdoll stop routine", 0},
+    {COMPLETION_RVA,
+        "48 89 5C 24 18 48 89 54 24 10 56 48 83 EC 70 48 8B F1 41 8B D8 41 8B C8 E8 D3 99 C1 FF 48 85 C0 "
+        "0F 84 72 01 00 00 F6 40 14 01 48 89 BC 24 80 00 00 00 0F 84 F2 00 00 00 8B 50 10 81 FA FF 7F 00 "
+        "00 74 2E 48 8B 05 FE BB 0A 02 48 8B 48 08 E8 ED DF C1 FF 84 C0 74 1A 48 8B 0D 42 CB 0B 02 8B D3 "
+        "48 8B 89 A8 B3 00 00 E8 34 0C 82 FF E9 1F 01 00 00 48 8B 0D C0 62 F6 01 8B D3 E8 81 6C 56 FF 84",
+        "Corpse completion request", 0},
+    {0x13C03D0u, /* COMPLETION_RVA + 128 */
+        "C0 0F 84 09 01 00 00 33 FF 48 8D 46 1C 8B CF 90 39 18 0F 84 F8 00 00 00 FF C1 48 83 C0 40 83 F9 "
+        "20 72 ED 8B CF 48 8D 86 24 08 00 00 0F 1F 40 00 39 18 0F 84 D8 00 00 00 FF C1 48 83 C0 40 81 F9 "
+        "80 00 00 00 72 EA 8B CB E8 23 99 C1 FF 48 85 C0 0F 84 BA 00 00 00 F6 40 14 01 0F 84 B0 00 00 00 "
+        "44 8B 48 0C 48 8D 94 24 88 00 00 00 40 88 7C 24 50 0F 57 C0 F3 0F 11 44 24 48 44 8B C3 F3 0F 10",
+        "Corpse completion request", 0},
+    {0x13C0450u, /* COMPLETION_RVA + 256 */
+        "05 07 63 00 01 48 8B CE 89 7C 24 40 89 7C 24 38 C6 44 24 30 01 F3 0F 11 44 24 28 C7 44 24 20 01 "
+        "00 00 00 E8 C8 F6 FF FF EB 66 8B 70 10 81 FE FF 7F 00 00 75 04 33 FF EB 23 48 8B 0D 78 5E F6 01 "
+        "48 8B 41 40 48 8B B8 60 01 00 00 48 8B 41 38 FF 50 08 48 8B C8 8B D6 FF D7 48 8B F8 8B CB E8 8D "
+        "95 C1 FF 41 B9 01 00 00 00 C7 44 24 60 01 00 00 00 4C 8D 44 24 60 C7 44 24 64 04 00 00 00 48 8B",
+        "Corpse completion request", 0},
+    {0x13C04D0u, /* COMPLETION_RVA + 384 */
+        "D7 48 89 44 24 68 B9 32 6C 66 21 E8 50 DF 81 FF 48 8B BC 24 80 00 00 00 48 8B 9C 24 90 00 00 00 "
+        "48 83 C4 70 5E C3",
+        "Corpse completion request", 0},
+};
+const int EcsCodePinCount = (int)(sizeof EcsCodePins / sizeof EcsCodePins[0]);
 
 static struct
 {
@@ -47,6 +75,7 @@ static struct
 } s;
 
 static const EcsNatives* g_replacement;
+static int g_codeReady; /* every pin read as shipped (the core's wait) */
 
 void EcsUseNatives(const EcsNatives* replacement) { g_replacement = replacement; }
 
@@ -57,19 +86,12 @@ static double PerformanceClock(void)
     return (double)now.QuadPart / s.frequency;
 }
 
-/* A routine's whole bytes (contiguous hex, as the Lua kept them), compared in parts of CHUNK_BYTES. */
-static int CodeMatches(uintptr_t address, const char* hex)
+static void CodeReady(VpmComponent* self, HfEvent event) { g_codeReady = 1; }
+
+int EcsWaitForCode(VpmComponent* self)
 {
-    size_t length = strlen(hex);
-    for (size_t at = 0; at < length; at += CHUNK_BYTES * 2u)
-    {
-        char part[CHUNK_BYTES * 2u + 1u];
-        size_t n = length - at < CHUNK_BYTES * 2u ? length - at : CHUNK_BYTES * 2u;
-        memcpy(part, hex + at, n);
-        part[n] = 0;
-        if (!vpm_hf()->code_matches(address + at / 2u, part)) return 0;
-    }
-    return 1;
+    g_codeReady = 0;
+    return vpm_when_code_ready(self, EcsCodePins, EcsCodePinCount, CodeReady);
 }
 
 /* The table entry at +offset must be the exe's function at rva: NULL, or why not. */
@@ -81,7 +103,8 @@ static const char* Entry(uint32_t offset, uint32_t rva)
     return NULL;
 }
 
-/* The Lua's checks, in its order: NULL when every one passes, or the first failure's text. */
+/* The Lua's checks of the physics API table, in its order (its code checks are the core's wait): NULL when every one
+ * passes, or the first failure's text. */
 static const char* Checks(uint64_t binding)
 {
     const char* why = NULL;
@@ -90,10 +113,6 @@ static const char* Checks(uint64_t binding)
     if ((why = Entry(8, ENABLED_RVA)) != NULL || (why = Entry(0x60, POSITION_RVA)) != NULL ||
         (why = Entry(0x68, ROTATION_RVA)) != NULL)
         return why;
-    if (!vpm_hf()->code_matches(vpm_exe() + POSITION_RVA, EcsSetterCode)) return "Position setter changed";
-    if (!vpm_hf()->code_matches(vpm_exe() + ROTATION_RVA, EcsSetterCode)) return "Rotation setter changed";
-    if (!CodeMatches(vpm_game() + STOP_RVA, EcsStopCode)) return "Ragdoll stop routine changed";
-    if (!CodeMatches(vpm_game() + COMPLETION_RVA, EcsCompletionCode)) return "Corpse completion request changed";
     return NULL;
 }
 
@@ -110,7 +129,7 @@ static void GameNatives(void)
 int EcsBind(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
-    if (vpm_game() == 0 || vpm_exe() == 0) return 0;
+    if (!g_codeReady || vpm_game() == 0 || vpm_exe() == 0) return 0;
     uint64_t binding = vpm_game_u64(BINDING_RVA);
     if (binding == 0) return 0;
     const char* why = Checks(binding);

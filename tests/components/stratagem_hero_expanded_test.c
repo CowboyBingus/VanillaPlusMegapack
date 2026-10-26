@@ -704,14 +704,99 @@ static void ReadsAListOutsideTheImage(void)
     CHECK_LOG("the stratagem list was moved by HellForge");
 }
 
+/* Another reader reads as code not decoded yet: the core waits for it, then stops the component, nothing written. */
 static void RefusesAnotherReader(void)
 {
     FreshPages();
     MakeWorld();
     Game()[LIST_SITE] = 0x48;
-    Refuses("disabled: the stratagem list's reader at game.dll 0x17EF922 is not the reviewed one");
+    Started();
+    Loaded();
+    fake_frames(60, 1.0f);
+    CHECK_LOG("disabled: the stratagem list's reader changed (game.dll 0x17EF922)");
+    CHECK(!vpm_running(fake_component(0)) && !vpm_ticking(fake_component(0)));
+    CHECK_EQ(g_page.stores, 0);
     CHECK_EQ(fake_counts().read, 0);
     CHECK(Vanilla());
+}
+
+/* ---- game.dll's code decoded in parts after HF_EVENT_GAME_LOADED (vpm_when_code_ready) ------------------------- */
+
+/* The reader as the game holds it before its part of game.dll is decoded, and once it is. */
+static void Encode(void) { memset(Game() + LIST_SITE, 0xCC, 8); }
+static void Decode(void)
+{
+    static const uint8_t site[] = {0x4C, 0x8B, 0xB4, 0xC1};
+    memcpy(Game() + LIST_SITE, site, 4);
+    Put32(Game() + LIST_SITE + 4, (uint32_t)(int32_t)((intptr_t)w.list - (intptr_t)Game()));
+}
+
+/* Still encoded at the event, decoded two seconds later: nothing read or written before; the attempt on the frame of
+ * the next look, as at load; then nothing. */
+static void TheReaderDecodedLaterAppliesThen(void)
+{
+    FreshPages();
+    MakeWorld();
+    Encode();
+    Started();
+    Loaded();
+    CHECK_CALLS(0, 1, 0, 0);
+    CHECK_EQ(fake_counts().log, 0);
+    CHECK(vpm_running(fake_component(0)) && !vpm_ticking(fake_component(0)));
+    ResetCounts();
+    fake_frames(120, 1.0f / 60);
+    CHECK_CALLS(0, 4, 0, 0); /* one look every 30 frames */
+    CHECK(Vanilla());
+    Decode();
+    ResetCounts();
+    fake_frames(30, 1.0f / 60);
+    CHECK_CALLS(108, 1, 2, 2);
+    CHECK(Expanded());
+    CHECK_LOG("[Stratagem Hero Expanded] applied (108 stratagems in 8 groups; pages 0x04, 0x04), at load.");
+    CHECK(!vpm_ticking(fake_component(0)));
+    ResetCounts();
+    fake_frames(300, 1.0f / 60);
+    CHECK_CALLS(0, 0, 0, 0);
+}
+
+/* Decoded later, before the stratagem settings load: the wait for them as before. */
+static void TheReaderDecodedBeforeTheSettingsWaitsForThem(void)
+{
+    FreshPages();
+    MakeWorld();
+    Unload();
+    Encode();
+    Started();
+    Loaded();
+    CHECK(!vpm_ticking(fake_component(0)));
+    Decode();
+    fake_frames(30, 1.0f / 60);
+    CHECK_LOG("Waiting for the game: the stratagem settings are not loaded yet.");
+    CHECK(vpm_ticking(fake_component(0)) && Vanilla());
+    Load();
+    fake_frames(1, 1.0f / 60);
+    CHECK(Expanded() && !vpm_ticking(fake_component(0)));
+}
+
+/* Never decoded: stopped after 60 s naming the reader; nothing read, written or page-checked. */
+static void TheReaderNeverDecodedStopsItAfterAMinute(void)
+{
+    FreshPages();
+    MakeWorld();
+    Encode();
+    Started();
+    Loaded();
+    fake_frames(59, 1.0f);
+    CHECK(vpm_running(fake_component(0)));
+    fake_frames(1, 1.0f);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Stratagem Hero Expanded] disabled: the stratagem list's reader changed (game.dll 0x17EF922)");
+    CHECK_EQ(fake_counts().read, 0);
+    CHECK_EQ(g_page.queries + g_page.stores, 0);
+    CHECK(Vanilla());
+    ResetCounts();
+    fake_frames(60, 1.0f);
+    CHECK_CALLS(0, 0, 0, 0);
 }
 
 /* Another game build: the core keeps the component off; nothing is read or written. */
@@ -757,5 +842,8 @@ int main(void)
     RUN(RefusesAnotherReader);
     RUN(OffOnAnotherBuild);
     RUN(StopPutsTheVanillaTablesBack);
+    RUN(TheReaderDecodedLaterAppliesThen);
+    RUN(TheReaderDecodedBeforeTheSettingsWaitsForThem);
+    RUN(TheReaderNeverDecodedStopsItAfterAMinute);
     TEST_END();
 }

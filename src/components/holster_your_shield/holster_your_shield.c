@@ -19,8 +19,14 @@
  * backpacks, other players' Helldivers and every other shield are left alone.
  *
  * On HellForge: the three functions are called through C function pointers (game.dll's base + RVA) from the pack's
- * game-thread tick, with the same arguments as the game's own callers, after their first 16 bytes were checked once at
- * HF_EVENT_GAME_LOADED (code_matches: the bytes as the game shipped them, so another mod's hook does not refuse them).
+ * game-thread tick, with the same arguments as the game's own callers, after their first 16 bytes were checked once
+ * (code_matches: the bytes as the game shipped them, so another mod's hook does not refuse them). game.dll's code is
+ * decoded in parts after HF_EVENT_GAME_LOADED, so the check is the core's wait (vpm_when_code_ready): at that event,
+ * then every 30 frames until the three read as shipped; only then are they bound and the tick started. Bytes that
+ * never match within 60 s stop the component ("game function set_mode changed (game.dll 0x9AC8E0)"), before it did
+ * anything. The re-draw's hook (below) is optional, so its bytes are not part of that wait: when they do not read as
+ * shipped yet once the three functions do, the component looks again every 30 frames for 60 s and hooks it then;
+ * after that the re-stow stays on the next frame, as when the bytes differ.
  * game.dll's globals are plain loads; the heap is read through vpm_read. The local Helldiver is found with the Lua's own
  * resolution, not vpm_local_avatar: the inventory row's identity check needs the address of the avatar's record in
  * the entity owner's table, which VpmAvatar does not keep, and the log names the step that failed ("Press refused: not
@@ -67,7 +73,9 @@
  * and the 3 calls), and the frame after only the move's check. Idle frames cost the same with the hook as without.
  * Fewer reads than the Lua because game.dll's globals are plain loads here. No write, no page query (VirtualQuery), no
  * allocation and no other Windows call on any path. Once per session, at HF_EVENT_GAME_LOADED: 4 code checks (the
- * three functions and the re-draw's first 25 bytes), the hook, and 2 plain loads (the game's "nothing held" ids). */
+ * three functions and the re-draw's first 25 bytes), the hook, and 2 plain loads (the game's "nothing held" ids). While
+ * game.dll's code is not decoded yet: the three functions' checks every 30 frames (the core's wait, at most 60 s, no
+ * tick); then, if the re-draw's bytes are not decoded yet, 1 code check on every 30th frame for at most 60 s. */
 #include <stdio.h>
 #include <string.h>
 #include "../../core/vpm.h"
@@ -114,6 +122,7 @@
 #define MODE_HELD 2u
 #define MODE_AWAY 1u
 #define POSITIVE_INFINITY_BITS 0x7F800000u
+#define REDRAW_WAIT_SECONDS 60.0f  /* the re-draw's bytes are looked at again for this long (game.dll is decoded in parts) */
 
 typedef void (*SetItemFn)(uint64_t inventory, uint32_t avatar, uint32_t item);
 typedef uint64_t (*SetModeFn)(uint64_t inventory, uint32_t avatar, uint32_t mode);
@@ -121,12 +130,11 @@ typedef void (*SendHeldFn)(int64_t peer, uint32_t avatar, uint32_t item, uint32_
 /* Whole registers, so the detour passes on exactly what the caller left in rcx, rdx and r8 (it sets edx and r8b). */
 typedef uint64_t (*RedrawFn)(uint64_t record, uint64_t send, uint64_t blend);
 
-typedef struct GameFunction { const char* name; uint32_t rva; const char* prologue; } GameFunction;
-/* The first 16 bytes of each function, checked once per session before anything is called. */
-static const GameFunction kFunctions[3] = {
-    {"set_item", SET_ITEM_RVA, "48 89 5C 24 18 48 89 4C 24 08 55 56 57 41 54 41"},
-    {"set_mode", SET_MODE_RVA, "48 89 5C 24 20 44 89 44 24 18 55 56 57 41 54 41"},
-    {"send_held", SEND_HELD_RVA, "48 89 5C 24 10 44 89 4C 24 20 57 48 83 EC 60 48"},
+/* The first 16 bytes of each function, checked once per session (the core's wait) before anything is called. */
+static const VpmCodePin kFunctions[3] = {
+    {SET_ITEM_RVA, "48 89 5C 24 18 48 89 4C 24 08 55 56 57 41 54 41", "game function set_item", 0},
+    {SET_MODE_RVA, "48 89 5C 24 20 44 89 44 24 18 55 56 57 41 54 41", "game function set_mode", 0},
+    {SEND_HELD_RVA, "48 89 5C 24 10 44 89 4C 24 20 57 48 83 EC 60 48", "game function send_held", 0},
 };
 
 /* Everything kept about the local Helldiver (the Lua's resolve). */
@@ -155,6 +163,8 @@ static struct
     SendHeldFn send_held;
     RedrawFn redraw;   /* the hook's original: HellForge rewrites it when another hook joins the chain */
     int hooked;
+    int redraw_waiting; /* the re-draw's bytes did not read as shipped yet: looked at again every 30 frames */
+    float redraw_waited;
     int busy;          /* inside the game's re-draw or the component's own calls: a nested re-draw is the game's */
     int bound;
     uint32_t none_item, none_slot;
@@ -555,6 +565,8 @@ static void Watch(VpmComponent* self)
     if (s.toggled && row.held == row.backpack) Restow(self, row.backpack, 0); /* the fallback, and the hook's safety net */
 }
 
+static void WaitForRedraw(VpmComponent* self, float dt);
+
 /* The tick: one row read; a key read while a shield is worn; the rest only when something happens. Without a kept
  * Helldiver, nothing but every 30th frame's resolution attempt. lint: per-frame */
 static void Step(VpmComponent* self, float dt)
@@ -562,6 +574,7 @@ static void Step(VpmComponent* self, float dt)
     s.frame++;
     if (s.has_kept) Watch(self);
     if (s.frame % CHECK_FRAMES == 0) Check(self);
+    if (s.redraw_waiting) WaitForRedraw(self, dt);
 }
 
 /* ---- the game's re-draw (0xA95A90) ------------------------------------------------------------------------------- */
@@ -612,26 +625,43 @@ static void MissionEnded(VpmComponent* self, const HfEventInfo* event)
     vpm_log(self, "This session so far: %s.", summary);
 }
 
-/* The game's re-draw hooked, or why the re-stow stays on the next frame (vpm_hook has logged the refusal). */
-static void HookRedraw(VpmComponent* self)
+static void LogRedraw(VpmComponent* self)
 {
-    s.hooked = vpm_hook(self, REDRAW_RVA, REDRAW_SHIPPED, (void*)Redraw, (void**)&s.redraw);
     vpm_log(self, "The game's re-draw (game.dll 0x%X) %s.", REDRAW_RVA, s.hooked
         ? "is hooked: a shield the game draws while it is on the back goes back inside the draw"
         : "is not hooked: a shield the game draws while it is on the back goes back on the next frame");
 }
 
-/* The three functions bound after their first bytes were checked, the "nothing held" ids read, the tick started, the
- * re-draw hooked. */
-static void GameLoaded(VpmComponent* self, HfEvent event)
+/* The game's re-draw hooked, or why the re-stow stays on the next frame: vpm_hook's check and hook, split so that the
+ * check can wait for the code to be decoded (the same refusal texts). final: the wait is over. */
+static void TryRedraw(VpmComponent* self, int final)
+{
+    s.redraw_waiting = 0;
+    if (!vpm_game_code_matches(REDRAW_RVA, REDRAW_SHIPPED))
+    {
+        if (!final) { s.redraw_waiting = 1; return; }
+        vpm_log(self, "hook refused: game.dll+0x%X is not the reviewed function", REDRAW_RVA);
+    }
+    else if (vpm_hf()->hook_ex(vpm_mod(), vpm_game() + REDRAW_RVA, (void*)Redraw, (void**)&s.redraw, 0) != 0)
+        vpm_log(self, "hook refused at game.dll+0x%X: %s", REDRAW_RVA, vpm_hf()->last_log(vpm_mod()));
+    else
+        s.hooked = 1;
+    LogRedraw(self);
+}
+
+/* While the re-draw's bytes do not read as shipped: a look on every 30th frame, for REDRAW_WAIT_SECONDS. lint: per-frame */
+static void WaitForRedraw(VpmComponent* self, float dt)
+{
+    s.redraw_waited += dt;
+    int final = s.redraw_waited >= REDRAW_WAIT_SECONDS;
+    if (final || s.frame % CHECK_FRAMES == 0) TryRedraw(self, final);
+}
+
+/* The three functions' first bytes read as shipped (the core's wait, from HF_EVENT_GAME_LOADED): they are bound, the
+ * "nothing held" ids read, the tick started, the re-draw hooked. */
+static void FunctionsReady(VpmComponent* self, HfEvent event)
 {
     if (s.bound) return;
-    for (int i = 0; i < 3; i++)
-        if (!vpm_game_code_matches(kFunctions[i].rva, kFunctions[i].prologue))
-        {
-            vpm_fail(self, "game function differs: %s", kFunctions[i].name);
-            return;
-        }
     uintptr_t game = vpm_game();
     s.set_item = (SetItemFn)(game + SET_ITEM_RVA);
     s.set_mode = (SetModeFn)(game + SET_MODE_RVA);
@@ -641,7 +671,7 @@ static void GameLoaded(VpmComponent* self, HfEvent event)
     if (!vpm_tick_start(self, Step)) { vpm_fail(self, "the game thread could not be reached"); return; }
     s.bound = 1;
     vpm_log(self,"Holster Your Shield v%s initialized.", vpm_def(self)->version);
-    HookRedraw(self);
+    TryRedraw(self, 0);
 }
 
 /* Nothing to put back: the component writes no memory, and the shield stays where the game has it. The re-draw's hook
@@ -658,7 +688,7 @@ static int Start(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
     s.self = self;
-    if (!vpm_on_load(self, HF_EVENT_GAME_LOADED, GameLoaded)) return vpm_fail(self, "game.dll's load event refused");
+    if (!vpm_when_code_ready(self, kFunctions, 3, FunctionsReady)) return vpm_fail(self, "game.dll's code checks refused");
     (void)vpm_listen(self, HF_ON_MISSION_END, MissionEnded, 0); /* the summary only; the core logs a refusal */
     return 0;
 }

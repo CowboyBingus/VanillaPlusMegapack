@@ -237,7 +237,7 @@ static void ClearsTheOwnedBitOnce(void)
      * read the buffer pointer twice: plain loads here). */
     FakeCounts once = fake_counts();
     CHECK_EQ(once.read, 4);
-    CHECK_EQ(once.code_matches, 1);
+    CHECK_EQ(once.code_matches, 0); /* the reader's code check came at HF_EVENT_GAME_LOADED (TheReaderIsCheckedAtLoad) */
     CHECK_EQ(once.write + once.find_pattern + once.hook + once.other, 0);
     CHECK_EQ(once.log, 1);
     CHECK_EQ(t.gets, 1);
@@ -309,7 +309,6 @@ static void RefusesMalformedSettings(void)
         {ShortLastGroup, "disabled: Incomplete stratagem settings"},
         {SettingsUnreadable, "disabled: Cannot read settings"},
         {ListUnreadable, "disabled: Cannot read settings table"},
-        {AnotherReader, "disabled: the stratagem list's reader at game.dll 0x62F087 is not the reviewed one"},
     };
     for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++)
     {
@@ -324,6 +323,21 @@ static void RefusesMalformedSettings(void)
         CHECK(memcmp(w.data, g_expected, DATA_SIZE) == 0);
         CHECK_EQ(t.sets + t.undos, 0);
     }
+}
+
+/* Another reader reads as code not decoded yet: the core waits for it, then stops the component, nothing changed. */
+static void RefusesAnotherReader(void)
+{
+    MakeWorld(VANILLA_LIST);
+    AnotherReader();
+    Started();
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    CHECK(vpm_running(fake_component(0)));
+    fake_frames(60, 1.0f);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("disabled: the stratagem list's reader changed (game.dll 0x62F087)");
+    CHECK(memcmp(w.data, g_original, DATA_SIZE) == 0);
+    CHECK_EQ(t.gets + t.sets + t.undos, 0);
 }
 
 /* Settings memory that is not writable: refused before any change (the Lua's one page check, then no write). */
@@ -522,6 +536,106 @@ static void GivesUpAfterTenMinutes(void)
     CHECK_EQ(t.sets, 0);
 }
 
+/* ---- game.dll's code decoded in parts after HF_EVENT_GAME_LOADED (vpm_when_code_ready) ------------------------- */
+
+/* The reader as the game holds it before its part of game.dll is decoded, and once it is. */
+static void Encode(void) { memset(Game() + LIST_SITE, 0xCC, 8); }
+static void Decode(void)
+{
+    static const uint8_t site[] = {0x48, 0x8B, 0x84, 0xD1};
+    memcpy(Game() + LIST_SITE, site, 4);
+    Put32(Game() + LIST_SITE + 4, w.list);
+}
+
+/* Decoded at load: the one code check at HF_EVENT_GAME_LOADED, nothing else there; the event's work as before. */
+static void TheReaderIsCheckedAtLoad(void)
+{
+    MakeWorld(VANILLA_LIST);
+    CHECK_EQ(vpm_core_init(&t.api, fake_mod(), kDefs, 1), 0);
+    Reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    FakeCounts loaded = fake_counts();
+    CHECK_EQ(loaded.code_matches, 1);
+    CHECK_EQ(loaded.read + loaded.write + loaded.log + loaded.other, 0);
+    CHECK_EQ(t.gets + t.sets, 0);
+    Reset();
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    CHECK_EQ(fake_counts().read, 4);
+    CHECK_EQ(fake_counts().code_matches, 0);
+    CHECK_EQ(t.sets, 103);
+}
+
+/* Still encoded at both events, decoded two seconds later: nothing read or changed before; the whole attempt on the
+ * frame of the core's next look; then nothing. */
+static void TheReaderDecodedLaterAppliesThen(void)
+{
+    MakeWorld(VANILLA_LIST);
+    Encode();
+    Started();
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    CHECK_EQ(fake_counts().read + fake_counts().code_matches + fake_counts().log, 0);
+    CHECK_EQ(t.gets + t.sets, 0);
+    CHECK(vpm_running(fake_component(0)) && !vpm_ticking(fake_component(0)));
+    fake_frames(120, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 4); /* one look every 30 frames */
+    CHECK_EQ(fake_counts().read + fake_counts().log, 0);
+    CHECK_EQ(t.gets + t.sets, 0);
+    CHECK(memcmp(w.data, g_original, DATA_SIZE) == 0);
+    Decode();
+    Reset();
+    fake_frames(30, 1.0f / 60);
+    OwnedCleared(g_original, g_expected);
+    CHECK(memcmp(w.data, g_expected, DATA_SIZE) == 0);
+    CHECK_LOG("[Better Stratagem Bounce] navigation_settings_ready: 103 flags; executable code unchanged");
+    CHECK_EQ(fake_counts().code_matches, 1);
+    CHECK_EQ(fake_counts().read, 4);
+    CHECK_EQ(t.gets, 1);
+    CHECK_EQ(t.sets, 103);
+    Reset();
+    fake_frames(300, 1.0f / 60);
+    CHECK_EQ(fake_counts().read + fake_counts().code_matches + fake_counts().log, 0);
+    CHECK_EQ(t.gets + t.sets, 0);
+}
+
+/* Decoded later while HellForge cannot read the rows yet: the wait for them as before. */
+static void TheReaderDecodedLaterWaitsForHellForge(void)
+{
+    MakeWorld(VANILLA_LIST);
+    t.ready = 0;
+    Encode();
+    Started();
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    Decode();
+    fake_frames(30, 1.0f / 60);
+    CHECK(vpm_ticking(fake_component(0)));
+    CHECK_LOG("Waiting for HellForge: the stratagem rows cannot be read yet.");
+    t.ready = 1;
+    fake_frames(30, 1.0f / 60);
+    CHECK_LOG("navigation_settings_ready: 103 flags; executable code unchanged");
+    CHECK(!vpm_ticking(fake_component(0)));
+}
+
+/* Never decoded: stopped after 60 s naming the reader; nothing read, nothing changed. */
+static void TheReaderNeverDecodedStopsItAfterAMinute(void)
+{
+    MakeWorld(VANILLA_LIST);
+    Encode();
+    Started();
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    fake_frames(59, 1.0f);
+    CHECK(vpm_running(fake_component(0)));
+    fake_frames(1, 1.0f);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Better Stratagem Bounce] disabled: the stratagem list's reader changed (game.dll 0x62F087)");
+    CHECK_EQ(fake_counts().read, 0);
+    CHECK_EQ(t.gets + t.sets + t.undos, 0);
+    CHECK(memcmp(w.data, g_original, DATA_SIZE) == 0);
+    Reset();
+    fake_fire(HF_EVENT_ENTITIES_READY); /* a reload after the stop: nothing */
+    fake_frames(60, 1.0f);
+    CHECK_EQ(fake_counts().read + fake_counts().code_matches, 0);
+}
+
 int main(void)
 {
     RUN(FlagsAreTheReviewedOnes);
@@ -538,5 +652,10 @@ int main(void)
     RUN(FailedWriteKeepsALaterChange);
     RUN(WaitsForHellForge);
     RUN(GivesUpAfterTenMinutes);
+    RUN(RefusesAnotherReader);
+    RUN(TheReaderIsCheckedAtLoad);
+    RUN(TheReaderDecodedLaterAppliesThen);
+    RUN(TheReaderDecodedLaterWaitsForHellForge);
+    RUN(TheReaderNeverDecodedStopsItAfterAMinute);
     TEST_END();
 }

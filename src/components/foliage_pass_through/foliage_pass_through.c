@@ -12,19 +12,24 @@
  * projectile types and rewrites every instruction that reads it, so the list is taken from the displacement of one of
  * them (game.dll 0x75A391, `mov rax, [rcx + rax*8 + list]`), not from the vanilla address. HellForge's live edits cannot
  * name raycast_template (not a reviewed field), hence the direct store. Each row is checked first (type, name hash,
- * impact explosion, a template of 0 or 2), as the Lua did; anything unexpected changes nothing.
+ * impact explosion, a template of 0 or 2), as the Lua did; anything unexpected changes nothing. The reader's code is
+ * checked with vpm_when_code_ready, from HF_EVENT_GAME_LOADED: game.dll's code is decoded in parts after that event, and
+ * HF_EVENT_PROJECTILES_READY can come before this part is (HellForge gives its own projectile pins 20 s once the list
+ * has loaded), so the list is not taken before the reader's bytes read as shipped. The core stops the component if they
+ * never do within 60 s ("the projectile list's reader changed (game.dll 0x75A391)"), with nothing changed.
  *
- * Cost: once per session, at HF_EVENT_PROJECTILES_READY: 1 read of the list (2808 bytes), 1 read per target row, one
- * page check (VirtualQuery) of the span holding every changed template, a store per changed row and a read-back per row:
- * 199 reads and 1 VirtualQuery for 99 rows (the Lua: 200 reads and 1 page check). Nothing per frame afterwards. If the
- * settings are not loaded yet, a tick waits with one plain load per frame (no Windows call), for at most 600 s. */
+ * Cost: once per session, at HF_EVENT_GAME_LOADED: 1 code check (code_matches; the core repeats it every 30 frames while
+ * the code is not decoded yet, for at most 60 s). At HF_EVENT_PROJECTILES_READY (or when the code is decoded, if that
+ * comes later): 1 read of the list (2808 bytes), 1 read per target row, one page check (VirtualQuery) of the span holding
+ * every changed template, a store per changed row and a read-back per row: 199 reads and 1 VirtualQuery for 99 rows (the
+ * Lua: 200 reads and 1 page check). Nothing per frame afterwards. If the settings are not loaded yet, a tick waits with
+ * one plain load per frame (no Windows call), for at most 600 s. */
 #include <string.h>
 #include "../../core/vpm.h"
 #include "foliage_targets.h"
 
 #define BUFFER_RVA 0x348E2F8u  /* the loaded generated_projectile_settings buffer (loader 0x11EC5A0) */
 #define LIST_SITE 0x75A391u    /* mov rax, qword ptr [rcx + rax*8 + 0x37C7670]: the list's reader in 0x75A0D0 */
-#define LIST_SITE_CODE "48 8B 84 C1"
 #define VANILLA_LIST 0x37C7670u
 #define SLOTS 351u             /* the game's types 0 .. 350 */
 #define ROW_SIZE 0x110u        /* ProjectileInfo */
@@ -42,7 +47,13 @@ static struct
     uint8_t changed[FOLIAGE_TARGET_COUNT]; /* this session set it from 0 to 2 */
     float waited;
     int applied;
+    int code_ready;        /* the reader's bytes read as shipped (CodeReady) */
+    int projectiles_ready; /* HF_EVENT_PROJECTILES_READY came first: CodeReady takes it up */
 } s;
+
+static const VpmCodePin kPins[] = {
+    {LIST_SITE, "48 8B 84 C1", "the projectile list's reader", 0},
+};
 
 static uint64_t g_list[SLOTS]; /* the list as read at the apply (static: 2808 bytes, off the game thread's stack) */
 
@@ -53,11 +64,12 @@ static uint32_t U32(const uint8_t* row, uint32_t at)
     return value;
 }
 
-/* The list the game reads now, from its reader's displacement (relative to game.dll's base), or 0. */
+/* The list the game reads now, from its reader's displacement (relative to game.dll's base), or 0. The reader's code
+ * was checked before (CodeReady). */
 static uintptr_t CurrentList(VpmComponent* self)
 {
     int32_t displacement;
-    if (!vpm_game_code_matches(LIST_SITE, LIST_SITE_CODE) || !vpm_game_read(LIST_SITE + 4, &displacement, 4))
+    if (!vpm_game_read(LIST_SITE + 4, &displacement, 4))
     {
         vpm_fail(self, "the projectile list's reader at game.dll 0x%X is not the reviewed one", LIST_SITE);
         return 0;
@@ -170,6 +182,7 @@ static void Wait(VpmComponent* self, float dt)
 static void ProjectilesReady(VpmComponent* self, HfEvent event)
 {
     if (s.applied) return;
+    if (!s.code_ready) { s.projectiles_ready = 1; return; }
     if (SettingsLoaded()) { Apply(self); return; }
     vpm_log(self, "Waiting for the game: the projectile settings are not loaded yet.");
     vpm_set_status(self, "waiting: the projectile settings are not loaded yet");
@@ -189,9 +202,17 @@ static void Stop(VpmComponent* self)
     }
 }
 
+/* The reader's bytes read as shipped: the event's work, if it came first. */
+static void CodeReady(VpmComponent* self, HfEvent event)
+{
+    s.code_ready = 1;
+    if (s.projectiles_ready) ProjectilesReady(self, HF_EVENT_PROJECTILES_READY);
+}
+
 static int Start(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
+    if (!vpm_when_code_ready(self, kPins, 1, CodeReady)) return 1;
     return vpm_on_load(self, HF_EVENT_PROJECTILES_READY, ProjectilesReady) ? 0 : 1;
 }
 

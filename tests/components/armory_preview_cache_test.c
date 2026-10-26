@@ -586,6 +586,7 @@ static void WaitsForTheEngineApi(void)
     BuildWorld();
     Put64(Game(APC_RVA_ROOT_API), 0);
     fake_start(kDefs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
     fake_counts_reset();
     Frames(100);
     CHECK_EQ(fake_counts().read + fake_counts().code_matches, 0);
@@ -598,6 +599,7 @@ static void WaitsForTheEngineApi(void)
     BuildWorld();
     Put64(Game(APC_RVA_ROOT_API), 0);
     fake_start(kDefs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
     fake_frames(36100, DT);
     CHECK(!vpm_running(C()));
     CHECK_LOG("gave up after 600 s: the engine API is not set up yet");
@@ -607,8 +609,8 @@ static void WaitsForTheEngineApi(void)
 static void RefusesWhatIsNotAsReviewed(void)
 {
     static const char* const texts[] = {
-        "disabled: Native instruction mismatch",
-        "disabled: Image instruction mismatch",
+        "disabled: Native instruction changed (game.dll 0x12FE461)",
+        "disabled: Image instruction changed (helldivers2.exe 0x31E030)",
         "disabled: Unexpected script API",
         "disabled: Unexpected package API",
         "disabled: Image application API mismatch",
@@ -625,10 +627,72 @@ static void RefusesWhatIsNotAsReviewed(void)
         if (c == 4) Put64(w.app + 400, P(Exe(APC_EXE_CREATE)));
         if (c == 5) Put32(Exe(APC_EXE_FORMAT_SIZE), 16);
         fake_start(kDefs, 1);
+        fake_fire(HF_EVENT_GAME_LOADED);
         Frames(3);
+        /* changed code reads as code not decoded yet: the core waits for it, then stops the component, naming it */
+        if (c < 2) CHECK(vpm_running(C()));
+        if (c < 2) fake_frames(60, 1.0f);
         CHECK(!vpm_running(C()));
         CHECK_LOG(texts[c]);
+        CHECK_EQ(e.acquires + e.creates + e.textures, 0);
     }
+}
+
+/* ---- game.dll's code decoded in parts after HF_EVENT_GAME_LOADED (vpm_when_code_ready) ------------------------- */
+
+/* The lease function's long body (no stand-in there: the image holds its bytes) as the game holds it before its part of
+ * game.dll is decoded, and once it is. */
+static void Encode(void) { memset(Game(0x12FE361u), 0xCC, 359); }
+static void Decode(void) { PutHex(Game(0x12FE361u), Shipped(0, 0x12FE361u)); }
+
+/* Decoded two seconds after the event: the tick reads, leases and binds nothing before; then it initializes on the
+ * frame of the core's next look and leases in the Armory as at load. */
+static void TheCodeDecodedLaterStartsItThen(void)
+{
+    BuildWorld();
+    ForgetProfile();
+    Encode();
+    fake_start(kDefs, 1);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(fake_counts().code_matches, 2); /* the first signature matches, the second part not: the look stops there */
+    fake_counts_reset();
+    Frames(120);
+    CHECK_EQ(fake_counts().code_matches, 8); /* one look every 30 frames */
+    CHECK_EQ(fake_counts().read + fake_counts().log + fake_counts().write, 0);
+    CHECK_NO_LOG("running:");
+    CHECK_EQ(e.acquires + e.creates + e.textures + e.polls, 0);
+    Decode();
+    fake_counts_reset();
+    Frames(30);
+    CHECK_EQ(fake_counts().code_matches, 20);
+    CHECK_LOG("[Armory Preview Cache] running: package leases (prewarm on) and rendered-image retention on; 0 learned items");
+    Top(5, 1);
+    Frames(60);
+    CHECK_EQ(LeaseCount(Package(0)), 1);
+    fake_counts_reset();
+    Frames(60);
+    CHECK_EQ(fake_counts().code_matches, 0);
+}
+
+/* Never decoded: stopped after 60 s naming the instruction; nothing read, leased, created or bound. */
+static void TheCodeNeverDecodedStopsItAfterAMinute(void)
+{
+    BuildWorld();
+    ForgetProfile();
+    Encode();
+    fake_start(kDefs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    Top(5, 1);
+    fake_counts_reset();
+    fake_frames(59, 1.0f);
+    CHECK(vpm_running(C()));
+    fake_frames(1, 1.0f);
+    CHECK(!vpm_running(C()));
+    CHECK_LOG("[Armory Preview Cache] disabled: Native instruction changed (game.dll 0x12FE361)");
+    CHECK_NO_LOG("running:");
+    CHECK_EQ(fake_counts().read + fake_counts().write, 0);
+    CHECK_EQ(e.acquires + e.releases + e.creates + e.textures, 0);
 }
 
 /* With images off (the settings file): no image signature checks, no image work; leases still. */
@@ -1371,11 +1435,15 @@ static void OnceOnlyCosts(void)
     BuildWorld();
     ForgetProfile();
     fake_start(kDefs, 1);
+    /* HF_EVENT_GAME_LOADED: 20 code-byte checks (16 functions; the two long ones in 3 patterns each), the core's wait for
+     * decoded code; nothing else there */
+    fake_counts_reset();
     fake_fire(HF_EVENT_GAME_LOADED);
-    /* The first tick initializes: 20 code-byte checks (16 functions; the two long ones in 3 patterns each), 7 reads of
-     * the engine's application API, then the frame's refresh on the ship (2). */
+    CHECK_EQ(fake_counts().code_matches, 20);
+    CHECK_EQ(fake_counts().read + fake_counts().log, 0);
+    /* The first tick initializes: 7 reads of the engine's application API, then the frame's refresh on the ship (2). */
     FakeCounts c = Frame();
-    CHECK_EQ(c.code_matches, 20);
+    CHECK_EQ(c.code_matches, 0);
     CHECK_EQ(c.read, 9);
     CHECK_EQ(c.log, 1);
     CHECK_EQ(Frame().read, 2);
@@ -1681,6 +1749,8 @@ int main(void)
     RUN(WaitsForTheEngineApi);
     RUN(RefusesWhatIsNotAsReviewed);
     RUN(ImagesOffLeasesOnly);
+    RUN(TheCodeDecodedLaterStartsItThen);
+    RUN(TheCodeNeverDecodedStopsItAfterAMinute);
     RUN(FirstVisitRetainsAndLeases);
     RUN(LeavingReleasesAndSaves);
     RUN(RevisitShowsTheCacheEarly);

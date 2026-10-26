@@ -8,10 +8,10 @@
  * contract first. Bindings are checked before every game update (prune) and released through the same setters.
  *
  * Calls into the game and the engine (function pointers at their build 25480438 addresses, checked by their code bytes
- * at start): game.dll set_texture 0x14499E0, set_uv 0x143EEF0, set_size 0x1447160, set_alpha 0x1448AD0, material
- * 0x144F800, register_image 0x1392680; helldivers2.exe create 0x31AF50, destroy 0x31B360, register 0x31E030. Stores into
- * game memory (plain stores, as the Lua's FFI stores): the manager's working atlas pointer (+11112), a widget's bound byte
- * (+2005) and a record's invalidation byte (+68). */
+ * before start, by the core's wait for decoded code): game.dll set_texture 0x14499E0, set_uv 0x143EEF0, set_size
+ * 0x1447160, set_alpha 0x1448AD0, material 0x144F800, register_image 0x1392680; helldivers2.exe create 0x31AF50,
+ * destroy 0x31B360, register 0x31E030. Stores into game memory (plain stores, as the Lua's FFI stores): the manager's
+ * working atlas pointer (+11112), a widget's bound byte (+2005) and a record's invalidation byte (+68). */
 #include "apc.h"
 
 #define BINDINGS 256
@@ -40,6 +40,13 @@ static const ApcSignature kExeSignatures[] = {
     {1, 0x31B360u, "48 89 5C 24 08 57 48 83 EC 20 48 8B 1D 97 4E 6F 01 48 8B F9 48 8B 83 38 03 00 00 80 B8 80 14 00"},
     {1, 0x31E030u, "4C 8B C2 8B D1 48 8B 0D CC 21 6F 01 48 8B 89 38 03 00 00 E9 48 B0 DE FF CC CC CC CC CC CC CC CC"},
 };
+
+const ApcSignature* apc_present_signatures(int exe, int* count)
+{
+    *count = exe ? (int)(sizeof kExeSignatures / sizeof kExeSignatures[0])
+                 : (int)(sizeof kSignatures / sizeof kSignatures[0]);
+    return exe ? kExeSignatures : kSignatures;
+}
 
 static struct
 {
@@ -84,13 +91,10 @@ static int AppPointer(uintptr_t app, uint32_t offset, uint32_t rva)
     return ApcPlausible(value) && value == vpm_exe() + rva ? 1 : apc_fail("Image application API mismatch");
 }
 
-/* image_native.lua M.new's checks: the code bytes, the engine API root, the application API's three slots and the
- * texture format size. */
+/* image_native.lua M.new's checks after its code bytes (the core's wait): the engine API root, the application API's
+ * three slots and the texture format size. */
 int apc_present_init(void)
 {
-    if (!apc_signatures_match(kSignatures, (int)(sizeof kSignatures / sizeof kSignatures[0])) ||
-        !apc_signatures_match(kExeSignatures, (int)(sizeof kExeSignatures / sizeof kExeSignatures[0])))
-        return apc_fail("Image instruction mismatch");
     uintptr_t root = ApcGamePointer(APC_RVA_ROOT_API);
     if (!root) return apc_fail("assertion failed!");
     if (root != vpm_exe() + APC_EXE_ROOT_API) return apc_fail("Image API root mismatch");

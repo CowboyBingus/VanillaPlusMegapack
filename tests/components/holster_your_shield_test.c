@@ -803,25 +803,42 @@ static void BindChecksTheFunctionsOnce(void)
     fake_counts_reset();
     fake_fire(HF_EVENT_GAME_LOADED);
     FakeCounts c = fake_counts();
-    /* the three functions, and the re-draw's bytes for its hook: not in this fake image, so refused (the fallback) */
+    /* the three functions, and the re-draw's bytes for its hook: not in this fake image, so not hooked (the fallback) */
     CHECK_EQ(c.code_matches, 4);
     CHECK_EQ(c.hook, 0);
     CHECK_EQ(c.read + c.write, 0);
     CHECK(vpm_ticking(fake_component(0)));
     CHECK_LOG("[Holster Your Shield] Holster Your Shield v1.0 initialized.");
+    /* bytes that do not read as shipped could still be encoded: looked at again on every 30th frame for 60 s, then the
+     * refusal, as vpm_hook words it */
+    CHECK_NO_LOG("hook refused");
+    fake_counts_reset();
+    fake_frames(59, 1.0f);
+    CHECK_EQ(fake_counts().code_matches, 1);
+    CHECK_NO_LOG("is not hooked");
+    fake_frames(1, 1.0f);
+    CHECK_EQ(fake_counts().code_matches, 2); /* the 30th frame, then the 60th: the last look */
+    CHECK_EQ(fake_counts().hook, 0);
     CHECK_LOG("[Holster Your Shield] hook refused: game.dll+0xA95A90 is not the reviewed function");
     CHECK_LOG("[Holster Your Shield] The game's re-draw (game.dll 0xA95A90) is not hooked: a shield the game draws while it is on the back goes back on the next frame.");
+    CHECK(vpm_running(fake_component(0)));
+    fake_counts_reset();
+    fake_frames(120, 1.0f);
+    CHECK_EQ(fake_counts().code_matches + fake_counts().log, 0);
 }
 
+/* A function whose first bytes differ reads as code not decoded yet: the core waits for it, then stops the component. */
 static void BindRefusesAFunctionWhoseFirstBytesDiffer(void)
 {
     World(NULL, 0);
     Game(SET_MODE_RVA)[0] = 0xC3;
     fake_start(kDefs, 1);
     fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK(vpm_running(fake_component(0)) && !vpm_ticking(fake_component(0)));
+    fake_frames(60, 1.0f);
     CHECK(!vpm_running(fake_component(0)));
     CHECK(!vpm_ticking(fake_component(0)));
-    CHECK_LOG("[Holster Your Shield] disabled: game function differs: set_mode");
+    CHECK_LOG("[Holster Your Shield] disabled: game function set_mode changed (game.dll 0x9AC8E0)");
     CHECK_NO_LOG("Stopped:");
     CHECK_EQ(fake_counts().hook, 0); /* nothing hooked for a component that did not start */
 }
@@ -1114,6 +1131,8 @@ static void TheHookRefusedForOtherBytesLeavesTheReStowNextFrame(void)
     /* +4: 0x18, not 0x20 (another build's frame) */
     fake_stand_in(REDRAW_RVA, "48 89 5C 24 18 57 41 54 41 57 48 83 EC 30 41 0F B6 F8 44 8B E2 44 8B 41 08", (void*)GameRedraw);
     Session(0);
+    fake_frames(60, 1.0f); /* the look again every 30th frame for 60 s */
+    w.frame += 60;
     CHECK_LOG("[Holster Your Shield] hook refused: game.dll+0xA95A90 is not the reviewed function");
     CHECK_LOG("is not hooked: a shield the game draws while it is on the back goes back on the next frame.");
     CHECK_EQ(fake_hook_count(), 0);
@@ -1190,6 +1209,121 @@ static void TheHookMovesTheReStowIntoTheDraw(void)
     CHECK_EQ(c.log, 0);
 }
 
+/* ---- game.dll's code decoded in parts after HF_EVENT_GAME_LOADED (vpm_when_code_ready) ------------------------- */
+
+/* The three functions as the game holds them before their part of game.dll is decoded, and once it is. */
+static void EncodeFunctions(void)
+{
+    for (int i = 0; i < 3; i++) memset(Game(kFunctionRvas[i]), 0xCC, 16);
+}
+static void DecodeFunctions(void)
+{
+    for (int i = 0; i < 3; i++) memcpy(Game(kFunctionRvas[i]), kPrologues[i], 16);
+}
+
+/* Still encoded at the event, decoded two seconds later: no tick, no read and no call before (a press does nothing);
+ * then the component starts on the frame of the core's next look and works as when it started at load. */
+static void TheFunctionsDecodedLaterStartItThen(void)
+{
+    World(NULL, 0);
+    SetRow(SHIELD, SHIELD, 2, 2);
+    EncodeFunctions();
+    fake_start(kDefs, 1);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(fake_counts().code_matches, 1); /* the first function does not match: the look stops there */
+    CHECK(vpm_running(fake_component(0)) && !vpm_ticking(fake_component(0)));
+    fake_counts_reset();
+    KeyDown();
+    Frames(120);
+    KeyUp();
+    FakeCounts c = fake_counts();
+    CHECK_EQ(c.code_matches, 4); /* one look every 30 frames */
+    CHECK_EQ(c.read + c.write + c.hook + c.log, 0);
+    CHECK_CALLS("");
+    CHECK_EQ(Held(), SHIELD);
+    DecodeFunctions();
+    fake_counts_reset();
+    Frames(30);
+    CHECK_LOG("[Holster Your Shield] Holster Your Shield v1.0 initialized.");
+    CHECK(vpm_ticking(fake_component(0)));
+    CHECK_EQ(fake_counts().code_matches, 4); /* the three functions and the re-draw's bytes */
+    JumpTo(SET_ITEM_RVA, (uintptr_t)GameSetItem);
+    JumpTo(SET_MODE_RVA, (uintptr_t)GameSetMode);
+    JumpTo(SEND_HELD_RVA, (uintptr_t)GameSendHeld);
+    Settle();
+    ClearCalls();
+    Press();
+    CHECK_CALLS(Holster(SHIELD));
+    Frame();
+    CHECK_LOG("Shield to the back: done (held 0, mode 0).");
+}
+
+/* Never decoded: stopped after 60 s naming the first function; no tick, no read, no call, no hook. */
+static void TheFunctionsNeverDecodedStopItAfterAMinute(void)
+{
+    World(NULL, 0);
+    SetRow(SHIELD, SHIELD, 2, 2);
+    EncodeFunctions();
+    fake_stand_in(REDRAW_RVA, REDRAW_SHIPPED, (void*)GameRedraw);
+    fake_start(kDefs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_counts_reset();
+    KeyDown();
+    fake_frames(59, 1.0f);
+    CHECK(vpm_running(fake_component(0)));
+    fake_frames(1, 1.0f);
+    KeyUp();
+    CHECK(!vpm_running(fake_component(0)) && !vpm_ticking(fake_component(0)));
+    CHECK_LOG("[Holster Your Shield] disabled: game function set_item changed (game.dll 0x9ABC30)");
+    CHECK_NO_LOG("initialized");
+    CHECK_NO_LOG("Stopped:");
+    CHECK_EQ(fake_counts().read + fake_counts().write + fake_counts().hook, 0);
+    CHECK_EQ(fake_hook_count(), 0);
+    CHECK_CALLS("");
+    CHECK_EQ(Held(), SHIELD);
+    CHECK_EQ(Mode(), 2);
+}
+
+/* The three functions decoded at the event, the re-draw two seconds later: the re-stow on the next frame meanwhile,
+ * then the hook on the next 30th frame, and the draw put back inside it from then on. */
+static void TheReDrawDecodedLaterIsHookedThen(void)
+{
+    World(NULL, 0);
+    SetRow(SHIELD, SHIELD, 2, 2);
+    Session(0);
+    CHECK_LOG("Holster Your Shield v1.0 initialized.");
+    CHECK_EQ(fake_hook_count(), 0);
+    CHECK_NO_LOG("re-draw");
+    Settle();
+    ClearCalls();
+    Press(); /* the toggle on, the shield on the back */
+    Frames(2);
+    ClearCalls();
+    GameDraws();
+    Frame(); /* meanwhile: the fallback's re-stow on the next frame */
+    CHECK_CALLS(Holster(SHIELD));
+    Frames(60);
+    CHECK_EQ(fake_hook_count(), 0);
+    fake_stand_in(REDRAW_RVA, REDRAW_SHIPPED, (void*)GameRedraw); /* decoded */
+    fake_counts_reset();
+    Frames(30);
+    CHECK_EQ(fake_counts().hook, 1);
+    CHECK_EQ(fake_counts().code_matches, 1);
+    CHECK_EQ(fake_hook_count(), 1);
+    CHECK_LOG("[Holster Your Shield] The game's re-draw (game.dll 0xA95A90) is hooked: a shield the game draws while it is on the back goes back inside the draw.");
+    CHECK_NO_LOG("hook refused");
+    w.detour = (RedrawFn)fake_hook_detour(fake_game() + REDRAW_RVA);
+    CHECK(w.detour != NULL);
+    ClearCalls();
+    FakeCounts c = WieldCounted(1, 1);
+    CHECK_CALLS(Then(GameDraw(1, 1, 1), Holster(SHIELD)));
+    CHECK_EQ(c.read, 31);
+    fake_counts_reset();
+    Frames(300);
+    CHECK_EQ(fake_counts().code_matches + fake_counts().hook, 0);
+}
+
 int main(void)
 {
     RUN(APressWithTheShieldInHandPutsItOnTheBack);
@@ -1215,6 +1349,9 @@ int main(void)
     RUN(TheNothingHeldIdsAreReadAtLoad);
     RUN(AnotherBuildStartsNothing);
     RUN(AStopLogsTheSummary);
+    RUN(TheFunctionsDecodedLaterStartItThen);
+    RUN(TheFunctionsNeverDecodedStopItAfterAMinute);
+    RUN(TheReDrawDecodedLaterIsHookedThen);
     RUN(TheHookGoesInAtLoad);
     RUN(AGameDrawWhileHolsteredGoesBackInsideIt);
     RUN(TheRegistersArePassedOnWhole);
