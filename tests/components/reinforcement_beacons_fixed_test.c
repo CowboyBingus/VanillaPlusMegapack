@@ -23,8 +23,9 @@ static const VpmComponentDef* const kDefs[] = {&vpm_component_reinforcement_beac
 #define AT_SPAWN 0x2E0u
 #define DT (1.0f / 60)
 
-#define CHECK_STATUS(text) do { test_checks++; if (strcmp(Status(), text) != 0) { test_failures++; \
-    printf("  FAILED %s:%d: the status is \"%s\", expected \"%s\"\n", __FILE__, __LINE__, Status(), text); } } while (0)
+/* The status now, and the status the frame's tick left (before the game's update and the check after it). */
+#define CHECK_STATUS(text) StatusIs("status", Status(), text, __LINE__)
+#define CHECK_TICK(text) StatusIs("tick's status", g_tickStatus, text, __LINE__)
 
 static void Put32(uint8_t* at, uint32_t v) { memcpy(at, &v, 4); }
 static void Put64(uint8_t* at, uint64_t v) { memcpy(at, &v, 8); }
@@ -33,6 +34,16 @@ static float GetF(const uint8_t* at) { float v; memcpy(&v, at, 4); return v; }
 static uint32_t Get32(const uint8_t* at) { uint32_t v; memcpy(&v, at, 4); return v; }
 static void Global(uint32_t rva, const void* to) { Put64((uint8_t*)fake_game() + rva, (uint64_t)(uintptr_t)to); }
 static const char* Status(void) { return vpm_status(fake_component(0)); }
+static int Posting(void) { return vpm_post_ticking(fake_component(0)); }
+
+static char g_tickStatus[96];
+static void StatusIs(const char* which, const char* actual, const char* expected, int line)
+{
+    test_checks++;
+    if (strcmp(actual, expected) == 0) return;
+    test_failures++;
+    printf("  FAILED %s:%d: the %s is \"%s\", expected \"%s\"\n", __FILE__, line, which, actual, expected);
+}
 
 /* ---- the fake game: test_idle_equivalence.lua's world -------------------------------------------------------------
  * Two player managers, the local player's entity, two beacons (77 owned here, 78 a teammate's) with positions, up to
@@ -166,13 +177,39 @@ static void Land(void)
 static void Xy(float x, float y) { PutF(w.p + AT_XY, x); PutF(w.p + AT_XY + 4, y); }
 static float X(void) { return GetF(w.p + AT_XY); }
 static float Y(void) { return GetF(w.p + AT_XY + 4); }
-static void Frame(void) { fake_frames(1, DT); }
 
-static void Started(void)
+/* ---- frames: the engine's, with the core's hook of game.dll's update (in game once its code is decoded) --------- *
+ * The tick, then the game's update (the tick's status and reads noted, then the step a test put inside it), then the
+ * check after the update. Without the hook (the core's fallback) both checks run in HellForge's callback, before the
+ * update's step. */
+
+static int g_hooked;              /* the session has the core's hook */
+static void (*g_inside)(void);    /* a step inside the next frame's update, between the two checks */
+static uint32_t g_tickReads;      /* the reads of the frame's tick */
+
+static void TheGameUpdates(float dt)
 {
+    void (*step)(void) = g_inside;
+    snprintf(g_tickStatus, sizeof g_tickStatus, "%s", Status());
+    g_tickReads = fake_counts().read;
+    g_inside = NULL;
+    if (step != NULL) step();
+}
+
+static void Frames(int n) { fake_engine_frames(n, DT); }
+static void Frame(void) { Frames(1); }
+
+static void StartedOn(int hooked)
+{
+    g_hooked = hooked;
+    g_inside = NULL;
+    if (hooked) fake_frame_update(1);
+    fake_after_tick(TheGameUpdates);
     fake_start(kDefs, 1);
     fake_fire(HF_EVENT_GAME_LOADED);
 }
+
+static void Started(void) { StartedOn(1); }
 
 /* A two-player mission with the local player's own beacon: alive, queued, corrected to the beacon's 11, 22. */
 static void Corrected(void)
@@ -466,7 +503,7 @@ static void StagedStartupThenCorrection(void)
     Started();
     CHECK_LOG("[Reinforcement Beacons Fixed] waiting_for_reinforcement");
     CHECK(vpm_ticking(fake_component(0)));
-    fake_frames(2, DT);
+    Frames(2);
     CHECK_STATUS("waiting_for_game_data:player_manager");
     Global(PM_GLOBAL, w.pm);
     Frame();
@@ -490,7 +527,8 @@ static void StagedStartupThenCorrection(void)
     Frame(); /* the unused beacon, while queued */
     Commit(1);
     Frame();
-    CHECK_STATUS("beacon_spawn_centered");
+    CHECK_TICK("beacon_spawn_centered");
+    CHECK_STATUS("reinforcement_already_centered"); /* the check after the update */
     CHECK(X() == 11 && Y() == 22);
     CHECK(GetF(w.pm + 0x114) == 9 && GetF(w.pm + 0x12C) == 5 && Get32(w.used) == 1 && w.b1[20] == 1);
     CHECK_LOG("beacon_spawn_centered (corrections=1; beacon beacon=77 from=50.000000,60.000000 to=11.000000,22.000000 association=used)");
@@ -532,7 +570,7 @@ static void ReloadForgetsAssociations(void)
     Global(PM_GLOBAL, NULL);
     Frame();
     Global(PM_GLOBAL, w.pm);
-    fake_frames(2, DT);
+    Frames(2);
     CHECK_STATUS("beacon_association_unavailable");
     CHECK_NO_LOG("corrections=2");
     Land();
@@ -615,7 +653,8 @@ static void SoloAnchorIsFrozen(void)
     Commit(1);
     Xy(120, 130);
     Frame();
-    CHECK_STATUS("solo_spawn_centered");
+    CHECK_TICK("solo_spawn_centered");
+    CHECK_STATUS("reinforcement_already_centered");
     CHECK(X() == 11 && Y() == 22);
     CHECK(GetF(w.pm + 0x114) == 9 && GetF(w.pm + 0x12C) == 5 && Get32(w.used) == 1 && w.b1[20] == 1);
     Frame();
@@ -627,71 +666,63 @@ static void SoloAnchorIsFrozen(void)
     CHECK_STATUS("waiting_for_reinforcement");
 }
 
-/* The calls per frame (test_startup.lua's frame_budget pins, here HfApi.read; game.dll globals are plain loads).
- * Between deaths only the gate runs; the snapshot runs while queued or pending, once per frame. */
-static void FrameBudget(void)
+/* One frame's reads: the tick's (the 1:1 port's one check) and the check's after the update. Without the hook the two
+ * run back to back and only their sum is seen. */
+#define READS(tick, post) do { fake_counts_reset(); Frame(); uint32_t all_ = fake_counts().read; \
+    if (g_hooked) { CHECK_EQ(g_tickReads, tick); CHECK_EQ(all_ - g_tickReads, post); } \
+    else CHECK_EQ(all_, (tick) + (post)); } while (0)
+
+/* The calls per frame, tick + post (test_startup.lua's frame_budget pins, here vpm_read; game.dll globals are plain
+ * loads). Between deaths only the gate runs, and no post check; the snapshot runs while queued or pending, at both
+ * points, as the Lua's step and after-update check. */
+static void FrameBudgetOn(int hooked)
 {
     MakeWorld();
-    Started();
+    StartedOn(hooked);
     Global(PM_GLOBAL, NULL);
-    fake_counts_reset();
-    Frame();
-    CHECK_EQ(fake_counts().read, 0); /* loading (the Lua: 1) */
+    READS(0, 0); /* loading (the Lua: 1) */
     CHECK_STATUS("waiting_for_game_data:player_manager");
     Global(PM_GLOBAL, w.pm);
     Frame();
-    fake_counts_reset();
-    Frame();
-    CHECK_EQ(fake_counts().read, 1); /* on the ship (the Lua: 2) */
+    READS(1, 0); /* on the ship (the Lua: 2) */
     CHECK_EQ(fake_counts().log, 0);
     Mission(2);
     Beacon(77, 11, 22);
     fake_counts_reset();
-    fake_frames(100, DT);
+    Frames(100);
     CHECK_EQ(fake_counts().read, 100); /* alive in a mission with a beacon out (the Lua: 2 per frame) */
     CHECK_EQ(fake_counts().log + fake_counts().write, 0);
+    CHECK(!Posting());
     Die();
-    fake_counts_reset();
-    Frame();
-    CHECK_EQ(fake_counts().read, 11); /* the death's frame: the gate, then the snapshot (the Lua: 30) */
-    fake_counts_reset();
-    Frame();
-    CHECK_EQ(fake_counts().read, 10); /* still queued (the Lua: 28) */
+    READS(11, 10); /* the death's frame: the gate, then the snapshot; the snapshot after the update (the Lua: 30) */
+    CHECK(Posting());
+    READS(10, 10); /* still queued (the Lua: 28) */
     CHECK_EQ(fake_counts().log, 0);
     Commit(1);
-    fake_counts_reset();
-    Frame();
-    CHECK_EQ(fake_counts().read, 21); /* the snapshot, its re-read, the write's read-back (the Lua: 42 + 1) */
+    READS(21, 10); /* the snapshot, its re-read, the read-back; the snapshot after the update (the Lua: 42 + 1) */
     CHECK_EQ(fake_counts().write, 0);
     CHECK(X() == 11 && Y() == 22);
-    fake_counts_reset();
-    Frame();
-    CHECK_EQ(fake_counts().read, 10); /* the correction held (the Lua: 28) */
+    READS(10, 10); /* the correction held (the Lua: 28) */
     CHECK_STATUS("reinforcement_already_centered");
     Mission(1);
     Land();
-    fake_counts_reset();
-    Frame();
-    CHECK_EQ(fake_counts().read, 5); /* landed solo: the last full check (the Lua: 9) */
+    READS(5, 0); /* landed solo: the last full check, which stops the post check (the Lua: 9) */
     CHECK_STATUS("waiting_for_reinforcement");
-    fake_counts_reset();
-    Frame();
-    CHECK_EQ(fake_counts().read, 1); /* alive solo (the Lua: 2) */
+    CHECK(!Posting());
+    READS(1, 0); /* alive solo (the Lua: 2) */
     Die();
     Row(0, 90, 100);
-    fake_counts_reset();
-    Frame();
-    CHECK_EQ(fake_counts().read, 8); /* the solo death: gate, snapshot, the fallback source (the Lua: 25) */
-    fake_counts_reset();
-    Frame();
-    CHECK_EQ(fake_counts().read, 6); /* the anchor held, not read again (the Lua: 20) */
+    READS(8, 6); /* the solo death: gate, snapshot, the fallback source; the snapshot after the update (the Lua: 25) */
+    READS(6, 6); /* the anchor held, not read again (the Lua: 20) */
     Beacon(77, 90, 100);
     Commit(1);
-    fake_counts_reset();
-    Frame();
-    CHECK_EQ(fake_counts().read, 25); /* two solo snapshots with a beacon and the read-back */
-    CHECK(X() == 15 && Y() == 25);    /* the fallback position when the anchor appeared */
+    READS(25, 12); /* two solo snapshots with a beacon and the read-back; the snapshot after the update */
+    CHECK(X() == 15 && Y() == 25); /* the fallback position when the anchor appeared */
 }
+
+static void FrameBudget(void) { FrameBudgetOn(1); }
+/* Without the core's hook the check after the update runs right after the tick: the same calls. */
+static void FrameBudgetWithoutTheHook(void) { FrameBudgetOn(0); }
 
 /* The player layout is read only once the local player is queued or pending, so an unsupported one is met at the
  * death, and stops the component. */
@@ -813,7 +844,7 @@ static void ChangedManagerIsNoticed(void)
     Xy(50, 60);
     Global(PM_GLOBAL, w.pm2);
     Frame();
-    CHECK_STATUS("waiting_for_reinforcement");
+    CHECK_TICK("waiting_for_reinforcement");
     CHECK(GetF(w.pm + AT_XY) == 50 && GetF(w.pm2 + AT_XY) == 50);
     Global(PM_GLOBAL, w.pm);
     Spawn(3);
@@ -829,13 +860,142 @@ static void ChangedManagerIsNoticed(void)
     CHECK_NO_LOG("corrections=2");
 }
 
+/* ---- the check after the game's update (the core's post-update tick) ------------------------------------------- */
+
+static void CommitOne(void) { Commit(1); }
+static void LandInTheUpdate(void) { Land(); }
+
+/* Queued at the tick, committed inside the game's update: the check after the update corrects it in the same frame,
+ * before the engine's world loop and the frame's render use the scattered X, Y (the Lua and the 1:1 port corrected it
+ * on the next frame). A landing inside the update ends the post check in that frame. */
+static void CommitInsideTheUpdate(void)
+{
+    MakeWorld();
+    Started();
+    Mission(2);
+    Beacon(77, 11, 22);
+    Frame();
+    CHECK(!Posting());
+    Die();
+    Frame();
+    CHECK(Posting());
+    g_inside = CommitOne;
+    READS(10, 21); /* the tick's snapshot (queued); after the update the snapshot, its re-read, the read-back */
+    CHECK_TICK("waiting_for_reinforcement");
+    CHECK_STATUS("beacon_spawn_centered");
+    CHECK(X() == 11 && Y() == 22);
+    CHECK_LOG("beacon_spawn_centered (corrections=1; beacon beacon=77 from=50.000000,60.000000 to=11.000000,22.000000 association=used)");
+    READS(10, 10);
+    CHECK_STATUS("reinforcement_already_centered");
+    g_inside = LandInTheUpdate;
+    READS(10, 4); /* the tick: held; after the update: landed (co-op), the post check stops */
+    CHECK_STATUS("waiting_for_reinforcement");
+    CHECK(!Posting());
+    READS(1, 0);
+    CHECK_NO_LOG("corrections=2");
+}
+
+/* The Lua's condition, not the tick's: queued while this machine does not own the local player, the tick follows the
+ * snapshot every frame, but nothing is in progress for the check after the update. */
+static void NotOwnedHasNoCheckAfterTheUpdate(void)
+{
+    MakeWorld();
+    Started();
+    Mission(2);
+    Beacon(77, 11, 22);
+    Frame();
+    w.entity[20] = 0;
+    Die();
+    READS(1 + 3, 0); /* the gate, then the snapshot up to the ownership (mode, player block, local entity) */
+    CHECK(!Posting());
+    READS(3, 0);
+    CHECK(!Posting());
+    w.entity[20] = 1;
+    READS(10, 10); /* owned again: in progress, both checks */
+    CHECK(Posting());
+}
+
+/* Without the core's hook both checks run before the update: the commit inside it is corrected at the next frame's
+ * tick, as in the 1:1 port. */
+static void CommitInsideTheUpdateWithoutTheHook(void)
+{
+    MakeWorld();
+    StartedOn(0);
+    Mission(2);
+    Beacon(77, 11, 22);
+    Frame();
+    Die();
+    Frame();
+    CHECK(Posting()); /* it runs, right after the tick */
+    g_inside = CommitOne;
+    READS(10, 10);
+    CHECK(X() == 50 && Y() == 60);
+    READS(21, 10);
+    CHECK(X() == 11 && Y() == 22);
+    CHECK_LOG("corrections=1;");
+}
+
+/* The core stopping the component while a correction is pending: the X, Y put back, the post check gone with the tick,
+ * and nothing read afterwards. */
+static void PostCheckStopsWithTheComponent(void)
+{
+    MakeWorld();
+    Started();
+    Corrected();
+    CHECK(Posting() && X() == 11 && Y() == 22);
+    vpm_core_stop(fake_component(0), "test");
+    CHECK(!Posting() && !vpm_ticking(fake_component(0)));
+    CHECK(X() == 50 && Y() == 60);
+    CHECK_LOG("disabled: test; correction_restored");
+    fake_counts_reset();
+    Frames(3);
+    CHECK_EQ(fake_counts().read, 0);
+}
+
+/* The player manager's page made read-only inside the update, after its first correction passed the page check: the
+ * second death's store in the check after the update faults. The core's guard stops the component there; nothing was
+ * written and nothing is pending, so its stop leaves the X, Y; the game goes on without it. */
+static void CommitOnAReadOnlyPage(void)
+{
+    Commit(1);
+    DWORD old;
+    VirtualProtect(w.pm, 0x440, PAGE_READONLY, &old); /* lint-ok: C1,C3 the test makes the fake memory read-only */
+}
+
+static void FaultAfterTheUpdate(void)
+{
+    MakeWorld();
+    Started();
+    Corrected();
+    Land();
+    Frame();
+    Die();
+    Put32(w.used, 0);
+    Put32(w.rm + 12, 1);
+    Frame();
+    CHECK(Posting());
+    g_inside = CommitOnAReadOnlyPage;
+    Frame();
+    DWORD old;
+    VirtualProtect(w.pm, 0x440, PAGE_READWRITE, &old); /* lint-ok: C1,C3 and writable again */
+    CHECK(!vpm_running(fake_component(0)) && !Posting() && !vpm_ticking(fake_component(0)));
+    CHECK_LOG("[Reinforcement Beacons Fixed] disabled: ");
+    CHECK_NO_LOG("corrections=2");
+    CHECK_NO_LOG("correction_restored");
+    CHECK(X() == 50 && Y() == 60);
+    fake_counts_reset();
+    Frames(3);
+    CHECK_EQ(fake_counts().read, 0);
+}
+
 /* ---- the idle gate's transitions (test_startup.lua's last block) ------------------------------------------------ */
 
+/* The frame's tick decides (test_startup.lua checked patch.apply alone); the check after the update follows. */
 static void Step(uint32_t spawn, const char* expected)
 {
     Spawn(spawn);
     Frame();
-    CHECK_STATUS(expected);
+    CHECK_TICK(expected);
 }
 
 /* The beacon the solo queue placed at x, y, used by the local player, and the pod scattered around it. */
@@ -966,12 +1126,13 @@ static void SourceWaitForgets(void)
     Global(CAMERA_GLOBAL, w.camera);
     fake_counts_reset();
     Frame();
-    CHECK_EQ(fake_counts().read, 1 + 6); /* the gate, then the snapshot: nothing was being followed */
+    CHECK_EQ(g_tickReads, 1 + 6); /* the gate, then the snapshot: nothing was being followed */
+    CHECK_EQ(fake_counts().read, 1 + 6 + 6); /* then the snapshot after the update: queued, so in progress */
     CHECK_STATUS("waiting_for_reinforcement");
     QueuedAt(90, 100);
     Spawn(2);
     Frame();
-    CHECK_STATUS("solo_anchor_unavailable"); /* the row was seen before it could be frozen: not this death's */
+    CHECK_TICK("solo_anchor_unavailable"); /* the row was seen before it could be frozen: not this death's */
     CHECK(X() == 120 && Y() == 130);
 }
 
@@ -1073,7 +1234,8 @@ static void UnitSourcePosition(void)
     Frame();
     /* gate 1, snapshot 6, the source 10: the lookup's header and its one probe, the entity record, the registry block,
      * the generation, the object, its vtable, the method, the scene and its position (the Lua: 12 with the two globals) */
-    CHECK_EQ(fake_counts().read, 1 + 6 + 10);
+    CHECK_EQ(g_tickReads, 1 + 6 + 10);
+    CHECK_EQ(fake_counts().read, 1 + 6 + 10 + 6); /* the snapshot after the update: the source is not read again */
     QueuedAt(90, 100);
     Spawn(2);
     Frame();
@@ -1100,9 +1262,11 @@ static void UnitSourcePosition(void)
 }
 
 /* ---- the main scenario (test_idle_equivalence.lua's, 2,100 frames) ---------------------------------------------- *
- * A step's "before" runs before that frame's tick, its "during" (the game's update in the Lua) after it: the C port
- * checks once per frame, so it sees "during" changes on the next frame. The Lua's error in an update below (frame 1430)
- * has no HellForge equivalent and is left out. */
+ * A step's "before" runs before that frame's tick, its "during" inside the game's update, between the tick and the
+ * check after the update. With the core's hook the check after the update sees a "during" change in the same frame, as
+ * the Lua's after-update check saw its "during" steps; without it both checks run before the update, so a "during"
+ * change is seen on the next frame, as in the 1:1 port. The Lua's error in an update below (frame 1430) has no
+ * HellForge equivalent and is left out. */
 
 typedef struct MainStep { int frame; int during; int what; } MainStep;
 enum { M_MISSION2, M_BEACON77, M_DIE, M_COMMIT1, M_LAND, M_BEACON78, M_COMMIT2, M_SHIP, M_RESTART, M_INITIAL, M_SOLO1,
@@ -1149,9 +1313,12 @@ static const MainStep kMain[] = {
     {1900, 1, M_DIE}, {1910, 0, M_LAYOUT},
 };
 
-/* The frames each correction is written on (a frame after its commit) and where. */
-typedef struct Expected { int frame; float x, y; } Expected;
-static const Expected kCorrections[] = {{321, 11, 22}, {541, 40, 50}, {1021, 15, 25}, {1221, 30, 40}, {1421, 30, 40}};
+/* The commits each correction follows (all inside the update) and where it puts the pod. */
+typedef struct Expected { int commit; float x, y; } Expected;
+static const Expected kCorrections[] = {{320, 11, 22}, {540, 40, 50}, {1020, 15, 25}, {1220, 30, 40}, {1420, 30, 40}};
+
+static int g_mainFrame;
+static float g_aroundTheStep[4]; /* X, Y right before the update's step and right after it */
 
 static void RunMainSteps(int frame, int during)
 {
@@ -1159,30 +1326,60 @@ static void RunMainSteps(int frame, int during)
         if (kMain[i].frame == frame && kMain[i].during == during) MainEvent(kMain[i].what);
 }
 
-static void MainScenario(void)
+static void MainDuring(void)
+{
+    g_aroundTheStep[0] = X();
+    g_aroundTheStep[1] = Y();
+    RunMainSteps(g_mainFrame, 1);
+    g_aroundTheStep[2] = X();
+    g_aroundTheStep[3] = Y();
+}
+
+/* The correction expected on this frame (its index), or -1: on the commit's frame with the hook, the next without. */
+static int CorrectionOn(int frame)
+{
+    for (int i = 0; i < (int)(sizeof kCorrections / sizeof kCorrections[0]); i++)
+        if (kCorrections[i].commit + !g_hooked == frame) return i;
+    return -1;
+}
+
+/* Whether the component wrote X, Y on this frame: before the update's step (the tick, or both checks without the hook)
+ * or after it (the check after the update). before: X, Y when the frame began. */
+static int WroteXy(const float* before)
+{
+    return g_aroundTheStep[0] != before[0] || g_aroundTheStep[1] != before[1] || X() != g_aroundTheStep[2] ||
+           Y() != g_aroundTheStep[3];
+}
+
+static void PlayMain(int hooked)
 {
     MakeWorld();
-    Started();
+    StartedOn(hooked);
     int corrected = 0;
-    uint32_t idle_reads = 0, idle_frames = 0, idle_logs = 0;
-    for (int frame = 1; frame <= 2100; frame++)
+    uint32_t idle_reads = 0, idle_frames = 0, idle_logs = 0, idle_posts = 0;
+    for (g_mainFrame = 1; g_mainFrame <= 2100; g_mainFrame++)
     {
+        int frame = g_mainFrame;
         RunMainSteps(frame, 0);
-        float x = X(), y = Y();
-        int expected = -1;
+        const float before[2] = {X(), Y()};
+        g_inside = MainDuring;
         fake_counts_reset();
         Frame();
         int idle = (frame > 110 && frame < 300) || (frame > 710 && frame < 800) || (frame > 1270 && frame < 1400);
-        if (idle) { idle_reads += fake_counts().read; idle_logs += fake_counts().log; idle_frames++; }
-        for (int i = 0; i < (int)(sizeof kCorrections / sizeof kCorrections[0]); i++)
-            if (kCorrections[i].frame == frame) expected = i;
+        if (idle)
+        {
+            idle_reads += fake_counts().read;
+            idle_logs += fake_counts().log;
+            idle_posts += (uint32_t)Posting();
+            idle_frames++;
+        }
+        int expected = CorrectionOn(frame);
         if (expected >= 0)
         {
-            CHECK(X() == kCorrections[expected].x && Y() == kCorrections[expected].y);
+            CHECK(WroteXy(before) && X() == kCorrections[expected].x && Y() == kCorrections[expected].y);
             corrected++;
         }
-        else if (X() != x || Y() != y) { test_failures++; printf("  FAILED: an X, Y written on frame %d\n", frame); }
-        RunMainSteps(frame, 1);
+        else if (WroteXy(before)) { test_failures++; printf("  FAILED: an X, Y written on frame %d\n", frame); }
     }
     CHECK_EQ(corrected, 5);
     CHECK_LOG("corrections=5;");
@@ -1190,10 +1387,13 @@ static void MainScenario(void)
     CHECK_LOG("initial_deployment_unchanged");
     CHECK_LOG("association=unmarked_remote)");
     CHECK_LOG("disabled: Unsupported player layout");
-    CHECK(!vpm_running(fake_component(0)));
+    CHECK(!vpm_running(fake_component(0)) && !Posting());
     CHECK_EQ(idle_reads, idle_frames); /* 1 read per idle frame: the spawn state */
-    CHECK_EQ(idle_logs, 0);
+    CHECK_EQ(idle_logs + idle_posts, 0); /* no log, no check after the update */
 }
+
+static void MainScenario(void) { PlayMain(1); }
+static void MainScenarioWithoutTheHook(void) { PlayMain(0); }
 
 int main(void)
 {
@@ -1212,12 +1412,18 @@ int main(void)
     RUN(EveryGameplayMode);
     RUN(SoloAnchorIsFrozen);
     RUN(FrameBudget);
+    RUN(FrameBudgetWithoutTheHook);
     RUN(LayoutMetAtTheDeath);
     RUN(InvalidPointersRefuse);
     RUN(RefusalRestoresTheCorrection);
     RUN(RestoresOnlyItsOwnWrite);
     RUN(ReadOnlyTargetIsRefused);
     RUN(ChangedManagerIsNoticed);
+    RUN(CommitInsideTheUpdate);
+    RUN(NotOwnedHasNoCheckAfterTheUpdate);
+    RUN(CommitInsideTheUpdateWithoutTheHook);
+    RUN(PostCheckStopsWithTheComponent);
+    RUN(FaultAfterTheUpdate);
     RUN(GateInitialDeploymentAndAliveToPending);
     RUN(GateSoloDeaths);
     RUN(GateAmbiguousAndLateRows);
@@ -1225,5 +1431,6 @@ int main(void)
     RUN(ReaderRefusesUnsupportedLayouts);
     RUN(UnitSourcePosition);
     RUN(MainScenario);
+    RUN(MainScenarioWithoutTheHook);
     TEST_END();
 }
