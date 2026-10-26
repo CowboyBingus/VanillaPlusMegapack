@@ -1558,6 +1558,154 @@ static void MissionEndCounters(void)
         "short_ends=1 table_moves=0 protection_queries=1");
 }
 
+/* ---- the detailed lines (the pack's Diagnostics option) and the mark's describe line ------------------------- */
+
+static VpmOption* PackOption(const char* id)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack() && strcmp(vpm_option_def(vpm_option_at(i))->id, id) == 0)
+            return vpm_option_at(i);
+    return NULL;
+}
+
+static void Diagnostics(int detailed) { CHECK(vpm_option_apply(PackOption("diagnostics"), detailed ? 2 : 1)); }
+
+/* A dive in 20 cm of water, then its end, and one in water too deep, then its end. */
+static void DiveScenario(void)
+{
+    Frames(1);
+    CHECK(StatusIs("airborne_reference") && swd.pending.valid);
+    Dive(0);
+    Frames(1);
+    CHECK(StatusIs("dive_ended") && !swd.pending.valid);
+    PutF(w.water + 24, (float)((double)GetF(w.position + 8) + 0.45));
+    Dive(1);
+    Frames(1);
+    CHECK(StatusIs("water_too_deep"));
+    Dive(0);
+    Frames(1);
+    CHECK(StatusIs("dive_ended"));
+}
+
+static const char* const kDetailLines[] = {
+    "[Shallow Water Diving] check after the game's update: on",
+    "[Shallow Water Diving] local avatar 222: dive controller 0x",
+    "[Shallow Water Diving] lease taken: water record 0x",
+    "[Shallow Water Diving] check: airborne_reference (water 0.20 above the root, max 0.20; stance 2, dive time 0.000, "
+        "landing 0.000, submersion 0.011)",
+    "[Shallow Water Diving] lease given back: dive_ended (restore: restored); observed=1 protected=1 restored=1",
+    "[Shallow Water Diving] check: dive_ended\n",
+    "[Shallow Water Diving] check: water_too_deep (water 0.45 above the root, max 0.20;",
+};
+
+static void DetailedLines(void)
+{
+    for (int detailed = 0; detailed < 2; detailed++)
+    {
+        fake_setup();
+        MakeWorld(0);
+        Started();
+        Diagnostics(detailed);
+        fake_log_clear();
+        DiveScenario();
+        for (int i = 0; i < (int)(sizeof kDetailLines / sizeof kDetailLines[0]); i++)
+        {
+            if (detailed) CHECK_LOG(kDetailLines[i]);
+            else CHECK_NO_LOG(kDetailLines[i]);
+        }
+        /* the page check's pages and the startup debt in the lease line */
+        if (detailed) CHECK_LOG("startup debt 0.011 s cleared; page checks 1\n");
+        if (!detailed) CHECK_NO_LOG("[Shallow Water Diving] check:");
+        /* a new limit, and the errors of a burst after its first */
+        CHECK(vpm_option_apply(DepthOption(), 0.5));
+        PutF(w.ctl + 0xB84 + 8, NAN);
+        Frames(2);
+        PutF(w.ctl + 0xB84 + 8, 0);
+        CHECK_LOG("[Shallow Water Diving] error: Invalid movement or water value");
+        if (detailed)
+        {
+            CHECK_LOG("[Shallow Water Diving] max dive water depth: 0.50\n");
+            CHECK_LOG("[Shallow Water Diving] error 2 of this burst: Invalid movement or water value\n");
+        }
+        else CHECK_NO_LOG("of this burst");
+    }
+}
+
+/* Idle frames in a mission, the gate's and every 120th's full check, keep their reads and log nothing in either mode;
+ * so do the polls outside a mission. */
+static void DetailedIdleFrames(void)
+{
+    uint32_t reads[2] = {0, 0};
+    for (int detailed = 0; detailed < 2; detailed++)
+    {
+        fake_setup();
+        MakeWorld(0);
+        Started();
+        Diagnostics(detailed);
+        Dive(0);
+        Frames(2); /* the avatar found idle, and the gate armed */
+        CHECK(StatusIs("dive_ended") && Posting());
+        int full = 0;
+        for (int i = 0; i < 480; i++)
+        {
+            uint32_t r = Frame(); /* no write, no log */
+            CHECK(r == 2 || r == 11);
+            full += r == 11;
+            reads[detailed] += r;
+        }
+        CHECK_EQ(full, 4);
+        Put32(w.mission + 8, 0); /* outside a mission: a check every 30th frame */
+        Frames(150);
+        CHECK(StatusIs("waiting_for_mission"));
+        uint32_t polls = 0;
+        for (int i = 0; i < 60; i++)
+        {
+            uint32_t r = Frame();
+            CHECK(r <= 1);
+            polls += r;
+        }
+        CHECK_EQ(polls, 2);
+    }
+    CHECK_EQ(reads[0], reads[1]);
+}
+
+/* Many dives in a short time: the limiter's 20 lines per 600 frames, then its count of the lines left out. */
+static void DetailedLinesThroughTheLimiter(void)
+{
+    Fresh();
+    Diagnostics(1);
+    Dive(0);
+    Frames(1);
+    for (int i = 0; i < 10; i++)
+    {
+        PutF(w.water + 16, 0.011f);
+        Dive(1);
+        Frames(1);
+        Dive(0);
+        Frames(1);
+    }
+    CHECK_EQ(swd.protected, 10);
+    CHECK_NO_LOG("detailed lines suppressed");
+    Frames(600);
+    Dive(1);
+    Frames(1);
+    CHECK_LOG("[Shallow Water Diving] ");
+    CHECK_LOG(" detailed lines suppressed (at most 20 per 600 frames)\n[Shallow Water Diving] lease taken");
+}
+
+/* The mark's line: the status, then the describe text. */
+static void MarkDescribes(void)
+{
+    Fresh();
+    Frames(1);
+    CHECK(swd.pending.valid);
+    fake_log_clear();
+    CHECK(vpm_option_apply(PackOption("note_problem"), 1));
+    CHECK_LOG("[core] MARK 1: Shallow Water Diving: airborne_reference | airborne_reference; local avatar 222 (controller 0x");
+    CHECK_LOG("); lease held at 0x");
+    CHECK_LOG("; max depth 0.20; check after update on; errors in burst 0; observed=1 protected=1 restored=0\n");
+}
+
 int main(void)
 {
     RUN(MissionModes);
@@ -1593,5 +1741,9 @@ int main(void)
     RUN(RefusedPostTickLater);
     RUN(ConstantsWaitForTheFirstDive);
     RUN(MissionEndCounters);
+    RUN(DetailedLines);
+    RUN(DetailedIdleFrames);
+    RUN(DetailedLinesThroughTheLimiter);
+    RUN(MarkDescribes);
     TEST_END();
 }

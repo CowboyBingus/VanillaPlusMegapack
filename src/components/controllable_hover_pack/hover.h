@@ -100,6 +100,11 @@ const ChpKey* chp_lease_key(void);
 float chp_lease_original(void);
 int chp_settings_created(void);
 int chp_settings_restorations(void);
+/* For the detailed lines: why the last cancellation waited, how the last lease ended (string literals; "none" before
+ * the first), and the pack's record the last inspection found (0: none). */
+const char* chp_settings_wait(void);
+const char* chp_settings_outcome(void);
+uintptr_t chp_settings_record(void);
 void chp_settings_reset(void);
 
 #ifdef VPM_TEST

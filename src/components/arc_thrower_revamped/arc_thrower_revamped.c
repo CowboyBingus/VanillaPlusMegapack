@@ -50,9 +50,21 @@
  *   updater; the first cycle that stalls in a session is logged ("stalled"), which is what a tick in the wrong place
  *   shows (one arc per press, then the charge stays at 0 while Fire is held).
  * - Dropped: the Lua's update-chain guard (pause after an error below, eight errors stop it: the core's crash guard stops
- *   the component on a fault instead), the shutdown restore (no shutdown event), the developer diagnostics
- *   (ArcThrowerDiagnostics: the shot, hold, idle-reason and release lines; the first stall of a session is logged), the
- *   SHA-256 build gate (the core checks the build), the kernel32 bindings and LuaJIT notes.
+ *   the component on a fault instead), the shutdown restore (no shutdown event), the SHA-256 build gate (the core checks
+ *   the build), the kernel32 bindings and LuaJIT notes.
+ * - The Lua's developer diagnostics (ArcThrowerDiagnostics) are the pack's Detailed lines (vpm_log_detail; nothing in
+ *   Normal mode), each where the component already acts and only on a change: a hold armed (entity, charge entry, its
+ *   index), the full check's reason the assist is idle when it changes (the Lua's idle lines: waiting for the engine
+ *   fire command, the input or a binding unavailable, the weapon, holder or binding changed, an interrupted hold, the
+ *   entry unreadable; without the Lua's 2 s repeat), every stall after the session's first (which Normal logs) and the
+ *   weapon the hold moved to, a charge entry that moved, an entry page checked, each shot (charge before and after, the
+ *   interval: counted only in Detailed mode) and the release with the shot count and min/mean/max interval, a lack of
+ *   progress that asks for the record again, the record found, a lookup's failure (once per run of them), a cleared flag
+ *   set again or its repair failing, a record that no longer checks out, the game's data reloaded, the flag put back at
+ *   stop, and a mission's start and end (with the session's holds, stalls, record lookups and repairs). Left out: the
+ *   Lua's "hold" line (charge, flag and rate every 0.25 s while Fire is held), which is periodic, not a change, and would
+ *   fill the limiter's 20 lines per 10 s by itself. The mark's describe line: the mission, the record and whether it is
+ *   patched (else why not), the hold, the kept Fire slot and the counters.
  *
  * Cost per tick: reads (vpm_read), as the test pins them; in brackets the Lua's ReadProcessMemory calls, as its
  * frame_budget pinned them. The game.dll globals the Lua read are plain loads here, hence the fewer reads.
@@ -71,7 +83,12 @@
  * decoded, for at most 60 s); at HF_EVENT_ENTITIES_READY (or when the code is decoded, if that comes later):
  * component_record, 1 read of the record, set_live, get_live and a log line [the Lua's first update: 23 reads,
  * 3 VirtualQueryEx, 2 VirtualProtectEx, 1 WriteProcessMemory and 6 QueryPerformanceCounter for its scan, which can take
- * more updates]. */
+ * more updates].
+ * The detailed lines add nothing to an idle tick (the gate returns before Maintain and the Fire check) and no game read
+ * or Windows call anywhere. A full Fire check stores and compares its idle reason (two stores, a compare); a driven
+ * tick compares for a shot, and only a shot's tick makes the core's one global read (vpm_detailed) before it counts;
+ * every other line is on a tick that changed something (an arm, a release, a stall, a move, a record change) or an
+ * event, one global read per line (plus, in Detailed mode, the line, at most 20 per 600 ticks). Unmeasured in game. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -152,6 +169,17 @@ static struct
     char why[200];         /* why the record is not patched */
     int codeReady;         /* the fire-mode setter's bytes read as shipped (CodeReady) */
     int entitiesReady;     /* HF_EVENT_ENTITIES_READY came first: CodeReady takes it up */
+    /* the detailed lines (the Lua's ArcThrowerDiagnostics): this full check's reason the assist is idle (the Lua's
+     * state.reason; expired: "; hold expired"), the one said last, the session's counters, this hold's shots */
+    VpmComponent* self;    /* this component (its detailed lines from helpers without it) */
+    const char* reason;
+    int reasonExpired;
+    const char* reasonSaid;
+    int reasonSaidExpired;
+    uint32_t holds, lookups, repairs;
+    int whySaid;           /* the record's failure was said since it was last found */
+    uint32_t shots, intervals;
+    double lastShot, intervalSum, intervalMin, intervalMax;
 } s;
 
 static uint8_t g_charge[RECORD_SIZE];     /* the charge record as read */
@@ -214,7 +242,8 @@ static int FindRecord(void)
     s.record = record;
     if (s.patched && g_charge[AT_AUTO_FIRE] == 1)
     {
-        snprintf(s.why, sizeof s.why, "charge record not found");
+        /* the Lua answered "charge record not found" here too; only the detailed lines show this text */
+        snprintf(s.why, sizeof s.why, "the record found is the one already patched");
         return 0;
     }
     s.patched = EnsureAutoFire(g_charge);
@@ -226,15 +255,25 @@ static void PatchRecord(VpmComponent* self)
 {
     if (s.now < s.nextScan) return;
     s.rescanRequested = 0;
+    s.lookups++;
     int found = FindRecord();
     s.nextScan = s.now + (found ? 1.0 : 5.0);
     if (found)
     {
+        s.whySaid = 0;
+        vpm_log_detail(self, "charge record at 0x%llX checked, its auto-fire flag set (lookup %u)",
+            (unsigned long long)s.record, s.lookups);
         if (s.patchLogged) return;
         s.patchLogged = 1;
         vpm_set_status(self, NULL);
         vpm_log(self, "Charge record ready.");
         return;
+    }
+    if (s.patched) vpm_log_detail(self, "charge record lookup %u: %s", s.lookups, s.why);
+    else if (!s.whySaid)
+    {
+        s.whySaid = 1;
+        vpm_log_detail(self, "charge record lookup %u: %s", s.lookups, s.why);
     }
     if (s.patched || s.scanLogged) return;
     s.scanLogged = 1;
@@ -246,21 +285,27 @@ static void PatchRecord(VpmComponent* self)
 
 /* A poll frame's check of the kept record (one 216-byte read): its flag set again when clear; a record that no longer
  * checks out is never written, it is looked up again at once. */
-static void CheckRecord(void)
+static void CheckRecord(VpmComponent* self)
 {
     if (vpm_read(s.record, g_charge, RECORD_SIZE) && ValidChargeRecord(g_charge))
     {
+        int clear = g_charge[AT_AUTO_FIRE] != 1;
         s.patched = EnsureAutoFire(g_charge);
+        if (!clear) return;
+        s.repairs++;
+        if (s.patched) vpm_log_detail(self, "the charge record's auto-fire flag was clear: set again (repair %u)", s.repairs);
+        else vpm_log_detail(self, "charge record repair failed (%s); retrying", s.why);
         return;
     }
     s.record = 0;
     s.patched = 0;
     s.nextScan = s.now;
+    vpm_log_detail(self, "charge record unavailable or changed; rediscovering");
 }
 
 static void Maintain(VpmComponent* self, int poll)
 {
-    if (s.record != 0 && poll) CheckRecord();
+    if (s.record != 0 && poll) CheckRecord(self);
     if (!s.patched || s.rescanRequested) PatchRecord(self);
 }
 
@@ -280,24 +325,36 @@ static void ClearHold(void)
     s.armed = s.discovering = s.suspended = s.heldKnown = s.progressKnown = s.drove = s.hasPrevious = 0;
     s.discoveryIndex = 0;
     s.drovePeak = 0;
+    s.shots = s.intervals = 0;
+}
+
+/* The hold ends, and why (the Lua's clear_hold(reason)). */
+static void ClearHoldFor(const char* why)
+{
+    ClearHold();
+    s.reason = why;
 }
 
 /* Leaving a mission ends any hold and drops the kept Fire slot. */
-static void PollMission(void)
+static void PollMission(VpmComponent* self)
 {
     int mission = InMission();
     if (s.mission && !mission)
     {
         ClearHold();
         s.fireSlot = s.keptSlot = 0;
+        vpm_log_detail(self, "mission ended: holds=%u stalls=%u record lookups=%u record repairs=%u (this session)",
+            s.holds, s.rescans, s.lookups, s.repairs);
     }
+    else if (!s.mission && mission) vpm_log_detail(self, "mission started");
     s.mission = mission;
 }
 
 /* A press the component follows: armed, or retrying discovery while Fire stays held. Such ticks run the full check. */
 static int Holding(void) { return s.armed || s.discovering; }
 
-static void SuspendHold(void)
+/* The writes pause for at most RECOVERY_WINDOW, and why (the Lua's suspend_hold(now, reason)). */
+static void SuspendHold(const char* why)
 {
     if (!s.suspended)
     {
@@ -305,7 +362,10 @@ static void SuspendHold(void)
         s.suspendedSince = s.now;
     }
     s.hasPrevious = 0;
-    if (s.now - s.suspendedSince >= RECOVERY_WINDOW) ClearHold();
+    s.reason = why;
+    if (s.now - s.suspendedSince < RECOVERY_WINDOW) return;
+    ClearHold();
+    s.reasonExpired = 1;
 }
 
 /* The full resolution from the registry roots, kept: the Fire slot, or 0. */
@@ -431,16 +491,21 @@ static int FlaggedArc(const uint32_t* avatar, uint32_t count, uintptr_t entities
 }
 
 /* The small fire-command table first, so ordinary weapons never walk the charged weapons: 1 with chosen armed-ready (its
- * entity, identity and charge entry), or 0. */
-static int ActiveArc(const uint32_t* avatar, Binding* chosen)
+ * entity, identity and charge entry), or 0 (*why). */
+static int ActiveArc(const uint32_t* avatar, Binding* chosen, const char** why)
 {
     uintptr_t manager = (uintptr_t)vpm_game_u64(TRIGGER_MANAGER), entry = 0;
     uint8_t header[72];
     memset(chosen, 0, sizeof *chosen);
+    *why = "trigger table unreadable";
     if (manager == 0 || !vpm_read(manager + 24, header, sizeof header)) return 0;
     uint32_t count = U32(header);
     uintptr_t entities = (uintptr_t)U64(header + 40), held = (uintptr_t)U64(header + 64);
-    if (count < 1 || count > TRIGGER_LIMIT || entities == 0 || held == 0) return 0;
+    if (count < 1 || count > TRIGGER_LIMIT || entities == 0 || held == 0)
+    {
+        *why = "invalid trigger table";
+        return 0;
+    }
     if (s.discoveryEntities != entities || s.discoveryCount != count)
     {
         s.discoveryIndex = 0;
@@ -450,7 +515,10 @@ static int ActiveArc(const uint32_t* avatar, Binding* chosen)
     uint32_t first = s.discoveryIndex;
     if (!vpm_read(held, g_flags, count)) return 0;
     s.discoveryIndex = 0;
-    if (!FlaggedArc(avatar, count, entities, first, chosen) || ChargeEntry(chosen, &entry) != 1) return 0;
+    *why = "waiting for the engine fire command";
+    if (!FlaggedArc(avatar, count, entities, first, chosen)) return 0;
+    *why = "charge binding unavailable";
+    if (ChargeEntry(chosen, &entry) != 1) return 0;
     chosen->entry = entry;
     return 1;
 }
@@ -464,14 +532,20 @@ static int Revalidate(const uint32_t* avatar, int check)
     Binding* b = &s.resolved;
     uint32_t record[6];
     uintptr_t entry = 0;
-    if (!vpm_read(b->entity, record, sizeof record)) { SuspendHold(); return 0; }
-    if (memcmp(record, b->identity, 24) != 0 || memcmp(avatar, b->avatar, 24) != 0) { ClearHold(); return 0; }
+    if (!vpm_read(b->entity, record, sizeof record)) { SuspendHold("weapon identity unreadable"); return 0; }
+    if (memcmp(record, b->identity, 24) != 0 || memcmp(avatar, b->avatar, 24) != 0)
+    {
+        ClearHoldFor("weapon entity changed");
+        return 0;
+    }
     int owned = LocalWeapon(b->identity[2], avatar[2], !check);
     int found = owned == 1 ? ChargeEntry(b, &entry) : owned;
-    if (found == UNKNOWN) { SuspendHold(); return 0; }
-    if (found == 0) { ClearHold(); return 0; }
+    if (found == UNKNOWN) { SuspendHold(owned == 1 ? "charge binding unavailable" : "weapon holder unavailable"); return 0; }
+    if (found == 0) { ClearHoldFor(owned == 1 ? "charge binding changed" : "weapon holder changed"); return 0; }
     if (entry != b->entry)
     {
+        vpm_log_detail(s.self, "charge entry moved: 0x%llX -> 0x%llX", (unsigned long long)b->entry,
+            (unsigned long long)entry);
         b->entry = entry;
         s.hasPrevious = s.drove = 0;
         s.drovePeak = 0;
@@ -486,10 +560,19 @@ static int Arm(const uint32_t* avatar)
     if (s.discovering && s.now < s.nextDiscovery) return 0;
     s.discovering = 1;
     s.nextDiscovery = s.now + DISCOVERY_INTERVAL;
-    if (!ActiveArc(avatar, &chosen)) return 0;
+    const char* why = NULL;
+    if (!ActiveArc(avatar, &chosen, &why))
+    {
+        s.reason = why;
+        return 0;
+    }
     s.resolved = chosen;
     memcpy(s.resolved.avatar, avatar, 24);
     s.armed = 1;
+    s.holds++;
+    s.reasonSaid = NULL;
+    vpm_log_detail(s.self, "assist armed: entity 0x%llX, charge entry 0x%llX (index %u); hold %u", (unsigned long long)chosen.entity,
+        (unsigned long long)chosen.entry, chosen.index, s.holds);
     s.drove = 0;
     s.drovePeak = 0;
     s.progressKnown = 1;
@@ -518,7 +601,10 @@ static int RecheckStall(VpmComponent* self, const uint32_t* avatar, double value
         vpm_log(self, "entry %#llx stalled (peak %.3f) - checking the current binding (#%u); logged once per session",
             (unsigned long long)s.resolved.entry, s.drovePeak, s.rescans);
     }
-    int found = ActiveArc(avatar, &chosen);
+    else vpm_log_detail(self, "entry %#llx stalled (peak %.3f) - checking the current binding (#%u)",
+        (unsigned long long)s.resolved.entry, s.drovePeak, s.rescans);
+    const char* why = NULL;
+    int found = ActiveArc(avatar, &chosen, &why);
     s.droveSince = s.now;
     s.drovePeak = value;
     if (!found || (chosen.entity == s.resolved.entity && memcmp(chosen.identity, s.resolved.identity, 24) == 0 &&
@@ -527,12 +613,44 @@ static int RecheckStall(VpmComponent* self, const uint32_t* avatar, double value
     memcpy(chosen.avatar, avatar, 24);
     s.resolved = chosen;
     s.hasPrevious = 0;
+    vpm_log_detail(self, "the hold moved to entity 0x%llX, charge entry 0x%llX", (unsigned long long)chosen.entity,
+        (unsigned long long)chosen.entry);
     return 1;
+}
+
+/* A shot (the charge fell from above half to below 5 % of the full charge): its interval, kept for the release line.
+ * Detailed mode only (the caller tests it): the Lua's diagnostics-only shot list, without the list. */
+static void NoteShot(VpmComponent* self, double previous, double value)
+{
+    s.shots++;
+    if (s.shots > 1)
+    {
+        double interval = s.now - s.lastShot;
+        if (s.intervals == 0 || interval < s.intervalMin) s.intervalMin = interval;
+        if (s.intervals == 0 || interval > s.intervalMax) s.intervalMax = interval;
+        s.intervalSum = s.intervals == 0 ? interval : s.intervalSum + interval;
+        s.intervals++;
+        vpm_log_detail(self, "shot %u (charge %.3f -> %.3f, interval %.3f)", s.shots, previous, value, interval);
+    }
+    else vpm_log_detail(self, "shot %u (charge %.3f -> %.3f, interval n/a)", s.shots, previous, value);
+    s.lastShot = s.now;
+}
+
+/* The release of an armed hold: its shots and their intervals (the Lua's log_release). */
+static void NoteRelease(VpmComponent* self)
+{
+    if (s.intervals == 0)
+    {
+        vpm_log_detail(self, "released after %u shot(s)", s.shots);
+        return;
+    }
+    vpm_log_detail(self, "released after %u shot(s); interval min %.3f mean %.3f max %.3f (%u)", s.shots, s.intervalMin,
+        s.intervalSum / s.intervals, s.intervalMax, s.intervals);
 }
 
 /* The charge progress of this cycle; a sustained lack of it (a missing record flag can leave the charge stuck at full)
  * asks for the record to be looked up again. */
-static void TrackProgress(double value, double full)
+static void TrackProgress(VpmComponent* self, double value, double full)
 {
     int had = s.hasPrevious;
     double previous = s.previous, change = value - s.previous, limit = full * 1.5 > 1.2 ? full * 1.5 : 1.2;
@@ -545,6 +663,8 @@ static void TrackProgress(double value, double full)
     }
     if (s.now - (s.progressKnown ? s.progressTime : s.now) > limit)
     {
+        vpm_log_detail(self, "no charge progress for %.2f s (charge %.3f, full %.3f): the record is looked up again",
+            s.now - s.progressTime, value, full);
         s.rescanRequested = 1;
         s.progressKnown = 1;
         s.progressTime = s.now;
@@ -555,6 +675,7 @@ static void TrackProgress(double value, double full)
         s.droveSince = s.now;
         s.drovePeak = value;
     }
+    if (had && previous > full * 0.5 && value < full * 0.05 && vpm_detailed()) NoteShot(self, previous, value);
 }
 
 /* The charging flag, set when the engine has cleared it. The entry's page is checked right before the first write of a
@@ -578,6 +699,7 @@ static void SetChargingFlag(VpmComponent* self)
             return;
         }
         b->checkedPage = page;
+        vpm_log_detail(self, "charge entry 0x%llX: its page checked (private read-write)", (unsigned long long)b->entry);
     }
     *(volatile uint8_t*)address = 1;
 }
@@ -590,18 +712,27 @@ static void DriveCharge(VpmComponent* self, const uint32_t* avatar, float held)
     s.suspended = 0;
     s.heldKnown = 1;
     s.heldTime = held;
-    if (!vpm_read(s.resolved.entry, entry, sizeof entry)) return;
+    if (!vpm_read(s.resolved.entry, entry, sizeof entry))
+    {
+        s.reason = "charge entry unreadable";
+        return;
+    }
     double value = Float(entry[1]), full = Float(entry[2]);
-    if (!(full > 0.1) || !(value >= 0.0)) return; /* NaN fails both */
+    if (!(full > 0.1) || !(value >= 0.0)) /* NaN fails both */
+    {
+        s.reason = "invalid full-charge time";
+        return;
+    }
     if (RecheckStall(self, avatar, value, full)) return;
-    TrackProgress(value, full);
+    TrackProgress(self, value, full);
     if ((entry[3] & 0xFFu) != 1u) SetChargingFlag(self);
 }
 
 /* Fire is held: an interrupted hold ends, the binding is kept or armed, then the charge driven. */
 static void FollowPress(VpmComponent* self, const uint32_t* avatar, float held, int check)
 {
-    if (s.suspended && (s.now - s.suspendedSince >= RECOVERY_WINDOW || (s.heldKnown && held < s.heldTime))) ClearHold();
+    if (s.suspended && (s.now - s.suspendedSince >= RECOVERY_WINDOW || (s.heldKnown && held < s.heldTime)))
+        ClearHoldFor("interrupted hold requires a new fire command");
     if (s.armed && !Revalidate(avatar, check)) return;
     if (!s.armed && !Arm(avatar)) return;
     DriveCharge(self, avatar, held);
@@ -609,7 +740,7 @@ static void FollowPress(VpmComponent* self, const uint32_t* avatar, float held, 
 
 /* The full check of the local Fire input and the hold it drives. Unknown input is not a release: a followed press is
  * suspended, nothing written until everything checks out again. */
-static void FollowInput(VpmComponent* self, int check)
+static void CheckInput(VpmComponent* self, int check)
 {
     float held = 0;
     uintptr_t slot = 0;
@@ -617,16 +748,35 @@ static void FollowInput(VpmComponent* self, int check)
     s.fireSlot = slot;
     if (down == UNKNOWN)
     {
-        if (Holding()) SuspendHold();
-        else s.hasPrevious = 0;
+        if (Holding()) SuspendHold("native Fire input unavailable");
+        else
+        {
+            s.hasPrevious = 0;
+            s.reason = "native Fire input unavailable";
+        }
         return;
     }
     if (!down)
     {
+        if (s.armed) NoteRelease(self);
         ClearHold();
+        s.reasonSaid = NULL;
         return;
     }
     FollowPress(self, s.kept.record, held, check);
+}
+
+/* The full check, then its reason the assist is idle, said when it changed (the Lua's log_reason, without its 2 s
+ * repeat: a release or an armed hold lets the same reason be said again). */
+static void FollowInput(VpmComponent* self, int check)
+{
+    s.reason = NULL;
+    s.reasonExpired = 0;
+    CheckInput(self, check);
+    if (s.reason == NULL || (s.reason == s.reasonSaid && s.reasonExpired == s.reasonSaidExpired)) return;
+    s.reasonSaid = s.reason;
+    s.reasonSaidExpired = s.reasonExpired;
+    vpm_log_detail(self, "idle: %s%s", s.reason, s.reasonExpired ? "; hold expired" : "");
 }
 
 /* One tick. An idle tick reads at most the gate's one word: in a mission (no check frame, no press followed, Fire up)
@@ -636,7 +786,7 @@ static void Tick(VpmComponent* self, float dt)
     s.now += dt;
     s.frames = s.frames + 1 >= POLL_FRAMES ? 0 : s.frames + 1;
     int poll = s.frames == 0;
-    if (poll) PollMission();
+    if (poll) PollMission(self);
     if (!s.mission)
     {
         if (poll) Maintain(self, poll);
@@ -661,6 +811,7 @@ static void EntitiesReady(VpmComponent* self, HfEvent event)
 {
     if (vpm_ticking(self))
     {
+        vpm_log_detail(self, "the game reloaded its entity data: the charge record is looked up again");
         s.record = 0;
         s.patched = 0;
         s.nextScan = s.now;
@@ -680,11 +831,26 @@ static void CodeReady(VpmComponent* self, HfEvent event)
     if (s.entitiesReady) EntitiesReady(self, HF_EVENT_ENTITIES_READY);
 }
 
+/* The key state for a tester's mark: the mission, the record, the hold, the counters. */
+static void Describe(VpmComponent* self, char* out, size_t size)
+{
+    char hold[96] = "none";
+    if (s.armed)
+        snprintf(hold, sizeof hold, "armed (entity 0x%llX, entry 0x%llX%s)", (unsigned long long)s.resolved.entity,
+            (unsigned long long)s.resolved.entry, s.suspended ? ", suspended" : "");
+    else if (s.discovering) snprintf(hold, sizeof hold, "discovering");
+    snprintf(out, size, "%s; charge record 0x%llX %s; hold %s; Fire slot 0x%llX; holds=%u stalls=%u lookups=%u "
+        "repairs=%u%s%s", s.mission ? "in a mission" : "no mission", (unsigned long long)s.record,
+        s.patched ? "patched" : "not patched", hold, (unsigned long long)s.fireSlot, s.holds, s.rescans, s.lookups,
+        s.repairs, s.patched ? "" : "; ", s.patched ? "" : s.why);
+}
+
 /* Ends the hold (the engine clears the charging flag itself on its next frame) and undoes the record's live edit. */
 static void Stop(VpmComponent* self)
 {
     if (s.wrote && vpm_hf()->set_live(vpm_mod(), ARC_ENTITY, &kAutoFire, NULL, 0) == 0)
         vpm_log(self, "the charge record's auto-fire flag could not be put back (%s)", vpm_hf()->last_log(vpm_mod()));
+    else if (s.wrote) vpm_log_detail(self, "the charge record's auto-fire flag put back");
     s.wrote = s.patched = 0;
     ClearHold();
 }
@@ -692,9 +858,11 @@ static void Stop(VpmComponent* self)
 static int Start(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
+    s.self = self;
     s.frames = POLL_FRAMES - 1; /* the first tick is a poll frame */
     if (!vpm_when_code_ready(self, kPins, 1, CodeReady)) return 1;
     return vpm_on_load(self, HF_EVENT_ENTITIES_READY, EntitiesReady) ? 0 : 1;
 }
 
-const VpmComponentDef vpm_component_arc_thrower_revamped = {"arc_thrower_revamped", "Arc Thrower Revamped", "1.7.1", 0, Start, Stop};
+const VpmComponentDef vpm_component_arc_thrower_revamped = {"arc_thrower_revamped", "Arc Thrower Revamped", "1.7.1", 0, Start, Stop,
+    Describe};

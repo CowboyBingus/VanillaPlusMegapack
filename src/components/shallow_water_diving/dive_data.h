@@ -92,6 +92,7 @@ typedef struct SwdState
     int was_dive, retry_start, constants_verified;
     SwdWriteCheck write_check;
     SwdLease pending;
+    const char* restore_why;     /* the last restore's answer ("restored", "already_restored", ...): for the detailed lines */
     double max_water_depth;
 } SwdState;
 
