@@ -9,8 +9,9 @@ param([switch]$Prebuilt,[string]$HellForge=$env:HELLFORGE_OPEN)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $root=Split-Path -Parent $PSScriptRoot
-$buildArgs=@('-Test')
-if($HellForge){$buildArgs+=@('-HellForge',$HellForge)}
+# A hashtable: an array would pass '-Test' as a positional string (it bound to -Only, and no test ran).
+$buildArgs=@{Test=$true}
+if($HellForge){$buildArgs.HellForge=$HellForge}
 & (Join-Path $PSScriptRoot 'build.ps1') @buildArgs
 if(-not $?){throw 'The build or its tests failed: nothing packed.'}
 $manifest=Get-Content -Raw -LiteralPath (Join-Path $root 'hellforge-mod.json')|ConvertFrom-Json
