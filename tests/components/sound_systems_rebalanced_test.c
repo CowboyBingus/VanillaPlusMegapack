@@ -235,7 +235,8 @@ static void EnteringAMissionSetsTheRoomOnce(void)
     State(6);
     FakeCounts c = Period();
     CHECK_EQ(c.read, 1);
-    CHECK_EQ(c.log, 1);
+    CHECK_EQ(c.log, 1 + 1); /* its line, and the core's status line */
+    CHECK_LOG("[core] Sound Systems Rebalanced status:");
     CHECK_EQ(ww.initChecks, 1);
     CHECK_EQ(ww.sets, 1);
     CHECK_EQ(ww.group, GROUP);
@@ -588,7 +589,7 @@ static void EnteringSixThenFourWithTheEvent(void)
     EventFrame(DT);
     State(6);
     FakeCounts c = EventFrame(DT);
-    CHECK(c.read == 0 && c.log == 1 && ww.initChecks == 1 && ww.sets == 1);
+    CHECK(c.read == 0 && c.log == 1 + 1 && ww.initChecks == 1 && ww.sets == 1); /* +1: the core's status line */
     CHECK(ww.group == GROUP && ww.value == ROOM);
     CHECK_LOG("[Sound Systems Rebalanced] Mission start (game state 6): " MISSION_LINE);
     CHECK(Status("held mission music at the war-table level 1 time(s)"));

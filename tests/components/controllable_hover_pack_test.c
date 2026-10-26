@@ -276,12 +276,16 @@ static const char* Status(void) { return vpm_status(fake_component(0)); }
 
 typedef struct Frame { uint32_t reads, logs; int focus, queries; } Frame;
 
+/* The core's status lines (vpm_set_status, rate-limited) are the core's: a frame's logs here are the component's own. */
+static int CoreStatusLines(void) { return fake_log_count("[core] Controllable Hover Pack status:"); }
+
 static Frame Tick(void)
 {
-    int focus = g_focusChecks, queries = chp_test_queries;
+    int focus = g_focusChecks, queries = chp_test_queries, statusLines = CoreStatusLines();
     fake_counts_reset();
     fake_frames(1, DT);
-    Frame f = {fake_counts().read, fake_counts().log, g_focusChecks - focus, chp_test_queries - queries};
+    Frame f = {fake_counts().read, fake_counts().log - (uint32_t)(CoreStatusLines() - statusLines), g_focusChecks - focus,
+        chp_test_queries - queries};
     return f;
 }
 

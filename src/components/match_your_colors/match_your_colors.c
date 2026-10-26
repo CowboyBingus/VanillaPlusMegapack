@@ -287,6 +287,7 @@ static void MycStop(VpmComponent* self)
     /* Always on the game thread: a fault on the worker is reported from there (myc_worker_busy). */
     if (!s.open) return;
     int ended = myc_worker_stop(&g.worker, 1000);
+    if (!ended) myc_note("The worker thread did not end within 1 s of the stop; it is left to finish its task.");
     g.job = g.saving = 0;
     myc_addon_restore_all();
     if (ended && g.worker.pipeline != NULL) myc_pipeline_close(g.worker.pipeline);
@@ -295,6 +296,9 @@ static void MycStop(VpmComponent* self)
     const char* reason = strncmp(status, "disabled: ", 10) == 0 ? status + 10 : status;
     myc_notef("Stopped (%s).", reason);
 }
+
+/* The core's summary line (at a mission's end and at a tester's mark): the worker's state. */
+static void MycSummary(VpmComponent* self, char* out, size_t size) { myc_worker_describe(&g.worker, out, size); }
 
 static int MycStart(VpmComponent* self)
 {
@@ -305,6 +309,7 @@ static int MycStart(VpmComponent* self)
     g.worker.self = self;
     MycRegister();
     MycPaths();
+    vpm_on_summary(self, MycSummary);
     if (!vpm_on_load(self, HF_EVENT_GAME_LOADED, MycLoaded)) return vpm_fail(self, "no game-loaded event");
     return 0;
 }

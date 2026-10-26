@@ -1,7 +1,9 @@
 /* The core: start-up, switches, the crash guard, ticks, listeners, options, the settings file, bindings, the game's
- * lookup and the local avatar. */
+ * lookup, the local avatar, and the diagnostics (identity, fault context, the crash breadcrumb, status lines, the
+ * mission's end, settings problems, costs, the detailed lines' limiter, the tester's mark). */
 #include <math.h>
 #include <string.h>
+#include "core/vpm_version.h"
 #include "harness/test.h"
 
 TEST_GLOBALS;
@@ -235,7 +237,7 @@ static void OptionsHaveDefaultsAndPersist(void)
     CHECK(vpm_option_value(g_depth) == 1.25);
     CHECK(vpm_option_value(g_mode) == 1);
     CHECK(vpm_option_value(g_flag) == 1);
-    CHECK_EQ(vpm_option_count(), 3);
+    CHECK_EQ(vpm_option_count(), 3 + 2); /* and the pack's own two (Diagnostics, Note a problem now) */
     CHECK(vpm_option_set(g_depth, 9.0));      /* out of range: clamped, as Mod Options Menu's snap does */
     CHECK(vpm_option_value(g_depth) == 3.0);
     CHECK(!vpm_option_set(g_mode, 4));        /* no fourth choice */
@@ -1034,7 +1036,7 @@ static void OptionsAreCheckedAsModOptionsMenuChecksThem(void)
     CHECK_EQ(g_refusedNull, 13);
     for (int i = 0; i < 13; i++) CHECK_LOG(kRefusals[i]);
     for (int i = 0; i < 6; i++) CHECK(g_accepted[i] != NULL);
-    CHECK_EQ(vpm_option_count(), 6);
+    CHECK_EQ(vpm_option_count(), 6 + 2); /* and the pack's own two */
     /* the decimals the step needs: no float noise */
     CHECK(vpm_option_value(g_accepted[2]) == 0.6);
     CHECK(vpm_option_set(g_accepted[2], 0.1 + 0.2 + 0.4) && vpm_option_value(g_accepted[2]) == 0.7);
@@ -1748,6 +1750,628 @@ static void NothingWaitingCostsNothing(void)
     CHECK_EQ(fake_counts().code_matches + fake_counts().read, 0);
 }
 
+/* ---- diagnostics (KB megapack-alpha-diagnostics-plan, the pack side) ------------------------------------------- */
+
+#define DT (1.0f / 60)
+
+/* Whether the log's line that starts with `start` (its first one) holds `text`. */
+static int LineHas(const char* start, const char* text)
+{
+    const char* line = strstr(fake_log_text(), start);
+    if (line == NULL) return 0;
+    const char* end = strchr(line, '\n');
+    size_t n = end != NULL ? (size_t)(end - line) : strlen(line);
+    char copy[1024];
+    if (n >= sizeof copy) n = sizeof copy - 1;
+    memcpy(copy, line, n);
+    copy[n] = 0;
+    return strstr(copy, text) != NULL;
+}
+
+static void WriteSettings(const wchar_t* path, const char* text, size_t size)
+{
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    CHECK(file != INVALID_HANDLE_VALUE);
+    DWORD wrote = 0;
+    CHECK(WriteFile(file, text, (DWORD)size, &wrote, NULL) && wrote == size);
+    CHECK(CloseHandle(file));
+}
+
+static VpmOption* PackOption(const char* id)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack() && strcmp(vpm_option_def(vpm_option_at(i))->id, id) == 0)
+            return vpm_option_at(i);
+    return NULL;
+}
+
+static void MissionStart(void)
+{
+    HfStateEvent start = {{sizeof start, HF_ON_MISSION_START, 1}, HF_STATE_PREPARE_MISSION, HF_STATE_MISSION};
+    fake_emit(&start.info);
+}
+
+static void MissionEnd(void)
+{
+    HfStateEvent end = {{sizeof end, HF_ON_MISSION_END, 1}, HF_STATE_MISSION, HF_STATE_SHIP};
+    fake_emit(&end.info);
+}
+
+/* ---- item 1: the identity block --------------------------------------------------------------------------------- */
+
+static void TheIdentityBlockSaysWhichBuildRan(void)
+{
+    Reset();
+    const VpmComponentDef* defs[] = {&kTicking, &kDefaultOff};
+    fake_start(defs, 2);
+    const char* log = fake_log_text();
+    CHECK(strncmp(log, "[core] Vanilla Plus Megapack " VPM_PACK_VERSION " (commit " VPM_COMMIT ", built ", 50) == 0);
+    CHECK_LOG(") for game build 25480438 (this game: 25480438)\n");
+    CHECK_LOG("[core] HellForge mod SDK 15 (API table ");
+    CHECK_LOG(" bytes); co-op: solo (session version 0); local time 20");
+    CHECK_LOG("[core] game.dll at 0x");
+    CHECK_LOG(", helldivers2.exe at 0x");
+    CHECK_LOG("; crash guard: installed\n");
+    CHECK_LOG("[core] settings: vpm-test-settings.ini: none yet, the defaults apply");
+    CHECK_LOG("[core] 1 of 2 components running");
+    CHECK_LOG("[core]   Ticking v1.0: running");
+    CHECK_LOG("[core]   Default Off v1.0: off");
+    CHECK_LOG("[core] options: all 2 at their defaults"); /* the pack's own two */
+    /* the identity comes before the settings, which come before the components */
+    CHECK(strstr(log, "crash guard") < strstr(log, "[core] settings:") && strstr(log, "[core] settings:") < strstr(log, "components running"));
+}
+
+static void TheOptionsNotAtTheirDefaultsAreListed(void)
+{
+    const char text[] = "[options]\noptions_user.max_depth = 2\noptions_user.mode = 3\ncore.diagnostics = 2\n";
+    WriteSettings(L"vpm-test-settings.ini", text, sizeof text - 1);
+    const VpmComponentDef* defs[] = {&kOptions};
+    fake_start(defs, 1);
+    CHECK(LineHas("[core] settings: vpm-test-settings.ini: ", " bytes, 3 entries"));
+    CHECK_LOG("[core] options not at their defaults: options_user.max_depth = 2, options_user.mode = 3 (Cape), "
+              "core.diagnostics = 2 (Detailed)\n");
+    CHECK_EQ(vpm_detailed(), 1);
+}
+
+/* ---- items 3 and 4: fault context, the fault count, the crash breadcrumb ---------------------------------------- */
+
+static VpmOption* g_faultyOption;
+static VpmBinding* g_faultyBinding;
+static int g_backendFaultsIn; /* 1 attach, 2 down */
+static void FaultLoad(VpmComponent* self, HfEvent event) { (void)*g_null; }
+static void FaultyChange(VpmComponent* self, VpmOption* option, double value) { (void)*g_null; }
+static void* FaultyAttach(VpmBinding* binding) { if (g_backendFaultsIn == 1) (void)*g_null; return NULL; }
+static int FaultyDown(const VpmBinding* binding, void* data) { if (g_backendFaultsIn == 2) (void)*g_null; return 1; }
+static const VpmBindingBackend kFaultyBackend = {FaultyAttach, FaultyDown};
+static void FaultyStop(VpmComponent* self) { (void)*g_null; }
+static void FaultyDescribe(VpmComponent* self, char* out, size_t size) { (void)*g_null; }
+static int StartFaultLoad(VpmComponent* self) { return vpm_on_load(self, HF_EVENT_GAME_LOADED, FaultLoad) ? 0 : 1; }
+static int StartFaultOption(VpmComponent* self)
+{
+    g_faultyOption = vpm_option(self, &kFlag);
+    vpm_option_on_change(g_faultyOption, FaultyChange);
+    return 0;
+}
+static int StartFaultBackend(VpmComponent* self) { vpm_bindings_set_backend(self, &kFaultyBackend); return 0; }
+static int StartAnyBinding(VpmComponent* self) { g_faultyBinding = vpm_binding(self, &kArmory); return 0; }
+static const VpmComponentDef kFaultLoad = {"fault_load", "Fault Load", "1.0", 0, StartFaultLoad, NULL};
+static const VpmComponentDef kFaultOption = {"fault_option", "Fault Option", "1.0", 0, StartFaultOption, NULL};
+static const VpmComponentDef kFaultBackend = {"fault_backend", "Fault Backend", "1.0", 0, StartFaultBackend, NULL};
+static const VpmComponentDef kAnyBinding = {"any_binding", "Any Binding", "1.0", 0, StartAnyBinding, NULL};
+static const VpmComponentDef kFaultStop = {"fault_stop", "Fault Stop", "1.0", 0, StartFaulting, FaultyStop};
+static const VpmComponentDef kFaultDescribe = {"fault_describe", "Fault Describe", "1.0", 0, StartNothing, NULL, FaultyDescribe};
+
+/* Each kind of callback: its fault's line says which ("in its ..."), and each fault gets its number and context. */
+static void AFaultSaysWhichCallbackItWasIn(void)
+{
+    Reset();
+    const VpmComponentDef* defs[] = {&kFaulting, &kFaultingPost, &kFaultListener, &kFaultLoad, &kFaultInStart,
+        &kFaultOption, &kFaultStop, &kFaultDescribe};
+    fake_start(defs, 8);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_frames(2, DT);
+    HfSpawnEvent spawn = {{sizeof spawn, HF_ON_SPAWN, 1}, 1, 2, 3, 1};
+    fake_emit(&spawn.info);
+    CHECK(vpm_option_apply(g_faultyOption, 0));
+    CHECK(vpm_option_apply(PackOption("note_problem"), 1));
+    CHECK(LineHas("[Faulting] disabled: fault 0xC0000005 at vanilla_plus_megapack.dll+0x", "(a read of 0x0) in its tick"));
+    CHECK(LineHas("[Faulting Post] disabled: fault 0xC0000005", " in its post-update tick"));
+    CHECK(LineHas("[Fault Listener] disabled: fault 0xC0000005", " in its listener for HF_ON_SPAWN"));
+    CHECK(LineHas("[Fault Load] disabled: fault 0xC0000005", " in its handler of HF_EVENT_GAME_LOADED"));
+    CHECK(LineHas("[Fault In Start] disabled: fault 0xC0000005", " in its start"));
+    CHECK(LineHas("[Fault Option] disabled: fault 0xC0000005", " in its option change"));
+    CHECK(LineHas("[Fault Stop] disabled: fault 0xC0000005", " in its tick"));
+    CHECK(LineHas("[Fault Stop] its stop did not finish: fault 0xC0000005", " in its stop"));
+    CHECK(LineHas("[Fault Describe] disabled: fault 0xC0000005", " in its describe or summary"));
+    /* 9 faults, numbered, each with its registers and the pack's return addresses */
+    CHECK_EQ(vpm_diag_faults(), 9);
+    CHECK_LOG("[core] fault 1 this session (Fault In Start's start): registers: rip=vanilla_plus_megapack.dll+0x");
+    CHECK_LOG("(Fault Listener's listener for HF_ON_SPAWN): registers: rip=vanilla_plus_megapack.dll+0x");
+    CHECK_LOG("(Fault Stop's stop): registers: ");
+    CHECK_LOG("[core] fault 9 this session (Fault Describe's describe or summary): return addresses in the pack");
+    CHECK(LineHas("[core] fault 2 this session", " rax=0x"));
+    CHECK(LineHas("[core] fault 2 this session", " r15=0x"));
+    CHECK_LOG("this session (Faulting's tick): return addresses in the pack, newest first: vanilla_plus_megapack.dll+0x");
+    /* the mark went on after the fault in a describe */
+    CHECK_LOG("[core] MARK 1 end");
+}
+
+static void FaultsInTheBindingsBackendAndADetourSayWhere(void)
+{
+    Reset();
+    g_backendFaultsIn = 1;
+    const VpmComponentDef* defs[] = {&kAnyBinding, &kFaultBackend};
+    fake_start(defs, 2);
+    CHECK(LineHas("[Fault Backend] disabled: fault 0xC0000005", " in its bindings attach"));
+    fake_next_session();
+    g_backendFaultsIn = 2;
+    fake_start(defs, 2);
+    CHECK_EQ(vpm_binding_down(g_faultyBinding), -1);
+    CHECK(LineHas("[Fault Backend] disabled: fault 0xC0000005", " in its bindings answer"));
+    g_backendFaultsIn = 0;
+    /* a detour's work (vpm_guarded) */
+    fake_next_session();
+    fake_stand_in(g_hookRva, "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 8B FA", (void*)&g_original);
+    const VpmComponentDef* hooking[] = {&kHooking};
+    fake_start(hooking, 1);
+    int (*detour)(int) = (int (*)(int))fake_hook_detour(fake_game() + g_hookRva);
+    CHECK(detour != NULL && detour(-1) == -2);
+    CHECK(LineHas("[Hooking] disabled: fault 0xC0000005", " in its guarded work (a detour's)"));
+    CHECK_EQ(vpm_diag_faults(), 1);
+}
+
+/* The return addresses: the call into the faulting function is found, inside the function that made it. */
+static __attribute__((noinline)) void FaultingInner(void) { (void)g_null[2]; }
+static void CallingTick(VpmComponent* self, float dt)
+{
+    FaultingInner();
+    g_ticks++; /* after the call: not a tail call, so the return address is in this function */
+}
+static int StartCalling(VpmComponent* self) { vpm_tick_start(self, CallingTick); return 0; }
+static const VpmComponentDef kCalling = {"calling", "Calling", "1.0", 0, StartCalling, NULL};
+
+static void AFaultFindsThePacksReturnAddresses(void)
+{
+    Reset();
+    const VpmComponentDef* defs[] = {&kCalling};
+    fake_start(defs, 1);
+    fake_frames(1, DT);
+    VpmFault fault;
+    CHECK(vpm_diag_last_fault(&fault));
+    CHECK(fault.has_context && fault.returns > 0);
+    CHECK_EQ(fault.rip - vpm_self_base(), fault.offset); /* rip is the faulting instruction */
+    CHECK_EQ(fault.address, 8); /* g_null[2] */
+    uintptr_t calling = (uintptr_t)(void*)&CallingTick - vpm_self_base();
+    int found = 0;
+    for (int i = 0; i < fault.returns; i++) found |= fault.ret[i] > calling && fault.ret[i] < calling + 64;
+    CHECK(found);
+    CHECK(fault.call.kind == VPM_CALL_TICK && fault.call.component == fake_component(0));
+    /* the faulting function itself is not among them: it made no call */
+    uintptr_t inner = (uintptr_t)(void*)&FaultingInner - vpm_self_base();
+    for (int i = 0; i < fault.returns; i++) CHECK(!(fault.ret[i] >= inner && fault.ret[i] < inner + 16));
+}
+
+/* A worker's fault: its text says so, it is counted, and nothing is logged from the worker. */
+static void AWorkersFaultIsCountedAndSaysSo(void)
+{
+    Reset();
+    const VpmComponentDef* defs[] = {&kTicking};
+    fake_start(defs, 1);
+    fake_log_clear();
+    OffThread t = {0};
+    HANDLE thread = CreateThread(NULL, 0, OffThreadMain, &t, 0, NULL); /* lint-ok: C6 the test's own worker */
+    CHECK(thread != NULL);
+    CHECK_EQ(WaitForSingleObject(thread, 10000), WAIT_OBJECT_0);
+    CHECK(CloseHandle(thread));
+    CHECK(strstr(t.text, "(a read of 0x0) in its worker thread") != NULL);
+    CHECK_EQ(vpm_diag_faults(), 2);
+    CHECK(strcmp(fake_log_text(), "") == 0);
+}
+
+/* The breadcrumb: game code that crashes under a component's call (a stand-in in the fake game.dll, outside the pack's
+ * image, so the guard passes it on). The test plays the game's own handler after it: it resumes past the stand-in. */
+static uintptr_t g_gameCode;
+static volatile LONG g_recovered;
+static LONG CALLBACK RecoverGameCode(EXCEPTION_POINTERS* info)
+{
+    CONTEXT* c = info->ContextRecord;
+    if ((uintptr_t)info->ExceptionRecord->ExceptionAddress != g_gameCode) return EXCEPTION_CONTINUE_SEARCH;
+    c->Rip = *(const DWORD64*)c->Rsp; /* the stand-in's ret */
+    c->Rsp += 8;
+    c->Rax = 0;
+    InterlockedIncrement(&g_recovered);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static uint64_t CallGameCode(uintptr_t pointer) { return ((uint64_t(*)(uintptr_t))(void*)g_gameCode)(pointer); }
+static void CrashingTick(VpmComponent* self, float dt) { g_ticks++; (void)CallGameCode(0x10); }
+static void CrashingListener(VpmComponent* self, const HfEventInfo* event) { g_events++; (void)CallGameCode(0x18); }
+static int StartCrashing(VpmComponent* self)
+{
+    vpm_tick_start(self, CrashingTick);
+    vpm_listen(self, HF_ON_KILL, CrashingListener, 0);
+    return 0;
+}
+static const VpmComponentDef kCrashing = {"crashing", "Crashing", "1.0", 0, StartCrashing, Stop};
+
+/* mov rax, [rcx]; ret at game.dll + 0x500000, and the game's handler after the breadcrumb (added after the core's). */
+static PVOID GameCodeThatFaults(void)
+{
+    static const uint8_t code[] = {0x48, 0x8B, 0x01, 0xC3};
+    uint8_t* at = (uint8_t*)fake_game() + 0x500000;
+    memcpy(at, code, sizeof code);
+    DWORD old;
+    CHECK(VirtualProtect(at, sizeof code, PAGE_EXECUTE_READWRITE, &old)); /* lint-ok: C3 the test's stand-in for game code */
+    g_gameCode = (uintptr_t)at;
+    g_recovered = 0;
+    return AddVectoredExceptionHandler(0, RecoverGameCode); /* lint-ok: C7 the test plays the game's own handler */
+}
+
+static void TheBreadcrumbNamesTheCallWhoseGameCodeCrashed(void)
+{
+    Reset();
+    const VpmComponentDef* defs[] = {&kCrashing, &kTicking};
+    fake_start(defs, 2);
+    PVOID recover = GameCodeThatFaults();
+    CHECK(recover != NULL);
+    fake_log_clear();
+    fake_frames(1, DT);
+    CHECK_EQ(g_recovered, 1);
+    CHECK(LineHas("[core] crash? exception 0xC0000005 at game.dll+0x500000 (a read of 0x10) on thread ",
+        " while Crashing's tick was running; passed on: the game crashes unless it handles it"));
+    CHECK(LineHas("[core] crash? registers: rip=game.dll+0x500000 ", " rcx=0x10 "));
+    CHECK_LOG("[core] crash? return addresses in the pack, newest first: vanilla_plus_megapack.dll+0x");
+    CHECK(vpm_running(fake_component(0)) && vpm_running(fake_component(1))); /* the guard did not take it */
+    CHECK_EQ(g_ticks, 2);
+    /* in a listener */
+    HfEventInfo kill = {sizeof kill, HF_ON_KILL, 1};
+    fake_emit(&kill);
+    CHECK(LineHas("(a read of 0x18) on thread ", " while Crashing's listener for HF_ON_KILL was running"));
+    /* outside any call into the pack */
+    (void)CallGameCode(0x20);
+    CHECK(LineHas("[core] crash? exception 0xC0000005 at game.dll+0x500000 (a read of 0x20)", " outside any call into the pack;"));
+    CHECK_EQ(vpm_crash_notes(), 3);
+    /* at most 4 a session */
+    for (int i = 0; i < 5; i++) (void)CallGameCode(0x30);
+    CHECK_EQ(g_recovered, 3 + 5);
+    CHECK_EQ(vpm_crash_notes(), 4);
+    CHECK_EQ(fake_log_count("[core] crash? exception"), 4);
+    /* a fault the guard takes gets no breadcrumb */
+    vpm_crash_reset();
+    fake_next_session();
+    const VpmComponentDef* faulting[] = {&kFaulting};
+    fake_start(faulting, 1);
+    fake_frames(1, DT);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_EQ(vpm_crash_notes(), 0);
+    CHECK(RemoveVectoredExceptionHandler(recover));
+}
+
+/* ---- item 5: status lines and the mission's end --------------------------------------------------------------- */
+
+static const char* g_nextStatus;
+static int g_logOwn;
+static void StatusTick(VpmComponent* self, float dt)
+{
+    if (g_nextStatus == NULL) return;
+    vpm_set_status(self, g_nextStatus);
+    if (g_logOwn) vpm_log(self, "now %s", g_nextStatus);
+    g_nextStatus = NULL;
+}
+static int StartStatus(VpmComponent* self) { vpm_set_status(self, "starting"); return vpm_tick_start(self, StatusTick) ? 0 : 1; }
+static const VpmComponentDef kStatus = {"status_user", "Status User", "1.0", 0, StartStatus, NULL};
+
+static void Status(const char* status)
+{
+    g_nextStatus = status;
+    fake_frames(1, DT);
+}
+
+static void StatusChangesAreLoggedAtMostOncePer600Frames(void)
+{
+    g_nextStatus = NULL;
+    g_logOwn = 0;
+    const VpmComponentDef* defs[] = {&kStatus};
+    fake_start(defs, 1);
+    CHECK_LOG("[core]   Status User v1.0: starting"); /* the start-up summary has the start's status */
+    CHECK_NO_LOG("Status User status:");
+    fake_counts_reset();
+    fake_frames(100, DT);
+    CHECK_EQ(fake_counts().log, 0);
+    Status("waiting for the table");
+    CHECK_LOG("[core] Status User status: waiting for the table\n");
+    fake_counts_reset();
+    Status("waiting for the table"); /* the same text: no change */
+    CHECK_EQ(fake_counts().log, 0);
+    Status("found");
+    Status("lost");
+    Status("found again");
+    CHECK_EQ(fake_log_count("Status User status:"), 1); /* within 600 frames of the last line */
+    CHECK(strcmp(vpm_status(fake_component(0)), "found again") == 0);
+    fake_frames(594, DT);
+    Status("ready"); /* 599 frames after the line */
+    CHECK_EQ(fake_log_count("Status User status:"), 1);
+    fake_frames(1, DT);
+    Status("ready at last");
+    CHECK_LOG("[core] Status User status: ready at last (4 changes before it not logged)\n");
+    /* a line of its own that carries the text says it: no core line */
+    fake_frames(600, DT);
+    g_logOwn = 1;
+    Status("phase 2");
+    CHECK_LOG("[Status User] now phase 2");
+    CHECK_NO_LOG("Status User status: phase 2");
+    /* idle frames log nothing */
+    fake_counts_reset();
+    fake_frames(2000, DT);
+    CHECK_EQ(fake_counts().log, 0);
+}
+
+static void SummarizeMe(VpmComponent* self, char* out, size_t size) { snprintf(out, size, "queue %d deep", 3); }
+static void DescribeMe(VpmComponent* self, char* out, size_t size) { snprintf(out, size, "phase %d", 2); }
+static int StartSummarized(VpmComponent* self)
+{
+    vpm_on_summary(self, SummarizeMe);
+    return vpm_tick_start(self, CountTick) ? 0 : 1;
+}
+static const VpmComponentDef kSummarized = {"summarized", "Summarized", "1.0", 0, StartSummarized, NULL, DescribeMe};
+
+static void AMissionsEndSaysWhatIsNotRunningAndItsCosts(void)
+{
+    Reset();
+    const VpmComponentDef* defs[] = {&kFaulting, &kTicking, &kRefused, &kDefaultOff, &kSummarized};
+    fake_start(defs, 5);
+    fake_frames(3, DT);
+    MissionStart();
+    fake_frames(120, DT);
+    fake_log_clear();
+    MissionEnd();
+    CHECK_LOG("[core] this mission: 120 frames over ");
+    CHECK(LineHas("[core] cost this mission: Ticking ", " ms per frame, peak "));
+    CHECK(LineHas("[core] cost this mission: Ticking ", " ms (120 ticks over 120 frames)"));
+    CHECK_LOG("[core] at the mission's end: 2 of 5 components running; faults this session: 1\n");
+    CHECK_LOG("[core]   Faulting: disabled: fault 0xC0000005");
+    CHECK_LOG("[core]   Refused: disabled: no table here\n");
+    CHECK_LOG("[core]   Summarized: queue 3 deep\n");
+    CHECK_NO_LOG("Default Off: off");
+    CHECK_NO_LOG("  Ticking:");
+    /* item 7: the peak of single ticks, the average over the frames */
+    VpmComponent* t = fake_component(1);
+    CHECK_EQ(t->calls, 120);
+    CHECK(t->peak > 0 && t->peak <= t->cycles && t->peak * t->calls >= t->cycles);
+}
+
+/* ---- item 6: the settings file -------------------------------------------------------------------------------- */
+
+static void ASettingsFileTooLargeIsSaidSo(void)
+{
+    static char text[300 * 1024];
+    size_t at = (size_t)snprintf(text, sizeof text, "[other]\n");
+    for (int i = 0; at + 1100 < sizeof text; i++)
+    {
+        at += (size_t)snprintf(text + at, sizeof text - at, "k%03d = ", i);
+        memset(text + at, 'v', 1000);
+        at += 1000;
+        text[at++] = '\n';
+    }
+    while (at < sizeof text) text[at++] = '\n';
+    WriteSettings(L"vpm-test-settings.ini", text, sizeof text);
+    const VpmComponentDef* defs[] = {&kNothing};
+    fake_start(defs, 1);
+    CHECK_LOG("[core] settings: vpm-test-settings.ini is too large (307200 bytes, over the 256 KB limit): only its first "
+              "262144 bytes were read, and the next save keeps only what they hold");
+    CHECK_LOG("[core] settings: vpm-test-settings.ini: 262144 bytes, ");
+}
+
+static void AFullTableAndOverLongKeysAreCounted(void)
+{
+    static char text[64 * 1024];
+    size_t at = (size_t)snprintf(text, sizeof text, "[other]\n");
+    memset(text + at, 'k', 200); /* a key of 200 bytes */
+    at += 200;
+    at += (size_t)snprintf(text + at, sizeof text - at, " = 1\nlong_value = ");
+    memset(text + at, 'v', 1100);
+    at += 1100;
+    at += (size_t)snprintf(text + at, sizeof text - at, "\n[a_section_name_of_forty_bytes_xxxxxxxxx]\nkey = 1\n[other]\n");
+    for (int i = 0; i < 600; i++) at += (size_t)snprintf(text + at, sizeof text - at, "e%03d = %d\n", i, i);
+    WriteSettings(L"vpm-test-settings.ini", text, at);
+    const VpmComponentDef* defs[] = {&kNothing};
+    fake_start(defs, 1);
+    CHECK(LineHas("[core] settings: vpm-test-settings.ini: ", " bytes, 512 entries"));
+    CHECK_LOG("[core] settings: dropped 90 entries (the table holds 512) and 1 keys over 127 bytes; cut 1 section names "
+              "over 31 bytes and 1 values over 1023 bytes; the first: other.kkkk");
+    CHECK_EQ(strlen(vpm_setting("other", "long_value")), 1023);
+    /* afterwards a refused entry is logged once per kind */
+    vpm_setting_put("other", "one_more", "1");
+    vpm_setting_put("other", "two_more", "1");
+    CHECK_EQ(fake_log_count("[core] settings: [other] one_more not kept: the settings table is full (512 entries)"), 1);
+    CHECK_NO_LOG("two_more");
+}
+
+static void SettingsThatCannotBeReadOrWrittenSayWhy(void)
+{
+    /* a folder where the file should be: it cannot be opened */
+    CHECK(CreateDirectoryW(L"vpm-test-folder.ini", NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+    vpm_settings_path_override(L"vpm-test-folder.ini");
+    const VpmComponentDef* defs[] = {&kOptions};
+    fake_start(defs, 1);
+    CHECK_LOG("[core] settings: vpm-test-folder.ini could not be opened (error 5): the defaults apply");
+    /* a folder that is not there: no file yet, and the save fails with its error */
+    fake_next_session();
+    vpm_settings_path_override(L"vpm-no-such-folder\\settings.ini");
+    fake_start(defs, 1);
+    CHECK_LOG("[core] settings: vpm-no-such-folder\\settings.ini: none yet, the defaults apply");
+    CHECK(vpm_option_set(g_mode, 2));
+    vpm_settings_save_now();
+    CHECK_LOG("[core] settings: vpm-no-such-folder\\settings.ini could not be written (CreateFileW, error 3); kept for the next try");
+    vpm_settings_path_override(L"vpm-test-settings.ini");
+    CHECK(RemoveDirectoryW(L"vpm-test-folder.ini"));
+}
+
+/* ---- item 8: the Diagnostics option and the detailed lines' limiter ------------------------------------------- */
+
+static VpmComponent* g_detailSelf;
+static VpmComponent* g_detailOther;
+static int g_detailAtStart = -1;
+static int StartDetail(VpmComponent* self) { g_detailSelf = self; g_detailAtStart = vpm_detailed(); return 0; }
+static int StartDetailOther(VpmComponent* self) { g_detailOther = self; return 0; }
+static const VpmComponentDef kDetail = {"detail_user", "Detail User", "1.0", 0, StartDetail, NULL};
+static const VpmComponentDef kDetailOther = {"detail_other", "Detail Other", "1.0", 0, StartDetailOther, NULL};
+
+static void Details(VpmComponent* self, int n, const char* what)
+{
+    for (int i = 0; i < n; i++) vpm_log_detail(self, "%s %d", what, i);
+}
+
+static void DetailedLinesComeOnlyInDetailedModeThroughTheLimiter(void)
+{
+    const VpmComponentDef* defs[] = {&kDetail, &kDetailOther};
+    fake_start(defs, 2);
+    CHECK_EQ(g_detailAtStart, 0);
+    CHECK_EQ(vpm_detailed(), 0);
+    fake_counts_reset();
+    Details(g_detailSelf, 1000, "normal");
+    CHECK_EQ(fake_counts().log, 0); /* Normal: nothing, at any rate */
+    VpmOption* diagnostics = PackOption("diagnostics");
+    CHECK(diagnostics != NULL && vpm_option_value(diagnostics) == 1);
+    CHECK(vpm_option_apply(diagnostics, 2));
+    CHECK_LOG("[core] diagnostics: detailed (components log the steps behind what they do)");
+    CHECK_EQ(vpm_detailed(), 1);
+    fake_counts_reset();
+    Details(g_detailSelf, 25, "line");
+    CHECK_EQ(fake_counts().log, 20); /* the window's 20 */
+    CHECK_LOG("[Detail User] line 19\n");
+    CHECK_NO_LOG("line 20");
+    Details(g_detailOther, 20, "other"); /* each component has a window of its own */
+    CHECK_EQ(fake_counts().log, 40);
+    fake_frames(599, DT); /* the window's last frame */
+    Details(g_detailSelf, 1, "late");
+    CHECK_EQ(fake_counts().log, 40);
+    fake_frames(1, DT); /* a new window: the count of the last one's left-out lines first */
+    Details(g_detailSelf, 1, "new window");
+    CHECK_LOG("[Detail User] 6 detailed lines suppressed (at most 20 per 600 frames)\n[Detail User] new window 0\n");
+    CHECK_EQ(fake_counts().log, 42);
+    /* what is left out when the window ends without another line: said at a mission's end */
+    Details(g_detailSelf, 30, "busy");
+    MissionStart();
+    MissionEnd();
+    CHECK_LOG("[Detail User] 11 detailed lines suppressed");
+    /* back to Normal */
+    CHECK(vpm_option_apply(diagnostics, 1));
+    CHECK_LOG("[core] diagnostics: normal");
+    fake_counts_reset();
+    fake_frames(600, DT);
+    Details(g_detailSelf, 5, "quiet");
+    CHECK_EQ(fake_counts().log, 0);
+    /* saved Detailed: components see it from their start */
+    CHECK(vpm_option_set(diagnostics, 2));
+    vpm_settings_save_now();
+    fake_next_session();
+    fake_start(defs, 2);
+    CHECK_EQ(g_detailAtStart, 1);
+}
+
+/* ---- item 9: "Note a problem now" ----------------------------------------------------------------------------- */
+
+static void ANoteWritesANumberedMarkAndSwitchesItselfOff(void)
+{
+    Reset();
+    fake_set_state(HF_STATE_SHIP);
+    const VpmComponentDef* defs[] = {&kSummarized, &kRefused, &kDefaultOff};
+    fake_start(defs, 3);
+    VpmOption* note = PackOption("note_problem");
+    CHECK(note != NULL && vpm_option_value(note) == 0);
+    CHECK(vpm_option_def(note)->kind == VPM_TOGGLE);
+    fake_frames(10, DT);
+    fake_log_clear();
+    CHECK(vpm_option_apply(note, 1));
+    CHECK_LOG("[core] MARK 1 at 20");
+    CHECK_LOG(" local time; game: ship; frame 10; 1 of 3 components running; faults this session: 0\n");
+    CHECK_LOG("[core] MARK 1: Summarized: running | phase 2 | queue 3 deep\n");
+    CHECK_LOG("[core] MARK 1: Refused: disabled: no table here\n");
+    CHECK_NO_LOG("Default Off");
+    CHECK_LOG("[core] MARK 1 end\n");
+    CHECK(vpm_option_value(note) == 0); /* switched itself back off, and saved so */
+    CHECK(strcmp(vpm_setting("options", "core.note_problem"), "0") == 0);
+    CHECK(vpm_option_apply(note, 1));
+    CHECK_LOG("[core] MARK 2 at ");
+    CHECK(vpm_option_apply(note, 0)); /* applied off: nothing */
+    CHECK_NO_LOG("MARK 3");
+    /* saved on by a session that ended in between: off at the next start, no mark */
+    const char text[] = "[options]\ncore.note_problem = 1\n";
+    WriteSettings(L"vpm-test-settings.ini", text, sizeof text - 1);
+    fake_next_session();
+    fake_start(defs, 3);
+    CHECK(vpm_option_value(PackOption("note_problem")) == 0);
+    CHECK_NO_LOG("MARK");
+}
+
+/* ---- idle frames: the same calls in both modes, nothing allocated --------------------------------------------- */
+
+/* Busy blocks in every heap of the process. */
+static size_t BusyHeapBlocks(void)
+{
+    static HANDLE heaps[64];
+    DWORD n = GetProcessHeaps(64, heaps);
+    size_t busy = 0;
+    for (DWORD i = 0; i < n && i < 64; i++)
+    {
+        if (!HeapLock(heaps[i])) continue;
+        PROCESS_HEAP_ENTRY entry;
+        entry.lpData = NULL;
+        while (HeapWalk(heaps[i], &entry))
+            if (entry.wFlags & PROCESS_HEAP_ENTRY_BUSY) busy++;
+        (void)HeapUnlock(heaps[i]);
+    }
+    return busy;
+}
+
+/* An idle tick as a component with detailed lines would write it: a gate, and the detailed line only on a change. */
+static int g_idleChanges;
+static void IdleDetailTick(VpmComponent* self, float dt)
+{
+    g_ticks++;
+    if (g_idleChanges == 0) return;
+    g_idleChanges--;
+    vpm_log_detail(self, "changed");
+}
+static int StartIdleDetail(VpmComponent* self) { return vpm_tick_start(self, IdleDetailTick) ? 0 : 1; }
+static const VpmComponentDef kIdleDetail = {"idle_detail", "Idle Detail", "1.0", 0, StartIdleDetail, NULL};
+
+static void IdleFramesAreTheSameInBothModesAndAllocateNothing(void)
+{
+    FakeCounts counts[2];
+    int ticks[2];
+    for (int mode = 0; mode < 2; mode++)
+    {
+        fake_next_session();
+        Reset();
+        g_idleChanges = 0;
+        g_nextStatus = NULL;
+        const VpmComponentDef* defs[] = {&kTicking, &kIdleDetail, &kStatus};
+        fake_start(defs, 3);
+        CHECK(vpm_option_apply(PackOption("diagnostics"), mode + 1));
+        fake_frames(3700, DT); /* past the core's one-off work: the save, the frame hook's 60 s wait */
+        MissionStart();
+        g_ticks = 0;
+        fake_counts_reset();
+        size_t before = BusyHeapBlocks();
+        fake_frames(10000, DT);
+        for (int i = 0; i < 10000; i++) vpm_log_detail(fake_component(1), "idle %d", i); /* Normal: the limiter's early return */
+        size_t after = BusyHeapBlocks();
+        counts[mode] = fake_counts();
+        ticks[mode] = g_ticks;
+        if (mode == 1) counts[mode].log -= 20; /* Detailed: the 20 lines of the loop above, through the limiter */
+        CHECK_EQ(after, before);
+        CHECK_EQ(counts[mode].log + counts[mode].read + counts[mode].write + counts[mode].other, 0);
+        VpmComponent* t = fake_component(0);
+        CHECK_EQ(t->calls, 10000);
+        CHECK(t->peak > 0 && t->peak <= t->cycles && t->peak * t->calls >= t->cycles);
+    }
+    CHECK(memcmp(&counts[0], &counts[1], sizeof counts[0]) == 0);
+    CHECK_EQ(ticks[0], ticks[1]);
+    CHECK_EQ(ticks[0], 2 * 10000); /* Ticking and Idle Detail every frame */
+}
+
 int main(void)
 {
     RUN(ReadyAtOnceWhenDecoded);
@@ -1813,5 +2437,20 @@ int main(void)
     RUN(TextUpperCasesAsTheLua);
     RUN(TextUpperNeverCutsACharacter);
     RUN(TextClipKeepsWholeCharacters);
+    RUN(TheIdentityBlockSaysWhichBuildRan);
+    RUN(TheOptionsNotAtTheirDefaultsAreListed);
+    RUN(AFaultSaysWhichCallbackItWasIn);
+    RUN(FaultsInTheBindingsBackendAndADetourSayWhere);
+    RUN(AFaultFindsThePacksReturnAddresses);
+    RUN(AWorkersFaultIsCountedAndSaysSo);
+    RUN(TheBreadcrumbNamesTheCallWhoseGameCodeCrashed);
+    RUN(StatusChangesAreLoggedAtMostOncePer600Frames);
+    RUN(AMissionsEndSaysWhatIsNotRunningAndItsCosts);
+    RUN(ASettingsFileTooLargeIsSaidSo);
+    RUN(AFullTableAndOverLongKeysAreCounted);
+    RUN(SettingsThatCannotBeReadOrWrittenSayWhy);
+    RUN(DetailedLinesComeOnlyInDetailedModeThroughTheLimiter);
+    RUN(ANoteWritesANumberedMarkAndSwitchesItselfOff);
+    RUN(IdleFramesAreTheSameInBothModesAndAllocateNothing);
     TEST_END();
 }

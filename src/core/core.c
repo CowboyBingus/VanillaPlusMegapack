@@ -5,7 +5,9 @@
  * Per frame (the frame update's detour, or HellForge's game-thread callback until it is in): the frame's settings
  * countdown (one compare while nothing waits to be saved), then each ticking component's tick under one guard, and after
  * game.dll's update each post-update tick, with two time-stamp counter reads around each (the per-component cost the
- * log reports at a mission's end). No Windows call and no allocation per frame. */
+ * log reports at a mission's end) and one compare for the largest single tick (the report's peak). Per tick list that
+ * has ticks: the thread's call record set and put back (two thread-local copies, for the fault line and the crash
+ * breadcrumb) and one compare of the status-line flag. No Windows call, no log call and no allocation per frame. */
 #include <intrin.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -16,18 +18,22 @@ static const HfApi* g_hf;
 static HfMod* g_mod;
 static VpmComponent g_components[VPM_MAX_COMPONENTS];
 static int g_componentCount;
-static void CoreLog(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
 typedef struct LoadReg { VpmComponent* component; HfEvent event; VpmLoadFn fn; } LoadReg;
-typedef struct ListenReg { VpmComponent* component; VpmListenFn fn; } ListenReg;
+typedef struct ListenReg { VpmComponent* component; VpmListenFn fn; uint32_t kind; } ListenReg;
 static LoadReg g_loads[VPM_MAX_LOADS];
 static int g_loadCount;
 static ListenReg g_listens[VPM_MAX_LISTENS];
 static int g_listenCount;
 
-static uint64_t g_frames;      /* frames this mission */
+static uint64_t g_frame;       /* frames this session: one increment per frame */
+static uint64_t g_missionFrame; /* g_frame when the mission started */
 static uint64_t g_tscStart;    /* the time-stamp counter and performance counter when the mission started */
 static LARGE_INTEGER g_qpcStart;
+static int g_starting;         /* vpm_core_init is running the components' start() */
+
+uint64_t vpm_core_frame(void) { return g_frame; }
+int vpm_core_starting(void) { return g_starting; }
 
 const HfApi* vpm_hf(void) { return g_hf; }
 const HfApi* vpm_core_hf(void) { return g_hf; }
@@ -39,12 +45,15 @@ int vpm_component_count(void) { return g_componentCount; }
 VpmComponent* vpm_component_at(int index) { return index >= 0 && index < g_componentCount ? &g_components[index] : NULL; }
 int vpm_component_switched_on(const VpmComponent* component) { return component->switched_on; }
 
+/* "[Name] text" for a component, "[core] text" for the core (NULL or its own record). */
 static void LogV(VpmComponent* self, const char* format, va_list args)
 {
     char line[1024];
     vsnprintf(line, sizeof line, format, args);
-    if (self != NULL) g_hf->log(g_mod, "[%s] %s", self->def->name, line); /* lint-ok: C4 components log on frames that act only (each one's review) */
-    else g_hf->log(g_mod, "%s", line); /* lint-ok: C4 the core logs at start-up, a stop and a mission's end */
+    /* A component's own line that carries its new status says it already: no core status line for it. */
+    if (self != NULL && self->status_pending && strstr(line, self->status) != NULL) self->status_pending = 0;
+    if (self != NULL && self != vpm_pack()) g_hf->log(g_mod, "[%s] %s", self->def->name, line); /* lint-ok: C4 components log on frames that act only (each one's review) */
+    else g_hf->log(g_mod, "[core] %s", line); /* lint-ok: C4 the core logs at start-up, a stop, a status change, a mission's end and a mark */
 }
 
 void vpm_log(VpmComponent* self, const char* format, ...)
@@ -55,7 +64,7 @@ void vpm_log(VpmComponent* self, const char* format, ...)
     va_end(args);
 }
 
-static void CoreLog(const char* format, ...)
+void vpm_core_log(const char* format, ...)
 {
     va_list args;
     va_start(args, format);
@@ -63,10 +72,35 @@ static void CoreLog(const char* format, ...)
     va_end(args);
 }
 
+/* Status lines. A new text is noted; when the callback that set it ends (the outermost one on the thread: a tick list,
+ * a listener, a load event...), the core logs it (rate-limited, diag.c) unless the component's own log line meanwhile
+ * carried the text (most components log their state changes themselves). The same text again changes nothing. Cost: a
+ * compare of the texts per call (the copy was there before); one global compare at the end of each tick list and each
+ * outermost guarded callback. */
+static int g_statusPending;
+
 void vpm_set_status(VpmComponent* self, const char* status)
 {
     if (self->state != VPM_STATE_RUNNING) return;
-    snprintf(self->status, sizeof self->status, "%s", status != NULL ? status : "running");
+    const char* text = status != NULL ? status : "running";
+    if (strncmp(self->status, text, sizeof self->status - 1) == 0) return;
+    snprintf(self->status, sizeof self->status, "%s", text);
+    if (g_starting || self == vpm_pack()) return; /* the start-up summary lists every status */
+    self->status_pending = 1;
+    g_statusPending = 1;
+}
+
+void vpm_core_status_lines(void)
+{
+    if (!g_statusPending) return;
+    g_statusPending = 0;
+    for (int i = 0; i < g_componentCount; i++)
+    {
+        VpmComponent* c = &g_components[i];
+        if (!c->status_pending) continue;
+        c->status_pending = 0;
+        vpm_diag_status(c);
+    }
 }
 
 typedef struct StopCall { VpmComponent* component; } StopCall;
@@ -85,10 +119,14 @@ void vpm_core_stop(VpmComponent* component, const char* reason)
     {
         StopCall call = {component};
         VpmFault fault;
-        if (vpm_guard_call(RunStop, &call, &fault) != 0)
+        VpmCall was = vpm_call_enter(component, VPM_CALL_STOP, 0);
+        DWORD code = vpm_guard_call(RunStop, &call, &fault);
+        vpm_call_leave(was);
+        if (code != 0)
         {
-            char text[160];
+            char text[VPM_STATUS_SIZE];
             vpm_fault_text(&fault, text, sizeof text);
+            vpm_diag_fault(&fault);
             vpm_log(component, "its stop did not finish: %s", text);
         }
     }
@@ -105,24 +143,40 @@ int vpm_fail(VpmComponent* self, const char* format, ...)
     return 1;
 }
 
-int vpm_guarded(VpmComponent* self, void (*fn)(void*), void* arg) { return vpm_core_guarded(self, fn, arg); }
+int vpm_guarded(VpmComponent* self, void (*fn)(void*), void* arg) { return vpm_core_guarded(self, VPM_CALL_GUARDED, 0, fn, arg); }
 
+/* A worker's fault: counted, and its text says "in its worker thread"; the component reports it from the game thread. */
 int vpm_guarded_off_thread(void (*fn)(void*), void* arg, char* fault, size_t size)
 {
     VpmFault caught;
-    if (vpm_guard_call(fn, arg, &caught) == 0) return 1;
+    VpmCall was = vpm_call_enter(NULL, VPM_CALL_WORKER, 0);
+    DWORD code = vpm_guard_call(fn, arg, &caught);
+    vpm_call_leave(was);
+    if (code == 0) return 1;
+    vpm_diag_worker_fault();
     if (fault != NULL && size > 0) vpm_fault_text(&caught, fault, size);
     return 0;
 }
 
-int vpm_core_guarded(VpmComponent* component, void (*fn)(void*), void* arg)
+/* A fault the core took on the game thread: its number, registers and return addresses, then the stop. */
+static void FaultStop(VpmComponent* component, VpmFault* fault)
+{
+    fault->call.component = component;
+    char text[VPM_STATUS_SIZE];
+    vpm_fault_text(fault, text, sizeof text);
+    vpm_diag_fault(fault);
+    vpm_core_stop(component, text);
+}
+
+int vpm_core_guarded(VpmComponent* component, uint32_t kind, uint32_t detail, void (*fn)(void*), void* arg)
 {
     VpmFault fault;
-    if (vpm_guard_call(fn, arg, &fault) == 0) return 1;
-    char text[160];
-    vpm_fault_text(&fault, text, sizeof text);
-    vpm_core_stop(component, text);
-    return 0;
+    VpmCall was = vpm_call_enter(component, kind, detail);
+    DWORD code = vpm_guard_call(fn, arg, &fault);
+    vpm_call_leave(was);
+    if (code != 0) FaultStop(component, &fault);
+    if (was.kind == VPM_CALL_NONE && g_statusPending) vpm_core_status_lines();
+    return code == 0;
 }
 
 /* ---- load events ------------------------------------------------------------------------------------------------- */
@@ -135,7 +189,7 @@ static void LoadTrampoline(HfMod* mod, HfEvent event, void* user)
     LoadReg* reg = user;
     if (!vpm_running(reg->component)) return;
     LoadCall call = {reg, event};
-    vpm_core_guarded(reg->component, RunLoad, &call);
+    vpm_core_guarded(reg->component, VPM_CALL_LOAD, (uint32_t)event, RunLoad, &call);
 }
 
 int vpm_on_load(VpmComponent* self, HfEvent event, VpmLoadFn fn)
@@ -157,14 +211,14 @@ static void ListenTrampoline(HfMod* mod, const HfEventInfo* event, void* user)
     ListenReg* reg = user;
     if (!vpm_running(reg->component)) return;
     ListenCall call = {reg, event};
-    vpm_core_guarded(reg->component, RunListen, &call);
+    vpm_core_guarded(reg->component, VPM_CALL_LISTENER, reg->kind, RunListen, &call);
 }
 
 int vpm_listen(VpmComponent* self, uint32_t kind, VpmListenFn fn, int32_t priority)
 {
     if (g_listenCount >= VPM_MAX_LISTENS) { vpm_log(self, "core: no room for another listener"); return 0; }
     ListenReg* reg = &g_listens[g_listenCount++];
-    *reg = (ListenReg){self, fn};
+    *reg = (ListenReg){self, fn, kind};
     if (!g_hf->subscribe(g_mod, kind, ListenTrampoline, reg, priority))
     {
         vpm_log(self, "core: game event %u refused (%s)", kind, g_hf->last_log(g_mod));
@@ -200,6 +254,7 @@ typedef void (*FrameUpdateFn)(void* game, float dt);
 static FrameUpdateFn g_frameOriginal;
 
 int vpm_frame_hooked(void) { return g_frameState; }
+VpmComponent* vpm_core_tick_component(void) { return g_tickCurrent; }
 
 static VpmTickFn* Slot(VpmComponent* c, int list) { return list == LIST_PRE ? &c->tick : &c->post_tick; }
 
@@ -242,7 +297,11 @@ static void RunTickList(void* arg)
         {
             uint64_t start = __rdtsc();
             fn(c, dt);
-            c->cycles += __rdtsc() - start;
+            uint64_t spent = __rdtsc() - start;
+            c->cycles += spent;
+            /* The one compare this adds per tick: the largest single tick for the mission-end report (alpha
+             * diagnostics, KB megapack-alpha-diagnostics-plan item 7: a spike hides in an average). */
+            if (spent > c->peak) c->peak = spent;
             c->calls++;
         }
         g_tickAt = g_tickAt + 1;
@@ -258,7 +317,9 @@ static void CompactTicks(int list)
     l->count = kept;
 }
 
-/* One list's ticks under one guard; a fault stops the component it happened in and the list goes on from the next. */
+/* One list's ticks under one guard; a fault stops the component it happened in and the list goes on from the next.
+ * The thread's call record says "tick" for the whole list (its component is g_tickCurrent): two thread-local copies per
+ * list per frame, none per tick. */
 static void RunTicks(int list, float dt)
 {
     TickList* l = &g_lists[list];
@@ -266,15 +327,16 @@ static void RunTicks(int list, float dt)
     TickCall call = {dt};
     g_tickList = list;
     g_tickAt = 0;
+    VpmCall was = vpm_call_enter(NULL, list == LIST_PRE ? VPM_CALL_TICK : VPM_CALL_POST_TICK, 0);
     while (g_tickAt < l->count)
     {
         VpmFault fault;
         if (vpm_guard_call(RunTickList, &call, &fault) == 0) break;
-        char text[160];
-        vpm_fault_text(&fault, text, sizeof text);
-        vpm_core_stop(g_tickCurrent, text);
+        FaultStop(g_tickCurrent, &fault);
         g_tickAt = g_tickAt + 1;
     }
+    vpm_call_leave(was);
+    if (g_statusPending) vpm_core_status_lines();
     for (int i = 0; i < l->count; i++)
         if (*Slot(l->items[i], list) == NULL) { CompactTicks(list); break; }
 }
@@ -283,7 +345,7 @@ static void CodeWaitsTick(float dt);
 
 static void PreFrame(float dt)
 {
-    g_frames++;
+    g_frame++;
     vpm_settings_tick(dt);
     CodeWaitsTick(dt);
     RunTicks(LIST_PRE, dt);
@@ -307,11 +369,11 @@ static void HookFrame(void)
     if (g_hf->hook_ex(g_mod, vpm_game() + VPM_FRAME_UPDATE, (void*)FrameDetour, (void**)&g_frameOriginal, 0) != 0)
     {
         g_frameState = -1;
-        CoreLog("the game's frame update could not be hooked (%s): ticks stay in HellForge's game-thread callback", g_hf->last_log(g_mod));
+        vpm_core_log("the game's frame update could not be hooked (%s): ticks stay in HellForge's game-thread callback", g_hf->last_log(g_mod));
         return;
     }
     g_frameState = 1;
-    CoreLog("ticks run at the start and the end of the game's frame update (game.dll 0x%X)", VPM_FRAME_UPDATE);
+    vpm_core_log("ticks run at the start and the end of the game's frame update (game.dll 0x%X)", VPM_FRAME_UPDATE);
 }
 
 /* Hooks the frame update once game.dll's code there is decoded (it is decoded in parts after HF_EVENT_GAME_LOADED).
@@ -330,7 +392,7 @@ static void TryFrameHook(float waited)
     }
     if (waited < VPM_FRAME_WAIT_SECONDS) return;
     g_frameState = -1;
-    CoreLog("the game's frame update (game.dll 0x%X) did not read as shipped within %.0f s: ticks stay in HellForge's game-thread callback",
+    vpm_core_log("the game's frame update (game.dll 0x%X) did not read as shipped within %.0f s: ticks stay in HellForge's game-thread callback",
         VPM_FRAME_UPDATE, VPM_FRAME_WAIT_SECONDS);
 }
 
@@ -390,7 +452,7 @@ static void LookAt(CodeWait* w, int final)
         w->done = 1;
         g_codeWaitsOpen--;
         ReadyCall call = {w};
-        vpm_core_guarded(w->component, RunReady, &call);
+        vpm_core_guarded(w->component, VPM_CALL_READY, 0, RunReady, &call);
         return;
     }
     if (!final) return;
@@ -438,12 +500,13 @@ static void CodeWaitsTick(float dt)
 
 static void CostsStart(void)
 {
-    g_frames = 0;
+    g_missionFrame = g_frame;
     g_tscStart = __rdtsc();
     QueryPerformanceCounter(&g_qpcStart); /* lint-ok: C4 once per mission, at its start */
-    for (int i = 0; i < g_componentCount; i++) g_components[i].cycles = g_components[i].calls = 0;
+    for (int i = 0; i < g_componentCount; i++) g_components[i].cycles = g_components[i].calls = g_components[i].peak = 0;
 }
 
+/* The mission's frames and length, then per ticking component the average ms per frame and its largest single tick. */
 static void CostsReport(void)
 {
     LARGE_INTEGER now, frequency;
@@ -451,19 +514,28 @@ static void CostsReport(void)
     QueryPerformanceFrequency(&frequency); /* lint-ok: C4 once per mission, at its end */
     double seconds = (double)(now.QuadPart - g_qpcStart.QuadPart) / (double)frequency.QuadPart;
     double cyclesPerMs = seconds > 0 ? (double)(__rdtsc() - g_tscStart) / (seconds * 1000.0) : 0;
-    if (cyclesPerMs <= 0 || g_frames == 0) return;
+    uint64_t frames = g_frame - g_missionFrame;
+    if (cyclesPerMs <= 0 || frames == 0) return;
+    vpm_core_log("this mission: %llu frames over %.1f s (%.2f ms per frame)", (unsigned long long)frames, seconds,
+        seconds * 1000.0 / (double)frames);
     for (int i = 0; i < g_componentCount; i++)
     {
         VpmComponent* c = &g_components[i];
         if (c->calls == 0) continue;
-        double ms = (double)c->cycles / cyclesPerMs / (double)g_frames;
-        CoreLog("cost this mission: %s %.4f ms per frame (%llu ticks over %llu frames)", c->def->name, ms,
-            (unsigned long long)c->calls, (unsigned long long)g_frames);
+        double ms = (double)c->cycles / cyclesPerMs / (double)frames;
+        vpm_core_log("cost this mission: %s %.4f ms per frame, peak %.3f ms (%llu ticks over %llu frames)", c->def->name, ms,
+            (double)c->peak / cyclesPerMs, (unsigned long long)c->calls, (unsigned long long)frames);
     }
 }
 
 static void CoreMissionStart(HfMod* mod, const HfEventInfo* event, void* user) { CostsStart(); }
-static void CoreMissionEnd(HfMod* mod, const HfEventInfo* event, void* user) { CostsReport(); vpm_settings_flush(); }
+static void CoreMissionEnd(HfMod* mod, const HfEventInfo* event, void* user)
+{
+    CostsReport();
+    vpm_core_status_lines();
+    vpm_diag_mission_end();
+    vpm_settings_flush();
+}
 
 /* ---- start-up ---------------------------------------------------------------------------------------------------- */
 
@@ -471,7 +543,10 @@ static void CodeWaitsLoaded(void);
 
 static void CoreGameLoaded(HfMod* mod, HfEvent event, void* user)
 {
+    int known = vpm_game() != 0;
     vpm_memory_game_loaded();
+    if (!known && vpm_game() != 0)
+        vpm_core_log("game.dll at 0x%llX (%llu bytes)", (unsigned long long)vpm_game(), (unsigned long long)vpm_game_size());
     TryFrameHook(0);
     CodeWaitsLoaded();
 }
@@ -511,7 +586,7 @@ static void StartComponent(VpmComponent* c, int buildOk, int vanillaPlus)
     c->state = VPM_STATE_RUNNING;
     snprintf(c->status, sizeof c->status, "running");
     StartCall call = {c, 1};
-    if (!vpm_core_guarded(c, RunStart, &call)) return;
+    if (!vpm_core_guarded(c, VPM_CALL_START, 0, RunStart, &call)) return;
     if (call.result != 0)
     {
         if (c->state == VPM_STATE_RUNNING) vpm_core_stop(c, "start refused");
@@ -524,19 +599,19 @@ static void LogSummary(void)
 {
     int running = 0;
     for (int i = 0; i < g_componentCount; i++) running += g_components[i].state == VPM_STATE_RUNNING;
-    CoreLog("%d of %d components running", running, g_componentCount);
+    vpm_core_log("%d of %d components running", running, g_componentCount);
     for (int i = 0; i < g_componentCount; i++)
-        CoreLog("  %s v%s: %s", g_components[i].def->name, g_components[i].def->version, g_components[i].status);
+        vpm_core_log("  %s v%s: %s", g_components[i].def->name, g_components[i].def->version, g_components[i].status);
 }
 
 static void HookCore(void)
 {
     g_tickHooked = g_hf->on_game_thread(g_mod, PackTick, NULL);
-    if (!g_tickHooked) CoreLog("the game thread could not be reached (%s): components that tick stay idle", g_hf->last_log(g_mod));
-    if (g_hf->on(g_mod, HF_EVENT_GAME_LOADED, CoreGameLoaded, NULL) != 0) CoreLog("game.dll's load event refused: components see it as absent");
+    if (!g_tickHooked) vpm_core_log("the game thread could not be reached (%s): components that tick stay idle", g_hf->last_log(g_mod));
+    if (g_hf->on(g_mod, HF_EVENT_GAME_LOADED, CoreGameLoaded, NULL) != 0) vpm_core_log("game.dll's load event refused: components see it as absent");
     if (!g_hf->subscribe(g_mod, HF_ON_MISSION_START, CoreMissionStart, NULL, 0) ||
         !g_hf->subscribe(g_mod, HF_ON_MISSION_END, CoreMissionEnd, NULL, 0))
-        CoreLog("mission events refused (%s): no per-mission cost report", g_hf->last_log(g_mod));
+        vpm_core_log("mission events refused (%s): no per-mission cost report", g_hf->last_log(g_mod));
 }
 
 int vpm_core_init(const HfApi* api, HfMod* mod, const VpmComponentDef* const* defs, int count)
@@ -548,14 +623,15 @@ int vpm_core_init(const HfApi* api, HfMod* mod, const VpmComponentDef* const* de
         api->log(mod, "Vanilla Plus Megapack needs HellForge mod SDK 15 or newer (this HellForge has %u)", api->version);
         return 1;
     }
+    vpm_diag_reset();
     vpm_guard_install();
     vpm_memory_init();
     vpm_user32_init();
-    vpm_settings_load();
     int buildOk = strcmp(api->build_id(), VPM_GAME_BUILD) == 0;
     int vanillaPlus = VanillaPlusInSession();
-    CoreLog("%s for game build %s (this game: %s)%s", VPM_PACK_NAME, VPM_GAME_BUILD, api->build_id(),
-        vanillaPlus ? "; HellForge's Vanilla Plus is in this session" : "");
+    vpm_diag_identity(vanillaPlus);
+    vpm_settings_load();
+    vpm_diag_settings_loaded();
     HookCore();
     g_componentCount = count < VPM_MAX_COMPONENTS ? count : VPM_MAX_COMPONENTS;
     for (int i = 0; i < g_componentCount; i++)
@@ -567,8 +643,12 @@ int vpm_core_init(const HfApi* api, HfMod* mod, const VpmComponentDef* const* de
         const char* saved = vpm_setting("components", c->def->id);
         c->switched_on = saved != NULL ? strcmp(saved, "off") != 0 : !(c->def->flags & VPM_DEFAULT_OFF);
     }
+    g_starting = 1;
     for (int i = 0; i < g_componentCount; i++) StartComponent(&g_components[i], buildOk, vanillaPlus);
+    g_starting = 0;
     LogSummary();
+    vpm_diag_register();
+    vpm_diag_options();
     return 0;
 }
 
@@ -584,8 +664,11 @@ void vpm_core_reset(void)
     memset(g_codeWaits, 0, sizeof g_codeWaits);
     g_codeWaitCount = g_codeWaitsOpen = g_codeLoaded = g_codeFrames = 0;
     g_codeWaited = 0;
-    g_frames = 0;
+    g_frame = g_missionFrame = 0;
+    g_starting = g_statusPending = 0;
     vpm_options_reset();
+    vpm_diag_reset();
+    vpm_crash_reset();
     vpm_bindings_reset();
 }
 

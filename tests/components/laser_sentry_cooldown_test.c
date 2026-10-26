@@ -272,8 +272,9 @@ static void AppliesAtLoadThenNothingPerFrame(void)
     CHECK_EQ(c.read, 2);
     CHECK_EQ(c.set_live, 2);
     CHECK_EQ(c.write, 1);
-    CHECK_EQ(c.log, 1);
-    CHECK_EQ(Total(c), 6);
+    CHECK_EQ(c.log, 1 + 1); /* its line, and the core's status line ("active") */
+    CHECK_LOG("[core] Laser Sentry Cooldown status: active");
+    CHECK_EQ(Total(c), 6 + 1);
     CHECK_EQ(g_lookups, 1);
     CHECK(Holds(record, kChange));
     CHECK_EQ(ProtectionOf(record), PAGE_READONLY);

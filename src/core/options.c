@@ -105,6 +105,36 @@ int vpm_setting_next(const char* section, int* cursor, const char** key, const c
     return 0;
 }
 
+/* Entries the table could not keep or kept cut (vpm_setting_put, and a section header too long while the file loads):
+ * counted while the file loads (one line after it), logged once per kind afterwards. */
+typedef struct Dropped { int full, key, section, cut; char first[64]; } Dropped;
+static Dropped g_dropped;
+static int g_loading;
+static uint8_t g_droppedLogged[4];
+
+static void DroppedEntry(int kind, int* count, const char* section, const char* key, const char* why)
+{
+    if (*count == 0 && g_dropped.first[0] == 0) snprintf(g_dropped.first, sizeof g_dropped.first, "%.24s.%.32s", section, key);
+    (*count)++;
+    if (g_loading || g_droppedLogged[kind]) return;
+    g_droppedLogged[kind] = 1;
+    vpm_core_log("settings: [%.32s] %.100s %s", section, key, why);
+}
+
+/* Whether a new entry fits the table (else it is counted and dropped). */
+static int Room(const char* section, const char* key)
+{
+    if (strlen(section) >= SECTION_SIZE)
+        DroppedEntry(2, &g_dropped.section, section, key, "not kept: its section name is longer than 31 bytes");
+    else if (strlen(key) >= KEY_SIZE)
+        DroppedEntry(1, &g_dropped.key, section, key, "not kept: its key is longer than 127 bytes");
+    else if (g_settingCount >= MAX_SETTINGS)
+        DroppedEntry(0, &g_dropped.full, section, key, "not kept: the settings table is full (512 entries)");
+    else
+        return 1;
+    return 0;
+}
+
 void vpm_setting_put(const char* section, const char* key, const char* value)
 {
     Setting* s = Find(section, key);
@@ -117,13 +147,14 @@ void vpm_setting_put(const char* section, const char* key, const char* value)
     }
     if (s == NULL)
     {
-        if (g_settingCount >= MAX_SETTINGS || strlen(section) >= SECTION_SIZE || strlen(key) >= KEY_SIZE) return;
+        if (!Room(section, key)) return;
         s = &g_settings[g_settingCount++];
         snprintf(s->section, SECTION_SIZE, "%s", section);
         snprintf(s->key, KEY_SIZE, "%s", key);
         s->value[0] = 0;
     }
     if (strcmp(s->value, value) == 0) return;
+    if (strlen(value) >= VALUE_SIZE) DroppedEntry(3, &g_dropped.cut, section, key, "cut: its value is longer than 1023 bytes");
     snprintf(s->value, VALUE_SIZE, "%s", value);
     g_dirty = 1;
 }
@@ -145,6 +176,7 @@ static void ParseLine(char* line, char* section)
     if (line[0] == '[' && line[n - 1] == ']')
     {
         line[n - 1] = 0;
+        if (strlen(line + 1) >= SECTION_SIZE) DroppedEntry(2, &g_dropped.section, line + 1, "", "cut to 31 bytes");
         snprintf(section, SECTION_SIZE, "%s", line + 1);
         Trim(section);
         return;
@@ -158,20 +190,41 @@ static void ParseLine(char* line, char* section)
     if (line[0] != 0) vpm_setting_put(section, line, value);
 }
 
-void vpm_settings_load(void)
+/* The load's line when the file cannot be read: none yet (the defaults), or why not. */
+static void OpenFailed(DWORD error)
 {
-    g_settingCount = 0;
-    g_dirty = 0;
-    g_saveIn = 0;
-    if (!SettingsPath(0)) return;
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+        vpm_core_log("settings: %ls: none yet, the defaults apply", g_path);
+    else
+        vpm_core_log("settings: %ls could not be opened (error %lu): the defaults apply", g_path, error);
+}
+
+/* The file's text into text (at most FILE_LIMIT bytes, terminated): its length, or -1 (logged). */
+static long ReadText(char* text)
+{
     HANDLE file = CreateFileW(g_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE) return;
-    static char text[FILE_LIMIT + 1];
+    if (file == INVALID_HANDLE_VALUE) { OpenFailed(GetLastError()); return -1; }
+    LARGE_INTEGER size;
+    size.QuadPart = 0;
+    BOOL sized = GetFileSizeEx(file, &size);
     DWORD got = 0;
     BOOL ok = ReadFile(file, text, FILE_LIMIT, &got, NULL);
+    DWORD error = ok ? 0 : GetLastError();
     CloseHandle(file);
-    if (!ok) return;
+    if (!ok)
+    {
+        vpm_core_log("settings: %ls could not be read (error %lu): the defaults apply", g_path, error);
+        return -1;
+    }
     text[got] = 0;
+    if (sized && size.QuadPart > FILE_LIMIT)
+        vpm_core_log("settings: %ls is too large (%lld bytes, over the %d KB limit): only its first %lu bytes were read, and the "
+                     "next save keeps only what they hold", g_path, (long long)size.QuadPart, FILE_LIMIT / 1024, got);
+    return (long)got;
+}
+
+static void ParseText(char* text)
+{
     char section[SECTION_SIZE] = "";
     char* line = text;
     while (line != NULL && *line != 0)
@@ -181,6 +234,38 @@ void vpm_settings_load(void)
         ParseLine(line, section);
         line = next;
     }
+}
+
+/* What the load could not keep, in one line. */
+static void LogDropped(void)
+{
+    Dropped* d = &g_dropped;
+    if (d->full + d->key + d->section + d->cut == 0) return;
+    vpm_core_log("settings: dropped %d entries (the table holds %d) and %d keys over %d bytes; cut %d section names over %d "
+                 "bytes and %d values over %d bytes; the first: %s", d->full, MAX_SETTINGS, d->key, KEY_SIZE - 1, d->section,
+        SECTION_SIZE - 1, d->cut, VALUE_SIZE - 1, d->first);
+}
+
+void vpm_settings_load(void)
+{
+    g_settingCount = 0;
+    g_dirty = 0;
+    g_saveIn = 0;
+    memset(&g_dropped, 0, sizeof g_dropped);
+    memset(g_droppedLogged, 0, sizeof g_droppedLogged);
+    if (!SettingsPath(0))
+    {
+        vpm_core_log("settings: no %%LOCALAPPDATA%% folder (or its path is too long): settings are neither loaded nor saved");
+        return;
+    }
+    static char text[FILE_LIMIT + 1];
+    long got = ReadText(text);
+    if (got < 0) return;
+    g_loading = 1;
+    ParseText(text);
+    g_loading = 0;
+    vpm_core_log("settings: %ls: %ld bytes, %d entries", g_path, got, g_settingCount);
+    LogDropped();
     g_dirty = 0;
 }
 
@@ -220,22 +305,36 @@ static size_t Compose(char* text, size_t size)
     return at < size ? at : 0;
 }
 
+/* Why the last save failed: the step and its GetLastError (0: none). */
+static const char* g_saveStep;
+static DWORD g_saveError;
+
+static int SaveFailed(const char* step, DWORD error)
+{
+    g_saveStep = step;
+    g_saveError = error;
+    return 0;
+}
+
 /* Written to <file>.new, then moved over the file: an interrupted save leaves the old file. */
 static int Write(void)
 {
     static char text[FILE_LIMIT];
     size_t at = Compose(text, sizeof text);
-    if (at == 0 || !SettingsPath(1)) return 0;
+    if (at == 0) return SaveFailed("they come to over 256 KB", 0);
+    if (!SettingsPath(1)) return SaveFailed("no %LOCALAPPDATA% folder for them", GetLastError()); /* lint-ok: C4 a failed save, after a change only */
     wchar_t temporary[MAX_PATH + 8];
     _snwprintf(temporary, MAX_PATH + 8, L"%ls.new", g_path);
     HANDLE file = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL); /* lint-ok: C4 a save: only after a change, a second after it or at a mission's end */
-    if (file == INVALID_HANDLE_VALUE) return 0;
+    if (file == INVALID_HANDLE_VALUE) return SaveFailed("CreateFileW", GetLastError()); /* lint-ok: C4 a failed save, after a change only */
     DWORD wrote = 0;
     BOOL ok = WriteFile(file, text, (DWORD)at, &wrote, NULL) && wrote == at; /* lint-ok: C4 a save, after a change only */
-    ok = CloseHandle(file) && ok; /* lint-ok: C4 a save, after a change only */
-    if (ok) ok = MoveFileExW(temporary, g_path, MOVEFILE_REPLACE_EXISTING); /* lint-ok: C4 a save, after a change only */
-    if (!ok) DeleteFileW(temporary); /* lint-ok: C4 a failed save, after a change only */
-    return ok;
+    DWORD error = ok ? 0 : GetLastError(); /* lint-ok: C4 a failed save, after a change only */
+    const char* step = ok ? NULL : "WriteFile";
+    if (!CloseHandle(file) && ok) { ok = 0; step = "CloseHandle"; error = GetLastError(); } /* lint-ok: C4 a save, after a change only */
+    if (ok && !MoveFileExW(temporary, g_path, MOVEFILE_REPLACE_EXISTING)) { ok = 0; step = "MoveFileExW"; error = GetLastError(); } /* lint-ok: C4 a save, after a change only */
+    if (!ok) (void)DeleteFileW(temporary); /* lint-ok: C4 a failed save, after a change only */
+    return ok ? 1 : SaveFailed(step, error);
 }
 
 void vpm_settings_save_soon(void)
@@ -249,8 +348,11 @@ void vpm_settings_flush(void)
 {
     if (!g_dirty) return;
     g_saveIn = 0;
-    if (Write()) g_dirty = 0;
-    else vpm_core_hf()->log(vpm_mod(), "settings: %ls could not be written; kept for the next try", g_path); /* lint-ok: C4 a failed save */
+    if (Write()) { g_dirty = 0; return; }
+    if (g_saveError == 0)
+        vpm_core_log("settings: %ls not written: %s (%d entries); kept for the next try", g_path, g_saveStep, g_settingCount);
+    else
+        vpm_core_log("settings: %ls could not be written (%s, error %lu); kept for the next try", g_path, g_saveStep, g_saveError);
 }
 
 void vpm_settings_tick(float dt)
@@ -426,6 +528,11 @@ VpmOption* vpm_option(VpmComponent* self, const VpmOptionDef* def)
 }
 
 double vpm_option_value(const VpmOption* option) { return option->value; }
+const char* vpm_option_key(const VpmOption* option) { return option->key; }
+double vpm_option_default(const VpmOption* option)
+{
+    return option->def->kind == VPM_SLIDER ? Snap(option->def, option->def->value) : option->def->value;
+}
 void vpm_option_on_change(VpmOption* option, VpmOptionFn fn) { option->on_change = fn; }
 int vpm_option_count(void) { return g_optionCount; }
 VpmOption* vpm_option_at(int index) { return index >= 0 && index < g_optionCount ? &g_options[index] : NULL; }
@@ -458,7 +565,7 @@ int vpm_option_apply(VpmOption* option, double value)
     if (option->on_change != NULL && vpm_running(option->owner))
     {
         ChangeCall call = {option};
-        vpm_core_guarded(option->owner, RunChange, &call);
+        vpm_core_guarded(option->owner, VPM_CALL_OPTION, 0, RunChange, &call);
     }
     return 1;
 }
@@ -496,7 +603,7 @@ static void Attach(VpmBinding* binding)
 {
     if (g_backend == NULL || g_backend->attach == NULL || !vpm_running(g_backendOwner)) return;
     AttachCall call = {binding};
-    vpm_core_guarded(g_backendOwner, RunAttach, &call);
+    vpm_core_guarded(g_backendOwner, VPM_CALL_ATTACH, 0, RunAttach, &call);
 }
 
 VpmBinding* vpm_binding(VpmComponent* self, const VpmBindingDef* def)
@@ -532,7 +639,7 @@ int vpm_binding_down(const VpmBinding* binding)
 {
     if (binding == NULL || g_backend == NULL || g_backend->down == NULL || !vpm_running(g_backendOwner)) return -1;
     DownCall call = {binding, -1};
-    if (!vpm_core_guarded(g_backendOwner, RunDown, &call)) return -1;
+    if (!vpm_core_guarded(g_backendOwner, VPM_CALL_BINDING, 0, RunDown, &call)) return -1;
     return call.result;
 }
 

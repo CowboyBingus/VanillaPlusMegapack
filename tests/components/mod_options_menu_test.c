@@ -1344,12 +1344,14 @@ static void ThePacksSwitches(void)
     Frame();
     static const char* const names[] = {"Alpha Mod", "Beta", "Zulu", "Mod Options Menu"};
     static const uint32_t on[] = {1, 1, 0, 1};
-    CHECK_EQ(G32(Panel(2) + 33256), 4);
+    CHECK_EQ(G32(Panel(2) + 33256), 4 + 2); /* the switches, then the pack's own options */
     for (int i = 0; i < 4; i++)
     {
         CHECK(Shows(Row(i) + 3992, names[i]) && G32(Row(i) + 29068) == on[i]);
         CHECK(G32(Row(i) + 29080) == OFF_LABEL && G32(Row(i) + 29084) == ON_LABEL);
     }
+    CHECK(Shows(Row(4) + 3992, "Diagnostics") && G32(Row(4) + 29068) == 0); /* Normal */
+    CHECK(Shows(Row(5) + 3992, "Note a problem now") && G32(Row(5) + 29068) == 0);
     P32(Panel(2) + 33296, 1);
     Frame();
     CHECK(Shows(w.title, "Beta") && Shows(w.body, "Switches Beta on or off. Applies from the next session."));
@@ -1375,6 +1377,17 @@ static void ThePacksSwitches(void)
     CHECK(G8(UNAPPLIED) == 0);
     fake_frames(70, DT);
     CHECK(SettingsFileHas("beta = off") && SettingsFileHas("zulu = on"));
+    /* The pack's "Note a problem now": switched on and applied, it writes a mark and its row goes back off. */
+    P32(Row(5) + 29068, 1);
+    Frame();
+    CHECK(G8(UNAPPLIED) == 1);
+    Press(APPLY);
+    Frame();
+    ReleaseKeys();
+    CHECK_LOG("[core] MARK 1 at ");
+    CHECK_LOG("[core] MARK 1: Beta: running");
+    Frame();
+    CHECK(G8(UNAPPLIED) == 0 && G32(Row(5) + 29068) == 0);
 }
 
 /* ---- values set from code (test_options_tab.lua's set()) ---------------------------------------------------------- */

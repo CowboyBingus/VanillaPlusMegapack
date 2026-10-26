@@ -64,6 +64,9 @@ typedef struct MycWorker
     volatile long faulted;          /* a task faulted: the game thread stops the component (myc_worker_busy) */
     char fault[160];                /* the fault, as the core's guard describes it */
     int task;
+    unsigned long tasks;            /* tasks given this session (the mission-end summary) */
+    unsigned long start_error;      /* GetLastError of the last failed start (event, thread or wake), 0 none */
+    int stuck;                      /* stop() timed out while a task ran: the thread may still run it */
     MycRequest* request;            /* the game thread's (it may set obsolete) */
     MycResult* result;
     MycErr err;
@@ -179,5 +182,7 @@ int myc_worker_stop(MycWorker* w, unsigned long timeout_ms);
 /* 1 while a task runs. After a task faulted: stops the component (on the game thread, where its stop runs) and
  * answers 1, so the caller gives nothing more. One plain load while nothing faulted. */
 int myc_worker_busy(MycWorker* w);
+/* The worker's state for the core's summary line (vpm_on_summary): game thread. */
+void myc_worker_describe(const MycWorker* w, char* out, size_t size);
 
 #endif
