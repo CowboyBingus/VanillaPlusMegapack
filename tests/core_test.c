@@ -1,5 +1,6 @@
 /* The core: start-up, switches, the crash guard, ticks, listeners, options, the settings file, bindings, the game's
  * lookup and the local avatar. */
+#include <math.h>
 #include <string.h>
 #include "harness/test.h"
 
@@ -881,8 +882,131 @@ static void SettingsSaveOncePerFrameUnderTheHook(void)
     CHECK(GetFileAttributesW(L"vpm-test-settings.ini") != INVALID_FILE_ATTRIBUTES);
 }
 
+/* ---- the options' registration checks and their numbers, as Mod Options Menu's ----------------------------------- */
+
+static const char* const kOne[] = {"Only", NULL};
+static const char* const kSeventeen[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", NULL};
+static const char* const kLongChoice[] = {"Short", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", NULL}; /* 49 */
+static const char* const kTwo[] = {"A", "B", NULL};
+#define X10 "xxxxxxxxxx"
+#define CJK "\xE6\xBC\xA2" /* one character, three bytes */
+static const VpmOptionDef kRefusedOptions[] = {
+    {"one", VPM_CHOICE, "One", NULL, 1, 0, 0, 0, kOne},
+    {"seventeen", VPM_CHOICE, "Seventeen", NULL, 1, 0, 0, 0, kSeventeen},
+    {"long_choice", VPM_CHOICE, "Long choice", NULL, 1, 0, 0, 0, kLongChoice},
+    {"choice_default", VPM_CHOICE, "Default", NULL, 3, 0, 0, 0, kTwo},
+    {"fine", VPM_SLIDER, "Fine", NULL, 0, 0, 1, 1e-39},
+    {"wide", VPM_SLIDER, "Wide", NULL, 0, 0, 3.5e38, 1},
+    {"coarse", VPM_SLIDER, "Coarse", NULL, 0, 0, 1, 2},
+    {"empty_range", VPM_SLIDER, "Empty", NULL, 1, 1, 1, 0.1},
+    {"long", VPM_TOGGLE, X10 X10 X10 X10 X10 X10 "xxxxx", NULL, 0},
+    {"wordy", VPM_TOGGLE, "Wordy", X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10
+        X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 X10 "x", 0},
+    {"half", VPM_TOGGLE, "Half", NULL, 0.5},
+    {"", VPM_TOGGLE, "No id", NULL, 0},
+    {"kind", 7, "Kind", NULL, 0},
+};
+static const char* const kRefusals[] = {
+    "option one refused: choices must list 2 to 16 names", "option seventeen refused: choices must list 2 to 16 names",
+    "option long_choice refused: invalid choice name", "option choice_default refused: invalid default",
+    "option fine refused: slider min, max and step must be finite floats",
+    "option wide refused: slider min, max and step must be finite floats",
+    "option coarse refused: slider needs min < max and 0 < step <= max - min",
+    "option empty_range refused: slider needs min < max and 0 < step <= max - min",
+    "option long refused: invalid option registration", "option wordy refused: invalid description",
+    "option half refused: invalid default", "option  refused: invalid option registration",
+    "option kind refused: type must be toggle, choice or slider",
+};
+static const VpmOptionDef kAccepted[] = {
+    {"cjk", VPM_TOGGLE, CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK
+        CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK
+        CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK CJK
+        CJK CJK CJK CJK, NULL, 1}, /* 64 characters, 192 bytes: fits */
+    {"two", VPM_CHOICE, "Two", NULL, 2, 0, 0, 0, kTwo},
+    {"tenths", VPM_SLIDER, "Tenths", NULL, 0.6, 0, 1, 0.1},
+    {"steps", VPM_SLIDER, "Steps", NULL, 0.2, 0.2, 1.3, 0.05},
+    {"unstepped", VPM_SLIDER, "Unstepped", NULL, 3.4, 0, 10, 0},
+    {"half_min", VPM_SLIDER, "Half min", NULL, 2, 0.5, 5, 1},
+};
+static VpmOption* g_accepted[6];
+static int g_refusedNull;
+static int StartChecking(VpmComponent* self)
+{
+    g_refusedNull = 0;
+    for (int i = 0; i < 13; i++) g_refusedNull += vpm_option(self, &kRefusedOptions[i]) == NULL;
+    for (int i = 0; i < 6; i++) g_accepted[i] = vpm_option(self, &kAccepted[i]);
+    return 0;
+}
+static const VpmComponentDef kChecking = {"checking", "Checking", "1.0", 0, StartChecking, NULL};
+
+static void OptionsAreCheckedAsModOptionsMenuChecksThem(void)
+{
+    const VpmComponentDef* defs[] = {&kChecking};
+    fake_start(defs, 1);
+    CHECK_EQ(g_refusedNull, 13);
+    for (int i = 0; i < 13; i++) CHECK_LOG(kRefusals[i]);
+    for (int i = 0; i < 6; i++) CHECK(g_accepted[i] != NULL);
+    CHECK_EQ(vpm_option_count(), 6);
+    /* the decimals the step needs: no float noise */
+    CHECK(vpm_option_value(g_accepted[2]) == 0.6);
+    CHECK(vpm_option_set(g_accepted[2], 0.1 + 0.2 + 0.4) && vpm_option_value(g_accepted[2]) == 0.7);
+    CHECK(vpm_option_set(g_accepted[3], 0.26) && vpm_option_value(g_accepted[3]) == 0.25);
+    CHECK(vpm_option_set(g_accepted[3], 1.29) && vpm_option_value(g_accepted[3]) == 1.3);
+    /* no step: Mod Options Menu's 1 */
+    CHECK(vpm_option_value(g_accepted[4]) == 3);
+    CHECK(vpm_option_set(g_accepted[4], 7.6) && vpm_option_value(g_accepted[4]) == 8);
+    /* a min that is not whole: one decimal at least, steps from min */
+    CHECK(vpm_option_set(g_accepted[5], 3.2) && vpm_option_value(g_accepted[5]) == 3.5);
+    CHECK(!vpm_option_set(g_accepted[5], NAN) && !vpm_option_set(g_accepted[5], INFINITY));
+}
+
+static VpmOptionDef g_rows[33];
+static char g_rowIds[33][8];
+static int g_rowsAccepted;
+static int StartRows(VpmComponent* self)
+{
+    g_rowsAccepted = 0;
+    for (int i = 0; i < 33; i++)
+    {
+        snprintf(g_rowIds[i], 8, "r%d", i);
+        g_rows[i] = (VpmOptionDef){g_rowIds[i], VPM_TOGGLE, "Row", NULL, 0};
+        g_rowsAccepted += vpm_option(self, &g_rows[i]) != NULL;
+    }
+    return 0;
+}
+static const VpmComponentDef kRows = {"rows", "Rows", "1.0", 0, StartRows, NULL};
+
+static void AComponentHoldsThirtyTwoOptions(void)
+{
+    const VpmComponentDef* defs[] = {&kRows};
+    fake_start(defs, 1);
+    CHECK_EQ(g_rowsAccepted, 32);
+    CHECK_LOG("option rows.r32 refused: the component already has 32 options");
+}
+
+static void TheRevisionCountsChangesAndSaveNowWrites(void)
+{
+    const VpmComponentDef* defs[] = {&kOptions};
+    fake_start(defs, 1);
+    uint32_t before = vpm_option_revision();
+    CHECK(vpm_option_set(g_depth, 1.25)); /* the value it has: no change */
+    CHECK_EQ(vpm_option_revision(), before);
+    CHECK(vpm_option_apply(g_depth, 2.0));
+    CHECK_EQ(vpm_option_revision(), before + 1);
+    CHECK(vpm_option_set(g_mode, 2));
+    CHECK_EQ(vpm_option_revision(), before + 2);
+    CHECK(!vpm_option_set(g_mode, 9));
+    CHECK_EQ(vpm_option_revision(), before + 2);
+    CHECK(GetFileAttributesW(L"vpm-test-settings.ini") == INVALID_FILE_ATTRIBUTES);
+    vpm_settings_save_now();
+    CHECK(GetFileAttributesW(L"vpm-test-settings.ini") != INVALID_FILE_ATTRIBUTES);
+}
+
 int main(void)
 {
+    RUN(OptionsAreCheckedAsModOptionsMenuChecksThem);
+    RUN(AComponentHoldsThirtyTwoOptions);
+    RUN(TheRevisionCountsChangesAndSaveNowWrites);
     RUN(TicksRunAroundTheFrameUpdate);
     RUN(TicksWaitForTheFrameUpdatesCode);
     RUN(TicksGiveUpTheFrameHookAfterAMinute);

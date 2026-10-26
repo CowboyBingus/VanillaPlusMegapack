@@ -6,10 +6,8 @@
 #include <windows.h>
 #include "vpm.h"
 
-#define VPM_MAX_COMPONENTS 32
 #define VPM_MAX_LOADS 128
 #define VPM_MAX_LISTENS 128
-#define VPM_MAX_OPTIONS 256
 #define VPM_MAX_BINDINGS 64
 #define VPM_STATUS_SIZE 192
 

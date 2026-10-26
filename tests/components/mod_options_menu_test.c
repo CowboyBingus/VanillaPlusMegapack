@@ -1302,10 +1302,10 @@ static const VpmOptionDef kOddDefs[] = {
 #define ODD_COUNT ((int)(sizeof kOddDefs / sizeof kOddDefs[0]))
 static const VpmOptionDef kOddLate = {"late", VPM_TOGGLE, "Late", NULL, 0, 0, 0, 0, NULL, 0};
 
+/* Every definition is offered; the core refuses the ones its registration checks catch (they return NULL). */
 static int OddStart(VpmComponent* self)
 {
-    for (int i = 0; i < ODD_COUNT; i++)
-        if (vpm_option(self, &kOddDefs[i]) == NULL) return 1;
+    for (int i = 0; i < ODD_COUNT; i++) (void)vpm_option(self, &kOddDefs[i]);
     return 0;
 }
 
@@ -1318,7 +1318,7 @@ static int ManyStart(VpmComponent* self)
         snprintf(g_manyNames[i][0], 16, "t%d", i + 1);
         snprintf(g_manyNames[i][1], 16, "Many %d", i + 1);
         g_manyDefs[i] = (VpmOptionDef){g_manyNames[i][0], VPM_TOGGLE, g_manyNames[i][1], NULL, 0, 0, 0, 0, NULL, 0};
-        if (vpm_option(self, &g_manyDefs[i]) == NULL) return 1;
+        if (vpm_option(self, &g_manyDefs[i]) == NULL && i < 32) return 1;
     }
     return 0;
 }
@@ -1328,20 +1328,21 @@ static const VpmComponentDef kMany = {"many", "Many", "1.0", 0, ManyStart, NULL}
 static const VpmComponentDef* const kOddDefsList[] = {&kOdd, &kMany, &vpm_component_mod_options_menu};
 
 /* As the Lua's register_option refused them (lengths in characters, 2 to 16 choices, a range a float can hold, 32
- * options a category): not shown, the log says why once. */
+ * options a category): the core refuses them at registration, and the tab leaves out the texts it cannot show (a blank
+ * description, bytes that are not UTF-8); each is logged once. */
 static void OptionsTheTabCannotShow(void)
 {
     static const char* const reasons[] = {
-        "Option odd.one is not shown: choices must list 2 to 16 names.",
-        "Option odd.seventeen is not shown: choices must list 2 to 16 names.",
-        "Option odd.fine is not shown: slider min, max and step must be finite floats.",
-        "Option odd.wide is not shown: slider min, max and step must be finite floats.",
-        "Option odd.coarse is not shown: slider needs min < max and 0 < step <= max - min.",
-        "Option odd.long is not shown: invalid option registration.",
-        "Option odd.wordy is not shown: invalid description.",
+        "[Odd] option one refused: choices must list 2 to 16 names",
+        "[Odd] option seventeen refused: choices must list 2 to 16 names",
+        "[Odd] option fine refused: slider min, max and step must be finite floats",
+        "[Odd] option wide refused: slider min, max and step must be finite floats",
+        "[Odd] option coarse refused: slider needs min < max and 0 < step <= max - min",
+        "[Odd] option long refused: invalid option registration",
+        "[Odd] option wordy refused: invalid description",
         "Option odd.blank is not shown: invalid description.",
         "Option odd.bytes is not shown: invalid option registration.",
-        "Option many.t33 is not shown: its component already has 32 options.",
+        "[Many] option many.t33 refused: the component already has 32 options",
     };
     Ready(kOddDefsList, 3);
     CHECK(vpm_running(fake_component(0)) && vpm_running(fake_component(1)));

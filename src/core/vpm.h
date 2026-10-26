@@ -197,6 +197,15 @@ uintptr_t vpm_action_slot(const VpmAvatar* avatar, uint32_t slot);
 #define VPM_CHOICE 2u
 #define VPM_SLIDER 3u
 
+/* Limits, as Mod Options Menu's (options.lua, rows.lua); vpm_option refuses an option past them and logs why. */
+#define VPM_MAX_COMPONENTS 32      /* components in the pack */
+#define VPM_MAX_OPTIONS 256        /* options in the pack */
+#define VPM_OPTION_ROWS 32         /* options per component (one category's rows) */
+#define VPM_OPTION_LABEL 64        /* characters of a label */
+#define VPM_OPTION_DESCRIPTION 400 /* characters of a description */
+#define VPM_OPTION_CHOICES 16      /* a choice's names: 2 to 16 */
+#define VPM_OPTION_CHOICE 48       /* characters of a choice's name */
+
 typedef struct VpmOption VpmOption;
 typedef struct VpmOptionDef
 {
@@ -205,7 +214,8 @@ typedef struct VpmOptionDef
     const char* label;       /* the row's text (English) */
     const char* description; /* shown while the row is selected, or NULL */
     double value;            /* the default: a toggle 0 or 1, a choice's 1-based index, a slider's number */
-    double min, max, step;   /* a slider's range and step */
+    double min, max, step;   /* a slider's range and step (0: 1, Mod Options Menu's default); values snap to the step
+                              * and to the decimals it needs (at most 3; at least 1 when min is not whole) */
     const char* const* choices; /* a choice's texts, ending in NULL */
     int gap;                 /* 1: space above the row */
 } VpmOptionDef;
@@ -220,6 +230,8 @@ double vpm_option_value(const VpmOption* option);
 int vpm_option_set(VpmOption* option, double value);
 /* Called on the game thread when the player applies a change (Mod Options Menu). One per option. */
 void vpm_option_on_change(VpmOption* option, VpmOptionFn fn);
+/* A count that goes up whenever an option's value changes (set or applied): an open view compares it to redraw. */
+uint32_t vpm_option_revision(void);
 
 /* For Mod Options Menu: every registered option in registration order. */
 int vpm_option_count(void);
@@ -274,6 +286,8 @@ void* vpm_binding_data(const VpmBinding* binding);
 const char* vpm_setting(const char* section, const char* key); /* NULL when absent */
 void vpm_setting_put(const char* section, const char* key, const char* value); /* value NULL removes it */
 void vpm_settings_save_soon(void);
+/* Writes a waiting change now (Mod Options Menu's APPLY, as the Lua saved at once); nothing when none waits. */
+void vpm_settings_save_now(void);
 
 /* ---- Windows functions resolved at run time --------------------------------------------------------------------- *
  * user32's are found with GetProcAddress at init, so the DLL links only kernel32 (HellForge's own source build passes no

@@ -7,6 +7,7 @@
  * a component adds, "key = value" lines. Entries the pack does not know (a component switched off, an older version's)
  * are kept as they are. It is read once at start-up and written about a second after a change (on the game thread, at
  * the pack tick), and at a mission's end if a change waits; never on a frame without a change. */
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -200,6 +201,8 @@ void vpm_settings_save_soon(void)
     if (g_dirty) g_saveIn = SAVE_DELAY;
 }
 
+void vpm_settings_save_now(void) { vpm_settings_flush(); }
+
 void vpm_settings_flush(void)
 {
     if (!g_dirty) return;
@@ -244,12 +247,32 @@ static int ChoiceCount(const VpmOptionDef* def)
     return n;
 }
 
+/* A slider's step: Mod Options Menu's default of 1 when none is given (0). */
+static double Step(const VpmOptionDef* def) { return def->step > 0 ? def->step : 1.0; }
+
+/* The decimal places a slider shows (Mod Options Menu's slider_decimals): as many as its step needs, at most 3, and at
+ * least 1 when min is not a whole number. */
+static int Decimals(const VpmOptionDef* def)
+{
+    double step = Step(def);
+    int decimals = 0;
+    while (decimals < 3 && fabs(step * pow(10, decimals) - floor(step * pow(10, decimals) + 0.5)) > 1e-6) decimals++;
+    if (fmod(def->min, 1.0) != 0 && decimals < 1) decimals = 1;
+    return decimals;
+}
+
+/* Mod Options Menu's snap: to the step from min, clamped to the range, then to the shown decimals, so no float noise
+ * (0.6000000000000001) reaches a value. NaN and infinities stay as they are (Valid refuses them). */
 static double Snap(const VpmOptionDef* def, double value)
 {
-    if (def->step <= 0) return value;
-    double steps = floor((value - def->min) / def->step + 0.5);
-    double snapped = def->min + steps * def->step;
-    return snapped > def->max ? def->max : snapped < def->min ? def->min : snapped;
+    if (!isfinite(value)) return value;
+    double step = Step(def);
+    double steps = floor((value - def->min) / step + 0.5);
+    double snapped = def->min + steps * step;
+    snapped = snapped > def->max ? def->max : snapped < def->min ? def->min : snapped;
+    char text[64];
+    snprintf(text, sizeof text, "%.*f", Decimals(def), snapped);
+    return strtod(text, NULL);
 }
 
 static int Valid(const VpmOptionDef* def, double value)
@@ -261,12 +284,44 @@ static int Valid(const VpmOptionDef* def, double value)
     return 0;
 }
 
-static int ValidDef(const VpmOptionDef* def)
+/* Characters of a UTF-8 text (continuation bytes do not count). */
+static size_t Characters(const char* text)
 {
-    if (def == NULL || def->id == NULL || def->id[0] == 0 || def->label == NULL) return 0;
-    if (def->kind == VPM_CHOICE) return ChoiceCount(def) > 0;
-    if (def->kind == VPM_SLIDER) return def->min < def->max && def->step >= 0;
-    return def->kind == VPM_TOGGLE;
+    size_t n = 0;
+    for (const unsigned char* at = (const unsigned char*)text; *at; at++) n += (*at & 0xC0) != 0x80;
+    return n;
+}
+
+/* Mod Options Menu's registration checks (options.lua new_option and its fields): a reason, or NULL. */
+static const char* Refusal(const VpmOptionDef* def)
+{
+    if (def == NULL || def->id == NULL || def->id[0] == 0 || strlen(def->id) > 96) return "invalid option registration";
+    if (def->label == NULL || def->label[0] == 0 || Characters(def->label) > VPM_OPTION_LABEL) return "invalid option registration";
+    if (def->description != NULL && Characters(def->description) > VPM_OPTION_DESCRIPTION) return "invalid description";
+    if (def->kind == VPM_CHOICE)
+    {
+        int n = ChoiceCount(def);
+        if (n < 2 || n > VPM_OPTION_CHOICES) return "choices must list 2 to 16 names";
+        for (int i = 0; i < n; i++)
+            if (def->choices[i][0] == 0 || Characters(def->choices[i]) > VPM_OPTION_CHOICE) return "invalid choice name";
+        return NULL;
+    }
+    if (def->kind == VPM_SLIDER)
+    {
+        double step = Step(def);
+        if (!(def->min < def->max) || step > def->max - def->min) return "slider needs min < max and 0 < step <= max - min";
+        if (!(def->min >= -FLT_MAX && def->max <= FLT_MAX && def->max - def->min <= FLT_MAX && step >= FLT_MIN))
+            return "slider min, max and step must be finite floats";
+        return NULL;
+    }
+    return def->kind == VPM_TOGGLE ? NULL : "type must be toggle, choice or slider";
+}
+
+static int RowsOf(const VpmComponent* owner)
+{
+    int n = 0;
+    for (int i = 0; i < g_optionCount; i++) n += g_options[i].owner == owner;
+    return n;
 }
 
 static void Save(VpmOption* option)
@@ -300,9 +355,11 @@ static VpmOption* Registered(const char* key, const VpmOptionDef* def, int* foun
 
 VpmOption* vpm_option(VpmComponent* self, const VpmOptionDef* def)
 {
-    if (!ValidDef(def) || !Valid(def, def->kind == VPM_SLIDER ? Snap(def, def->value) : def->value))
+    const char* refusal = Refusal(def);
+    if (refusal == NULL && !Valid(def, def->kind == VPM_SLIDER ? Snap(def, def->value) : def->value)) refusal = "invalid default";
+    if (refusal != NULL)
     {
-        vpm_log(self, "option %s refused: its definition is not valid", def != NULL && def->id != NULL ? def->id : "?");
+        vpm_log(self, "option %s refused: %s", def != NULL && def->id != NULL ? def->id : "?", refusal);
         return NULL;
     }
     char key[KEY_SIZE];
@@ -311,6 +368,7 @@ VpmOption* vpm_option(VpmComponent* self, const VpmOptionDef* def)
     VpmOption* existing = Registered(key, def, &found);
     if (found) return existing;
     if (g_optionCount >= VPM_MAX_OPTIONS) { vpm_log(self, "option %s refused: the pack holds %d", key, VPM_MAX_OPTIONS); return NULL; }
+    if (RowsOf(self) >= VPM_OPTION_ROWS) { vpm_log(self, "option %s refused: the component already has %d options", key, VPM_OPTION_ROWS); return NULL; }
     VpmOption* option = &g_options[g_optionCount++];
     memset(option, 0, sizeof *option);
     option->def = def;
@@ -328,10 +386,14 @@ VpmOption* vpm_option_at(int index) { return index >= 0 && index < g_optionCount
 const VpmOptionDef* vpm_option_def(const VpmOption* option) { return option->def; }
 VpmComponent* vpm_option_owner(const VpmOption* option) { return option->owner; }
 
+static uint32_t g_revision;
+uint32_t vpm_option_revision(void) { return g_revision; }
+
 int vpm_option_set(VpmOption* option, double value)
 {
     if (option->def->kind == VPM_SLIDER && value == value) value = Snap(option->def, value);
     if (!Valid(option->def, value)) return 0;
+    if (option->value != value) g_revision++;
     option->value = value;
     Save(option);
     return 1;
