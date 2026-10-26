@@ -72,7 +72,9 @@ Rules for components:
 
 - A component ports its Lua release 1:1: the same addresses, checks, writes and timing. Where HellForge moves a game
   table (stratagems, projectiles, difficulty levels), rows are reached by identity (`get_live`, `set_live`).
-- `start()` sets every piece of the component's static state, so a test can start it again.
+- `start()` sets every piece of the component's static state, so a test can start it again. A test that needs to see
+  that state uses a `VPM_TEST`-only accessor declared in the component's own header (Hellpod Drop Hold's is the
+  pattern); the DLL never has it.
 - Per frame: an idle gate first; no Windows calls, no allocation and no logging on an idle frame. The file's header
   comment lists the component's calls per frame, idle and active, and its test pins them with the harness's counts.
 

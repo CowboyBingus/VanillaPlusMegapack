@@ -20,9 +20,9 @@ typedef struct FakeModStruct { const HfApi* api; } FakeModStruct;
 typedef struct Hole { uintptr_t at; size_t size; } Hole;
 typedef struct Load { HfEvent event; HfEventCallback callback; void* user; } Load;
 typedef struct Listener { uint32_t kind; HfListener listener; void* user; int32_t priority; } Listener;
-typedef struct Live { uint64_t target; char component[64]; uint16_t offset; HfValue now, base; int changed; } Live;
+typedef struct Live { uint64_t target; char component[64]; uint16_t offset; HfValue now, base; int changed; uintptr_t memory; } Live;
 typedef struct Original { uintptr_t target; void* original; } Original;
-typedef struct Row { char table[32]; uint64_t id; uintptr_t row; } Row;
+typedef struct Row { char table[32]; uint64_t id; uintptr_t row; uint32_t stride; } Row;
 
 static uint8_t* g_game;
 static uint8_t* g_exe;
@@ -106,11 +106,16 @@ static int FakeRead(uintptr_t address, void* buffer, size_t size)
     return 0;
 }
 
+/* As HellForge's write: the bytes are made writable for the write, then their protection is put back. */
 static int FakeWrite(uintptr_t address, const void* data, size_t size)
 {
     g_counts.write++;
     if (g_refuseWrites || !Mapped(address, size)) return 1;
+    DWORD old;
+    if (!VirtualProtect((void*)address, size, PAGE_EXECUTE_READWRITE, &old)) return 1; /* lint-ok: C3 the fake of HfApi.write */
     memcpy((void*)address, data, size);
+    DWORD ignored;
+    (void)VirtualProtect((void*)address, size, old, &ignored); /* lint-ok: C3 the fake of HfApi.write */
     return 0;
 }
 
@@ -134,6 +139,12 @@ void* fake_heap(size_t size)
 void fake_hole(uintptr_t address, size_t size)
 {
     if (g_holeCount < MAX_HOLES) g_holes[g_holeCount++] = (Hole){address, size};
+}
+
+void fake_unhole(uintptr_t address)
+{
+    for (int i = 0; i < g_holeCount; i++)
+        if (g_holes[i].at == address) { g_holes[i--] = g_holes[--g_holeCount]; }
 }
 
 void fake_refuse_writes(int refuse) { g_refuseWrites = refuse; }
@@ -400,6 +411,27 @@ int fake_live_now(uint64_t target, const char* component, uint16_t offset, HfVal
     return 1;
 }
 
+/* A live field bound to memory (fake_live_bind): set_live stores its value there too, as HellForge's edit does. */
+static void StoreLive(const Live* live)
+{
+    if (live->memory == 0) return;
+    const HfValue* v = &live->now;
+    uint8_t bytes[8];
+    size_t size = v->type == HF_TYPE_U8 ? 1 : v->type == HF_TYPE_U16 ? 2 : v->type == HF_TYPE_U64 ? 8 : 4;
+    if (v->type == HF_TYPE_F32) { float f = (float)v->number; memcpy(bytes, &f, 4); }
+    else if (v->type == HF_TYPE_I32) { int32_t i = (int32_t)v->number; memcpy(bytes, &i, 4); }
+    else if (v->type == HF_TYPE_U64) memcpy(bytes, &v->u64, 8);
+    else { uint64_t u = (uint64_t)v->number; memcpy(bytes, &u, size); }
+    (void)FakeWrite(live->memory, bytes, size);
+    g_counts.write--; /* HellForge's own store, not the component's call */
+}
+
+void fake_live_bind(uint64_t target, const char* component, uint16_t offset, uintptr_t memory)
+{
+    Live* live = FindLive(target, component, offset);
+    if (live != NULL) live->memory = memory;
+}
+
 static int FakeGetLive(HfMod* mod, HfRef target, const HfField* field, HfLiveValue* out)
 {
     g_counts.get_live++;
@@ -416,10 +448,11 @@ static int FakeSetLive(HfMod* mod, HfRef target, const HfField* field, const HfV
     g_counts.set_live++;
     Live* live = FindLive(target, field->component, field->offset);
     if (live == NULL) { snprintf(g_lastLog, sizeof g_lastLog, "fake: no such field"); return 0; }
-    if (value == NULL) { live->now = live->base; return HF_APPLIES_NOW; }
+    if (value == NULL) { live->now = live->base; StoreLive(live); return HF_APPLIES_NOW; }
     if (value->type != field->type) { snprintf(g_lastLog, sizeof g_lastLog, "fake: the value's type is not the field's"); return 0; }
     live->now = *value;
     live->changed = 1;
+    StoreLive(live);
     return HF_APPLIES_NOW;
 }
 
@@ -454,15 +487,27 @@ static uintptr_t FindRow(const char* table, uint64_t id)
     return 0;
 }
 
-void fake_set_row(const char* table, uint64_t id, uintptr_t row)
+void fake_set_record(const char* table, uint64_t id, uintptr_t row, uint32_t stride)
 {
-    if (g_rowCount < MAX_ROWS) { snprintf(g_rows[g_rowCount].table, 32, "%s", table); g_rows[g_rowCount].id = id; g_rows[g_rowCount++].row = row; }
+    if (g_rowCount >= MAX_ROWS) return;
+    snprintf(g_rows[g_rowCount].table, 32, "%s", table);
+    g_rows[g_rowCount].id = id;
+    g_rows[g_rowCount].stride = stride;
+    g_rows[g_rowCount++].row = row;
 }
+
+void fake_set_row(const char* table, uint64_t id, uintptr_t row) { fake_set_record(table, id, row, 0); }
 
 static uintptr_t FakeComponentRecord(const char* component, uint64_t resource, uint32_t* stride)
 {
     if (stride) *stride = 0;
-    return FindRow(component, resource);
+    for (int i = 0; i < g_rowCount; i++)
+        if (g_rows[i].id == resource && strcmp(g_rows[i].table, component) == 0)
+        {
+            if (stride) *stride = g_rows[i].stride;
+            return g_rows[i].row;
+        }
+    return 0;
 }
 static uintptr_t FakeProjectileRow(uint32_t type) { return FindRow("projectile", type); }
 static uintptr_t FakeDamageRow(uint32_t id) { return FindRow("damage", id); }

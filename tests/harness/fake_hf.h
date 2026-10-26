@@ -39,7 +39,10 @@ uintptr_t fake_exe(void);
 void* fake_heap(size_t size);
 /* API reads and writes touching [address, address + size) fail from now on. */
 void fake_hole(uintptr_t address, size_t size);
-/* The API's write fails from now on (protection refused). */
+/* The holes made at address (fake_hole) are gone: reads and writes there work again. */
+void fake_unhole(uintptr_t address);
+/* The API's write fails from now on (protection refused). Otherwise it writes read-only pages too, as HellForge's
+ * write does (it changes their protection for the write). */
 void fake_refuse_writes(int refuse);
 
 /* Fires a load event: its registered callbacks run, later registrations get it at once. */
@@ -65,6 +68,8 @@ void fake_log_echo(int echo);
 /* Live fields (get_live, set_live), by target, component record name and offset. */
 void fake_live_put(uint64_t target, const char* component, uint16_t offset, HfValue value);
 int fake_live_now(uint64_t target, const char* component, uint16_t offset, HfValue* out);
+/* set_live on that field also stores the value at memory (its record's field), as HellForge's live edit does. */
+void fake_live_bind(uint64_t target, const char* component, uint16_t offset, uintptr_t memory);
 
 /* Hooks the code made (hook, hook_ex), and the original a test gives a hooked target. */
 typedef struct FakeHook { uintptr_t target; void* detour; int32_t priority; } FakeHook;
@@ -75,6 +80,8 @@ void fake_set_original(uintptr_t target, void* original);
 /* What projectile_row, damage_row, stratagem_row, difficulty_row ("projectile", "damage", "stratagem", "difficulty"),
  * component_record and record (the component's name, by resource) answer for an id. */
 void fake_set_row(const char* table, uint64_t id, uintptr_t row);
+/* The same with the record size component_record answers in *stride. */
+void fake_set_record(const char* table, uint64_t id, uintptr_t row, uint32_t stride);
 
 /* A stand-in for a game function at game.dll + rva: code_matches and read_code see `shipped` (an IDA-style pattern of
  * concrete bytes, at least 14 of them: the function as the game shipped it), while the image holds a jump to fn, so a

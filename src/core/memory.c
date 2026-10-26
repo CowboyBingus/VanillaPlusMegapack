@@ -76,7 +76,7 @@ void vpm_core_test_hooks(const VpmTestHooks* hooks) { g_hooks = hooks != NULL ? 
 
 int vpm_write(uintptr_t address, const void* data, size_t size)
 {
-    return address != 0 && vpm_core_hf()->write(address, data, size) == 0;
+    return address != 0 && vpm_core_hf()->write(address, data, size) == 0; /* lint-ok: C4 writes only on frames that act; callers state them */
 }
 
 int vpm_writable(uintptr_t address, size_t size)
