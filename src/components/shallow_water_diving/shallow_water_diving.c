@@ -38,7 +38,15 @@
  * changes that, so frames without a local avatar run the tick alone, as in the 1:1 port. Without the core's hook of
  * game.dll's update (its code not decoded yet, or another mod's hook there first) the post tick runs right after the
  * tick inside HellForge's callback: its check then sees what the tick's saw, at the Lua's two-check cost (the component
- * cannot tell the two cases apart through vpm.h). A refused post tick is logged once and leaves one check per frame.
+ * cannot tell the two cases apart through vpm.h). A refused post tick is logged once and leaves one check per frame for
+ * the session (the 1:1 port's), however a later start would answer.
+ *
+ * game.dll's decoding: HF_EVENT_GAME_LOADED fires once one pin of game.dll reads as decoded, and the rest of its code
+ * is decoded in parts after that. This component checks no code bytes (no code_matches, no hook). Its reads of
+ * game.dll's image are its globals (data the game writes; null ones wait) and, on the first dive of a session in a
+ * mission, the read-only dive timeout and stance offsets: minutes after the event (the ship, then a mission's load),
+ * far past HellForge's 20 s for its own pins and the core's 60 s wait, and a mismatch there is one error of a burst,
+ * not a stop. So nothing here waits on vpm_when_code_ready.
  *
  * The tick starts at HF_EVENT_GAME_LOADED. The slider is the core's option (registered at start, its saved value
  * applied, changes through on_change) instead of Mod Options Menu's retried registration. The session's counters go to
@@ -52,8 +60,9 @@
  * - outside a mission: 1 read every 30th frame (the mission record), none between; no post tick [2 every 30th];
  * - no local avatar: every 30th frame the reads up to the wait, 3 while dead (at most 10), none between; no post tick
  *   [5 while dead];
- * - idle in a mission: 1 + 1 reads (the gate at both points) [2], and 10 + 1 on every 120th frame (the full check, then
- *   the gate) [15];
+ * - idle in a mission: 1 + 1 reads, the gate before and after the update [2]: the Lua's own count (the 1:1 port read
+ *   once), kept so that a dive started inside the update gets its lease in the same frame; 10 + 1 on every 120th frame
+ *   (the full check, then the gate) [15];
  * - a dive start: 75 + 24 reads (the lease, then the held check; 76 + 24 when the gate ran first), 1 page check
  *   (VirtualQuery) for the first dive in a record table, 2 stores [129 reads, 1 page check, 2 writes]; a dive the
  *   game's update starts: 1 + 76 on that frame (the tick's gate, then the gate and the lease after the update);
@@ -61,13 +70,12 @@
  * - a landing: 37 + 1 reads and 1 store, no page check (the dive's check is reused) [50 reads, 1 write];
  * - a dive not assisted (deep water): 24 + 24 reads per frame [62];
  * - a stop with a lease held: 27 reads, 1 page check, 1 store.
- * The 1:1 port made the tick's share alone (idle in a mission 1 read, a dive held 24): the post check's reads are the
- * Lua's second boundary, back where it watched, guarded plain loads (unmeasured in game) where the Lua's
- * ReadProcessMemory cost 1-2 us.
- * The post tick costs the core a guarded call and two time-stamp reads per frame while it runs; nothing while it is
- * stopped. No Windows call on a frame that does not act (the page check runs only right before a dive's first write in
- * a table), no allocation (all state is static), no logging (an error's first line in a burst only). Once: the option's
- * registration at start and one log line at HF_EVENT_GAME_LOADED, no reads; one log line at each mission's end. */
+ * The 1:1 port made the tick's share alone (a dive held 24): the post check's reads are the Lua's second boundary, back
+ * where it watched, guarded plain loads (unmeasured in game) where the Lua's ReadProcessMemory cost 1-2 us. The post
+ * tick costs the core a guarded call and two time-stamp reads per frame while it runs; nothing while it is stopped. No
+ * Windows call on a frame that does not act (the page check runs only right before a dive's first write in a table), no
+ * allocation (all state is static), no logging (an error's first line in a burst only). Once: the option's registration
+ * at start and one log line at HF_EVENT_GAME_LOADED, no reads; one log line at each mission's end. */
 #include <stdio.h>
 #include <string.h>
 #include "../../core/vpm.h"
