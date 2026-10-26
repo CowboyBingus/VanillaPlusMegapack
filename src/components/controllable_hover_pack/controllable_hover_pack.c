@@ -26,9 +26,18 @@
  *   burst. Its pause and resume around errors in the game's update, the retries of a restore after a stop and the
  *   shutdown restore are gone: HellForge does not chain the game's update, a stopped component no longer ticks, and
  *   there is no shutdown event (the record goes with the process).
- * - Its developer diagnostics (CowboyBingusDiagnostics status lines and log file) are dropped. The status the Lua kept
- *   (waiting_for_mission, watching_hover, cancel_requested, native_descent...) is the component's status in the Mods
- *   tab, set when it changes; the first cancellation and the first restoration of the session are logged.
+ * - The status the Lua kept (waiting_for_mission, watching_hover, cancel_requested, native_descent...) is the
+ *   component's status in the Mods tab, set when it changes; the first cancellation and the first restoration of the
+ *   session are logged. Its developer diagnostics (CowboyBingusDiagnostics: the status, its counters and last errors in
+ *   a log file) are the pack's Detailed lines (vpm_log_detail; nothing in Normal mode), each on a change only: every
+ *   status change (with the game-data error), the hover pack found (id, jump-pack manager, mission type), every
+ *   cancellation (pack, duration, its record created or reused and its address), why one waited (the Lua's
+ *   last_settings_error) or why a press was not confirmed (the fresh snapshot's status, another key, the flight ended,
+ *   the Jump released, the focus lost), every restoration, a lease that ended without a write and why, a restoration's
+ *   wait when its reason changes (last_restore_error), and at each mission's end the Lua's counters (cancellations,
+ *   restorations, snapshot_waits, settings_waits, restore_waits) with the last of each wait. Its `updates` count is left
+ *   out: it would cost a store on every idle frame (the core counts frames). The mark's describe line: the last hover
+ *   pack found, the lease, the idle gate's frames left and the counters.
  * - The mission check is the Lua's own (the mode global's active flag and type 1 .. 7), not HF_ON_MISSION_START.
  *
  * COST (calls per frame; the Lua's counts from its frame_budget pins in parentheses; reads are vpm_read, guarded plain
@@ -44,7 +53,13 @@
  *   1 VirtualQuery (46, 1, 1);
  * - the landing after it (restoration): 15 + 29 reads and 1 VirtualQuery (16 + 31, 1 query, 1 write).
  * No allocation and no logging on any frame but the session's first cancellation and first restoration. Once only:
- * GetCurrentProcessId at start. */
+ * GetCurrentProcessId at start.
+ * The detailed lines: idle frames unchanged (the gate returns before them); no game read and no Windows call added
+ * (the press's confirmation makes the same calls, now telling why it failed). A full check with a hover pack compares
+ * the pack and manager it last said (2 compares), a game-data wait counts (1 store), a restoration's wait counts and
+ * compares its reason; only a frame where something changed makes the core's one global read of the Diagnostics mode
+ * per line (plus, in Detailed mode, the line, at most 20 per 600 frames). The mission's end: one listener call, the
+ * global read. Unmeasured in game. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -72,6 +87,13 @@ static struct
     const char* shown_error;
     int cancelled;           /* the first cancellation was logged */
     int restored;            /* the first restoration was logged */
+    /* the Lua's diagnostics counters (its log file's), for the detailed lines and the mark */
+    uint32_t cancellations, snapshot_waits, settings_waits, restore_waits;
+    const char* snapshot_error;  /* the last game-data wait, the last restoration's wait (string literals) */
+    const char* restore_wait;
+    const char* restore_logged;  /* the restoration's wait the detailed lines said last (NULL: none in this lease) */
+    uint32_t seen_pack;          /* the hover pack the detailed lines said last */
+    uintptr_t seen_manager;
 } s;
 
 /* The game window is in front: two user32 calls, on flight frames only. */
@@ -124,12 +146,27 @@ static void Arm(int status)
     s.idle_at = at;
 }
 
-/* The pack located afresh: the same pack (key) in the same flight with the Jump held. */
-static int Confirmed(const ChpSnapshot* snap)
+/* The pack located afresh: the same pack (key) in the same flight with the Jump held. NULL when it is, else why not. */
+static const char* Unconfirmed(const ChpSnapshot* snap)
 {
     ChpKey key = snap->key;
     const ChpSnapshot* again = NULL;
-    return chp_snapshot(1, &again) == CHP_VALID && chp_same_key(&again->key, &key) && again->flight && again->down;
+    int reason = chp_snapshot(1, &again);
+    if (reason != CHP_VALID) return kStatusNames[reason];
+    if (!chp_same_key(&again->key, &key)) return "another pack, avatar or manager";
+    if (!again->flight) return "the flight ended";
+    if (!again->down) return "the Jump was released";
+    return NULL;
+}
+
+/* A valid snapshot's pack, said when it is another than the last (detailed lines). */
+static void NotePack(VpmComponent* self, const ChpSnapshot* snap)
+{
+    if (snap->pack == s.seen_pack && snap->manager == s.seen_manager) return;
+    s.seen_pack = snap->pack;
+    s.seen_manager = snap->manager;
+    vpm_log_detail(self, "hover pack %u found: jump-pack manager 0x%llX, mission type %u", snap->pack,
+        (unsigned long long)snap->manager, snap->mission_type);
 }
 
 /* The cut, for the pack the confirmation found: 1, 0 not now, RAISED. */
@@ -148,14 +185,35 @@ static int Cancel(VpmComponent* self)
         vpm_fail(self, "%s", error);
         return RAISED;
     }
-    if (r > 0 && !s.cancelled)
+    if (r == 0)
+    {
+        s.settings_waits++;
+        vpm_log_detail(self, "cancellation not now: %s", chp_settings_wait());
+        return 0;
+    }
+    s.cancellations++;
+    if (!s.cancelled)
     {
         s.cancelled = 1;
         vpm_log(self, "cancel_requested: the hover pack's duration is cut from %.2f s to 1/1024 s (its own record %s); "
             "the landing assistance stays. Only the session's first cancellation is logged.",
             (double)chp_lease_original(), chp_settings_created() ? "created" : "reused");
     }
+    vpm_log_detail(self, "cancellation %u: pack %u, duration %.2f s cut to 1/1024 s in its own record (%s) at 0x%llX, "
+        "jump-pack manager 0x%llX", s.cancellations, target.pack, (double)chp_lease_original(),
+        chp_settings_created() ? "created" : "reused", (unsigned long long)chp_settings_record(),
+        (unsigned long long)target.manager);
     return r;
+}
+
+/* A restoration that waits: counted, and said when its reason changes. */
+static void RestoreWaits(VpmComponent* self, const char* why)
+{
+    s.restore_waits++;
+    s.restore_wait = why;
+    if (why == s.restore_logged) return;
+    s.restore_logged = why;
+    vpm_log_detail(self, "restoration waits: %s (the lease is kept)", why);
 }
 
 /* The lease's restoration: 1 settled, 0 waiting, RAISED. */
@@ -169,12 +227,23 @@ static int Restore(VpmComponent* self)
         vpm_fail(self, "%s", why);
         return RAISED;
     }
-    if (chp_settings_restorations() > before && !s.restored)
+    if (r == 0)
+    {
+        RestoreWaits(self, why);
+        return 0;
+    }
+    s.restore_logged = NULL;
+    int wrote = chp_settings_restorations() > before;
+    if (wrote && !s.restored)
     {
         s.restored = 1;
         vpm_log(self, "restored: the hover pack's duration is %.2f s again. Only the session's first restoration is logged.",
             (double)chp_lease_original());
     }
+    if (wrote)
+        vpm_log_detail(self, "restoration %d: the duration is %.2f s again", chp_settings_restorations(),
+            (double)chp_lease_original());
+    else vpm_log_detail(self, "lease ended without a write: %s", chp_settings_outcome());
     return r;
 }
 
@@ -187,10 +256,12 @@ static int Fly(VpmComponent* self, const ChpSnapshot* snap)
         return CHP_WAITING_FOR_GAME_FOCUS;
     }
     if (!chp_policy_step(&s.policy, snap)) return CHP_WATCHING_HOVER;
-    int r = Focused() && Confirmed(snap) ? Cancel(self) : 0;
+    const char* why = Focused() ? Unconfirmed(snap) : "the game lost focus";
+    int r = why == NULL ? Cancel(self) : 0;
     if (r == RAISED) return RAISED;
     if (r == 0)
     {
+        if (why != NULL) vpm_log_detail(self, "press not confirmed: %s", why);
         chp_policy_step(&s.policy, NULL);
         return CHP_SNAPSHOT_CHANGED;
     }
@@ -214,6 +285,7 @@ static int Work(VpmComponent* self)
         chp_policy_step(&s.policy, NULL);
         return reason;
     }
+    NotePack(self, snap);
     if (!snap->flight)
     {
         chp_policy_step(&s.policy, snap);
@@ -229,6 +301,7 @@ static void Show(VpmComponent* self, int status)
     if (status == s.shown && error == s.shown_error) return;
     s.shown = status;
     s.shown_error = error;
+    vpm_log_detail(self, "status: %s%s%s", kStatusNames[status], error != NULL ? ": " : "", error != NULL ? error : "");
     if (error == NULL)
     {
         vpm_set_status(self, kStatusNames[status]);
@@ -245,8 +318,37 @@ static void Tick(VpmComponent* self, float dt)
     if (Idle()) return;
     int status = Work(self);
     if (status == RAISED) return;
+    if (status == CHP_WAITING_FOR_GAME_DATA)
+    {
+        s.snapshot_waits++;
+        s.snapshot_error = chp_snapshot_error();
+    }
     Arm(status);
     Show(self, status);
+}
+
+/* The Lua's diagnostics counters (its log file's), at each mission's end: a detailed line. */
+static void MissionEnd(VpmComponent* self, const HfEventInfo* event)
+{
+    vpm_log_detail(self, "mission end: %s; cancellations=%u restorations=%d snapshot_waits=%u settings_waits=%u "
+        "restore_waits=%u; last game-data wait: %s; last settings wait: %s; last restoration wait: %s",
+        vpm_status(self), s.cancellations, chp_settings_restorations(), s.snapshot_waits, s.settings_waits, s.restore_waits,
+        s.snapshot_error != NULL ? s.snapshot_error : "none", chp_settings_wait(),
+        s.restore_wait != NULL ? s.restore_wait : "none");
+}
+
+/* The key state for a tester's mark: the status, the pack followed, the lease, the counters. */
+static void Describe(VpmComponent* self, char* out, size_t size)
+{
+    char pack[64] = "none", lease[64] = "none";
+    if (s.seen_pack != 0 || s.seen_manager != 0)
+        snprintf(pack, sizeof pack, "%u (manager 0x%llX)", s.seen_pack, (unsigned long long)s.seen_manager);
+    if (chp_lease_held())
+        snprintf(lease, sizeof lease, "held (%.2f s cut, record %s)", (double)chp_lease_original(),
+            chp_settings_created() ? "created" : "reused");
+    snprintf(out, size, "last hover pack %s; lease %s; idle frames left %d; cancellations=%u restorations=%d "
+        "snapshot_waits=%u settings_waits=%u restore_waits=%u", pack, lease, s.idle_left, s.cancellations,
+        chp_settings_restorations(), s.snapshot_waits, s.settings_waits, s.restore_waits);
 }
 
 /* Puts the duration back and forgets the flight (the core stopping the component). */
@@ -272,7 +374,9 @@ static int Start(VpmComponent* self)
     s.process = GetCurrentProcessId();
     vpm_set_status(self, kStatusNames[CHP_WAITING_FOR_MISSION]);
     if (!vpm_tick_start(self, Tick)) return vpm_fail(self, "the game thread could not be reached");
+    if (!vpm_listen(self, HF_ON_MISSION_END, MissionEnd, 0)) vpm_log(self, "no counters at a mission's end");
     return 0;
 }
 
-const VpmComponentDef vpm_component_controllable_hover_pack = {"controllable_hover_pack", "Controllable Hover Pack", "1.8.1", 0, Start, Stop};
+const VpmComponentDef vpm_component_controllable_hover_pack = {"controllable_hover_pack", "Controllable Hover Pack", "1.8.1", 0, Start,
+    Stop, Describe};

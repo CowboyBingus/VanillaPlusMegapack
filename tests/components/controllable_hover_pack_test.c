@@ -1193,6 +1193,206 @@ static void IdleGateSoak(void)
     CHECK(vpm_running(fake_component(0)));
 }
 
+/* ---- the detailed lines (the pack's Diagnostics option) and the mark's describe line ------------------------- */
+
+static VpmOption* PackOption(const char* id)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack() && strcmp(vpm_option_def(vpm_option_at(i))->id, id) == 0)
+            return vpm_option_at(i);
+    return NULL;
+}
+
+static void Diagnostics(int detailed) { CHECK(vpm_option_apply(PackOption("diagnostics"), detailed ? 2 : 1)); }
+
+static void MissionEnds(void)
+{
+    HfStateEvent end;
+    memset(&end, 0, sizeof end);
+    end.info.size = sizeof end;
+    end.info.kind = HF_ON_MISSION_END;
+    fake_emit(&end.info);
+}
+
+/* A flight cut by a press, then its landing: the activation hold, a release, the press, the landing. */
+static void CutFlight(void)
+{
+    Row(FLIGHT);
+    Held(0.3f);
+    (void)Tick();
+    Held(0);
+    (void)Tick();
+    Held(0.01f);
+    (void)Tick();
+    CHECK_STATUS("cancel_requested");
+    Row(IDLE);
+    Held(0);
+    (void)Tick();
+    CHECK_STATUS("waiting_for_hover");
+}
+
+static const char* const kDetailLines[] = {
+    "[Controllable Hover Pack] hover pack 524 found: jump-pack manager 0x",
+    "[Controllable Hover Pack] status: watching_hover\n",
+    "[Controllable Hover Pack] cancellation 1: pack 524, duration 6.00 s cut to 1/1024 s in its own record (created) at 0x",
+    "[Controllable Hover Pack] status: cancel_requested\n",
+    "[Controllable Hover Pack] restoration 1: the duration is 6.00 s again\n",
+    "[Controllable Hover Pack] status: waiting_for_hover\n",
+    "[Controllable Hover Pack] cancellation 2: pack 524, duration 6.00 s cut to 1/1024 s in its own record (reused) at 0x",
+    "[Controllable Hover Pack] restoration waits: ",
+    "[Controllable Hover Pack] status: restore_pending\n",
+    "[Controllable Hover Pack] restoration 2: the duration is 6.00 s again\n",
+    "[Controllable Hover Pack] press not confirmed: waiting_for_player\n",
+    "[Controllable Hover Pack] status: snapshot_changed\n",
+    "[Controllable Hover Pack] 1 detailed lines suppressed (at most 20 per 600 frames)\n"
+        "[Controllable Hover Pack] mission end: waiting_for_hover; cancellations=2 restorations=2 snapshot_waits=0 "
+        "settings_waits=1 restore_waits=2; last game-data wait: none; last settings wait: Hover settings unreadable; "
+        "last restoration wait: Hover settings unreadable\n",
+    "[Controllable Hover Pack] cancellation not now: Hover settings unreadable\n",
+};
+
+static void DetailedLines(void)
+{
+    for (int detailed = 0; detailed < 2; detailed++)
+    {
+        fake_setup();
+        MakeGame();
+        Row(IDLE);
+        Started();
+        Diagnostics(detailed);
+        fake_log_clear();
+        (void)Tick();
+        CutFlight();
+        /* the next cut, and a mission's end while its settings cannot be read: the restoration waits twice */
+        Row(FLIGHT);
+        Held(0.3f);
+        (void)Tick();
+        Held(0);
+        (void)Tick();
+        Held(0.01f);
+        (void)Tick();
+        CHECK(chp_lease_held());
+        Mission(0);
+        g_missing = (uintptr_t)g.jm + 96;
+        (void)Tick();
+        (void)Tick();
+        CHECK_STATUS("restore_pending");
+        g_missing = 0;
+        (void)Tick();
+        CHECK_STATUS("waiting_for_mission");
+        /* a press the fresh snapshot does not confirm (no local player there) */
+        Mission(2);
+        Row(FLIGHT);
+        Ticks(60);
+        Held(0);
+        (void)Tick();
+        CHECK_STATUS("watching_hover");
+        Put32(g.pm + 0x84, 0);
+        Put32(g.pm + 0x88, 0);
+        Held(0.01f);
+        (void)Tick();
+        CHECK_STATUS("snapshot_changed");
+        Put32(g.pm + 0x84, 2);
+        Put32(g.pm + 0x88, 2);
+        /* a confirmed press whose settings cannot be read: the cancellation waits */
+        Held(0);
+        (void)Tick();
+        g_missing = (uintptr_t)g.jm + 96;
+        Held(0.01f);
+        (void)Tick();
+        g_missing = 0;
+        CHECK_STATUS("snapshot_changed");
+        CHECK(!chp_lease_held());
+        /* the 20 lines above fill the limiter's window: the mission's end comes in the next */
+        Row(IDLE);
+        Held(0);
+        Ticks(600);
+        MissionEnds();
+        for (int i = 0; i < (int)(sizeof kDetailLines / sizeof kDetailLines[0]); i++)
+        {
+            if (detailed) CHECK_LOG(kDetailLines[i]);
+            else CHECK_NO_LOG(kDetailLines[i]);
+        }
+        if (!detailed) CHECK_NO_LOG("[Controllable Hover Pack] status:");
+        CHECK(vpm_running(fake_component(0)));
+    }
+}
+
+/* Idle frames (the gate's, and the full checks between them that change nothing) and unchanged flight frames keep
+ * their calls and log nothing in either mode. */
+static void DetailedIdleFrames(void)
+{
+    for (int detailed = 0; detailed < 2; detailed++)
+    {
+        fake_setup();
+        MakeGame();
+        Row(IDLE);
+        Started();
+        Diagnostics(detailed);
+        (void)Tick();
+        CHECK_STATUS("waiting_for_hover");
+        CHECK_GATED(29, "waiting_for_hover", 1);
+        CHECK_TICK("waiting_for_hover", 15, 0, 0);
+        CHECK_GATED(29, "waiting_for_hover", 1);
+        CHECK_TICK("waiting_for_hover", 15, 0, 0);
+        Row(FLIGHT);
+        Held(0.3f);
+        (void)Tick();
+        CHECK_STATUS("watching_hover");
+        CHECK_TICK("watching_hover", 15, 1, 0);
+        CHECK_TICK("watching_hover", 15, 1, 0);
+        Row(IDLE);
+        Held(0);
+        (void)Tick();
+        Mission(0);
+        int frames = 0;
+        while (strcmp(Status(), "waiting_for_mission") != 0 && frames++ < 31) (void)Tick();
+        CHECK_STATUS("waiting_for_mission");
+        CHECK_GATED(59, "waiting_for_mission", 0);
+        CHECK_TICK("waiting_for_mission", 1, 0, 0);
+        CHECK_GATED(59, "waiting_for_mission", 0);
+    }
+}
+
+/* Many cut flights in a short time: the limiter's 20 lines per 600 frames, then its count of the lines left out. */
+static void DetailedLinesThroughTheLimiter(void)
+{
+    MakeGame();
+    Row(IDLE);
+    Started();
+    Diagnostics(1);
+    (void)Tick();
+    for (int i = 0; i < 6; i++) CutFlight();
+    CHECK_EQ(chp_settings_restorations(), 6);
+    CHECK_NO_LOG("detailed lines suppressed");
+    Ticks(600);
+    CutFlight();
+    CHECK_LOG(" detailed lines suppressed (at most 20 per 600 frames)\n[Controllable Hover Pack] status: watching_hover\n");
+}
+
+/* The mark's line: the status, then the describe text. */
+static void MarkDescribes(void)
+{
+    MakeGame();
+    Row(IDLE);
+    Started();
+    (void)Tick();
+    CutFlight();
+    Row(FLIGHT);
+    Held(0.3f);
+    (void)Tick();
+    Held(0);
+    (void)Tick();
+    Held(0.01f);
+    (void)Tick();
+    CHECK(chp_lease_held());
+    fake_log_clear();
+    CHECK(vpm_option_apply(PackOption("note_problem"), 1));
+    CHECK_LOG("[core] MARK 1: Controllable Hover Pack: cancel_requested | last hover pack 524 (manager 0x");
+    CHECK_LOG("); lease held (6.00 s cut, record reused); idle frames left 0; cancellations=2 restorations=1 "
+        "snapshot_waits=0 settings_waits=0 restore_waits=0\n");
+}
+
 int main(void)
 {
     RUN(PolicyNeedsAReleaseThenOnePressPerFlight);
@@ -1217,5 +1417,9 @@ int main(void)
     RUN(AnUnsupportedDurationStopsTheComponent);
     RUN(AFlightAfterARegistryMoveIsSeenWithin29Frames);
     RUN(IdleGateSoak);
+    RUN(DetailedLines);
+    RUN(DetailedIdleFrames);
+    RUN(DetailedLinesThroughTheLimiter);
+    RUN(MarkDescribes);
     TEST_END();
 }

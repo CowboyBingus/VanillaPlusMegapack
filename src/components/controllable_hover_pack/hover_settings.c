@@ -62,6 +62,8 @@ static int g_guardCount;
 static uint32_t g_guardUsed;
 static Settings g_s;
 static const char* g_error;
+static const char* g_wait;    /* why the last cancellation waited (the Lua's last_settings_error) */
+static const char* g_outcome; /* how the last lease ended */
 static struct
 {
     int held;
@@ -278,22 +280,34 @@ static int Raise(const char** error, const char* text)
     return -1;
 }
 
+/* A cancellation that waits because the settings changed since its inspection: 0. */
+static int Changed(void)
+{
+    g_wait = "Hover settings changed";
+    return 0;
+}
+
 /* lint: per-frame */
 int chp_settings_cancel(const ChpTarget* target, const char** error)
 {
     uint8_t original[4], now[4];
     float duration;
     /* A mission transition can change the data after the snapshot: an inspection that fails only waits. */
-    if (Inspect(target) <= 0) return 0;
+    int found = Inspect(target);
+    if (found <= 0)
+    {
+        g_wait = found == 0 ? "Hover pack changed" : g_error;
+        return 0;
+    }
     memcpy(original, g_s.bytes + AT_DURATION, 4);
     memcpy(&duration, original, 4);
     if (!(duration > kCutoff && duration < 86400.0f) || g_s.bytes[AT_MODE] != 1)
         return Raise(error, "Unsupported hover duration mode");
-    if (!Current()) return 0;
+    if (!Current()) return Changed();
     int created = g_s.create;
     uintptr_t validated = created ? g_s.address : 0; /* a record this call validated before storing to it */
     if (created && Create(target, original) < 0) return Raise(error, g_error);
-    if (!Current()) return 0;
+    if (!Current()) return Changed();
     g_lease.held = 1;
     g_lease.target = *target;
     memcpy(g_lease.original, original, 4);
@@ -323,6 +337,7 @@ int chp_settings_restore(const char** why)
     if (r == 0 || g_s.create)
     {
         g_lease.held = 0; /* the pack is gone, or another pack holds its id */
+        g_outcome = "the pack is gone (or another holds its id): nothing to put back";
         return 1;
     }
     if (!Current())
@@ -337,7 +352,9 @@ int chp_settings_restore(const char** why)
         memcpy((void*)at, g_lease.original, 4);
         if (!vpm_read(at, now, 4) || memcmp(now, g_lease.original, 4) != 0) return Raise(why, "Hover restoration not retained");
         g_lease.restorations++;
+        g_outcome = "restored";
     }
+    else g_outcome = "the duration was changed by another (the engine or a mod): its value stays";
     g_lease.held = 0;
     return 1;
 }
@@ -346,6 +363,9 @@ int chp_lease_held(void) { return g_lease.held; }
 const ChpKey* chp_lease_key(void) { return &g_lease.target.key; }
 int chp_settings_created(void) { return g_lease.created; }
 int chp_settings_restorations(void) { return g_lease.restorations; }
+const char* chp_settings_wait(void) { return g_wait != NULL ? g_wait : "none"; }
+const char* chp_settings_outcome(void) { return g_outcome != NULL ? g_outcome : "none"; }
+uintptr_t chp_settings_record(void) { return g_s.address; }
 
 float chp_lease_original(void)
 {
@@ -361,4 +381,6 @@ void chp_settings_reset(void)
     g_guardCount = 0;
     g_guardUsed = 0;
     g_error = NULL;
+    g_wait = NULL;
+    g_outcome = NULL;
 }
