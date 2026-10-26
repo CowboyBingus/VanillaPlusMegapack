@@ -22,11 +22,12 @@
  * control characters, blank), with the core's text functions (vpm_utf8_*, vpm_upper). New here: a VANILLA PLUS
  * MEGAPACK category with a switch per component (vpm_component_switch), which applies from the next session (the row's
  * description says so). The game.dll functions are checked with vpm_game_code_matches (the bytes as shipped, so another
- * mod's hook does not fail them) at the first tick, as the Lua checked them in its first update. Texts are English
- * (vpm_text). Dropped: the _G.ModOptionsMenu API for Lua mods, the values file and its backup (the core saves), the
- * game's Text Language query and text refresh on each opening (no translations yet), and the Lua update guard (error
- * bursts, pauses, shutdown save): the core's crash guard stops the component on a fault, and stop() hands an open view
- * back to the game as the Lua's guard did.
+ * mod's hook does not fail them) at the first tick, as the Lua checked them in its first update; their calling
+ * convention and the arguments they take are checked against the decoded game.dll of 25480438, function by function
+ * (native.h). Texts are English (vpm_text). Dropped: the _G.ModOptionsMenu API for Lua mods, the values file and its
+ * backup (the core saves), the game's Text Language query and text refresh on each opening (no translations yet), and
+ * the Lua update guard (error bursts, pauses, shutdown save): the core's crash guard stops the component on a fault, and
+ * stop() hands an open view back to the game as the Lua's guard did.
  *
  * Cost (the Lua's test_options_tab.lua budgets: ReadProcessMemory calls per frame):
  * - Escape menu closed (most of every session): 1 plain load (the UI state pointer in game.dll) and 1 read (the UI stack,
