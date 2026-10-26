@@ -1468,8 +1468,196 @@ static void BudgetSetup(int setup)
     if (setup == 3) Matrix(SceneBody(0, 16), 2, 0, 0, 0);
 }
 
-/* The calls of one poll after `warm` polls, pinned (the Lua's budget.check limits are in the header comment). */
-static void CallsPerPoll(void)
+/* ---- diagnostics: the detailed lines (the Lua's status log), the mark ----------------------------------------- */
+
+static VpmOption* PackOption(const char* id)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack() && strcmp(vpm_option_def(vpm_option_at(i))->id, id) == 0)
+            return vpm_option_at(i);
+    return NULL;
+}
+
+/* The pack's Diagnostics option: Normal (0) or Detailed (1). */
+static void Diagnostics(int detailed)
+{
+    CHECK(vpm_option_apply(PackOption("diagnostics"), detailed ? 2 : 1));
+    CHECK_EQ(vpm_detailed(), detailed);
+}
+
+static void MissionEnds(void)
+{
+    HfStateEvent end = {{sizeof end, HF_ON_MISSION_END}, HF_STATE_MISSION, HF_STATE_SHIP};
+    fake_emit(&end.info);
+}
+
+/* The busy mission of BusyMissionLogsNothing, in either mode: realignments, a verified stop, 3 raised polls, then the
+ * ship. */
+static void BusyMission(int detailed)
+{
+    Scene(4, 2, 2, 0);
+    Started();
+    Diagnostics(detailed);
+    fake_frames(1, DT); /* the bind's line and status */
+    if (!detailed) fake_log_clear();
+    for (int frame = 1; frame <= 1800; frame++)
+    {
+        if (frame % 120 == 0) Matrix(SceneBody(2, 16), 2 + frame % 7, 0, 0, 0);
+        if (frame == 600) MoveUnit(0, 3);
+        P32(S.managers[0] + 4, frame >= 900 && frame < 909 ? 0 : 6);
+        fake_frames(1, DT);
+    }
+    P32(S.mode + 8, 0);
+    fake_frames(6, DT);
+    CHECK(Ecs.realignments > 0 && Ecs.fling_stops_verified == 1 && Ecs.retries == 3);
+}
+
+static void DetailedModeSaysWhatThePollsDid(void)
+{
+    BusyMission(1);
+    CHECK_LOG("[Enemy Collision Synchronized] in a mission: mode block 0x");
+    CHECK_LOG("; ragdoll manager 0x");
+    CHECK_LOG("[Enemy Collision Synchronized] physics getter preflight: verified (checks ");
+    CHECK_LOG("[Enemy Collision Synchronized] Bile Titan corpse unit ");
+    CHECK_LOG("): realigned 1 (largest: actor ");
+    CHECK_LOG("claws disabled 0, refused 0 (its guards changed), deferred 0 (repeat cooldown)");
+    CHECK_LOG("[Enemy Collision Synchronized] watching settled remote Bile Titan unit ");
+    CHECK_LOG("): renewed motion stopped (translation, ");
+    CHECK_LOG("): verified\n");
+    CHECK_LOG(" detailed lines suppressed (at most 20 per 600 frames)\n"); /* the stubs leave the moved ragdoll displaced */
+    CHECK_LOG("[Enemy Collision Synchronized] not in a mission (mode block 0x");
+    CHECK_LOG(", flag 0): no unit is read, every record forgotten\n");
+}
+
+static void NormalModeLogsNoneOfThem(void)
+{
+    BusyMission(0);
+    CHECK_NO_LOG("[Enemy Collision Synchronized]"); /* only the core's status lines */
+    CHECK_NO_LOG("in a mission");
+    CHECK_NO_LOG("preflight");
+    CHECK_NO_LOG("realigned");
+    CHECK_NO_LOG("renewed motion");
+    CHECK_NO_LOG("poll raised");
+}
+
+/* A raised poll and its reason (RaisedPollsRetryThenStop). */
+static void DetailedModeSaysWhyAPollRaised(void)
+{
+    Fix(1, Named("Impaler"));
+    Started();
+    Diagnostics(1);
+    fake_frames(1, DT);
+    P32(F.manager + 16, 0);
+    fake_frames(6, DT);
+    CHECK_LOG("[Enemy Collision Synchronized] poll raised (1 in a row; 8 stop it): Manager bounds changed\n");
+    CHECK_LOG("[Enemy Collision Synchronized] poll raised (2 in a row; 8 stop it): Manager bounds changed\n");
+}
+
+/* The stop, the ownership handoff, the completion request and its observation (StopThenHandoff, CompletionVariant). */
+static void DetailedModeSaysStopsHandoffsAndCompletions(void)
+{
+    Fix(0, Named("Impaler"));
+    Started();
+    Diagnostics(1);
+    N.on_stop = EmptiesTheManager;
+    CHECK(Apply(0) && Apply(.5) && Apply(1));
+    CHECK_LOG("[Enemy Collision Synchronized] watching settled remote Impaler unit 00400007 (entity ");
+    Matrix(Body(1), 1, 0, 0, 0);
+    CHECK(Apply(1.2) && Apply(1.4));
+    CHECK_LOG("[Enemy Collision Synchronized] Impaler unit 00400007 (entity ");
+    CHECK_LOG("): renewed motion stopped (");
+    P32(F.entity + 20, 1);
+    CHECK(Apply(1.6) && Ecs.fling_handoffs == 1);
+    CHECK_LOG("): ownership moved here; its stop finished through the owned branch\n");
+    /* a remote stop: the owner is asked after the grace, then the Corpse is seen */
+    int added;
+    fake_setup();
+    memset(&N, 0, sizeof N);
+    Started();
+    Diagnostics(1);
+    Synthetic(&g_u, 0, 0);
+    g_u.update_enabled = 0;
+    EcsStop* stop = EcsTablePut(&EcsStops, g_u.unit, &added);
+    *stop = (EcsStop){77, 0, 0, 0, g_u.signature, 100};
+    CHECK(Poll(&g_u, 100) && Poll(&g_u, 101) && N.requests == 1);
+    CHECK_LOG("): asked its owner to complete it, 1.0 s after the stop\n");
+    g_u.id += 5;
+    g_u.corpse = 1;
+    g_u.update_enabled = -1;
+    g_u.signature.count = 0;
+    CHECK(Poll(&g_u, 108) && Ecs.completion_corpse_observed == 1);
+    CHECK_LOG(" completed into a Corpse (entity ");
+    /* a stop record that no longer describes its unit */
+    stop = EcsTablePut(&EcsStops, g_u.unit, &added);
+    *stop = (EcsStop){77, Ecs.fling_scan, 0, 0, g_u.signature, 100};
+    g_u.corpse = 0;
+    g_u.update_enabled = 0;
+    CHECK(Poll(&g_u, 109));
+    CHECK_LOG(": its stop record no longer describes it (entity 0000004D, now ");
+}
+
+/* A corpse realigned on every poll: past 20 lines in 600 frames the limiter counts, and says so at the mission's end. */
+static void ManyLinesAreLimited(void)
+{
+    Scene(0, 0, 1, 0);
+    Started();
+    Diagnostics(1);
+    fake_frames(1, DT); /* the bind's line */
+    fake_log_clear();
+    for (int frame = 1; frame <= 300; frame++)
+    {
+        Matrix(SceneBody(0, 16), 2 + frame % 2, 0, 0, 0);
+        fake_frames(1, DT);
+    }
+    CHECK(Ecs.realignments > 40);
+    CHECK_EQ(fake_log_count("[Enemy Collision Synchronized]"), 18); /* the window's 20 less the first poll's two */
+    MissionEnds();
+    CHECK_LOG("[Enemy Collision Synchronized] ");
+    CHECK_LOG(" detailed lines suppressed (at most 20 per 600 frames)\n");
+}
+
+/* Idle polls (outside a mission, on the ship, an empty mission) through the tick: the same calls in both modes and no
+ * line, once the first polls said where it is. */
+static void IdlePollsAreTheSameInBothModes(void)
+{
+    for (int setup = 0; setup < 3; setup++)
+    {
+        FakeCounts counts[2];
+        for (int detailed = 0; detailed < 2; detailed++)
+        {
+            fake_setup();
+            Scene(0, 0, 0, 0);
+            if (setup == 0) P64(G() + 0x33266A0, 0);
+            if (setup == 1) P32(S.mode + 8, 0);
+            Started();
+            Diagnostics(detailed);
+            fake_frames(30, DT);
+            fake_counts_reset();
+            fake_frames(600, DT);
+            counts[detailed] = fake_counts();
+            CHECK_EQ(counts[detailed].log, 0);
+        }
+        CHECK(memcmp(&counts[0], &counts[1], sizeof counts[0]) == 0);
+    }
+}
+
+/* "Note a problem now": the describe line in the mark. */
+static void TheMarkCarriesItsState(void)
+{
+    Scene(0, 0, 1, 0);
+    Started();
+    Matrix(SceneBody(0, 16), 2, 0, 0, 0);
+    fake_frames(12, DT);
+    fake_log_clear();
+    CHECK(vpm_option_apply(PackOption("note_problem"), 1));
+    CHECK_LOG("[core] MARK 1: Enemy Collision Synchronized: ready | ready; polls ");
+    CHECK_LOG("; mission flag 1; ragdolls 0, corpses 1; preflight verified; realigned ");
+    CHECK_LOG("; retries 0; last skip none\n");
+}
+
+/* The calls of one poll after `warm` polls, pinned (the Lua's budget.check limits are in the header comment); in
+ * Detailed mode the same calls, and no line on the idle polls. */
+static void CallsPerPollIn(int detailed)
 {
     static const Budget budgets[] = {
         {"outside a mission", 0, 0, 0, 0, 0, 0, 1}, {"on the ship", 0, 0, 0, 0, 1, 0, 2}, {"idle in a mission", 0, 0, 0, 0, 3, 0, 0},
@@ -1484,6 +1672,7 @@ static void CallsPerPoll(void)
         fake_setup();
         Scene(x->living, x->dead, x->corpses, 0);
         Started();
+        Diagnostics(detailed);
         BudgetSetup(x->setup);
         for (uint32_t i = 1; i <= x->warm; i++) CHECK(Apply(i / 30.0));
         fake_counts_reset();
@@ -1491,9 +1680,13 @@ static void CallsPerPoll(void)
         CHECK(Apply(1));
         FakeCounts n = fake_counts();
         if (n.read != x->reads || N.clocks != x->clocks) printf("  %s: %u reads, %u clocks\n", x->label, n.read, N.clocks);
-        CHECK(n.read == x->reads && N.clocks == x->clocks && n.write + n.code_matches + n.log + n.other == 0);
+        CHECK(n.read == x->reads && N.clocks == x->clocks && n.write + n.code_matches + n.other == 0);
+        CHECK(n.log == 0 || (detailed && b > 2)); /* the idle polls (the first three) log nothing in either mode */
     }
 }
+
+static void CallsPerPoll(void) { CallsPerPollIn(0); }
+static void CallsPerPollDetailed(void) { CallsPerPollIn(1); }
 
 static int Repose(double now)
 {
@@ -1633,5 +1826,13 @@ int main(void)
     RUN(RepeatCooldown);
     RUN(MetadataInvalidation);
     RUN(BusyMissionLogsNothing);
+    RUN(CallsPerPollDetailed);
+    RUN(DetailedModeSaysWhatThePollsDid);
+    RUN(NormalModeLogsNoneOfThem);
+    RUN(DetailedModeSaysWhyAPollRaised);
+    RUN(DetailedModeSaysStopsHandoffsAndCompletions);
+    RUN(ManyLinesAreLimited);
+    RUN(IdlePollsAreTheSameInBothModes);
+    RUN(TheMarkCarriesItsState);
     TEST_END();
 }

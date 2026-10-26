@@ -114,6 +114,7 @@ static int InMission(int* in)
     Ecs.mission_flag = Ecs.mode_field_40 = 0;
     r.mode_slot = vpm_game_u64(ECS_MODE_SLOT_RVA);
     r.mode = EcsPointer(r.mode_slot);
+    Ecs.mode = r.mode;
     if (r.mode == 0) return 1;
     if (!EcsRead(r.mode, r.mode_bytes, sizeof r.mode_bytes)) return 0;
     Ecs.mission_flag = EcsU32(r.mode_bytes + 8);
@@ -129,6 +130,7 @@ static int ManagerHeader(void)
     EcsGuardsClear(&r.globals);
     if (!EcsGuardAdd(&r.globals, vpm_game() + rva, &slot, 8)) return 0;
     if ((r.manager = EcsPointer(slot)) == 0) return EcsRaise("Pointer unavailable");
+    Ecs.managers[r.corpse] = r.manager;
     if (!EcsGuardRead(&r.globals, r.manager, r.header, MANAGER_HEADER)) return 0;
     uint32_t capacity = EcsU32(r.header + (r.corpse ? 16 : 4)), count = EcsU32(r.header + (r.corpse ? 24 : 12));
     r.active = EcsU32(r.header + (r.corpse ? 28 : 16));
@@ -214,6 +216,8 @@ static int HandOver(EcsUnit* unit)
     {
         EcsTableRemove(&EcsHistories, unit->unit);
         Ecs.skipped++;
+        vpm_log_detail(Ecs.self, "%s unit %08X skipped: the %s manager changed during its inspection",
+            EcsProfiles[unit->profile].name, unit->unit, r.corpse ? "corpse" : "ragdoll");
         return 1;
     }
     /* Its own guards were verified by the inspection and the manager's just now, with no native call since. */
@@ -234,6 +238,9 @@ static int InspectListed(const EcsEntry* entry, uint32_t index, const uint8_t* h
     if (result < 0)
     {
         Ecs.skipped++;
+        /* The same reason poll after poll is one line: logged on a change. */
+        if (vpm_detailed() && strcmp(Ecs.last_skip, EcsWhy()) != 0)
+            vpm_log_detail(Ecs.self, "%s unit %08X skipped: %s", EcsProfiles[profile].name, EcsU32(header + 12), EcsWhy());
         snprintf(Ecs.last_skip, sizeof Ecs.last_skip, "%s", EcsWhy());
     }
     EcsTableRemove(&EcsHistories, EcsU32(header + 12));
