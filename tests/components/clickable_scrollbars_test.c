@@ -1183,6 +1183,173 @@ static void OtherRoutesNeverConsume(void)
     }
 }
 
+
+/* ---- diagnostics: the Detailed mode's lines and the tester's mark ------------------------------------------------ */
+
+/* The pack's own option (Diagnostics, Note a problem now), by id. */
+static VpmOption* PackOption(const char* id)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack() && strcmp(vpm_option_def(vpm_option_at(i))->id, id) == 0)
+            return vpm_option_at(i);
+    return NULL;
+}
+
+/* Diagnostics: 1 Normal, 2 Detailed (applied as the player applies it). */
+static void Diagnostics(int mode)
+{
+    VpmOption* option = PackOption("diagnostics");
+    CHECK(option != NULL && vpm_option_apply(option, mode));
+}
+
+static void MissionEnds(void)
+{
+    HfStateEvent end = {{sizeof end, HF_ON_MISSION_END, 1}, HF_STATE_MISSION, HF_STATE_SHIP};
+    fake_emit(&end.info);
+}
+
+/* A press beside the bar, a drag of the thumb, a track page, an unanswered write and a mission's end, in a mode. */
+static void DiagnosedGestures(int mode)
+{
+    Session(GRID);
+    Diagnostics(mode);
+    Press(g_at.x + 200, g_at.thumb_y); /* beside the bar */
+    Release();
+    Press(g_at.x + 200, g_at.thumb_y + 5); /* the same refusal: no second line */
+    Release();
+    Press(g_at.x, g_at.thumb_y); /* held still: no write */
+    Release();
+    Press(g_at.x, g_at.thumb_y);
+    for (int i = 0; i < 20; i++) Move(g_at.x, g_in.y + 2);
+    Release();
+    Press(g_at.x, g_at.track_y - 9);
+    Release();
+    g_ignore = g_frozen = 1;
+    Press(g_at.x, g_at.thumb_y);
+    Move(g_at.x, g_at.thumb_y + 90);
+    for (int i = 0; i < 30; i++) Tick();
+    Release();
+    Press(g_at.x, g_at.thumb_y);
+    Release();
+    MissionEnds();
+}
+
+static const char* const kGestureLines[] = {
+    "[Clickable Scrollbars] owner: equipment list (kind 224), controller 0x",
+    "[Clickable Scrollbars] press: no drag (outside the scrollbar)\n",
+    "[Clickable Scrollbars] native press on equipment list: y=",
+    "[Clickable Scrollbars] native release writes=",
+    "[Clickable Scrollbars] native release writes=0 value=none",
+    "[Clickable Scrollbars] press: no drag (this list's owner is retired)",
+    "[Clickable Scrollbars] at the mission's end: presses 7, track pages 2, drags 3, ",
+};
+
+static void DetailedModeLogsTheFlightRecorder(void)
+{
+    DiagnosedGestures(2);
+    for (size_t i = 0; i < sizeof kGestureLines / sizeof kGestureLines[0]; i++) CHECK_LOG(kGestureLines[i]);
+    CHECK_EQ(fake_log_count("press: no drag (outside the scrollbar)"), 1); /* logged on change */
+    CHECK_EQ(fake_log_count("] owner: "), 1);                               /* the same owner every press */
+    CHECK_LOG("; model items ");
+    CHECK_LOG("; decisions: native_retired 1, native_drag 1, native_jump 2, bar_press 2, native_release 3\n");
+    /* the lines every log has are there as before */
+    CHECK_LOG("[Clickable Scrollbars] native retired (the game did not answer the write) after ");
+    /* a press in play: the resolution's refusal, once */
+    Session(GRID);
+    Diagnostics(2);
+    P32(g_w.dispatch, 5744 + 16 + 8, 7); /* the controller's row: unregistered */
+    for (int i = 0; i < 5; i++) { Press(g_at.x, g_at.thumb_y); Release(); }
+    CHECK_EQ(fake_log_count("press: no drag (equipment grid not registered)"), 1);
+    /* a Settings drag whose select action cannot be consumed any more */
+    Session(SETTINGS);
+    Diagnostics(2);
+    Press(g_at.x, g_at.thumb_y);
+    PImage(RVA_INPUT, NULL);
+    Move(g_at.x, g_at.thumb_y + 10);
+    CHECK_LOG("[Clickable Scrollbars] Settings drag cancelled: the select action could not be consumed");
+    Release();
+    Press(g_at.x, g_at.thumb_y);
+    CHECK_LOG("[Clickable Scrollbars] press: no drag (the Settings page's select action could not be consumed)");
+}
+
+static void NormalModeLogsNoneOfThem(void)
+{
+    DiagnosedGestures(1);
+    for (size_t i = 0; i < sizeof kGestureLines / sizeof kGestureLines[0]; i++) CHECK_NO_LOG(kGestureLines[i] + 23);
+    CHECK_NO_LOG("press: no drag");
+    CHECK_NO_LOG("detailed lines suppressed");
+    CHECK_LOG("[Clickable Scrollbars] native retired (the game did not answer the write) after ");
+}
+
+/* Idle frames in Detailed mode: the trigger alone (the Normal pins), in play and in each menu; a play press makes the
+ * Normal press's calls, and its refusal is logged once in all. */
+static void IdleFramesInDetailedMode(void)
+{
+    for (int route = 0; route < ROUTES; route++)
+    {
+        Session(route);
+        Diagnostics(2);
+        for (int i = 0; i < 3; i++) Tick();
+        Expected(route, "idle", Tick());
+        g_in.x = g_at.x;
+        g_in.y = g_at.thumb_y;
+        Tick();
+        Expected(route, "hover", Tick());
+        Session(route);
+        Diagnostics(2);
+        P32(g_w.owner, 0x429C + 20, 0);
+        if (route <= CAREER) P32(g_w.dispatch, 5744 + 16 + 8, 7);
+        else g_w.screen[12] = 0;
+        Budget idle = {1};
+        Budget press = {1, 1, 1};
+        press.read = 3;
+        int logged = 0;
+        for (int index = 1; index <= 120; index++)
+        {
+            int was = g_in.down;
+            g_in.down = index % 7 < 3;
+            Calls c = Tick();
+            int pressed = g_in.down && !was;
+            if (pressed) { press.log = (int)c.hf.log; logged += (int)c.hf.log; }
+            Expect(kRouteNames[route], pressed ? "detailed play press" : "detailed play frame", c, pressed ? press : idle);
+        }
+        CHECK_EQ(logged, 1);
+    }
+}
+
+/* Many drags in one window: the limiter keeps 20 lines and says how many it left out. */
+static void ManyDragsHitTheLimiter(void)
+{
+    Session(GRID);
+    Diagnostics(2);
+    for (int i = 0; i < 15; i++)
+    {
+        Press(g_at.x, g_at.thumb_y);
+        Move(g_at.x, g_at.thumb_y + 30);
+        Release();
+    }
+    CHECK_EQ(fake_log_count("native press on "), 10); /* the owner's line, then 19 of the drags' 30 */
+    for (int i = 0; i < 600; i++) Tick();
+    Press(g_at.x, g_at.thumb_y);
+    CHECK_LOG("[Clickable Scrollbars] 11 detailed lines suppressed (at most 20 per 600 frames)");
+}
+
+/* "Note a problem now": the mark carries the describe line. */
+static void DescribeInTheMark(void)
+{
+    Session(GRID);
+    VpmOption* note = PackOption("note_problem");
+    CHECK(note != NULL && vpm_option_apply(note, 1));
+    CHECK_LOG("MARK 1: Clickable Scrollbars: running | no drag; owner none; presses 0, pages 0, drags 0, writes 0, verified "
+              "0, retired 0; last none\n");
+    Press(g_at.x, g_at.thumb_y);
+    Move(g_at.x, g_at.thumb_y + 30);
+    CHECK(vpm_option_apply(note, 1));
+    CHECK_LOG("MARK 2: Clickable Scrollbars: running | dragging the equipment list scrollbar (1 writes); owner equipment "
+              "list at 0x");
+    CHECK_LOG("; presses 1, pages 0, drags 1, writes 1, verified 0, retired 0; last bar_press\n");
+}
+
 int main(void)
 {
     RUN(PinsEveryFrameOfEveryRoute);
@@ -1209,5 +1376,10 @@ int main(void)
     RUN(HeldDragsRevalidate);
     RUN(SettingsDragsHoldTheSelection);
     RUN(OtherRoutesNeverConsume);
+    RUN(DetailedModeLogsTheFlightRecorder);
+    RUN(NormalModeLogsNoneOfThem);
+    RUN(IdleFramesInDetailedMode);
+    RUN(ManyDragsHitTheLimiter);
+    RUN(DescribeInTheMark);
     TEST_END();
 }

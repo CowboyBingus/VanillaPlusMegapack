@@ -23,11 +23,20 @@
  * shipped, and the component starts then (it is stopped, naming the routine, if they do not within 60 s, before
  * anything ran); game.dll globals are plain loads;
  * time is the tick's dt (the Lua read GetTickCount64); the client origin comes from ScreenToClient on the cursor (the
- * core resolves no ClientToScreen). Dropped: the diagnostics (the opt-in ClickableScrollbars.log flight recorder,
- * trace, frame-interval and capture-budget bookkeeping, display scale), the optional ini (its native-route keys only
- * repeated their defaults; enabled is the component switch), the Bingus runtime's error bursts and pause (the core's
- * crash guard), the shutdown log and the UI-bridge probe (log only). An owner retired and the first verified drag on
- * each route are logged once (the Lua traced them with diagnostics only), so a session's log shows each route working.
+ * core resolves no ClientToScreen). Dropped: the optional ini (its native-route keys only repeated their defaults;
+ * enabled is the component switch), the Bingus runtime's error bursts and pause (the core's crash guard), the shutdown
+ * log and the UI-bridge probe (log only). An owner retired and the first verified drag on each route are logged once
+ * (the Lua traced them with diagnostics only), so a session's log shows each route working.
+ *
+ * Diagnostics. The Lua's opt-in flight recorder (ClickableScrollbars.log, rewritten every few seconds with its trace,
+ * counters and model) comes back as the pack's Detailed mode (vpm_log_detail), on frames that already act: why a press
+ * did nothing (the owner's resolution or model refusal, outside the bar, a retired owner; logged when the reason
+ * changes, since every shot in play is a press too), the owner a press resolved (its route, kind and pointers, when it
+ * changed), each drag's press record with the model it grabbed, its release (writes, value), a cancelled or dropped
+ * drag, a Settings capture that failed, and at each mission's end the counters and the decisions' tally (reason_counts).
+ * Left out: the recorder's frame interval, frame time and capture budget (a clock call on every frame, idle ones
+ * included), the raw key state (a call per frame) and the display scale (the pixel route it served is gone). describe
+ * gives the gesture, the owner, the counters and the last decision.
  *
  * Tick order: the tick runs where the Lua's step ran, at the start of game.dll's frame update (0xAB5000), which the
  * engine calls right after the game's Lua update (only the engine plugins' pre-update lies between; KB
@@ -52,14 +61,27 @@
  *   Once per gesture, 200 ms after the press: + one model read (4, 4, 2, 1, 1).
  * - A release: 3 Windows calls, no read (Settings: + 1 consume; the Lua 3, and 5 and a read on Settings).
  * - A track press: a press, then a held frame's repeat, model and write.
+ * Detailed mode: idle frames unchanged (the trigger alone: no read, no log, no vpm_detailed check); a press, a held
+ *   frame that cancels or a release +1 global read; in Detailed mode a press may format and log a line (the owner and
+ *   a refusal only when they changed). A mission's end: nothing in Normal mode.
  * Once, at game load: 5 code checks and GetCurrentProcessId; 1 log line. While game.dll's code there is not decoded yet:
  * the 5 code checks every 30 frames (at most 60 s), no tick. */
+#include <stdio.h>
 #include <string.h>
 #include <windows.h>
 #include "clickable_scrollbars.h"
 
 #define VERIFY_MS 200.0 /* native_verify_ms: the check of a gesture's first write waits this long */
 #define TRACK_MARGIN 3.0 /* px either side of the bar a press still takes */
+
+/* The decisions (the Lua's note reasons), tallied for the Detailed mode's line at a mission's end. */
+enum { NATIVE_RETIRED, NATIVE_DRAG, NATIVE_CANCELLED, SETTINGS_INPUT_UNAVAILABLE, NATIVE_JUMP, BAR_PRESS, NATIVE_RELEASE,
+    NATIVE_DROPPED, SETTINGS_INPUT_CANCELLED, REASONS };
+static const char* const kReasons[REASONS] = {"native_retired", "native_drag", "native_cancelled",
+    "settings_input_unavailable", "native_jump", "bar_press", "native_release", "native_dropped", "settings_input_cancelled"};
+static const char* const kRoutes[] = {"", "equipment list", "Career", "Controls", "Settings"};
+
+static const char* RouteName(uint32_t route) { return kRoutes[route <= CS_ROUTE_SETTINGS ? route : 0]; }
 
 typedef struct Drag
 {
@@ -96,11 +118,27 @@ static struct
     void* window;
     uint32_t clicks, pages, drags, writes, verified, retired, logged_routes;
     const char* reason;     /* the last decision (note) */
+    uint32_t tally[REASONS]; /* the decisions so far (the Lua's reason_counts) */
+    const char* refusal;    /* Detailed mode: the last press refusal logged (logged on change) */
+    int has_logged_key;
+    CsKey logged_key;       /* Detailed mode: the owner last logged */
 } s;
 
 static CsBridge g_bridges[2]; /* the owner and the spare a resolution fills (each with its tape: static) */
 
-static void Note(const char* reason) { s.reason = reason; }
+static void Note(int reason)
+{
+    s.reason = kReasons[reason];
+    s.tally[reason]++;
+}
+
+/* Detailed mode: why a press did nothing, logged when the reason changed (a shot in play is a press too). */
+static void Refused(const char* why)
+{
+    if (why == s.refusal || !vpm_detailed()) return;
+    s.refusal = why;
+    vpm_log_detail(s.self, "press: no drag (%s)", why);
+}
 
 static void DropDrag(void)
 {
@@ -144,11 +182,10 @@ static int ReadView(View* v)
 
 static void LogFirstVerified(uint32_t route)
 {
-    static const char* const kRoutes[] = {"", "equipment list", "Career", "Controls", "Settings"};
     uint32_t bit = 1u << route;
     if (route > CS_ROUTE_SETTINGS || (s.logged_routes & bit)) return;
     s.logged_routes |= bit;
-    vpm_log(s.self, "%s scrollbar: the game answered the first drag", kRoutes[route]);
+    vpm_log(s.self, "%s scrollbar: the game answered the first drag", RouteName(route));
 }
 
 /* native_retire: this owner is not driven again until a press resolves a different one. */
@@ -158,17 +195,17 @@ static void Retire(const char* reason)
     s.has_failed_key = s.native != NULL;
     if (s.native != NULL) s.failed_key = s.native->key;
     s.retired++;
-    Note("native_retired");
+    Note(NATIVE_RETIRED);
     vpm_log(s.self, "native retired (%s) after %u writes", reason, s.writes);
 }
 
-/* refresh_native: resolves the owner and reads its model afresh. 1 with both. */
+/* refresh_native: resolves the owner and reads its model afresh. 1 with both; 0 with *reason. */
 /* lint: per-frame */
-static int RefreshNative(void)
+static int RefreshNative(const char** reason)
 {
-    const char* reason = NULL;
     CsBridge* bridge = Spare();
-    if (!cs_resolve(bridge, &reason))
+    *reason = "no owner";
+    if (!cs_resolve(bridge, reason))
     {
         s.native = NULL;
         s.has_model = 0;
@@ -176,8 +213,31 @@ static int RefreshNative(void)
     }
     if (s.has_failed_key && !cs_same_key(&s.failed_key, &bridge->key)) s.failed = 0; /* a different screen */
     s.native = bridge;
-    s.has_model = cs_state(bridge, &s.model, &reason);
+    s.has_model = cs_state(bridge, &s.model, reason);
     return s.has_model;
+}
+
+/* Detailed mode: the owner a press resolved, when it is not the one last logged (the pointers found). */
+static void LogOwner(const CsBridge* b)
+{
+    if (s.has_logged_key && cs_same_key(&s.logged_key, &b->key)) return;
+    s.has_logged_key = 1;
+    s.logged_key = b->key;
+    vpm_log_detail(s.self, "owner: %s (kind %u), controller 0x%llX, list 0x%llX, panel 0x%llX, bar 0x%llX, thumb 0x%llX%s",
+        RouteName(b->route), b->kind, (unsigned long long)b->controller, (unsigned long long)b->grid,
+        (unsigned long long)b->panel, (unsigned long long)b->bar, (unsigned long long)b->thumb, s.failed ? " (retired)" : "");
+}
+
+/* Detailed mode: a drag begins (install.lua's native press record, with the model its flight recorder showed). */
+static void LogPress(double cursor_y, const CsTrack* track)
+{
+    const CsModel* m = &s.model;
+    char range[48] = "unread";
+    if (m->has_range) snprintf(range, sizeof range, "%u..%u", m->first, m->last);
+    vpm_log_detail(s.self, "native press on %s: y=%.0f track=%.1f..%.1f thumb=%.1f value=%.4f; model items %u rows %u "
+        "columns %u anchor %u visible %s content %.1f span %.1f viewport %.1f", RouteName(m->route), cursor_y, track->top,
+        track->top + track->length, track->thumb, m->value, m->items, m->rows, m->columns, m->anchor, range, m->content,
+        m->span, m->viewport);
 }
 
 /* The list is still the one grabbed. */
@@ -241,7 +301,7 @@ static void VerifyNative(void)
     if (moved)
     {
         s.verified++;
-        Note("native_drag");
+        Note(NATIVE_DRAG);
         LogFirstVerified(s.drag.model.route);
         return;
     }
@@ -255,8 +315,9 @@ static void ServiceDrag(double cursor_y)
 {
     if (!CurrentNative())
     {
+        vpm_log_detail(s.self, "drag cancelled after %d writes: the list is no longer the one grabbed", s.drag.writes);
         DropDrag();
-        Note("native_cancelled");
+        Note(NATIVE_CANCELLED);
         return;
     }
     double value = 0;
@@ -274,7 +335,8 @@ static int BeginDrag(double cursor_y, const CsTrack* track)
     {
         if (!cs_settings_input())
         {
-            Note("settings_input_unavailable");
+            Note(SETTINGS_INPUT_UNAVAILABLE);
+            Refused("the Settings page's select action could not be consumed");
             return 0;
         }
         s.capture = 1;
@@ -286,6 +348,11 @@ static int BeginDrag(double cursor_y, const CsTrack* track)
     s.drag.model = s.model;
     s.drag.key = s.native->key;
     s.drag.started = s.now;
+    if (vpm_detailed())
+    {
+        s.refusal = NULL;
+        LogPress(cursor_y, track);
+    }
     return 1;
 }
 
@@ -293,16 +360,21 @@ static int BeginDrag(double cursor_y, const CsTrack* track)
 /* lint: per-frame */
 static void HandlePress(void)
 {
+    const char* reason = NULL;
     s.clicks++;
-    if (!RefreshNative()) return;
+    if (!RefreshNative(&reason)) { Refused(reason); return; }
+    if (vpm_detailed()) LogOwner(s.native);
     View v;
-    if (!ReadView(&v)) return;
+    if (!ReadView(&v)) { Refused("the window's view unreadable"); return; }
     CsTrack track;
     cs_screen_track(&s.model, v.x, v.y, v.height, &track);
     if (v.cursor_x < track.left - TRACK_MARGIN || v.cursor_x > track.right + TRACK_MARGIN || v.cursor_y < track.top ||
         v.cursor_y > track.top + track.length)
+    {
+        Refused("outside the scrollbar");
         return;
-    if (s.failed) return;
+    }
+    if (s.failed) { Refused("this list's owner is retired"); return; }
     double top = track.top + s.model.value * track.span;
     double centre = top + track.thumb / 2;
     if (!BeginDrag(v.cursor_y, &track)) return;
@@ -311,10 +383,10 @@ static void HandlePress(void)
         s.drag.press_y = centre;
         ServiceDrag(v.cursor_y);
         s.pages++;
-        Note("native_jump");
+        Note(NATIVE_JUMP);
     }
     else
-        Note("bar_press");
+        Note(BAR_PRESS);
 }
 
 /* The held gesture: a release ends it; a held button moves it. */
@@ -323,7 +395,9 @@ static void HoldDrag(int down)
 {
     if (!down)
     {
-        Note("native_release");
+        Note(NATIVE_RELEASE);
+        if (s.drag.has_sent) vpm_log_detail(s.self, "native release writes=%d value=%.4f", s.drag.writes, s.drag.sent);
+        else vpm_log_detail(s.self, "native release writes=%d value=none", s.drag.writes);
         DropDrag();
         return;
     }
@@ -331,8 +405,9 @@ static void HoldDrag(int down)
     int read = s.user32->GetCursorPos(&cursor) != 0; /* lint-ok: C4 a held drag only */
     if (s.failed)
     {
+        vpm_log_detail(s.self, "drag dropped: the owner was retired");
         DropDrag();
-        Note("native_dropped");
+        Note(NATIVE_DROPPED);
     }
     else if (read)
         ServiceDrag((double)cursor.y);
@@ -358,8 +433,9 @@ static void HoldSettingsInput(int down)
 {
     if (ForegroundSelf() && !cs_settings_input())
     {
+        if (s.drag.on) vpm_log_detail(s.self, "Settings drag cancelled: the select action could not be consumed");
         DropDrag();
-        Note("settings_input_cancelled");
+        Note(SETTINGS_INPUT_CANCELLED);
     }
     if (!down) s.capture = 0;
 }
@@ -420,6 +496,45 @@ static void GameLoaded(VpmComponent* self, HfEvent event)
     if (!vpm_when_code_ready(self, pins, count, RoutinesReady)) vpm_fail(self, "unsupported native scroll routine");
 }
 
+/* ---- diagnostics ---------------------------------------------------------------------------------------------------- */
+
+/* The decisions tallied ("bar_press 3, native_jump 1"), or "none". */
+static void Tally(char* out, size_t size)
+{
+    size_t used = 0;
+    out[0] = 0;
+    for (int i = 0; i < REASONS && used < size; i++)
+        if (s.tally[i] > 0)
+            used += (size_t)snprintf(out + used, size - used, "%s%s %u", used > 0 ? ", " : "", kReasons[i], s.tally[i]);
+    if (used == 0) snprintf(out, size, "none");
+}
+
+/* Detailed mode: the session's counters at each mission's end (the flight recorder's counters and reason tally). */
+static void MissionEnded(VpmComponent* self, const HfEventInfo* event)
+{
+    if (!vpm_detailed() || !vpm_ticking(self)) return;
+    char tally[320];
+    Tally(tally, sizeof tally);
+    vpm_log_detail(self, "at the mission's end: presses %u, track pages %u, drags %u, writes %u, verified %u, owners retired "
+        "%u; decisions: %s", s.clicks, s.pages, s.drags, s.writes, s.verified, s.retired, tally);
+}
+
+/* The tester's mark: the gesture, the owner, the counters and the last decision. */
+static void Describe(VpmComponent* self, char* out, size_t size)
+{
+    char gesture[64] = "no drag";
+    if (s.drag.on)
+        snprintf(gesture, sizeof gesture, "dragging the %s scrollbar (%d writes)", RouteName(s.drag.model.route),
+            s.drag.writes);
+    char owner[96] = "none";
+    if (s.native != NULL)
+        snprintf(owner, sizeof owner, "%s at 0x%llX%s", RouteName(s.native->route), (unsigned long long)s.native->controller,
+            s.failed ? ", retired" : "");
+    snprintf(out, size, "%s%s; owner %s; presses %u, pages %u, drags %u, writes %u, verified %u, retired %u; last %s",
+        gesture, s.capture ? ", Settings capture" : "", owner, s.clicks, s.pages, s.drags, s.writes, s.verified, s.retired,
+        s.reason != NULL ? s.reason : "none");
+}
+
 void cs_counts(CsCounts* out)
 {
     *out = (CsCounts){s.clicks, s.pages, s.drags, s.writes, s.verified, s.retired, s.drag.on, s.drag_active, s.failed,
@@ -432,7 +547,9 @@ static int Start(VpmComponent* self)
     memset(g_bridges, 0, sizeof g_bridges);
     s.self = self;
     s.user32 = vpm_user32();
+    (void)vpm_listen(self, HF_ON_MISSION_END, MissionEnded, 0); /* Detailed lines only; the core logs a refusal */
     return vpm_on_load(self, HF_EVENT_GAME_LOADED, GameLoaded) ? 0 : 1;
 }
 
-const VpmComponentDef vpm_component_clickable_scrollbars = {"clickable_scrollbars", "Clickable Scrollbars", "2.15.1", 0, Start, NULL};
+const VpmComponentDef vpm_component_clickable_scrollbars = {"clickable_scrollbars", "Clickable Scrollbars", "2.15.1", 0, Start, NULL,
+    Describe};
