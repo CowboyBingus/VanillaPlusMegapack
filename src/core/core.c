@@ -49,8 +49,8 @@ static void LogV(VpmComponent* self, const char* format, va_list args)
 {
     char line[1024];
     vsnprintf(line, sizeof line, format, args);
-    if (self != NULL) g_hf->log(g_mod, "[%s] %s", self->def->name, line);
-    else g_hf->log(g_mod, "%s", line);
+    if (self != NULL) g_hf->log(g_mod, "[%s] %s", self->def->name, line); /* lint-ok: C4 components log on frames that act only (each one's review) */
+    else g_hf->log(g_mod, "%s", line); /* lint-ok: C4 the core logs at start-up, a stop and a mission's end */
 }
 
 void vpm_log(VpmComponent* self, const char* format, ...)
@@ -212,6 +212,7 @@ static void CompactTicks(void)
     g_tickCount = kept;
 }
 
+/* The pack's game-thread callback. */
 static void PackTick(HfMod* mod, float dt, void* user)
 {
     g_frames++;
@@ -238,15 +239,15 @@ static void CostsStart(void)
 {
     g_frames = 0;
     g_tscStart = __rdtsc();
-    QueryPerformanceCounter(&g_qpcStart);
+    QueryPerformanceCounter(&g_qpcStart); /* lint-ok: C4 once per mission, at its start */
     for (int i = 0; i < g_componentCount; i++) g_components[i].cycles = g_components[i].calls = 0;
 }
 
 static void CostsReport(void)
 {
     LARGE_INTEGER now, frequency;
-    QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&now); /* lint-ok: C4 once per mission, at its end */
+    QueryPerformanceFrequency(&frequency); /* lint-ok: C4 once per mission, at its end */
     double seconds = (double)(now.QuadPart - g_qpcStart.QuadPart) / (double)frequency.QuadPart;
     double cyclesPerMs = seconds > 0 ? (double)(__rdtsc() - g_tscStart) / (seconds * 1000.0) : 0;
     if (cyclesPerMs <= 0 || g_frames == 0) return;
@@ -324,7 +325,7 @@ static void HookCore(void)
 {
     g_tickHooked = g_hf->on_game_thread(g_mod, PackTick, NULL);
     if (!g_tickHooked) CoreLog("the game thread could not be reached (%s): components that tick stay idle", g_hf->last_log(g_mod));
-    g_hf->on(g_mod, HF_EVENT_GAME_LOADED, CoreGameLoaded, NULL);
+    if (g_hf->on(g_mod, HF_EVENT_GAME_LOADED, CoreGameLoaded, NULL) != 0) CoreLog("game.dll's load event refused: components see it as absent");
     if (!g_hf->subscribe(g_mod, HF_ON_MISSION_START, CoreMissionStart, NULL, 0) ||
         !g_hf->subscribe(g_mod, HF_ON_MISSION_END, CoreMissionEnd, NULL, 0))
         CoreLog("mission events refused (%s): no per-mission cost report", g_hf->last_log(g_mod));

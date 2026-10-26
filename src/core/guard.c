@@ -68,8 +68,7 @@ void vpm_guard_install(void)
 {
     if (g_handler != NULL) return;
     FindSelf();
-    /* lint-ok: C7 the pack's crash guard: it takes only faults in the pack's own code during a guarded call */
-    g_handler = AddVectoredExceptionHandler(1, GuardHandler);
+    g_handler = AddVectoredExceptionHandler(1, GuardHandler); /* lint-ok: C7 the pack's crash guard: only faults in the pack's own code during a guarded call */
 }
 
 /* noinline: the resume point must stay in this function's own frame, which outlives the call it guards. Locals changed

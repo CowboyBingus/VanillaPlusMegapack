@@ -249,8 +249,8 @@ static void SwitchesPersistAndUnknownEntriesStay(void)
 static VpmBinding* g_binding;
 static int g_attached, g_down = 1;
 static const VpmBindingDef kArmory = {"armory", "Armory", NULL, 0, 0x70};
-static void* Attach(VpmBinding* binding) { g_attached++; return (void*)(uintptr_t)42; }
-static int Down(const VpmBinding* binding, void* data) { return data == (void*)(uintptr_t)42 ? g_down : -1; }
+static void* Attach(VpmBinding* binding) { g_attached++; return (void*)(uintptr_t)42; } /* lint-ok: C2 a token, never dereferenced */
+static int Down(const VpmBinding* binding, void* data) { return data == (void*)(uintptr_t)42 ? g_down : -1; } /* lint-ok: C2 the token compared */
 static const VpmBindingBackend kBackend = {Attach, Down};
 static int StartBindingUser(VpmComponent* self) { g_binding = vpm_binding(self, &kArmory); return g_binding == NULL; }
 static int StartBackend(VpmComponent* self) { vpm_bindings_set_backend(self, &kBackend); return 0; }

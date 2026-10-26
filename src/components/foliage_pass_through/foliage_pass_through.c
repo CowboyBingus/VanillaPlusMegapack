@@ -89,27 +89,27 @@ static int CheckRow(VpmComponent* self, int i, uint32_t* template)
     return 1;
 }
 
-/* Every row checked, then one page check over the span of the templates to change, the stores and their read-backs. */
-static void Apply(VpmComponent* self)
+/* Every target's row checked (templates[] filled); the number still to change, with the span of their templates, or
+ * -1 after vpm_fail. */
+static int CheckAll(VpmComponent* self, uint32_t* templates, uintptr_t* low, uintptr_t* high)
 {
-    uintptr_t list = CurrentList(self);
-    if (list == 0 || !vpm_read(list, g_list, sizeof g_list)) { if (list != 0) vpm_fail(self, "Projectile index unreadable"); return; }
-    uint32_t templates[FOLIAGE_TARGET_COUNT];
-    uintptr_t low = UINTPTR_MAX, high = 0;
     int pending = 0;
+    *low = UINTPTR_MAX;
+    *high = 0;
     for (int i = 0; i < FOLIAGE_TARGET_COUNT; i++)
     {
-        if (!CheckRow(self, i, &templates[i])) return;
+        if (!CheckRow(self, i, &templates[i])) return -1;
         if (templates[i] == NO_FOLIAGE) continue;
         pending++;
-        if (s.rows[i] < low) low = s.rows[i];
-        if (s.rows[i] > high) high = s.rows[i];
+        if (s.rows[i] < *low) *low = s.rows[i];
+        if (s.rows[i] > *high) *high = s.rows[i];
     }
-    if (pending > 0 && !vpm_writable(low + AT_TEMPLATE, high - low + 4))
-    {
-        vpm_fail(self, "Projectile settings write refused or failed");
-        return;
-    }
+    return pending;
+}
+
+/* The stores, then a read-back of every row's template: 1, or 0 after vpm_fail. */
+static int StoreAll(VpmComponent* self, const uint32_t* templates)
+{
     const uint32_t value = NO_FOLIAGE;
     for (int i = 0; i < FOLIAGE_TARGET_COUNT; i++)
     {
@@ -123,9 +123,28 @@ static void Apply(VpmComponent* self)
         if (!vpm_read_u32(s.rows[i] + AT_TEMPLATE, &now) || now != NO_FOLIAGE)
         {
             vpm_fail(self, "Projectile settings write did not hold");
-            return;
+            return 0;
         }
     }
+    return 1;
+}
+
+/* Every row checked, then one page check over the span of the templates to change, the stores and their read-backs. */
+static void Apply(VpmComponent* self)
+{
+    uintptr_t list = CurrentList(self);
+    if (list == 0) return;
+    if (!vpm_read(list, g_list, sizeof g_list)) { vpm_fail(self, "Projectile index unreadable"); return; }
+    uint32_t templates[FOLIAGE_TARGET_COUNT];
+    uintptr_t low, high;
+    int pending = CheckAll(self, templates, &low, &high);
+    if (pending < 0) return;
+    if (pending > 0 && !vpm_writable(low + AT_TEMPLATE, high - low + 4))
+    {
+        vpm_fail(self, "Projectile settings write refused or failed");
+        return;
+    }
+    if (!StoreAll(self, templates)) return;
     s.applied = 1;
     vpm_set_status(self, "applied");
     vpm_log(self, "applied: %d projectile types use the no-foliage query (%d changed now, %d already changed)",
@@ -134,7 +153,7 @@ static void Apply(VpmComponent* self)
 
 static int SettingsLoaded(void) { return vpm_game_u64(BUFFER_RVA) != 0; }
 
-/* The fallback while the settings are not loaded yet: one plain load per frame. */
+/* The fallback while the settings are not loaded yet: one plain load per frame. lint: per-frame */
 static void Wait(VpmComponent* self, float dt)
 {
     if (!SettingsLoaded())

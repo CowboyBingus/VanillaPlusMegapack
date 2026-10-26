@@ -2,11 +2,11 @@
  * plus HellForge's moved projectile list. */
 #include <string.h>
 #include "harness/test.h"
+#include "components.h"
 #include "components/foliage_pass_through/foliage_targets.h"
 
 TEST_GLOBALS;
 
-extern const VpmComponentDef vpm_component_foliage_pass_through;
 static const VpmComponentDef* const kDefs[] = {&vpm_component_foliage_pass_through};
 
 #define BUFFER_RVA 0x348E2F8u
@@ -197,10 +197,10 @@ static void RefusesReadOnlySettings(void)
 {
     MakeWorld(VANILLA_LIST, 0, 1);
     DWORD old;
-    VirtualProtect(w.buffer, (FOLIAGE_TARGET_COUNT + 1) * ROW + 64, PAGE_READONLY, &old);
+    VirtualProtect(w.buffer, (FOLIAGE_TARGET_COUNT + 1) * ROW + 64, PAGE_READONLY, &old); /* lint-ok: C1,C3 the test makes the fake memory read-only */
     Started();
     fake_fire(HF_EVENT_PROJECTILES_READY);
-    VirtualProtect(w.buffer, (FOLIAGE_TARGET_COUNT + 1) * ROW + 64, PAGE_READWRITE, &old);
+    VirtualProtect(w.buffer, (FOLIAGE_TARGET_COUNT + 1) * ROW + 64, PAGE_READWRITE, &old); /* lint-ok: C1,C3 and writable again */
     CHECK_LOG("Projectile settings write refused or failed");
     CHECK_EQ(Count(2), 0);
 }

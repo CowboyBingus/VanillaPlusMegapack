@@ -2,10 +2,10 @@
  * game. */
 #include <string.h>
 #include "harness/test.h"
+#include "components.h"
 
 TEST_GLOBALS;
 
-extern const VpmComponentDef vpm_component_sticky_grenade_handles;
 static const VpmComponentDef* const kDefs[] = {&vpm_component_sticky_grenade_handles};
 
 #define LIBRARY_RVA 0x27C5CF0u
@@ -173,10 +173,10 @@ static void RefusesReadOnlyMaterials(void)
     MakeLibrary();
     MakeGrenades();
     DWORD old;
-    VirtualProtect(g_entries, 6 * ENTRY, PAGE_READONLY, &old);
+    VirtualProtect(g_entries, 6 * ENTRY, PAGE_READONLY, &old); /* lint-ok: C1,C3 the test makes the fake memory read-only */
     Started();
     fake_fire(HF_EVENT_ENTITIES_READY);
-    VirtualProtect(g_entries, 6 * ENTRY, PAGE_READWRITE, &old);
+    VirtualProtect(g_entries, 6 * ENTRY, PAGE_READWRITE, &old); /* lint-ok: C1,C3 and writable again */
     CHECK_LOG("Material write refused or failed");
     CHECK_EQ(HandleTag(), HANDLE);
 }

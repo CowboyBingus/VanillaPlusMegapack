@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "note": "The C lint of HellForge (HellForge/c-lint/HellForge-Open/scripts/lint/lint.py, feature/c-lint) over this pack: run scripts/lint.ps1.",
+  "sdk_header": "../sdk-dev/HellForge-Open/native/mod-sdk/hellforge_mod.h",
+  "discover": [],
+  "default_sources": [
+    "src/**/*.c",
+    "src/**/*.h"
+  ],
+  "default_tests": [
+    "tests/**/*.c",
+    "tests/**/*.h"
+  ],
+  "units": [
+    {
+      "name": "vanilla-plus-megapack",
+      "path": "."
+    }
+  ]
+}

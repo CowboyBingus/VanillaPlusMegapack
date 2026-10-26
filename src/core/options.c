@@ -154,31 +154,44 @@ static size_t AppendSection(char* out, size_t at, size_t size, const char* secti
     return at;
 }
 
+static const char* const kCoreSections[] = {"components", "options", "bindings"};
+
+static int SectionBefore(int i)
+{
+    for (int k = 0; k < 3; k++)
+        if (strcmp(g_settings[i].section, kCoreSections[k]) == 0) return 1;
+    for (int j = 0; j < i; j++)
+        if (strcmp(g_settings[j].section, g_settings[i].section) == 0) return 1;
+    return 0;
+}
+
+/* The file's text: the core's sections first, then the others in the order first seen. Its length, or 0 too long. */
+static size_t Compose(char* text, size_t size)
+{
+    size_t at = (size_t)snprintf(text, size,
+        "; Vanilla Plus Megapack settings. The pack writes this file when you change a setting in game;\n"
+        "; edit it only while the game is closed. Components: on or off, from the next session.\n");
+    for (int k = 0; k < 3; k++) at = AppendSection(text, at, size, kCoreSections[k]);
+    for (int i = 0; i < g_settingCount && at < size; i++)
+        if (!SectionBefore(i)) at = AppendSection(text, at, size, g_settings[i].section);
+    return at < size ? at : 0;
+}
+
+/* Written to <file>.new, then moved over the file: an interrupted save leaves the old file. */
 static int Write(void)
 {
     static char text[FILE_LIMIT];
-    size_t at = (size_t)snprintf(text, sizeof text,
-        "; Vanilla Plus Megapack settings. The pack writes this file when you change a setting in game;\n"
-        "; edit it only while the game is closed. Components: on or off, from the next session.\n");
-    static const char* const known[] = {"components", "options", "bindings"};
-    for (int k = 0; k < 3; k++) at = AppendSection(text, at, sizeof text, known[k]);
-    for (int i = 0; i < g_settingCount && at < sizeof text; i++)
-    {
-        int seen = 0;
-        for (int k = 0; k < 3; k++) seen |= strcmp(g_settings[i].section, known[k]) == 0;
-        for (int j = 0; j < i; j++) seen |= strcmp(g_settings[j].section, g_settings[i].section) == 0;
-        if (!seen) at = AppendSection(text, at, sizeof text, g_settings[i].section);
-    }
-    if (at >= sizeof text || !SettingsPath(1)) return 0;
+    size_t at = Compose(text, sizeof text);
+    if (at == 0 || !SettingsPath(1)) return 0;
     wchar_t temporary[MAX_PATH + 8];
     _snwprintf(temporary, MAX_PATH + 8, L"%ls.new", g_path);
-    HANDLE file = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE file = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL); /* lint-ok: C4 a save: only after a change, a second after it or at a mission's end */
     if (file == INVALID_HANDLE_VALUE) return 0;
     DWORD wrote = 0;
-    BOOL ok = WriteFile(file, text, (DWORD)at, &wrote, NULL) && wrote == at;
-    ok = CloseHandle(file) && ok;
-    if (ok) ok = MoveFileExW(temporary, g_path, MOVEFILE_REPLACE_EXISTING);
-    if (!ok) DeleteFileW(temporary);
+    BOOL ok = WriteFile(file, text, (DWORD)at, &wrote, NULL) && wrote == at; /* lint-ok: C4 a save, after a change only */
+    ok = CloseHandle(file) && ok; /* lint-ok: C4 a save, after a change only */
+    if (ok) ok = MoveFileExW(temporary, g_path, MOVEFILE_REPLACE_EXISTING); /* lint-ok: C4 a save, after a change only */
+    if (!ok) DeleteFileW(temporary); /* lint-ok: C4 a failed save, after a change only */
     return ok;
 }
 
@@ -192,7 +205,7 @@ void vpm_settings_flush(void)
     if (!g_dirty) return;
     g_saveIn = 0;
     if (Write()) g_dirty = 0;
-    else vpm_core_hf()->log(vpm_mod(), "settings: %ls could not be written; kept for the next try", g_path);
+    else vpm_core_hf()->log(vpm_mod(), "settings: %ls could not be written; kept for the next try", g_path); /* lint-ok: C4 a failed save */
 }
 
 void vpm_settings_tick(float dt)
@@ -264,6 +277,27 @@ static void Save(VpmOption* option)
     vpm_settings_save_soon();
 }
 
+/* The saved value of a new option, when it is valid (a slider's clamped to its range, as Mod Options Menu's decode). */
+static void LoadSaved(VpmComponent* self, VpmOption* option)
+{
+    const char* saved = vpm_setting("options", option->key);
+    if (saved == NULL) return;
+    char* end = NULL;
+    double value = strtod(saved, &end);
+    int number = end != saved && *end == 0;
+    if (number && option->def->kind == VPM_SLIDER) value = Snap(option->def, value);
+    if (number && Valid(option->def, value)) option->value = value;
+    else vpm_log(self, "option %s: the saved value \"%s\" is not valid; the default is used", option->key, saved);
+}
+
+static VpmOption* Registered(const char* key, const VpmOptionDef* def, int* found)
+{
+    *found = 0;
+    for (int i = 0; i < g_optionCount; i++)
+        if (strcmp(g_options[i].key, key) == 0) { *found = 1; return g_options[i].def == def ? &g_options[i] : NULL; }
+    return NULL;
+}
+
 VpmOption* vpm_option(VpmComponent* self, const VpmOptionDef* def)
 {
     if (!ValidDef(def) || !Valid(def, def->kind == VPM_SLIDER ? Snap(def, def->value) : def->value))
@@ -273,8 +307,9 @@ VpmOption* vpm_option(VpmComponent* self, const VpmOptionDef* def)
     }
     char key[KEY_SIZE];
     snprintf(key, sizeof key, "%s.%s", vpm_def(self)->id, def->id);
-    for (int i = 0; i < g_optionCount; i++)
-        if (strcmp(g_options[i].key, key) == 0) return g_options[i].def == def ? &g_options[i] : NULL;
+    int found;
+    VpmOption* existing = Registered(key, def, &found);
+    if (found) return existing;
     if (g_optionCount >= VPM_MAX_OPTIONS) { vpm_log(self, "option %s refused: the pack holds %d", key, VPM_MAX_OPTIONS); return NULL; }
     VpmOption* option = &g_options[g_optionCount++];
     memset(option, 0, sizeof *option);
@@ -282,15 +317,7 @@ VpmOption* vpm_option(VpmComponent* self, const VpmOptionDef* def)
     option->owner = self;
     snprintf(option->key, sizeof option->key, "%s", key);
     option->value = def->kind == VPM_SLIDER ? Snap(def, def->value) : def->value;
-    const char* saved = vpm_setting("options", key);
-    if (saved != NULL)
-    {
-        char* end = NULL;
-        double value = strtod(saved, &end);
-        if (end != saved && *end == 0 && def->kind == VPM_SLIDER) value = Snap(def, value);
-        if (end != saved && *end == 0 && Valid(def, value)) option->value = value;
-        else vpm_log(self, "option %s: the saved value \"%s\" is not valid; the default is used", key, saved);
-    }
+    LoadSaved(self, option);
     return option;
 }
 

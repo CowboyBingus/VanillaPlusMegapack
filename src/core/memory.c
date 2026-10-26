@@ -50,7 +50,12 @@ uint64_t vpm_exe_u64(uint32_t rva)
     return vpm_exe_read(rva, &value, sizeof value) ? value : 0;
 }
 
-int vpm_read(uintptr_t address, void* out, size_t size) { return address != 0 && vpm_core_hf()->read(address, out, size) == 0; }
+/* The heap read every component uses: ReadProcessMemory, as the Lua api.read was. Components gate it (each header states
+ * its reads per frame, and its test pins them). */
+int vpm_read(uintptr_t address, void* out, size_t size)
+{
+    return address != 0 && vpm_core_hf()->read(address, out, size) == 0; /* lint-ok: C4 the heap read; callers count and gate it */
+}
 int vpm_read_u8(uintptr_t address, uint8_t* out) { return vpm_read(address, out, sizeof *out); }
 int vpm_read_u16(uintptr_t address, uint16_t* out) { return vpm_read(address, out, sizeof *out); }
 int vpm_read_u32(uintptr_t address, uint32_t* out) { return vpm_read(address, out, sizeof *out); }
@@ -77,7 +82,7 @@ int vpm_writable(uintptr_t address, size_t size)
     while (at < end)
     {
         MEMORY_BASIC_INFORMATION info;
-        if (VirtualQuery((const void*)at, &info, sizeof info) != sizeof info) return 0;
+        if (VirtualQuery((const void*)at, &info, sizeof info) != sizeof info) return 0; /* lint-ok: C4 validation only, when a target is found */
         DWORD protect = info.Protect & 0xFF;
         if (info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
             (protect != PAGE_READWRITE && protect != PAGE_EXECUTE_READWRITE))

@@ -168,6 +168,7 @@ static void Done(VpmComponent* self, const char* when)
         s.status, s.index, when);
 }
 
+/* lint: per-frame */
 static void Wait(VpmComponent* self, float dt)
 {
     const char* why = "";

@@ -498,7 +498,7 @@ static uint8_t* Region(uint8_t* region, size_t size)
         return region;
     }
     /* Decommitting and committing again gives zeroed pages without touching the untouched ones. */
-    VirtualFree(region, size, MEM_DECOMMIT);
+    (void)VirtualFree(region, size, MEM_DECOMMIT); /* the commit below fails loudly if this did */
     if (VirtualAlloc(region, size, MEM_COMMIT, PAGE_READWRITE) == NULL) { fprintf(stderr, "fake: recommit failed\n"); exit(2); }
     return region;
 }
