@@ -12,8 +12,9 @@
  * the game, so stop() has nothing to put back.
  *
  * On HellForge, compared with the Lua:
- * - The poll runs in the pack's game-thread tick, before the game's update; the Lua polled after it (the loader's update
- *   chain). Both see the state the previous update left, 3/64 s of frame time apart.
+ * - The poll runs in the pack's game-thread tick, at the start of game.dll's frame update, where the Lua global update
+ *   ran. The Lua polled after the updates below it in its loader's chain, which is still before game.dll's update: the
+ *   same point of the frame. Both see the state the previous frame's update left, every 3/64 s of frame time.
  * - Statics in game.dll's and the exe's images (the mode and manager slots, the unit registry, actor lists, pools and
  *   physics world slots, the physics API table) are plain loads; the Lua read them with ReadProcessMemory.
  * - The routines are checked with HfApi.code_matches (the bytes as shipped) and once the game has set its physics API

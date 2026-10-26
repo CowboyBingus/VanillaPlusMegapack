@@ -23,12 +23,14 @@
  * calls by name: lua_getfield, lua_pushnumber, lua_pushlstring, lua_pushvalue, lua_pcall, lua_gettop, lua_settop,
  * lua_type, lua_tonumber, luaL_ref, lua_rawgeti, luaL_unref. What is not known is the lua_State and when calling into
  * it is safe: LuaApi (get_engine_api id 1) has getscriptenvironmentstate, but the getter and the LuaApi table (exe
- * 0xa4fe0 and 0x27cc0a0 in a capture of an older build) and LuaApi's layout are unverified on 25480438; and HellForge's
- * game-thread tick (game.dll 0x13270B0, before the game's update) may run inside one of the engine's script calls, where
- * the running Lua thread may not be the main one. What the probe must find: the main lua_State* (from
- * getscriptenvironmentstate, or the L of the engine's lua_pcall of the script's update), whether HellForge's tick runs
- * inside a script call and on which lua_State, and that one stingray.Gui.rect call made from the tick draws on the war
- * table. With those, this file gets a KycGui whose members push the arguments and lua_pcall the bindings, keeping
+ * 0xa4fe0 and 0x27cc0a0 in a capture of an older build) and LuaApi's layout are unverified on 25480438. The pack's tick
+ * runs at the start of game.dll's frame update (0xAB5000), which the engine's script update reaches by a tail jump once
+ * the Lua global update has returned (KB squad-join-pipeline-research section 1, the static frame order): outside the
+ * engine's script call of update, at the point of the frame where the Lua's update ran (until the core's frame hook is
+ * in, HellForge's game-thread callback, game.dll 0x13270B0, runs it later in the same update). What the probe must
+ * find: the main lua_State* (from getscriptenvironmentstate, or the L of the engine's lua_pcall of the script's update),
+ * that no script call is running on it when the tick runs, and that one stingray.Gui.rect call made from the tick draws
+ * on the war table. With those, this file gets a KycGui whose members push the arguments and lua_pcall the bindings, keeping
  * worlds, GUIs and materials in the registry (luaL_ref) as their KycRef.
  *
  * Until then: kyc_gui() is the none route, and kyc_gui_use lets the tests (and a route under test) take its place. */

@@ -35,13 +35,15 @@
  * - Time is the sum of the ticks' dt (the Lua: the performance counter). The game.dll globals are plain loads (the Lua read
  *   each through ReadProcessMemory); heap reads stay vpm_read. The charging flag is a plain store into the page checked for
  *   the binding (the Lua: WriteProcessMemory).
- * - The tick runs in HellForge's game-thread callback (the menu sound manager's update, game.dll 0x13270B0); the Lua ran in
- *   the game's Lua update, at the start of the engine's frame, before game.dll's whole update. The flag must reach the
- *   charge updater before the trigger handler copies the cleared fire command over it again: a store anywhere after the
- *   handler and before the updater (in frame order, wrapping into the next frame) works, a store between the updater
- *   and the handler is lost. The Lua's place worked. Whether HellForge's does is not verified: the first cycle that
- *   stalls in a session is logged ("stalled"), which is what a tick in the wrong place shows (one arc per press, then the
- *   charge stays at 0 while Fire is held).
+ * - The tick runs where the Lua ran: at the start of game.dll's whole update (0xAB5000), which the engine calls right
+ *   after the game's Lua update, so the store comes before anything game.dll does in the frame, as the Lua's did. The
+ *   flag must reach the charge updater before the trigger handler copies the cleared fire command over it again: a
+ *   store anywhere after the handler and before the updater (in frame order, wrapping into the next frame) works, a
+ *   store between the updater and the handler is lost. The Lua's place worked, and the tick has that place. Until the
+ *   core's frame hook is in (or if it is refused), the tick runs from HellForge's game-thread callback (the menu sound
+ *   manager's update, game.dll 0x13270B0) inside the same update, a place not checked against the handler and the
+ *   updater; the first cycle that stalls in a session is logged ("stalled"), which is what a tick in the wrong place
+ *   shows (one arc per press, then the charge stays at 0 while Fire is held).
  * - Dropped: the Lua's update-chain guard (pause after an error below, eight errors stop it: the core's crash guard stops
  *   the component on a fault instead), the shutdown restore (no shutdown event), the developer diagnostics
  *   (ArcThrowerDiagnostics: the shot, hold, idle-reason and release lines; the first stall of a session is logged), the

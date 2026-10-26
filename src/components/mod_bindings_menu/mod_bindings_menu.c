@@ -45,7 +45,7 @@
  *     (the core checks the build), the LuaJIT notes, and the Lua's logs of engine button ids. The crash guard covers
  *     faults; stop() gives back what a page borrowed, as the Lua's shut_down.
  *
- * COST per frame (calls; "read" is HfApi.read, ReadProcessMemory; tests/components/mod_bindings_menu_test.c pins the
+ * COST per frame (calls; "read" is vpm_read, a guarded plain load; tests/components/mod_bindings_menu_test.c pins the
  * reads; the harness does not count VirtualQuery, so those are from the code). Ship Station Hotkeys' six bindings:
  *   - Idle (no binding page, nothing to save, no sweep due): 1 read, the screen stack (Lua: 1).
  *   - A sweep, every 2 s: each registered native action's defaults and live records, and the screen stack: 13 (Lua:

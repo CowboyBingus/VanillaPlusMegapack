@@ -46,7 +46,7 @@ static inline uintptr_t kyc_pointer_at(const uint8_t* b)
     return v >= 0x10000u && v < 0x800000000000ull ? (uintptr_t)v : 0;
 }
 
-/* Heap reads (HfApi.read) into out, capacity bytes: 1, or 0 pending ("Mission data unavailable"; a size of 0 or over
+/* Heap reads (vpm_read) into out, capacity bytes: 1, or 0 pending ("Mission data unavailable"; a size of 0 or over
  * the capacity fails instead). */
 int kyc_read(uintptr_t address, void* out, size_t capacity, size_t size);
 /* A game.dll static (a plain load): 1, or 0 pending. */
