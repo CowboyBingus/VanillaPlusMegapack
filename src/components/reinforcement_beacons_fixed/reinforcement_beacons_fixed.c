@@ -11,17 +11,31 @@
  *
  * The idle gate (the Lua's spawn_state): between deaths a frame loads the player manager global and reads its spawn
  * state; only 1 (dead, queued) or 2 (pod pending) starts the full snapshot, which then runs every frame until the state
- * leaves 1 and 2. The death's first snapshot is compared with a baseline: the state the gate saw last (so the initial
- * deployment, 0 -> 2, stays excluded), no beacons, and the automatic rows of the last solo landing on the same player
- * manager. Each correction re-reads the snapshot immediately before the write and writes only if the same pending spawn
- * and the same beacon association still hold; a read-back that differs puts the original X, Y back and stops.
+ * leaves 1 and 2 (at both check points while it is the local player's own reinforcement). The death's first snapshot is
+ * compared with a baseline: the state the gate saw last (so the initial deployment, 0 -> 2, stays excluded), no
+ * beacons, and the automatic rows of the last solo landing on the same player manager. Each correction re-reads the
+ * snapshot immediately before the write and writes only if the same pending spawn and the same beacon association still
+ * hold; a read-back that differs puts the original X, Y back and stops.
  *
  * On HellForge (what differs from the Lua, and why):
- * - One check per frame, on HellForge's game-thread tick (before the game's update). The Lua checked a second time after
- *   the game's update while a reinforcement was in progress; HellForge has no post-update callback. A spawn committed
- *   during the game's update is therefore corrected on the next frame instead of the same one; the pod waits about 5 s
- *   and the window is 0.1 .. 5.1 s, so the correction is the same.
- * - The globals (game.dll and the exe's unit registry) are plain loads; only heap data goes through HfApi.read.
+ * - Two checks per frame while a reinforcement is in progress, as the Lua: the tick at the start of game.dll's update
+ *   and the post-update tick right after that update returns, under the Lua's condition for its second check (the last
+ *   full snapshot is the local player's own, in a gameplay mode, queued or pending). The post tick is started by the
+ *   full check that finds that and stopped by the one that ends it, so frames between deaths run the gate alone, as in
+ *   the 1:1 port. Why the post point is the same or strictly better than the Lua's: the Lua's two checks ran at the
+ *   start of its update chain and after the chain below it, both before game.dll's update (the engine calls it right
+ *   after the Lua update: KB squad-join-pipeline-research section 1, static), so a spawn the game commits during its
+ *   update in frame N (AC83F0 storing the pending X, Y) was corrected at frame N+1's first check at the earliest, after
+ *   the engine's per-world loop, the frame's render and the next Lua update had run with the scattered X, Y in place
+ *   (the 1:1 port: at frame N+1's tick). Here the post tick corrects it at the end of that same update, before anything
+ *   else runs, and the tick (at the start of game.dll's update, after the whole Lua chain: the Lua's second point or
+ *   later) still sees, before the next update, whatever changed between the updates. Without the core's hook of
+ *   game.dll's update (its code not decoded yet, or another mod's hook there first) the post tick runs right after the
+ *   tick inside HellForge's callback: its check then sees what the tick's saw (a commit inside the update is corrected
+ *   at the next frame, as in the 1:1 port), at the Lua's two-check cost; the component cannot tell the two cases apart
+ *   through vpm.h. A refused post tick is logged once and leaves one check per frame. The pod waits about 5 s and the
+ *   window is 0.1 .. 5.1 s, so either way the correction is the same.
+ * - The globals (game.dll and the exe's unit registry) are plain loads; only heap data goes through vpm_read.
  * - The pending X, Y's page is checked (VirtualQuery) at the first correction on each player manager, then the store is
  *   a plain one; the Lua checked at every correction. A player manager lives for the mission.
  * - A refusal (an unsupported layout, an invalid pointer, a failed write) stops the component (vpm_fail), whose stop()
@@ -33,19 +47,27 @@
  * - The log: one line per status change (the Lua printed it and rewrote its own log file); a correction's line carries
  *   the count and the correction (kind, beacon, from, to, association) the Lua's log file held.
  *
- * COST per frame (HfApi.read is one ReadProcessMemory; plain loads are no Windows call):
- * - Idle, loading (null player manager global): 1 plain load, 0 reads (the Lua: 1 read).
- * - Idle, on the ship or alive in a mission: 1 plain load, 1 read (the spawn state) (the Lua: 2 reads).
- * - Dead (queued or pending), every frame: one snapshot: 3 to 5 plain loads and 4 reads (mode block, player block, local
- *   entity, reinforcement manager); with n beacons 2 + n more; queued or pending with beacons also the position
- *   manager's block and per beacon its probes and position; solo the anchor manager's block and its rows (1 read each).
- *   Co-op with one beacon: 10 reads (the Lua: 28, its snapshot twice); the death's frame 11 (the Lua: 30).
- * - The correction frame (once per death): the snapshot, its re-read and a read-back: 21 reads co-op with one beacon (the
- *   Lua: 42 and 1, its after-update check included), one 8-byte store, and one VirtualQuery on the player manager's
- *   first correction (the Lua: one per correction).
+ * COST per frame, the tick's + the post check's (reads are vpm_read, guarded plain loads; the globals are plain loads;
+ * no Windows call except where named; the Lua's numbers from its tests' frame_budget pins of a whole update, both
+ * checks):
+ * - Idle, loading (null player manager global): 1 plain load, 0 reads; no post check (the Lua: 1 read).
+ * - Idle, on the ship or alive in a mission: 1 plain load, 1 read (the spawn state); no post check (the Lua: 2 reads).
+ * - Dead (queued or pending), every frame: one snapshot at each point: 3 to 5 plain loads and 4 reads (mode block,
+ *   player block, local entity, reinforcement manager); with n beacons 2 + n more; queued or pending with beacons also
+ *   the position manager's block and per beacon its probes and position; solo the anchor manager's block and its rows
+ *   (1 read each). Co-op with one beacon: 10 + 10 reads (the Lua: 28); the death's frame 11 + 10 (the Lua: 30).
+ * - The correction frame (once per death): the snapshot, its re-read and a read-back at the point that corrects, the
+ *   snapshot at the other: 21 + 10 reads co-op with one beacon, or 10 + 21 for a commit inside the update (the Lua: 42
+ *   and 1), one 8-byte store, and one VirtualQuery on the player manager's first correction (the Lua: one per
+ *   correction).
  * - Solo, the frame that captures the anchor: the source position too, 1 read for the fallback (the Lua: 3), 9 plus the
- *   lookup's probes for a unit (the Lua: 11 plus probes).
- * - No allocation; one log line per status change only. Once: the tick starts at HF_EVENT_GAME_LOADED. */
+ *   lookup's probes for a unit (the Lua: 11 plus probes); the post check does not read it again (the solo death: 8 + 6,
+ *   the Lua: 25).
+ * - The landing's frame: the last full snapshot (4 co-op, 5 solo), which stops the post check.
+ * The 1:1 port made the tick's share alone (a queued frame 10 reads); the post check's share is the Lua's second check,
+ * back under its own condition, at about 25 ns per read where the Lua's ReadProcessMemory cost 1-2 us. The post tick
+ * costs the core a guarded call and two time-stamp reads per frame while it runs; nothing between deaths. No
+ * allocation; one log line per status change only. Once: the tick starts at HF_EVENT_GAME_LOADED. */
 #include <stdio.h>
 #include <string.h>
 #include "../../core/vpm.h"
@@ -64,7 +86,11 @@ static struct
     uintptr_t checked;        /* the player manager whose pending X, Y passed the page check */
     const char* status;       /* the last status reported, and its stage when it was "waiting for game data" */
     const char* stage;
+    int watching;             /* the post-update tick runs (the Lua's after-update check) */
+    int post_refused;         /* the core refused it: one check per frame for the session */
 } s;
+
+static void After(VpmComponent* self, float dt);
 
 /* Three snapshots: the previous one (or the gate's baseline), the current one and the re-read before a write. */
 static RbfSnapshot g_snapshots[3];
@@ -214,6 +240,35 @@ static void Follow(VpmComponent* self, RbfReader* reader, int tracking, int64_t 
     else Correct(self, reader, current, &plan);
 }
 
+/* The Lua's condition for its check after the update: the last full snapshot is the local player's own, in a gameplay
+ * mode, queued or pending. */
+static int InProgress(void)
+{
+    const RbfSnapshot* last = s.state.previous;
+    return last != NULL && last->owned && last->mode >= 1 && last->mode <= 7 && (last->state == 1 || last->state == 2);
+}
+
+/* After a full check: the post-update tick started or stopped when InProgress changes. A gate-only frame never needs
+ * this: the gate runs only when the last full check left nothing in progress, which stopped the post tick then. */
+static void Watch(VpmComponent* self)
+{
+    int watch = InProgress();
+    if (watch == s.watching || s.post_refused || !vpm_running(self)) return;
+    if (!watch)
+    {
+        vpm_post_tick_stop(self);
+        s.watching = 0;
+        return;
+    }
+    if (vpm_post_tick_start(self, After))
+    {
+        s.watching = 1;
+        return;
+    }
+    s.post_refused = 1;
+    vpm_log(self, "no check after the game's update (its tick was refused): one check per frame");
+}
+
 /* Every frame (patch.apply): the idle gate first, unless a reinforcement is being followed. lint: per-frame */
 static void Tick(VpmComponent* self, float dt)
 {
@@ -238,6 +293,15 @@ static void Tick(VpmComponent* self, float dt)
         }
     }
     Follow(self, &reader, tracking, last);
+    Watch(self);
+}
+
+/* After game.dll's whole update in the same frame, while a reinforcement is in progress (the Lua's after): the full check
+ * the tick makes then. lint: per-frame */
+static void After(VpmComponent* self, float dt)
+{
+    if (InProgress()) Tick(self, dt);
+    else Watch(self);
 }
 
 /* Puts back the original X, Y of this component's correction, only while the same player manager's spawn is still
