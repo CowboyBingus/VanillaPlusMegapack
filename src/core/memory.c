@@ -108,10 +108,96 @@ int vpm_writable(uintptr_t address, size_t size)
 
 typedef struct Image { const char* name; uintptr_t base; size_t size; } Image;
 
+/* The pack's hooks (vpm_hook): one record per target and detour while it is in, so a start after a switch-off does not
+ * hook twice (HellForge refuses the same detour on the same function twice, and the old *original stays valid). With
+ * HellForge's live mods a switched-off component's hooks are taken out (unhook); without them they stay, and their
+ * detours only call the original while the component is not running. */
+#define MAX_PACK_HOOKS 32
+typedef struct PackHook
+{
+    VpmComponent* component;
+    uintptr_t target;
+    void* detour;
+    void** original;   /* the component's variable HellForge keeps up to date */
+    void* first;       /* what hook_ex wrote there: put back if a start reset the variable while the hook stayed in */
+    int in;
+} PackHook;
+static PackHook g_packHooks[MAX_PACK_HOOKS];
+
+int vpm_hooks_in(void)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_PACK_HOOKS; i++) n += g_packHooks[i].in;
+    return n;
+}
+
+/* The pack's hook of target with this detour while it is in, or NULL. */
+static PackHook* HookIn(uintptr_t target, void* detour)
+{
+    for (int i = 0; i < MAX_PACK_HOOKS; i++)
+        if (g_packHooks[i].in && g_packHooks[i].target == target && g_packHooks[i].detour == detour) return &g_packHooks[i];
+    return NULL;
+}
+
+static void HookNote(VpmComponent* self, uintptr_t target, void* detour, void** original)
+{
+    for (int i = 0; i < MAX_PACK_HOOKS; i++)
+        if (!g_packHooks[i].in) { g_packHooks[i] = (PackHook){self, target, detour, original, *original, 1}; return; }
+    vpm_log(self, "core: more than %d hooks in the pack: this one stays for the session", MAX_PACK_HOOKS);
+}
+
+/* Another component's hook in at the same target (the pack's unhook takes the pack's whole link there out). */
+static int SharedTarget(const PackHook* hook)
+{
+    for (int i = 0; i < MAX_PACK_HOOKS; i++)
+    {
+        const PackHook* other = &g_packHooks[i];
+        if (other != hook && other->in && other->target == hook->target && other->component != hook->component) return 1;
+    }
+    return 0;
+}
+
+void vpm_hooks_component_off(VpmComponent* component)
+{
+    const VpmLive* live = vpm_core_live();
+    if (!live->present) return; /* SDK 15: hooks stay; their detours check vpm_running */
+    for (int i = 0; i < MAX_PACK_HOOKS; i++)
+    {
+        PackHook* hook = &g_packHooks[i];
+        if (!hook->in || hook->component != component || SharedTarget(hook)) continue;
+        hook->in = 0;
+        if (live->unhook(vpm_mod(), hook->target) != 0) vpm_log(component, "core: HellForge had no hook of 0x%llX to take out", (unsigned long long)hook->target);
+    }
+}
+
+void vpm_hooks_unload(void)
+{
+    const VpmLive* live = vpm_core_live();
+    for (int i = 0; i < MAX_PACK_HOOKS; i++)
+    {
+        PackHook* hook = &g_packHooks[i];
+        if (hook->in && live->present && live->unhook != NULL) (void)live->unhook(vpm_mod(), hook->target); /* 1: HellForge took it out already */
+        hook->in = 0;
+    }
+}
+
 static int HookAt(VpmComponent* self, Image image, uint32_t rva, const char* shipped, void* detour, void** original)
 {
     const HfApi* hf = vpm_core_hf();
     if (image.base == 0 || rva >= image.size) { vpm_log(self, "hook refused: %s+0x%X is not in the image", image.name, rva); return 0; }
+    PackHook* kept = HookIn(image.base + rva, detour);
+    if (kept != NULL)
+    {
+        /* Still in from an earlier start (SDK 15 keeps hooks): nothing to hook. A start that reset *original gets back
+         * what HellForge first wrote there (vpm.h: keep it outside the state start() resets). */
+        kept->component = self;
+        if (kept->original != original || *original == NULL)
+        {
+            vpm_log(self, "core: the hook of %s+0x%X was already in; its original was reset by start() and is put back", image.name, rva);
+            *original = kept->original != original && *kept->original != NULL ? *kept->original : kept->first;
+        }
+        return 1;
+    }
     if (!hf->code_matches(image.base + rva, shipped))
     {
         vpm_log(self, "hook refused: %s+0x%X is not the reviewed function", image.name, rva);
@@ -122,6 +208,7 @@ static int HookAt(VpmComponent* self, Image image, uint32_t rva, const char* shi
         vpm_log(self, "hook refused at %s+0x%X: %s", image.name, rva, hf->last_log(vpm_mod()));
         return 0;
     }
+    HookNote(self, image.base + rva, detour, original);
     return 1;
 }
 

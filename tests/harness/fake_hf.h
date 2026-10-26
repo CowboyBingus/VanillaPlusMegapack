@@ -21,6 +21,7 @@ typedef struct FakeCounts
     uint32_t read, write, code_matches, find_pattern, get_live, set_live, hook, log, subscribe, on, other;
     uint32_t writable; /* VirtualQuery calls of vpm_writable */
     uint32_t exports;  /* vpm_module_export lookups */
+    uint32_t unhook;   /* the live table's unhook calls (fake_live_api) */
 } FakeCounts;
 
 /* A fresh HellForge and game: zeroed images and heap, no events fired, no logs, counts 0, the core reset, game state
@@ -34,6 +35,17 @@ HfMod* fake_mod(void);
 void fake_next_session(void);
 /* vpm_core_init with the fake API and these components. */
 int fake_start(const VpmComponentDef* const* defs, int count);
+/* HellForge's live mods (PR 65's SDK 16): the fake API with version 16 and load_phase and unhook after stats_source.
+ * load_phase answers fake_live_phase's value (HF_LOAD_BOOT by default); unhook takes the mod's latest hook of the target
+ * out (0), or answers 1 when there is none. fake_start_live starts the components with it. */
+const HfApi* fake_live_api(void);
+void fake_live_phase(uint32_t phase);
+int fake_start_live(const VpmComponentDef* const* defs, int count);
+/* What HellForge's taking out of a live mod removes: its load-event callbacks, listeners, game-thread callback and hooks
+ * (the fake memory, the events fired, the mods and the core stay; the core's own state is the pack's to clear). */
+void fake_take_out(void);
+/* The session's other mods forgotten (fake_add_mod's). */
+void fake_clear_mods(void);
 /* The component started from defs[index] by fake_start. */
 VpmComponent* fake_component(int index);
 

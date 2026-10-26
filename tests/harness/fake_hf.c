@@ -330,6 +330,8 @@ static const char* FakeModId(HfMod* mod) { return VPM_PACK_ID; }
 static const char* FakeModFolder(HfMod* mod) { return "."; }
 void fake_set_build(const char* build) { snprintf(g_build, sizeof g_build, "%s", build); }
 
+void fake_clear_mods(void) { g_modCount = 0; }
+
 void fake_add_mod(const char* id, uint32_t kind)
 {
     if (g_modCount >= MAX_MODS) return;
@@ -555,6 +557,20 @@ static int FakeHookEx(HfMod* mod, uintptr_t target, void* detour, void** origina
 }
 
 static int FakeHookPlain(HfMod* mod, uintptr_t target, void* detour, void** original) { return FakeHookEx(mod, target, detour, original, 0); }
+
+/* SDK 16 unhook: the latest hook of target out of the list. */
+static int FakeUnhook(HfMod* mod, uintptr_t target)
+{
+    g_counts.unhook++;
+    for (int i = g_hookCount - 1; i >= 0; i--)
+    {
+        if (g_hooks[i].target != target) continue;
+        memmove(&g_hooks[i], &g_hooks[i + 1], sizeof g_hooks[0] * (size_t)(g_hookCount - i - 1));
+        g_hookCount--;
+        return 0;
+    }
+    return 1;
+}
 int fake_hook_count(void) { return g_hookCount; }
 FakeHook fake_hook_at(int index) { return g_hooks[index]; }
 
@@ -704,6 +720,45 @@ static const HfApi g_api = {
 };
 
 const HfApi* fake_api(void) { return &g_api; }
+
+/* The live table: SDK 15's HfApi with PR 65's two functions after it (built with PR 65's header, they are its fields). */
+static uint32_t g_livePhase;
+static uint32_t FakeLoadPhase(HfMod* mod) { return g_livePhase; }
+#ifdef HF_LOAD_LIVE
+static HfApi g_liveApi;
+#else
+typedef struct FakeLiveApi { HfApi api; uint32_t (*load_phase)(HfMod* mod); int (*unhook)(HfMod* mod, uintptr_t target); } FakeLiveApi;
+static FakeLiveApi g_liveApi;
+#endif
+
+void fake_live_phase(uint32_t phase) { g_livePhase = phase; }
+
+const HfApi* fake_live_api(void)
+{
+#ifdef HF_LOAD_LIVE
+    g_liveApi = g_api;
+    g_liveApi.load_phase = FakeLoadPhase;
+    g_liveApi.unhook = FakeUnhook;
+    g_liveApi.version = 16;
+    return &g_liveApi;
+#else
+    g_liveApi.api = g_api;
+    g_liveApi.api.version = 16;
+    g_liveApi.api.size = sizeof g_liveApi;
+    g_liveApi.load_phase = FakeLoadPhase;
+    g_liveApi.unhook = FakeUnhook;
+    return &g_liveApi.api;
+#endif
+}
+
+int fake_start_live(const VpmComponentDef* const* defs, int count) { return vpm_core_init(fake_live_api(), fake_mod(), defs, count); }
+
+void fake_take_out(void)
+{
+    g_loadCount = g_listenerCount = g_hookCount = 0;
+    g_tick = NULL;
+    g_tickUser = NULL;
+}
 HfMod* fake_mod(void) { return (HfMod*)&g_modStruct; }
 
 /* ---- set-up ------------------------------------------------------------------------------------------------------ */
@@ -759,6 +814,7 @@ void fake_setup(void)
     g_modStruct.api = &g_api;
     g_standInCount = g_exportCount = 0;
     g_afterFn = NULL;
+    g_livePhase = 0; /* PR 65's HF_LOAD_BOOT */
     static const VpmTestHooks hooks = {FakeWritableQuery, FakeModuleExport, FakeCoreRead, FakeTickRefused};
     vpm_core_test_hooks(&hooks);
     /* A hook of the frame update goes on to the fake's frame update. */

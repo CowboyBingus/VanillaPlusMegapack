@@ -1,10 +1,24 @@
 /* The Vanilla Plus Megapack's core: what every component of the pack uses (docs: README.md "The core").
  *
  * The pack is one HellForge code mod. Each component is a VpmComponentDef (src/components.c lists them) whose start()
- * runs once, inside hellforge_mod_init, when the player has it switched on. start() registers what the component needs:
- * load events, a game-thread tick, game event listeners, options and bindings. The core makes one registration of each
- * kind with HellForge for the whole pack and passes the calls on, so the pack holds one game-thread callback however many
- * components tick.
+ * runs inside hellforge_mod_init when the player has it switched on, and again whenever the player switches it on while
+ * the game runs. start() registers what the component needs: load events, a game-thread tick, game event listeners,
+ * options and bindings. The core makes one registration of each kind with HellForge for the whole pack and passes the
+ * calls on, so the pack holds one game-thread callback however many components tick.
+ *
+ * Live switches. A switch the player changes in game applies at the start of the next frame, on the game thread:
+ *   - off: the component's ticks, listeners, load events, code waits and option callbacks stop, its stop() runs
+ *     (guarded) and puts back what it changed, and with HellForge's live mods (SDK 16) its vpm_hook hooks are taken out;
+ *   - on: start() runs again, then every load event that already fired is delivered to it in the order the game fired
+ *     them (and its code waits are looked at), as at boot.
+ * A component may go off and on many times in a session, so start() resets all of its state (one memset), stop() puts
+ * back everything (or forgets it only when the game already did), and nothing it registers stays behind: a registration
+ * from an earlier start never fires again. A component that cannot restart safely names why in
+ * VpmComponentDef.next_session; its switch then applies from the next session, and Mod Options Menu says so.
+ *
+ * HellForge's live mods (SDK 16, detected by what its HfApi offers, never by the SDK number alone): HellForge may take
+ * the whole pack out while the game runs and set it up again. The pack's hellforge_mod_unload stops every component,
+ * drops its ticks, takes its hooks out, removes the crash guard and saves the settings; a later init starts afresh.
  *
  * Every call into a component runs under the core's crash guard (guard.c): an access violation, illegal instruction or
  * division by zero in the pack's own code stops that component (its stop() runs, guarded too), logs where it happened
@@ -52,10 +66,15 @@ typedef struct VpmComponentDef
     /* Registers callbacks, options and bindings. 0: running; anything else: it stays off (vpm_fail's reason, or the
      * default "start refused"). */
     int (*start)(VpmComponent* self);
-    /* Optional: puts back what the component changed, when the core stops it (a fault, or vpm_fail after start). */
+    /* Optional: puts back what the component changed, when the core stops it (a switch-off, a fault, vpm_fail after
+     * start, or HellForge taking the pack out). */
     void (*stop)(VpmComponent* self);
     /* Optional (NULL: none): its key state for a tester's "Note a problem now" mark (vpm.h "diagnostics"). */
     VpmDescribeFn describe;
+    /* NULL: its switch applies at once (live). Else why it cannot restart while the game runs (a player-facing clause,
+     * "its worker thread may still be running"): its switch then applies from the next session, and the log and Mod
+     * Options Menu's row say why. */
+    const char* next_session;
 } VpmComponentDef;
 
 /* ---- HellForge and the component ------------------------------------------------------------------------------- */
@@ -65,7 +84,7 @@ HfMod* vpm_mod(void);
 const VpmComponentDef* vpm_def(const VpmComponent* self);
 /* A line in the pack's log, "[Name] ..." (a file write: never on an idle frame). */
 void vpm_log(VpmComponent* self, const char* format, ...) __attribute__((format(printf, 2, 3)));
-/* Stops the component for the session: its tick and listeners stop, its stop() runs (when it had started), and the log
+/* Stops the component (until the player switches it off and on again): its tick and listeners stop, its stop() runs (when it had started), and the log
  * and its status say why ("disabled: <reason>"). Returns 1, for `return vpm_fail(...)` from start(). */
 int vpm_fail(VpmComponent* self, const char* format, ...) __attribute__((format(printf, 2, 3)));
 /* 1 while the component runs (started, not stopped). */
@@ -119,7 +138,9 @@ typedef void (*VpmLoadFn)(VpmComponent* self, HfEvent event);
 typedef void (*VpmTickFn)(VpmComponent* self, float dt);
 typedef void (*VpmListenFn)(VpmComponent* self, const HfEventInfo* event);
 
-/* A HellForge load event (HF_EVENT_...), at once if it already happened. 1 registered, 0 not. */
+/* A HellForge load event (HF_EVENT_GAME_LOADED .. HF_EVENT_PROJECTILES_READY). If it already happened: registered from
+ * start(), it is delivered right after start() returns (in the order the game fired the events); registered from
+ * another callback, at once. 1 registered, 0 not (another event, or HellForge refused the core's registration of it). */
 int vpm_on_load(VpmComponent* self, HfEvent event, VpmLoadFn fn);
 /* The component's game-thread tick: once per frame, at the start of game.dll's update, where the Lua global `update`
  * ran (the engine calls game.dll's update right after it). The core hooks that update (game.dll 0xAB5000) once its code
@@ -137,7 +158,8 @@ int vpm_ticking(const VpmComponent* self);
 int vpm_post_tick_start(VpmComponent* self, VpmTickFn fn);
 void vpm_post_tick_stop(VpmComponent* self);
 int vpm_post_ticking(const VpmComponent* self);
-/* A game event (HF_ON_...): HfApi.subscribe with this priority. 1 registered, 0 not (the log says why). */
+/* A game event (HF_ON_...): HfApi.subscribe with this priority. 1 registered, 0 not (the log says why). A subscription
+ * an earlier start of any component left (same kind and priority) is reused, so switching on and off adds none. */
 int vpm_listen(VpmComponent* self, uint32_t kind, VpmListenFn fn, int32_t priority);
 
 /* ---- memory ------------------------------------------------------------------------------------------------------ */
@@ -194,7 +216,10 @@ int vpm_exe_code_matches(uint32_t rva, const char* pattern);
  * HF_EVENT_GAME_LOADED, then every 30 frames until all match, for at most VPM_CODE_WAIT_SECONDS of game time; ready
  * runs once (guarded, with HF_EVENT_GAME_LOADED) when they match. After the wait the component is stopped:
  * "disabled: <name> changed (game.dll 0x<rva>)". The pins must stay valid (static). 1 registered, 0 not. While waiting:
- * one code_matches per pin every 30 frames (an API call), nothing afterwards. */
+ * one code_matches per pin every 30 frames (an API call), nothing afterwards. Registered from a start() after
+ * HF_EVENT_GAME_LOADED (a live switch-on), the pins are looked at right after start() returns; the wait's time counts
+ * from HF_EVENT_GAME_LOADED, so once VPM_CODE_WAIT_SECONDS have passed, pins that do not match then stop the component
+ * at the next frame. */
 #define VPM_PIN_EXE 0x1u
 #define VPM_CODE_WAIT_SECONDS 60.0f
 typedef struct VpmCodePin { uint32_t rva; const char* pattern; const char* name; uint32_t flags; } VpmCodePin;
@@ -210,7 +235,11 @@ int vpm_lookup(uintptr_t header, uint32_t key, uint32_t limit, uint32_t* index);
  * game shipped them (HfApi.code_matches: another mod's hook does not hide them) against `shipped`, an IDA-style pattern
  * of its first instructions. *original receives what the detour calls to go on (HfApi.hook_ex: the next hook in the
  * function's chain, or the function). 1 hooked, 0 not (the log says why). Call it from start() for the exe, from
- * HF_EVENT_GAME_LOADED or later for game.dll. Hooks stay for the session, so:
+ * HF_EVENT_GAME_LOADED or later for game.dll. Without HellForge's live mods (SDK 16 unhook) hooks stay for the session;
+ * with them, a component's hooks are taken out when it is switched off. So:
+ *   - the same detour on the same target again (a start after a switch-off) is not hooked twice: while the first hook
+ *     is in, vpm_hook answers 1 and leaves *original as HellForge keeps it. *original must therefore live outside the
+ *     state start() resets (HellForge updates it when the function's chain changes; zeroing it would crash the detour);
  *   - a detour checks vpm_running(self) first and, when the component is stopped, only calls *original;
  *   - a detour runs on the game's stack, outside the core's guard: its own work goes in a function run with
  *     vpm_guarded, and *original is called outside it;
@@ -311,9 +340,12 @@ int vpm_option_apply(VpmOption* option, double value);
 /* The pack's components, for Mod Options Menu's switches: in src/components.c's order. */
 int vpm_component_count(void);
 VpmComponent* vpm_component_at(int index);
-/* The player's switch (saved; takes effect in the next session) and whether it is on now. */
+/* The player's switch (saved) and whether it is on. A switch applies at the start of the next frame (vpm.h "Live
+ * switches"), or from the next session for a component whose VpmComponentDef.next_session says why. */
 int vpm_component_switched_on(const VpmComponent* component);
 void vpm_component_switch(VpmComponent* component, int on);
+/* NULL when its switch applies at once, else why it applies from the next session (VpmComponentDef.next_session). */
+const char* vpm_component_next_session(const VpmComponent* component);
 
 /* ---- bindings (Mod Bindings Menu's model) ----------------------------------------------------------------------- */
 

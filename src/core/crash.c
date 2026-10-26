@@ -89,3 +89,8 @@ void vpm_crash_install(void)
     if (g_crashHandler != NULL) return;
     g_crashHandler = AddVectoredExceptionHandler(0, CrashNote); /* lint-ok: C7 a breadcrumb: logs a fatal fault and passes it on, never resumes */
 }
+
+void vpm_crash_uninstall(void)
+{
+    if (g_crashHandler != NULL && RemoveVectoredExceptionHandler(g_crashHandler) != 0) g_crashHandler = NULL; /* lint-ok: C7 the breadcrumb's own handler, taken out with the pack */
+}
