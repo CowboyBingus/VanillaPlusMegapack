@@ -389,3 +389,46 @@ void myc_spec_drop(MycSpec* spec)
     free(spec->data);
     free(spec);
 }
+
+/* ---- buffers ------------------------------------------------------------------------------------------------------ */
+
+void myc_buf_add(MycBuf* b, const void* data, size_t size)
+{
+    if (b->failed) return;
+    if (b->size + size + 1 > b->capacity)
+    {
+        size_t capacity = b->capacity < 4096 ? 4096 : b->capacity;
+        while (capacity < b->size + size + 1) capacity *= 2;
+        char* grown = realloc(b->data, capacity);
+        if (grown == NULL) { b->failed = 1; return; }
+        b->data = grown;
+        b->capacity = capacity;
+    }
+    memcpy(b->data + b->size, data, size);
+    b->size += size;
+    b->data[b->size] = 0;
+}
+
+void myc_buf_printf(MycBuf* b, const char* format, ...)
+{
+    char text[1024];
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(text, sizeof text, format, args);
+    va_end(args);
+    if (n < 0) { b->failed = 1; return; }
+    if ((size_t)n < sizeof text) { myc_buf_add(b, text, (size_t)n); return; }
+    char* big = malloc((size_t)n + 1);
+    if (big == NULL) { b->failed = 1; return; }
+    va_start(args, format);
+    vsnprintf(big, (size_t)n + 1, format, args);
+    va_end(args);
+    myc_buf_add(b, big, (size_t)n);
+    free(big);
+}
+
+void myc_buf_free(MycBuf* b)
+{
+    free(b->data);
+    memset(b, 0, sizeof *b);
+}

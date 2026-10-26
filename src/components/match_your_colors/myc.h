@@ -57,6 +57,12 @@ typedef struct MycVec { void* items; int count, capacity; size_t size; } MycVec;
 void* myc_vec_push(MycArena* arena, MycVec* vec, size_t size); /* a zeroed new item, or NULL */
 #define MYC_AT(vec, type, i) (((type*)(vec).items)[i])
 
+/* A growable byte buffer (malloc'd; failed: an allocation failed, later additions are ignored). */
+typedef struct MycBuf { char* data; size_t size, capacity; int failed; } MycBuf;
+void myc_buf_add(MycBuf* b, const void* data, size_t size);
+void myc_buf_printf(MycBuf* b, const char* format, ...) __attribute__((format(printf, 2, 3)));
+void myc_buf_free(MycBuf* b);
+
 /* ---- maps (open addressing) ------------------------------------------------------------------------------------ */
 
 /* u64 -> pointer. Keys are any value but MYC_MAP_EMPTY. Grows inside an arena. */

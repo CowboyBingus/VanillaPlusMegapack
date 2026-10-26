@@ -8,11 +8,16 @@
 #define MYC_METAL_ON_PAINT_ROUGH 0.30
 
 /* Named texture data a plan made (LUT, cape LUT, pattern, sheet, albedo): each spec holds one reference. */
-typedef struct MycNamedSpec { uint64_t name; MycSpec* spec; } MycNamedSpec;
+/* attachment: a weapons plan's attachment LUT (Recolor.ATTACHMENT: bound on attachment units only). */
+typedef struct MycNamedSpec { uint64_t name; int attachment; MycSpec* spec; } MycNamedSpec;
 typedef struct MycSpecs { MycNamedSpec* items; int n, capacity; } MycSpecs;
 MycSpec* myc_specs_get(const MycSpecs* list, uint64_t name);
+MycSpec* myc_specs_find(const MycSpecs* list, uint64_t name, int attachment);
 /* Puts spec under name (taking the caller's reference; one there is dropped); 0 out of memory (spec dropped). */
 int myc_specs_put(MycArena* arena, MycSpecs* list, uint64_t name, MycSpec* spec);
+int myc_specs_set(MycArena* arena, MycSpecs* list, uint64_t name, int attachment, MycSpec* spec);
+/* Every spec of from put into to too (a reference each). */
+int myc_specs_merge(MycArena* arena, MycSpecs* to, const MycSpecs* from);
 void myc_specs_drop(MycSpecs* list);   /* drops every reference (the list's memory stays in its arena) */
 
 /* A fit's statistics (diagnostics): rows fitted and the largest CIEDE2000 error. */

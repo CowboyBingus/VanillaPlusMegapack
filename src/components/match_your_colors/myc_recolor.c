@@ -8,17 +8,19 @@
 
 /* ---- named specs -------------------------------------------------------------------------------------------------- */
 
-MycSpec* myc_specs_get(const MycSpecs* list, uint64_t name)
+MycSpec* myc_specs_find(const MycSpecs* list, uint64_t name, int attachment)
 {
     for (int i = 0; i < list->n; i++)
-        if (list->items[i].name == name) return list->items[i].spec;
+        if (list->items[i].name == name && list->items[i].attachment == attachment) return list->items[i].spec;
     return NULL;
 }
 
-int myc_specs_put(MycArena* arena, MycSpecs* list, uint64_t name, MycSpec* spec)
+MycSpec* myc_specs_get(const MycSpecs* list, uint64_t name) { return myc_specs_find(list, name, 0); }
+
+int myc_specs_set(MycArena* arena, MycSpecs* list, uint64_t name, int attachment, MycSpec* spec)
 {
     for (int i = 0; i < list->n; i++)
-        if (list->items[i].name == name)
+        if (list->items[i].name == name && list->items[i].attachment == attachment)
         {
             myc_spec_drop(list->items[i].spec);
             list->items[i].spec = spec;
@@ -34,8 +36,22 @@ int myc_specs_put(MycArena* arena, MycSpecs* list, uint64_t name, MycSpec* spec)
         list->capacity = capacity;
     }
     list->items[list->n].name = name;
+    list->items[list->n].attachment = attachment;
     list->items[list->n].spec = spec;
     list->n++;
+    return 1;
+}
+
+int myc_specs_put(MycArena* arena, MycSpecs* list, uint64_t name, MycSpec* spec)
+{
+    return myc_specs_set(arena, list, name, 0, spec);
+}
+
+int myc_specs_merge(MycArena* arena, MycSpecs* to, const MycSpecs* from)
+{
+    for (int i = 0; i < from->n; i++)
+        if (!myc_specs_set(arena, to, from->items[i].name, from->items[i].attachment, myc_spec_hold(from->items[i].spec)))
+            return 0;
     return 1;
 }
 

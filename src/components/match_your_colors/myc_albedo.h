@@ -5,6 +5,7 @@
 #define MYC_ALBEDO_H
 
 #include "myc_kits.h"
+#include "myc_recolor.h"
 
 #define MYC_SLOT_ALBEDO 0xac652e43u
 #define MYC_SLOT_MRA 0x756f6fa6u
@@ -28,5 +29,12 @@ MycLab myc_albedo_unlook(double L, double a, double b);
 
 /* BC1/BC3 color block decode (Albedo.color_block) and the endpoint rewrite (Albedo.rewrite), for the tests. */
 void myc_albedo_color_block(const uint8_t* p, uint8_t out[64], int three_color);
+
+/* The pipeline's fresh copy of a texture's whole mip chain (a spec holding its data, info filled), or NULL (after
+ * myc_fail on an error; not found otherwise). */
+typedef MycSpec* (*MycAlbedoChain)(void* ctx, uint64_t name, uint64_t archive, MycTexInfo* info, MycErr* err);
+/* Albedo.plan_specs: the target's recolored albedos for plan into out, and the log line (empty: none) into report. */
+int myc_albedo_plan_specs(MycArena* arena, const MycAnalysis* target, const MycPlan* plan, MycSpecs* out,
+    MycAlbedoChain chain, void* ctx, char* report, size_t size, MycErr* err);
 
 #endif
