@@ -433,10 +433,15 @@ void* fake_hook_detour(uintptr_t target)
     return NULL;
 }
 
+static uint32_t g_refusedKind;
+
+void fake_refuse_subscribe(uint32_t kind) { g_refusedKind = kind; }
+
 static int FakeSubscribe(HfMod* mod, uint32_t kind, HfListener listener, void* user, int32_t priority)
 {
     g_counts.subscribe++;
-    if (kind < 1 || kind > 15 || g_listenerCount >= MAX_LISTENERS) return 0;
+    if (kind < 1 || kind > 15 || g_listenerCount >= MAX_LISTENERS || (g_refusedKind != 0 && kind == g_refusedKind))
+        return 0;
     g_listeners[g_listenerCount++] = (Listener){kind, listener, user, priority};
     return 1;
 }
@@ -717,6 +722,16 @@ static uint8_t* Region(uint8_t* region, size_t size)
     return region;
 }
 
+static int g_refuseTicks[2];
+
+void fake_refuse_ticks(int pre, int post)
+{
+    g_refuseTicks[0] = pre;
+    g_refuseTicks[1] = post;
+}
+
+static int FakeTickRefused(int post) { return g_refuseTicks[post != 0]; }
+
 void fake_setup(void)
 {
     g_game = Region(g_game, FAKE_GAME_SIZE);
@@ -724,6 +739,8 @@ void fake_setup(void)
     g_heap = Region(g_heap, HEAP_SIZE);
     g_heapUsed = 0;
     g_holeCount = g_refuseWrites = 0;
+    g_refuseTicks[0] = g_refuseTicks[1] = 0;
+    g_refusedKind = 0;
     memset(g_fired, 0, sizeof g_fired);
     g_loadCount = g_listenerCount = g_liveCount = g_hookCount = g_originalCount = g_rowCount = g_modCount = 0;
     g_tick = NULL;
@@ -740,7 +757,7 @@ void fake_setup(void)
     g_modStruct.api = &g_api;
     g_standInCount = g_exportCount = 0;
     g_afterFn = NULL;
-    static const VpmTestHooks hooks = {FakeWritableQuery, FakeModuleExport, FakeCoreRead};
+    static const VpmTestHooks hooks = {FakeWritableQuery, FakeModuleExport, FakeCoreRead, FakeTickRefused};
     vpm_core_test_hooks(&hooks);
     /* A hook of the frame update goes on to the fake's frame update. */
     fake_set_original((uintptr_t)g_game + VPM_FRAME_UPDATE, (void*)FakeFrameUpdate);

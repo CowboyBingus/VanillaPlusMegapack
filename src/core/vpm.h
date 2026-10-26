@@ -14,7 +14,8 @@
  *
  * Memory. Addresses inside game.dll's or the exe's image (statics: RVA globals and tables) are read with plain loads
  * (vpm_game_u64 and friends): the image stays mapped for the whole process. Everything else (the game's heap) is read
- * through vpm_read, HellForge's ReadProcessMemory, which answers 0 on a bad pointer instead of faulting. Writes to code or
+ * through vpm_read: plain loads under the pack's own guard, which answers 0 on a bad pointer instead of faulting
+ * (HellForge's read, a ReadProcessMemory, when the guard is not installed). Writes to code or
  * read-only data go through vpm_write (HfApi.write: it changes the protection for the write).
  *
  * Per-frame rules (the workspace's performance rules, in C): an idle frame stops at the component's idle gate, makes no
@@ -85,7 +86,9 @@ void vpm_tick_stop(VpmComponent* self);
 int vpm_ticking(const VpmComponent* self);
 /* A tick after game.dll's whole update in the same frame (after the world update, the mode's update and the UI pass):
  * for work the Lua did after the game's update, or a second check in the frame. Without the core's hook of the update
- * it runs right after the frame's ticks. One per component, as vpm_tick_start. */
+ * it runs right after the frame's ticks. One per component, as vpm_tick_start. Both start calls answer 0 when the tick
+ * cannot run (no game-thread callback and no frame hook, or the component is not running): the component goes on
+ * without it. */
 int vpm_post_tick_start(VpmComponent* self, VpmTickFn fn);
 void vpm_post_tick_stop(VpmComponent* self);
 int vpm_post_ticking(const VpmComponent* self);

@@ -48,6 +48,12 @@ void fake_unhole(uintptr_t address);
 /* The API's write fails from now on (protection refused). Otherwise it writes read-only pages too, as HellForge's
  * write does (it changes their protection for the write). */
 void fake_refuse_writes(int refuse);
+/* From now on vpm_tick_start (pre) and vpm_post_tick_start (post) answer 0, as when a tick cannot run; already
+ * registered ticks keep running. fake_setup clears both. */
+void fake_refuse_ticks(int pre, int post);
+/* From now on HfApi.subscribe refuses this event kind (HF_ON_...; 0: none), as HellForge does for a kind it does not
+ * deliver. fake_setup clears it. */
+void fake_refuse_subscribe(uint32_t kind);
 
 /* Fires a load event: its registered callbacks run, later registrations get it at once. */
 void fake_fire(HfEvent event);
@@ -58,7 +64,9 @@ void fake_after_tick(void (*fn)(float dt));
  * HellForge's game-thread callback inside (once, or twice with fake_double_tick: the late update's second caller of the
  * hooked function), then fake_after_tick's step. fake_frame_update(1) lays the update's shipped first bytes into the
  * fake image (decoded), (0) other bytes (not decoded yet); a fresh fake has neither, so the core's hook never goes in
- * and fake_frames (HellForge's callback alone) is the whole frame, as before. */
+ * and fake_frames (HellForge's callback alone) is the whole frame, as before. Once the hook is in, HellForge's callback
+ * runs no ticks (it would run them twice a frame), so fake_frames runs none either: drive frames with
+ * fake_engine_frames. */
 void fake_frame_update(int decoded);
 void fake_engine_frames(int n, float dt);
 void fake_double_tick(int twice);

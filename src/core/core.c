@@ -199,10 +199,15 @@ static int TickStart(VpmComponent* self, int list, VpmTickFn fn)
 {
     /* Ticks need a way to run: HellForge's game-thread callback (it also retries the frame hook), or the hook itself. */
     if ((!g_tickHooked && g_frameState != 1) || !vpm_running(self) || fn == NULL) return 0;
+    if (vpm_test_tick_refused(list == LIST_POST)) return 0;
     TickList* l = &g_lists[list];
     int listed = 0;
     for (int i = 0; i < l->count; i++) listed |= l->items[i] == self;
-    if (!listed && l->count < VPM_MAX_COMPONENTS) l->items[l->count++] = self;
+    if (!listed)
+    {
+        if (l->count >= VPM_MAX_COMPONENTS) return 0; /* cannot happen: one entry per component */
+        l->items[l->count++] = self;
+    }
     *Slot(self, list) = fn;
     return 1;
 }
