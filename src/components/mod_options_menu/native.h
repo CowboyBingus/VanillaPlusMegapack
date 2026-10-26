@@ -58,6 +58,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../../core/vpm.h"
 
 /* Widget positions and sizes: two floats passed by value in one integer register (the Microsoft x64 rule for an
  * 8-byte struct). */
@@ -94,9 +95,11 @@ enum
     MOM_NATIVE_COUNT
 };
 
-/* {name, game.dll RVA, its first bytes as shipped} */
-typedef struct MomNativeEntry { const char* name; uint32_t rva; const char* code; } MomNativeEntry;
-extern const MomNativeEntry mom_native_entries[MOM_NATIVE_COUNT];
+/* Each function's game.dll RVA and first bytes as shipped, for the core's wait (vpm_when_code_ready). A pin's name is
+ * the refusal as Mod Options Menu words it ("Mod options integration unavailable: set_tab_labels"), so the core's
+ * "<name> changed (game.dll 0x<rva>)" reads as the Lua's "... set_tab_labels changed". */
+#define MOM_UNAVAILABLE "Mod options integration unavailable: "
+extern const VpmCodePin mom_native_pins[MOM_NATIVE_COUNT];
 
 /* The native labels of the escape menu's three tabs (4 bytes each) and of the OPTIONS content's nine categories (one
  * record each, the label at +8), and setting 139's descriptor. */
@@ -139,8 +142,8 @@ typedef struct MomNative
 } MomNative;
 extern MomNative mom_native;
 
-/* Checks every function's bytes, the labels and the descriptor; fills mom_native. NULL when verified, else the reason
- * ("set_tab_labels changed", written into why). */
-const char* mom_native_verify(char* why, size_t size);
+/* Once the functions read as shipped (the core's wait): checks the labels and the descriptor, and fills mom_native. NULL
+ * when verified, else the reason ("tab labels changed"). */
+const char* mom_native_verify(void);
 
 #endif

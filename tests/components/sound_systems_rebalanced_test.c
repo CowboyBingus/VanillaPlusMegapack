@@ -731,26 +731,19 @@ static void ChangesTheLuasChecksMissed(void)
     CHECK_LOG("Mission start (game state 6): " MISSION_LINE);
 }
 
-/* The fallback: HellForge refuses the subscription (here its listener table is full). The log says so, and the Lua's
- * poll runs for the whole session at its cadence, with its reads; HellForge's events reach nothing. */
-static void FillerListener(HfMod* mod, const HfEventInfo* event, void* user) {}
-static int FillerStart(VpmComponent* self)
-{
-    for (int i = 0; i < 1024 && vpm_hf()->subscribe(vpm_mod(), HF_ON_KILL, FillerListener, NULL, 0); i++) continue;
-    return 0;
-}
-static const VpmComponentDef kFiller = {"filler", "Filler", "1.0", 0, FillerStart, NULL};
-static const VpmComponentDef* const kRefusedDefs[] = {&kFiller, &vpm_component_sound_systems_rebalanced};
-
+/* The fallback: HellForge refuses the subscription (as it does for a kind it does not deliver). The log says so, and
+ * the Lua's poll runs for the whole session at its cadence, with its reads; HellForge's events reach nothing. */
 static void ThePollWhenTheEventIsRefused(void)
 {
     ResetWwise();
     MakeGame(3);
-    fake_start(kRefusedDefs, 2);
+    fake_refuse_subscribe(HF_ON_STATE);
+    fake_start(kDefs, 1);
     fake_fire(HF_EVENT_GAME_LOADED);
     fake_fire(HF_EVENT_ENTITIES_READY);
-    VpmComponent* self = fake_component(1);
+    VpmComponent* self = Self();
     CHECK(vpm_running(self) && vpm_ticking(self));
+    CHECK_LOG("[Sound Systems Rebalanced] core: game event 1 refused");
     CHECK_LOG("[Sound Systems Rebalanced] HellForge's state event is unavailable: the game state is polled every 0.25 s, as the Lua did.");
     LoaderReset();
     fake_counts_reset();

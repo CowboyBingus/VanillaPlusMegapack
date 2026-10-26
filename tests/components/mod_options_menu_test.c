@@ -4,9 +4,10 @@
  * Lua's values file (test_values.lua) is the core's settings file, written at once on APPLY as the Lua wrote its file;
  * its translation, update-guard and LuaJIT tests have no C counterpart.
  *
- * game.dll's functions are stand-ins: the fake image holds each function's first bytes as reviewed, so the component's
- * code checks pass at its first tick, and after them a jump to the stand-in (an absolute jmp [rip] over those bytes, its
- * page made executable), so the component calls game.dll + RVA as it does in the game. The stand-ins do what the Lua
+ * game.dll's functions are stand-ins: the fake image holds each function's first bytes as reviewed, so the core's wait
+ * for them (vpm_when_code_ready) passes at HF_EVENT_GAME_LOADED, and after it a jump to the stand-in (an absolute jmp
+ * [rip] over those bytes, its page made executable), so the component calls game.dll + RVA as it does in the game. The
+ * code still encoded at the event (int3 bytes) and never decoded have tests of their own. The stand-ins do what the Lua
  * test's emulated natives did: rows, text widgets, the category selection and the OPTIONS visual pass. */
 #include <math.h>
 #include <stdio.h>
@@ -407,7 +408,7 @@ static void InstallStubs(void)
     static const uint8_t jump[6] = {0xFF, 0x25, 0, 0, 0, 0};
     for (int i = 0; i < MOM_NATIVE_COUNT; i++)
     {
-        uint8_t* at = (uint8_t*)fake_game() + mom_native_entries[i].rva;
+        uint8_t* at = (uint8_t*)fake_game() + mom_native_pins[i].rva;
         uint64_t target = (uint64_t)(uintptr_t)StandIn(i);
         memcpy(at, jump, sizeof jump);
         memcpy(at + 6, &target, 8);
@@ -508,15 +509,17 @@ static void MakeWorld(void)
     P32(game + 0x32ECC60, 139);
     P32(game + 0x32ECC60 + 4, 10);
     P32(game + 0x32ECC60 + 12, 0);
-    for (int i = 0; i < MOM_NATIVE_COUNT; i++) WriteCode((uint8_t*)game + mom_native_entries[i].rva, mom_native_entries[i].code);
+    for (int i = 0; i < MOM_NATIVE_COUNT; i++) WriteCode((uint8_t*)game + mom_native_pins[i].rva, mom_native_pins[i].pattern);
     w.layoutDirty = 1;
 }
 
-/* Started, the first tick (the code checks) run with the menu closed, then the stand-ins in place. */
+/* Started with game.dll's code decoded at HF_EVENT_GAME_LOADED (the code checks pass there, and MOM's ready step runs),
+ * a first frame with the menu closed, then the stand-ins in place. */
 static void Ready(const VpmComponentDef* const* defs, int count)
 {
     MakeWorld();
     CHECK_EQ(fake_start(defs, count), 0);
+    fake_fire(HF_EVENT_GAME_LOADED);
     fake_frames(1, DT);
     InstallStubs();
 }
@@ -610,24 +613,107 @@ static int CodeBytes(const char* code)
     return n / 2;
 }
 
-/* The Lua's table (native.lua), checked at the first tick: 25 code checks, then an idle frame makes one read. */
+#define VERIFIED "[Mod Options Menu] Native options layout verified for current game build."
+
+/* The Lua's table (native.lua). Decoded at HF_EVENT_GAME_LOADED: the 25 code checks there, MOM ready at once; then an
+ * idle frame makes one read, as before. */
 static void VerifiesTheGameOnce(void)
 {
     CHECK_EQ(MOM_NATIVE_COUNT, 25);
-    CHECK(mom_native_entries[MOM_SET_TAB_LABELS].rva == 0x17AAC50u && mom_native_entries[MOM_ROW_INIT].rva == 0x17FE8D0u);
-    CHECK(mom_native_entries[MOM_OPTIONS_VISUAL].rva == 0x1998590u && mom_native_entries[MOM_PLAY_SOUND].rva == 0x1327F50u);
-    CHECK(strncmp(mom_native_entries[MOM_SET_TAB_LABELS].code, "48 89 54 24 10 53 56 48 83 EC 68", 32) == 0);
+    CHECK(mom_native_pins[MOM_SET_TAB_LABELS].rva == 0x17AAC50u && mom_native_pins[MOM_ROW_INIT].rva == 0x17FE8D0u);
+    CHECK(mom_native_pins[MOM_OPTIONS_VISUAL].rva == 0x1998590u && mom_native_pins[MOM_PLAY_SOUND].rva == 0x1327F50u);
+    CHECK(strncmp(mom_native_pins[MOM_SET_TAB_LABELS].pattern, "48 89 54 24 10 53 56 48 83 EC 68", 32) == 0);
+    CHECK(strcmp(mom_native_pins[MOM_PLAY_SOUND].name, "Mod options integration unavailable: play_sound") == 0);
     for (int i = 0; i < MOM_NATIVE_COUNT; i++)
-        CHECK_EQ(CodeBytes(mom_native_entries[i].code), i == MOM_SET_POSITION || i == MOM_SET_SIZE ? 28 : 16);
+    {
+        CHECK_EQ(CodeBytes(mom_native_pins[i].pattern), i == MOM_SET_POSITION || i == MOM_SET_SIZE ? 28 : 16);
+        CHECK_EQ(mom_native_pins[i].flags, 0);
+    }
     MakeWorld();
     CHECK_EQ(fake_start(kDefs, 4), 0);
+    VpmComponent* self = fake_component(MOM_INDEX);
+    CHECK(!vpm_ticking(self));
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(fake_counts().code_matches, 25);
+    CHECK_EQ(fake_counts().read, 0);
+    CHECK_LOG(VERIFIED);
+    CHECK(vpm_ticking(self));
     fake_counts_reset();
     Frame();
-    CHECK_EQ(fake_counts().code_matches, 25);
-    CHECK_EQ(fake_counts().read, 1); /* the idle gate, on that frame too */
-    CHECK_LOG("[Mod Options Menu] Native options layout verified for current game build.");
+    CHECK_EQ(fake_counts().code_matches, 0);
+    CHECK_EQ(fake_counts().read, 1); /* the idle gate */
     CHECK_EQ(Reads(100), 100);
-    CHECK(vpm_running(fake_component(MOM_INDEX)));
+    CHECK(vpm_running(self));
+}
+
+/* game.dll's functions still encoded (int3 bytes, as the harness's undecoded frame update), and decoded. */
+static void Encode(int index)
+{
+    memset((uint8_t*)fake_game() + mom_native_pins[index].rva, 0xCC, (size_t)CodeBytes(mom_native_pins[index].pattern));
+}
+static void Decode(int index) { WriteCode((uint8_t*)fake_game() + mom_native_pins[index].rva, mom_native_pins[index].pattern); }
+static int MomLines(void) { return fake_log_count("[Mod Options Menu]"); }
+
+/* The code still encoded at HF_EVENT_GAME_LOADED and decoded seconds later. Meanwhile nothing of MOM runs, with the
+ * escape menu open on OPTIONS: no tick, no read, no write, no log line, the tab bar untouched; the core looks every 30
+ * frames, up to the first function that does not match yet. Once the last one is decoded, the next look runs MOM's
+ * ready step (the labels, the binding, the tick) and the MODS tab comes as when decoded at the event. */
+static void StartsOnceTheCodeIsDecoded(void)
+{
+    MakeWorld();
+    for (int i = 0; i < MOM_NATIVE_COUNT; i++) Encode(i);
+    CHECK_EQ(fake_start(kDefs, 4), 0);
+    VpmComponent* self = fake_component(MOM_INDEX);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK(vpm_running(self) && !vpm_ticking(self));
+    MenuOnOptions();
+    int lines = MomLines();
+    fake_counts_reset();
+    fake_frames(180, DT); /* about 3 s: six looks */
+    FakeCounts c = fake_counts();
+    CHECK(c.code_matches == 6 && c.read == 0 && c.write == 0);
+    CHECK(MomLines() == lines && !vpm_ticking(self) && G32(w.bar + 57448) == 3);
+    for (int i = 0; i < MOM_NATIVE_COUNT - 1; i++) Decode(i); /* all but play_sound */
+    fake_counts_reset();
+    fake_frames(60, DT);
+    CHECK(fake_counts().code_matches == 50 && fake_counts().read == 0);
+    CHECK(!vpm_ticking(self) && MomLines() == lines && G32(w.bar + 57448) == 3);
+    SetStack(0, 0, 0);
+    Decode(MOM_PLAY_SOUND);
+    int frames = 0;
+    while (frames < 30 && !vpm_ticking(self)) { Frame(); frames++; }
+    CHECK(vpm_ticking(self) && vpm_running(self) && frames == 30);
+    CHECK_LOG(VERIFIED);
+    InstallStubs();
+    CHECK_EQ(Reads(10), 10); /* the idle gate: one read per frame */
+    MenuOnOptions();
+    Frame();
+    CHECK(G32(w.bar + 57448) == 4 && Shows(w.bar + 8296 + 3400 * 3, "MODS"));
+}
+
+/* Never decoded (one function): MOM is stopped once 60 s of game time have passed, naming that function in the Lua's
+ * wording; it never ticked, read or wrote, and the open escape menu was left alone. */
+static void StoppedWhenTheCodeIsNeverDecoded(void)
+{
+    MakeWorld();
+    Encode(MOM_OPTIONS_VISUAL);
+    CHECK_EQ(fake_start(kDefs, 4), 0);
+    VpmComponent* self = fake_component(MOM_INDEX);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    MenuOnOptions();
+    fake_counts_reset();
+    fake_frames(3700, DT); /* 59.2 s */
+    CHECK(vpm_running(self) && !vpm_ticking(self));
+    fake_frames(100, DT);
+    CHECK(!vpm_running(self));
+    static const char kWhy[] = "disabled: Mod options integration unavailable: options_visual changed (game.dll 0x1998590)";
+    CHECK(strcmp(vpm_status(self), kWhy) == 0);
+    CHECK_LOG(kWhy);
+    CHECK_NO_LOG(VERIFIED);
+    CHECK(fake_counts().read == 0 && fake_counts().write == 0);
+    CHECK(G32(w.bar + 57448) == 3 && G32(w.content + 1318488) == 7 && G32(Row(0) + 31428) == 700);
+    CHECK_EQ(Reads(100), 0);
 }
 
 static void RefusesAChangedGame(void)
@@ -644,7 +730,8 @@ static void RefusesAChangedGame(void)
         if (c == 2) P32(game + 0x32EC990 + 48 * 5 + 8, 1);
         if (c == 3) P32(game + 0x32ECC60 + 4, 11);
         CHECK_EQ(fake_start(kDefs, 4), 0);
-        Frame();
+        fake_fire(HF_EVENT_GAME_LOADED); /* a changed function: refused once the wait is over; changed data: at once */
+        if (c == 0) fake_frames(3800, DT);
         CHECK(!vpm_running(fake_component(MOM_INDEX)));
         CHECK_LOG("disabled: Mod options integration unavailable: ");
         CHECK_LOG(texts[c]);
@@ -1517,6 +1604,8 @@ int main(void)
 {
     RUN(VerifiesTheGameOnce);
     RUN(RefusesAChangedGame);
+    RUN(StartsOnceTheCodeIsDecoded);
+    RUN(StoppedWhenTheCodeIsNeverDecoded);
     RUN(TheModsTab);
     RUN(CategoriesStayInPlace);
     RUN(SlidersAsShallowWaterDivingRegistersThem);
