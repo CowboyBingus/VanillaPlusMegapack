@@ -151,6 +151,11 @@ int myc_kits_changed(const MycRequest* r, uint32_t helmet, uint32_t armor, uint3
 int myc_records_same(void* ctx, const MycResult* result, uint32_t helmet, uint32_t armor, uint32_t cape, int has_cape);
 void myc_request_key(const MycRequest* r, char* out, size_t size);
 MycApplyTo myc_apply_to(uintptr_t units_at, uint32_t body, uintptr_t slot);
+/* Detailed diagnostics after an apply of c (what: "Helldiver", "Preview", ...): where its units were read, and its
+ * bindings by unit and material instance with what reads back (myc_controller_report). Nothing in Normal mode. */
+void myc_addon_detail_bound(const char* what, const MycController* c, const MycApplyTo* to, int count);
+/* The describe line (vpm.h "diagnostics"): the Helldiver's and the preview's bindings, what reads back, the job. */
+void myc_addon_describe(char* out, size_t size);
 void myc_addon_adopt(const MycIdentity* identity, uint32_t frame);
 void myc_addon_lose(uint32_t frame, const char* why);
 void myc_addon_poll_ui(uint32_t frame);

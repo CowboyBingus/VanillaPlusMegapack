@@ -219,6 +219,39 @@ static void MycAdResolve(uint32_t frame)
     myc_addon_plan_ahead(found);
 }
 
+/* "<n> bound, <k> read back" of a controller (one binding read each). */
+static void MycAdBound(const MycController* c, char* out, size_t size)
+{
+    static char report[900];
+    int ok = myc_controller_report(c, report, sizeof report);
+    snprintf(out, size, "%d bound, %d read back", c->nbindings, ok);
+}
+
+void myc_addon_describe(char* out, size_t size)
+{
+    char bound[48], who[96], preview[48];
+    MycAdBound(&g.controller, bound, sizeof bound);
+    MycAdBound(&g.ui_controller, preview, sizeof preview);
+    if (g.has_identity)
+        snprintf(who, sizeof who, "avatar %u (%08x, %08x; units at %llx)", g.identity.avatar_index, g.identity.helmet,
+            g.identity.armor, (unsigned long long)g.identity.units_at);
+    else snprintf(who, sizeof who, "not found");
+    const char* ui = !g.has_ui ? "none" : g.ui.shown ? "shown" : "hidden";
+    snprintf(out, size, "Helldiver %s: %s; preview %s: %s; job %s", who, bound, ui, preview,
+        g.job ? "running" : g.saving ? "saving" : "none");
+}
+
+void myc_addon_detail_bound(const char* what, const MycController* c, const MycApplyTo* to, int count)
+{
+    if (!vpm_detailed()) return;
+    static char report[900];
+    myc_controller_report(c, report, sizeof report);
+    char slot[40] = "";
+    if (to->slot != 0) snprintf(slot, sizeof slot, ", body copies at %llx", (unsigned long long)to->slot);
+    vpm_log_detail(g.self, "%s apply: %d slots bound now, units read at %llx%s; %s.", what, count, (unsigned long long)to->units_at,
+        slot, report);
+}
+
 MycApplyTo myc_apply_to(uintptr_t units_at, uint32_t body, uintptr_t slot)
 {
     MycApplyTo to;
@@ -241,7 +274,8 @@ static int MycAdRebind(uint32_t frame)
     if (!myc_records_same(NULL, result, id->helmet, id->armor, id->cape, capes)) return 0;
     MycApplyTo to = myc_apply_to(id->units_at, id->body, g.slot);
     char why[160];
-    myc_controller_apply(&g.controller, result, &to, frame, why, sizeof why);
+    int count = myc_controller_apply(&g.controller, result, &to, frame, why, sizeof why);
+    myc_addon_detail_bound("Helldiver (new units)", &g.controller, &to, count);
     return 1;
 }
 
@@ -322,7 +356,8 @@ static void MycAdUiUnits(MycUi* ui, uint32_t frame)
     if (stale) { ui->dirty = 1; return; }
     MycApplyTo to = myc_apply_to(ui->where.units_at, r->body, 0);
     char why[160];
-    myc_controller_apply(&g.ui_controller, result, &to, frame, why, sizeof why);
+    int count = myc_controller_apply(&g.ui_controller, result, &to, frame, why, sizeof why);
+    myc_addon_detail_bound("Preview (new units)", &g.ui_controller, &to, count);
 }
 
 /* The preview's status as the player's own among the squad cards (own_status); -1: nothing more this poll. */

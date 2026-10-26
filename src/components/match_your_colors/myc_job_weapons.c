@@ -228,7 +228,9 @@ static uint64_t MycWjPackage(MycJob* j, uint64_t name)
     return package;
 }
 
-/* A weapon's kit in its package (weapon_kit), its preview customization composed first; NULL when it has none. */
+/* A weapon's kit in its package (weapon_kit), its preview customization composed first; NULL when it has none. The kit
+ * lives in the job's arena, for this job only: an analysis the pipeline keeps of it takes a copy of its own
+ * (myc_pipeline.c MycPipeOwnKit), so later jobs and the cache save never read this one. */
 static MycKit* MycWjWeaponKit(MycJob* j, MycWeapon* w, const MycTemplate* template)
 {
     if (w->has_ids && !w->copy)

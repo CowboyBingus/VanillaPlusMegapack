@@ -897,6 +897,7 @@ static void AFaultOnTheWorkerStopsItOnTheGameThread(void)
     CHECK_LOG(" in its worker thread");
     CHECK_EQ(fake_log_count("disabled:"), 1);
     CHECK_LOG("[Match Your Colors] Stopped (fault on the worker thread: fault 0xC0000005");
+    CHECK_LOG("[Match Your Colors] Original colors put back: 2 slots on the Helldiver, 0 on the preview.");
     CHECK_EQ(Recolored(0x100, HELMET_LUT), 0); /* the originals back, from the game thread */
     CHECK_EQ(Recolored(0x101, ARMOR_LUT), 0);
     CHECK(myc_g.worker.thread == NULL); /* joined */
@@ -1822,6 +1823,186 @@ static void TheIdleWatchReportsChangesOnce(void)
     free(w);
 }
 
+/* ---- diagnostics and the user's session of 2026-10-26 ------------------------------------------------------------- */
+
+static VpmOption* PackOption(const char* id)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack() && strcmp(vpm_option_def(vpm_option_at(i))->id, id) == 0)
+            return vpm_option_at(i);
+    return NULL;
+}
+
+/* The pack's Diagnostics option: Normal (0) or Detailed (1). */
+static void Diagnostics(int detailed)
+{
+    CHECK(vpm_option_apply(PackOption("diagnostics"), detailed ? 2 : 1));
+    CHECK_EQ(vpm_detailed(), detailed);
+}
+
+/* Whether every binding of c is on one of unit's materials. */
+static int BindingsOn(const MycController* c, uint32_t unit)
+{
+    const uintptr_t* materials = E.units[FindUnit(unit)].materials;
+    for (int i = 0; i < c->nbindings; i++)
+        if (c->bindings[i].unit != unit || (c->bindings[i].material != materials[0] && c->bindings[i].material != materials[1])) return 0;
+    return c->nbindings > 0;
+}
+
+/* The user's session (2026-10-26): the UI preview in player slot 0 shows a new armor on its own helmet unit (its own
+ * material instances), the Helldiver (avatar 0) is given the same pair, and both take the same plan. Each controller's
+ * bindings are on its own unit's materials; the Helldiver's stay when the preview closes. The detailed lines name the
+ * units and material instances each apply bound and what read back; the mark's describe says the same in short. */
+static void TheHelldiverAndThePreviewBindTheirOwnMaterials(void)
+{
+    Boot(1, 1, HELMET, 1);
+    Diagnostics(1);
+    g_ui = 0;
+    Put32(W.players + 948, 0); /* UI preview slot 0, as solo on the ship (before the first resolve) */
+    ShowUi(0, 0, 0, 0, 0);
+    Frames(4);
+    CHECK_LOG("Local Helldiver: avatar 0, helmet a5574ac2, armor 0ade6719, body 0, UI preview slot 0.");
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 1);
+    Unit(0x300, HELMET_LUT);
+    ShowUi(0, 1, HELMET, 0x0b0b0b0bu, 0x300);
+    Frames(8);
+    CHECK_EQ(Recolored(0x300, HELMET_LUT), 1);
+    CHECK(BindingsOn(&myc_g.ui_controller, 0x300));
+    CHECK(BindingsOn(&myc_g.controller, 0x100));
+    char line[320];
+    snprintf(line, sizeof line, "[Match Your Colors] Preview apply: 2 slots bound now, units read at %llx; 2 bindings on 1 units, 2 read "
+        "back: unit 300 alive, 2 slots 2 read back, materials %llx (1 of 1 ok) %llx (1 of 1 ok).",
+        (unsigned long long)(g_ui + 49160 + 12), (unsigned long long)E.units[FindUnit(0x300)].materials[0],
+        (unsigned long long)E.units[FindUnit(0x300)].materials[1]);
+    CHECK_LOG(line);
+    Unit(0x111, ARMOR_LUT);
+    Kits(0, HELMET, CAPE, 0x0b0b0b0bu); /* the Armory's pair applied to the Helldiver: its new armor unit */
+    LocalUnit(0, 2, 0x111);
+    Frames(8);
+    CHECK_LOG("Local Helldiver: avatar 0, helmet a5574ac2, armor 0b0b0b0b, body 0, UI preview slot 0.");
+    CHECK(strcmp(myc_g.controller.key, myc_g.ui_controller.key) == 0); /* the same plan */
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 1);
+    CHECK_EQ(Recolored(0x300, HELMET_LUT), 1);
+    CHECK(BindingsOn(&myc_g.controller, 0x100) && BindingsOn(&myc_g.ui_controller, 0x300));
+    CHECK(Bound(0x100, 0) != Bound(0x300, 0)); /* a texture each */
+    snprintf(line, sizeof line, "[Match Your Colors] Helldiver apply: 2 slots bound now, units read at %llx; 2 bindings on 1 units, 2 "
+        "read back: unit 100 alive, 2 slots 2 read back, materials %llx (1 of 1 ok) %llx (1 of 1 ok).", (unsigned long long)UnitsOf(0),
+        (unsigned long long)E.units[FindUnit(0x100)].materials[0], (unsigned long long)E.units[FindUnit(0x100)].materials[1]);
+    CHECK_LOG(line);
+    ShowUi(0, 0, 0, 0, 0); /* the Armory closed */
+    Frames(MYC_CHECK_FRAMES * 3);
+    CHECK_EQ(Recolored(0x300, HELMET_LUT), 0);
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 1); /* the Helldiver keeps its colors */
+    fake_log_clear();
+    CHECK(vpm_option_apply(PackOption("note_problem"), 1));
+    snprintf(line, sizeof line, ": Match Your Colors: active | Helldiver avatar 0 (a5574ac2, 0b0b0b0b; units at %llx): "
+        "2 bound, 2 read back; preview hidden: 0 bound, 0 read back; job none", (unsigned long long)UnitsOf(0));
+    CHECK_LOG(line);
+    Diagnostics(0);
+}
+
+/* Detailed diagnostics change nothing on an idle frame: no log line, no engine call, the same reads. */
+static void IdleFramesStayQuietWhenDetailed(void)
+{
+    Boot(1, 1, HELMET, 1);
+    Diagnostics(1);
+    Frames(4);
+    CHECK_LOG("[Match Your Colors] Helldiver apply: 2 slots bound now");
+    int idle, checks, other, quiet;
+    Classify(240, 1, 3, &idle, &checks, &other, &quiet);
+    CHECK_EQ(other, 2);
+    CHECK(checks >= 7 && checks <= 8);
+    CHECK(quiet);
+    Diagnostics(0);
+}
+
+/* A weapon's analysis made from a kit in memory its job lets go (Weapons.kit in the job's arena) is kept by the
+ * pipeline (pipeline.analysis); the cache save after the job reads every kept analysis's kit (the user's fault of
+ * 2026-10-26: myc_pipeline_save read a freed weapon kit 4 s after Recolor Weapons was switched on). Here the job's
+ * kit is in pages released at the job's end, so any later read of it faults. */
+static MycAnalysis* MadeAnalysis(MycPipeline* p, MycKit* kit, int body, MycErr* err)
+{
+    MycAnalysis* a = myc_alloc(&p->arena, sizeof(MycAnalysis));
+    if (a == NULL) { myc_fail(err, "out of memory"); return NULL; }
+    a->kit = kit;
+    a->body = body;
+    return a;
+}
+
+static struct { int weapons, kept; } g_weapons;
+
+static int CannedWeapons(MycPipeline** p, const wchar_t* data, const wchar_t* cache, MycRequest* r, MycResult* out, MycErr* err)
+{
+    int ok = Canned(p, data, cache, r, out, err);
+    (*p)->make = MadeAnalysis;
+    uint8_t* page = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (page == NULL) return myc_fail(err, "no page");
+    MycKit* kit = (MycKit*)page;
+    MycPiece* piece = (MycPiece*)(page + 512);
+    MycOverride* rows = (MycOverride*)(page + 1024);
+    char* text = (char*)(page + 2048);
+    snprintf(text, 64, "7e662968=a007a73e4082430e");
+    kit->id = 0x5eed0001u + (uint32_t)g_weapons.weapons;
+    kit->archive = 0x1111222233334444ull;
+    kit->type = MYC_WEAPON;
+    kit->name = 0xabcdef0123456789ull;
+    kit->pieces = piece;
+    kit->npieces = 1;
+    kit->signature = text + 256;
+    snprintf(kit->signature, 64, "weapon %u", g_weapons.weapons);
+    piece->path = 0x99;
+    piece->overrides = rows;
+    piece->noverrides = piece->has_overrides = 1;
+    piece->overrides_text = text;
+    rows[0].slot = LUT_SLOT;
+    rows[0].lut = ARMOR_LUT;
+    MycAnalysis* a = myc_pipeline_analysis(*p, kit, 0, err);
+    g_weapons.weapons++;
+    g_weapons.kept += a != NULL && a->kit != kit && a->kit->type == MYC_WEAPON && a->kit->npieces == 1
+        && a->kit->pieces[0].overrides != rows && a->kit->pieces[0].overrides[0].lut == ARMOR_LUT
+        && strcmp(a->kit->pieces[0].overrides_text, text) == 0 && strcmp(a->kit->signature, kit->signature) == 0;
+    if (!VirtualFree(page, 0, MEM_RELEASE)) return myc_fail(err, "page not released"); /* the job's arena, freed at its end */
+    return ok && a != NULL;
+}
+
+static void TheCacheSaveAfterAWeaponsJobReadsOnlyKeptKits(void)
+{
+    Boot(1, 1, HELMET, 1);
+    memset(&g_weapons, 0, sizeof g_weapons);
+    C.dirty = 1;
+    g_pipeline.has_header = 1;
+    snprintf(g_pipeline.header, sizeof g_pipeline.header, "MYCCACHE test");
+    wcscpy(g_pipeline.cache_path, L"test-weapons.cache");
+    DeleteFileW(L"test-weapons.cache");
+    myc_g.worker.job = CannedWeapons;
+    myc_g.worker.synchronous = 0; /* the worker's own thread, where the user's fault was */
+    for (int i = 0; i < 2000 && Recolored(0x100, HELMET_LUT) != 1; i++)
+    {
+        Sleep(1);
+        Frames(1);
+    }
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 1);
+    SetOption("match_materials", 1); /* option changes: more jobs, each with a weapon of its own */
+    SetOption("recolor_cape", 1);
+    for (int i = 0; i < 4000 && !fake_log_has("Analysis cache saved (") && vpm_running(fake_component(0)); i++)
+    {
+        Sleep(1);
+        Frames(1);
+    }
+    CHECK(vpm_running(fake_component(0)));
+    CHECK_NO_LOG("fault on the worker thread");
+    CHECK_LOG("[Match Your Colors] Analysis cache saved (");
+    CHECK(g_weapons.weapons >= 2 && g_weapons.kept == g_weapons.weapons); /* each analysis took the session's copy */
+    CHECK(C.thread != 0 && C.thread != GetCurrentThreadId());
+    uint8_t* text = NULL;
+    size_t size = 0;
+    CHECK(myc_cache_read(L"test-weapons.cache", &text, &size) && size > 0 && memcmp(text, "MYCCACHE test\n", 14) == 0);
+    free(text);
+    DeleteFileW(L"test-weapons.cache");
+    vpm_fail(fake_component(0), "test stop");
+    CHECK(myc_g.worker.thread == NULL);
+}
+
 int main(void)
 {
     RUN(RegistersTheLuaOptions);
@@ -1875,5 +2056,8 @@ int main(void)
     RUN(Bc3BlocksDecodeAsPillow);
     RUN(AlbedoColorBlockModes);
     RUN(TheIdleWatchReportsChangesOnce);
+    RUN(TheHelldiverAndThePreviewBindTheirOwnMaterials);
+    RUN(IdleFramesStayQuietWhenDetailed);
+    RUN(TheCacheSaveAfterAWeaponsJobReadsOnlyKeptKits);
     TEST_END();
 }

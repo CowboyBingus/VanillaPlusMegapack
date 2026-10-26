@@ -500,6 +500,71 @@ int myc_controller_apply(MycController* c, MycResult* result, const MycApplyTo* 
     return count;
 }
 
+/* ---- diagnostics ------------------------------------------------------------------------------------------------------ */
+
+/* Whether binding b's slot holds its texture now. */
+static int MycCtlReadsBack(const MycBinding* b) { return myc_binding(b->material, b->slot) == b->texture; }
+
+/* Whether binding i is the first of its unit (with material: of its unit and material). */
+static int MycCtlFirstOf(const MycController* c, int i, int material)
+{
+    for (int k = 0; k < i; k++)
+        if (c->bindings[k].unit == c->bindings[i].unit && (!material || c->bindings[k].material == c->bindings[i].material)) return 0;
+    return 1;
+}
+
+/* The bindings of unit (with material not 0: on that material too) and how many of them read back. */
+static int MycCtlCount(const MycController* c, uint32_t unit, uint64_t material, int* ok)
+{
+    int n = 0;
+    *ok = 0;
+    for (int i = 0; i < c->nbindings; i++)
+    {
+        const MycBinding* b = &c->bindings[i];
+        if (b->unit != unit || (material != 0 && b->material != material)) continue;
+        n++;
+        *ok += MycCtlReadsBack(b);
+    }
+    return n;
+}
+
+/* One unit's part of the report (its first binding at first) at out: its length as snprintf counts it. */
+static size_t MycCtlReportUnit(const MycController* c, int first, char* out, size_t size, int* ok)
+{
+    uint32_t unit = c->bindings[first].unit;
+    int slots = MycCtlCount(c, unit, 0, ok), listed = 0;
+    size_t at = (size_t)snprintf(out, size, "unit %x %s, %d slots %d read back, materials", unit,
+        c->native->alive(unit) != 0 ? "alive" : "dead", slots, *ok);
+    for (int i = first; i < c->nbindings && listed < 4 && at < size; i++)
+    {
+        if (c->bindings[i].unit != unit || !MycCtlFirstOf(c, i, 1)) continue;
+        int held, on = MycCtlCount(c, unit, c->bindings[i].material, &held);
+        at += (size_t)snprintf(out + at, size - at, " %llx (%d of %d ok)", (unsigned long long)c->bindings[i].material, held, on);
+        listed++;
+    }
+    return at;
+}
+
+int myc_controller_report(const MycController* c, char* out, size_t size)
+{
+    static char list[768];
+    size_t at = 0;
+    int units = 0, ok = 0;
+    list[0] = 0;
+    for (int i = 0; i < c->nbindings; i++)
+    {
+        if (!MycCtlFirstOf(c, i, 0)) continue;
+        int unit_ok = 0;
+        if (at < sizeof list) at += (size_t)snprintf(list + at, sizeof list - at, "%s", units > 0 ? "; " : "");
+        if (at < sizeof list) at += MycCtlReportUnit(c, i, list + at, sizeof list - at, &unit_ok);
+        else (void)MycCtlCount(c, c->bindings[i].unit, 0, &unit_ok);
+        units++;
+        ok += unit_ok;
+    }
+    snprintf(out, size, "%d bindings on %d units, %d read back%s%s", c->nbindings, units, ok, c->nbindings > 0 ? ": " : "", list);
+    return ok;
+}
+
 /* ---- settle ---------------------------------------------------------------------------------------------------------- */
 
 /* One waiting slot read again: done (bound, its unit gone, or one of ours there); *bound whether it bound. */

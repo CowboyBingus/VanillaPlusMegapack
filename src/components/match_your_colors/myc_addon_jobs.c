@@ -263,6 +263,7 @@ static void MycAjFinishUi(MycResult* result, const MycRequest* request, uint32_t
     char why[160];
     int count = myc_controller_apply(&g.ui_controller, result, &to, frame, why, sizeof why);
     if (count < 0) { myc_addon_error(why); return; }
+    myc_addon_detail_bound("Preview", &g.ui_controller, &to, count);
     ui->applied = *request;
     ui->has_applied = 1;
     ui->dirty = 0;
@@ -374,6 +375,7 @@ static void MycAjFinishLocal(MycResult* result, const MycRequest* request, uint3
     char why[160];
     int count = myc_controller_apply(&g.controller, result, &to, frame, why, sizeof why);
     if (count < 0) { myc_addon_error(why); return; }
+    myc_addon_detail_bound("Helldiver", &g.controller, &to, count);
     g.applied = *request;
     g.has_applied = 1;
     MycAjNoteCache(frame);

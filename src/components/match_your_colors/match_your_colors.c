@@ -45,7 +45,13 @@
  *     the engine calls of the apply (alive, meshes, mesh, materials, material, set_resource, commit, and create or
  *     update for each runtime texture) [the same calls];
  *   - once: the engine's 14 function addresses compared, the PlayFab exports looked up, the worker thread made with the
- *     first job. */
+ *     first job.
+ *
+ * Diagnostics (the pack's own, not the Lua's): in Detailed mode each apply of the Helldiver's or the preview's plan logs
+ * where it read the units and, per unit, the material instances it bound and how many slots read back the texture just
+ * bound (myc_controller_report: one binding read per slot and one alive per unit, on that frame only); a tester's mark
+ * describes the same for both in short. A stop logs how many slots it put back to their original colors (a fault on
+ * the worker stops the component, and its stop is what puts the originals back). Idle frames log nothing in either mode. */
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
@@ -289,16 +295,28 @@ static void MycStop(VpmComponent* self)
     int ended = myc_worker_stop(&g.worker, 1000);
     if (!ended) myc_note("The worker thread did not end within 1 s of the stop; it is left to finish its task.");
     g.job = g.saving = 0;
+    int helldiver = g.controller.restored, preview = g.ui_controller.restored;
     myc_addon_restore_all();
+    helldiver = g.controller.restored - helldiver;
+    preview = g.ui_controller.restored - preview;
     if (ended && g.worker.pipeline != NULL) myc_pipeline_close(g.worker.pipeline);
     g.has_reader_kept = g.close_due = 0;
     const char* status = vpm_status(self);
     const char* reason = strncmp(status, "disabled: ", 10) == 0 ? status + 10 : status;
     myc_notef("Stopped (%s).", reason);
+    if (helldiver > 0 || preview > 0)
+        myc_notef("Original colors put back: %d slots on the Helldiver, %d on the preview.", helldiver, preview);
 }
 
 /* The core's summary line (at a mission's end and at a tester's mark): the worker's state. */
 static void MycSummary(VpmComponent* self, char* out, size_t size) { myc_worker_describe(&g.worker, out, size); }
+
+/* The describe line for a tester's mark: what the Helldiver and the preview have bound and what reads back. */
+static void MycDescribe(VpmComponent* self, char* out, size_t size)
+{
+    if (!s.open) { snprintf(out, size, "engine not opened yet"); return; }
+    myc_addon_describe(out, size);
+}
 
 static int MycStart(VpmComponent* self)
 {
@@ -314,4 +332,4 @@ static int MycStart(VpmComponent* self)
     return 0;
 }
 
-const VpmComponentDef vpm_component_match_your_colors = {"match_your_colors", "Match Your Colors", "1.5", 0, MycStart, MycStop};
+const VpmComponentDef vpm_component_match_your_colors = {"match_your_colors", "Match Your Colors", "1.5", 0, MycStart, MycStop, MycDescribe};
