@@ -292,28 +292,32 @@ static size_t Characters(const char* text)
     return n;
 }
 
+static const char* ChoiceRefusal(const VpmOptionDef* def)
+{
+    int n = ChoiceCount(def);
+    if (n < 2 || n > VPM_OPTION_CHOICES) return "choices must list 2 to 16 names";
+    for (int i = 0; i < n; i++)
+        if (def->choices[i][0] == 0 || Characters(def->choices[i]) > VPM_OPTION_CHOICE) return "invalid choice name";
+    return NULL;
+}
+
+static const char* SliderRefusal(const VpmOptionDef* def)
+{
+    double step = Step(def);
+    if (!(def->min < def->max) || step > def->max - def->min) return "slider needs min < max and 0 < step <= max - min";
+    if (!(def->min >= -FLT_MAX && def->max <= FLT_MAX && def->max - def->min <= FLT_MAX && step >= FLT_MIN))
+        return "slider min, max and step must be finite floats";
+    return NULL;
+}
+
 /* Mod Options Menu's registration checks (options.lua new_option and its fields): a reason, or NULL. */
 static const char* Refusal(const VpmOptionDef* def)
 {
     if (def == NULL || def->id == NULL || def->id[0] == 0 || strlen(def->id) > 96) return "invalid option registration";
     if (def->label == NULL || def->label[0] == 0 || Characters(def->label) > VPM_OPTION_LABEL) return "invalid option registration";
     if (def->description != NULL && Characters(def->description) > VPM_OPTION_DESCRIPTION) return "invalid description";
-    if (def->kind == VPM_CHOICE)
-    {
-        int n = ChoiceCount(def);
-        if (n < 2 || n > VPM_OPTION_CHOICES) return "choices must list 2 to 16 names";
-        for (int i = 0; i < n; i++)
-            if (def->choices[i][0] == 0 || Characters(def->choices[i]) > VPM_OPTION_CHOICE) return "invalid choice name";
-        return NULL;
-    }
-    if (def->kind == VPM_SLIDER)
-    {
-        double step = Step(def);
-        if (!(def->min < def->max) || step > def->max - def->min) return "slider needs min < max and 0 < step <= max - min";
-        if (!(def->min >= -FLT_MAX && def->max <= FLT_MAX && def->max - def->min <= FLT_MAX && step >= FLT_MIN))
-            return "slider min, max and step must be finite floats";
-        return NULL;
-    }
+    if (def->kind == VPM_CHOICE) return ChoiceRefusal(def);
+    if (def->kind == VPM_SLIDER) return SliderRefusal(def);
     return def->kind == VPM_TOGGLE ? NULL : "type must be toggle, choice or slider";
 }
 
