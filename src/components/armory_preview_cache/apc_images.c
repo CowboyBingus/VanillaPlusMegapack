@@ -167,8 +167,11 @@ static void Unlist(int i)
  * succeeds, so a failed cleanup can be retried). */
 int apc_images_clear(const char* reason)
 {
-    if (g.texture_count > 0) g.st.clear_count++;
-    (void)reason;
+    if (g.texture_count > 0)
+    {
+        g.st.clear_count++;
+        g.st.last_clear_reason = reason;
+    }
     if (!apc_present_restore(1)) return 0;
     CropsClear();
     ResetRequest();

@@ -12,6 +12,7 @@
  * state 2; then it runs the focused card's popup, whose KICK fires inside the game's own update once its hold timer
  * passes 3 s. Closing the menu as Esc does: the Main presenter's pending-close byte. */
 #include <math.h>
+#include <stdio.h>
 #include "blm.h"
 
 #define MENU_SYSTEM_PTR 0x347CE38u
@@ -76,6 +77,9 @@ typedef struct MenuNatives
     void (*card_state)(uint64_t card, int32_t state);
 } MenuNatives;
 
+#define TRACE_FIELDS 13
+#define NO_TYPE 0xFFFFFFFFu        /* the trace's type of a focus that is not on a button */
+
 typedef struct Prepared { int action; const char* title; const char* body; int full; } Prepared;
 
 static MenuNatives n;
@@ -89,6 +93,8 @@ static struct
     int refused;                  /* a write was refused: no retry until the menu opens again */
     const char* labels[MAX_BUTTONS]; /* what our button at each index shows */
     int confirmWait;
+    int traced;                   /* Detailed mode: the dialog and focus state last logged (blm_menu_trace) */
+    uint32_t trace[TRACE_FIELDS];
 } s;
 
 static const char* const kActionNames[BLM_ACTIONS + 1] = {"", "disband", "promote", "cancel_sos"};
@@ -413,6 +419,29 @@ int blm_menu_step(uintptr_t screen, uint64_t local, const BlmOffer* offer, uint6
     int confirmed = Answer(content, inactive);
     Dialog(content, action, inactive, offer);
     return confirmed;
+}
+
+/* lint: per-frame (an open escape menu, in Detailed mode only). The dialog and focus state, logged when it changes
+ * (menu.lua trace, the Lua's diagnostic builds: to explain a confirm the component did not see). Plain loads. */
+void blm_menu_trace(uintptr_t screen)
+{
+    uintptr_t content = screen + CONTENT;
+    uint32_t focus = blm_load8(content + FOCUS), count = blm_load8(content + COUNT);
+    const uint32_t now[TRACE_FIELDS] = {blm_load32(screen + SHOWN), blm_load8(content + HIDDEN), focus,
+        focus >= 4 && focus - 4 < count ? blm_load8(content + TYPES + focus - 4) : NO_TYPE,
+        blm_load8(content + DIALOG_INACTIVE), blm_load8(content + DIALOG_OPENING), blm_load8(content + DIALOG_ANSWERED),
+        blm_load8(content + DIALOG_CONFIRMED), blm_load32(content + DIALOG + DIALOG_STATE),
+        blm_loadf(content + DIALOG_FADE) != 0.0f, blm_load32(content + PANEL_STATE), (uint32_t)s.pending,
+        (uint32_t)s.prepared.action};
+    if (s.traced && memcmp(now, s.trace, sizeof now) == 0) return;
+    s.traced = 1;
+    memcpy(s.trace, now, sizeof now);
+    char type[12] = "-";
+    if (now[3] != NO_TYPE) snprintf(type, sizeof type, "%u", now[3]);
+    vpm_log_detail(blm_component, "menu trace: tab %u hidden %u focus %u type %s dialog inactive %u opening %u answered %u "
+        "confirmed %u state %u fading %u panel %u pending %s prepared %s", now[0], now[1], now[2], type, now[4], now[5],
+        now[6], now[7], now[8], now[9], now[10], s.pending ? kActionNames[s.pending] : "-",
+        s.prepared.action ? kActionNames[s.prepared.action] : "-");
 }
 
 /* ---- the player menu's KICK and the menu's close --------------------------------------------------------------- */

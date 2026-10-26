@@ -1447,10 +1447,28 @@ static void DisabledPartsStayAway(void)
 
 /* While nothing is pending and the escape screen is closed, a frame reads the menu system's screen and runs the scanner's
  * check: 4 plain loads, no read, no page check, no log line, whatever the session. */
-static void IdleFrames(void)
+/* The pack's own option (Diagnostics, Note a problem now), by id. */
+static VpmOption* PackOption(const char* id)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack() && strcmp(vpm_option_def(vpm_option_at(i))->id, id) == 0)
+            return vpm_option_at(i);
+    return NULL;
+}
+
+/* Diagnostics: 1 Normal, 2 Detailed (applied as the player applies it). */
+static void Diagnostics(int mode)
+{
+    VpmOption* option = PackOption("diagnostics");
+    CHECK(option != NULL && vpm_option_apply(option, mode));
+}
+
+/* The idle scenarios, in a Diagnostics mode (1 Normal, 2 Detailed): the same pins in both. */
+static void IdleFramesIn(int mode)
 {
     NewWorld(0);
     Started();
+    Diagnostics(mode);
     fake_counts_reset();
     Frames(1);
     /* The first frame: a full one; the context confirmed (2 reads), the scanner's first write (1 read, 1 page check,
@@ -1495,6 +1513,8 @@ static void IdleFrames(void)
     CHECK_EQ(Reads() + fake_counts().log, 0);
     CHECK_EQ(blm_page_checks(), pages);
 }
+
+static void IdleFrames(void) { IdleFramesIn(1); }
 
 /* A menu system that cannot be confirmed (its screen field unreadable): the full frame runs and the gate tries the
  * guarded read again on every 60th frame only; a readable one gives idle frames again. */
@@ -3493,6 +3513,147 @@ static void StopPutsBack(void)
     CHECK_LOG("CANCEL SOS: no longer kept off; a player leaving lists the SOS again");
 }
 
+
+/* ==== diagnostics: the Detailed mode's lines and the tester's mark ====================================================== */
+
+static void MissionEnds(void)
+{
+    HfStateEvent end = {{sizeof end, HF_ON_MISSION_END, 1}, HF_STATE_MISSION, HF_STATE_SHIP};
+    fake_emit(&end.info);
+}
+
+/* A PROMOTE with squad messages, then a DISBAND, then a mission's end, in a Diagnostics mode. */
+static void DiagnosedActions(int mode)
+{
+    NewWorld(1);
+    Started();
+    Diagnostics(mode);
+    Squad(2, TANGO, CHARLIE);
+    w.successor = TANGO;
+    w.lobbyAfter = 2;
+    w.arrivals[0] = TANGO;
+    w.arrivals[1] = ME;
+    w.arrivals[2] = CHARLIE;
+    w.arrivalCount = 3;
+    OpenMenu(0);
+    Frames(1);
+    Confirm(3, 1);
+    for (int i = 0; i < 400 && blm_lobby_busy(); i++) Ticks(1);
+    CHECK(strncmp(blm_lobby_status(), "squad moved to Tango's ship", 27) == 0);
+    w.host = ME; /* back to hosting a squad of one */
+    w.hosting = 1;
+    w.joinState = 0;
+    Squad(1, TANGO, 0);
+    OpenMenu(0);
+    Frames(1);
+    Confirm(2, 1);
+    Frames(80);
+    MissionEnds();
+}
+
+static const char* const kPromoteLines[] = {
+    "[Better Lobby Management] squad leader notice for 0100000000000005 sent to 0100000000000005, 0A00000000000007",
+    "[Better Lobby Management] promote: search 1 for Tango's lobby (string_key2 eq 72057594037927941)",
+    "[Better Lobby Management] promote: successor search: 0 result(s)\n",
+    "[Better Lobby Management] promote: search 2 for Tango's lobby",
+    "[Better Lobby Management] promote: successor search: 1 result(s), first lobby lobby-0 (has a connection string)",
+    "[Better Lobby Management] squad message recipients: 0100000000000005; your chat history 0/0 -> 0/1",
+    "[Better Lobby Management] menu trace: tab 0 hidden 0 focus 255 type - dialog inactive 1",
+    "[Better Lobby Management] at the mission's end: 2 actions; page checks ",
+};
+
+static void DetailedModeLogsTheVerboseLines(void)
+{
+    DiagnosedActions(2);
+    for (size_t i = 0; i < sizeof kPromoteLines / sizeof kPromoteLines[0]; i++) CHECK_LOG(kPromoteLines[i]);
+    CHECK_LOG("menu trace: tab 0 hidden 0 focus 7 type 6 dialog inactive 1"); /* PROMOTE focused: its dialog prepared */
+    CHECK_LOG("pending promote");
+    CHECK_LOG("; scanner active: setting 5 s, game 20 s, field 5 s; writes 1, game rewrites 0, countdowns shortened 0; SOS "
+              "cancels 0, re-arms caught 0 (0 already posted); nearby lobbies ");
+    /* the lines a player's log always has are there as before */
+    CHECK_LOG("squad leader notice sent to 2 player(s): Tango");
+    CHECK_LOG("promote: found Tango's lobby after 2 search(es)");
+    /* a waiting search says why, once per reason */
+    fake_setup();
+    NewWorld(0);
+    Started();
+    Diagnostics(2);
+    Squad(1, TANGO, 0);
+    w.successor = TANGO;
+    w.requests[1] = 1;
+    OpenMenu(0);
+    Frames(1);
+    Confirm(3, 1);
+    Ticks((int)(3.5 / DT));
+    CHECK_EQ(fake_log_count("promote: search waits (a game search is running)"), 1);
+    w.requests[1] = 0;
+    w.busy = 1000000000;
+    Ticks(60);
+    CHECK_EQ(fake_log_count("promote: search waits (the lobby browser is busy)"), 1);
+    w.busy = 0;
+    for (int i = 0; i < 60 && Count("browser_start") == 0; i++) Ticks(1);
+    CHECK_LOG("promote: search 1 for Tango's lobby");
+}
+
+static void NormalModeLogsNoneOfThem(void)
+{
+    DiagnosedActions(1);
+    for (size_t i = 0; i < sizeof kPromoteLines / sizeof kPromoteLines[0]; i++) CHECK_NO_LOG(kPromoteLines[i] + 26);
+    CHECK_NO_LOG("menu trace");
+    CHECK_NO_LOG("search waits");
+    CHECK_NO_LOG("detailed lines suppressed");
+    CHECK_LOG("squad leader notice sent to 2 player(s): Tango");
+    CHECK_LOG("promote: found Tango's lobby after 2 search(es)");
+}
+
+/* Idle frames in Detailed mode: the Normal pins (no read, no log, no page check). */
+static void IdleFramesDetailed(void) { IdleFramesIn(2); }
+
+/* A successor whose lobby never shows: about 42 searches in 60 s, two lines each, through the limiter. */
+static void ManySearchesHitTheLimiter(void)
+{
+    NewWorld(0);
+    Started();
+    Diagnostics(2);
+    Squad(1, TANGO, 0);
+    w.successor = TANGO;
+    w.lobbyAfter = 1000000;
+    OpenMenu(0);
+    Frames(1);
+    Confirm(3, 1);
+    for (int i = 0; i < (int)(80.0 / DT) && blm_lobby_busy(); i++) Ticks(1);
+    CHECK_LOG("promote failed at search: Tango's lobby was not found");
+    CHECK_LOG("[Better Lobby Management] promote: search 1 for Tango's lobby");
+    CHECK_LOG(" detailed lines suppressed (at most 20 per 600 frames)");
+    CHECK(fake_log_count("promote: search ") < Count("browser_start")); /* some were left out */
+}
+
+/* "Note a problem now": the mark carries the describe line. */
+static void DescribeInTheMark(void)
+{
+    NewWorld(1);
+    Started();
+    Frames(2);
+    VpmOption* note = PackOption("note_problem");
+    CHECK(note != NULL && vpm_option_apply(note, 1));
+    CHECK_LOG("MARK 1: Better Lobby Management: ready | ready; menu on, SOS on, messages on, region ");
+    CHECK_LOG(", scanner active; action: idle; 0 actions; SOS cancels 0, re-arms 0\n");
+    /* a part left out and an action under way show */
+    fake_setup();
+    NewWorld(0);
+    Started();
+    Squad(1, TANGO, 0);
+    w.successor = TANGO;
+    w.lobbyAfter = 1000000;
+    OpenMenu(0);
+    Frames(1);
+    Confirm(3, 1);
+    Ticks(10);
+    CHECK(vpm_option_apply(PackOption("note_problem"), 1));
+    CHECK_LOG("messages off");
+    CHECK_LOG("; action: promote: waiting for Tango's lobby; 0 actions;");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0); /* every line out before a fault */
@@ -3559,5 +3720,10 @@ int main(void)
     RUN(MenuGameKick);
     RUN(MenuClose);
     RUN(StopPutsBack);
+    RUN(DetailedModeLogsTheVerboseLines);
+    RUN(NormalModeLogsNoneOfThem);
+    RUN(IdleFramesDetailed);
+    RUN(ManySearchesHitTheLimiter);
+    RUN(DescribeInTheMark);
     TEST_END();
 }

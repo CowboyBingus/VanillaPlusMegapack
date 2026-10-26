@@ -54,6 +54,7 @@ typedef struct Job
     double goneAt, foundAt, movedAt, searchUntil, nextSearch;
     int hasGone, hasFound;
     int searches;
+    const char* waiting;          /* why the last search waited (a Detailed line on change) */
 } Job;
 
 typedef struct UiKick { uint64_t id; double since, started; int hasStarted; const char* status; } UiKick;
@@ -358,17 +359,24 @@ static int StartSearch(const BlmSession* snap, double now)
     uintptr_t field = snap->ctx + BLM_BROWSER;
     uint64_t handle = blm_load64(field);
     if (handle == 0) return Fail("no lobby browser");
-    if (blm_game_searching() || blm_native.browser_busy(field) != 0)
+    int searching = blm_game_searching();
+    if (searching || blm_native.browser_busy(field) != 0)
     {
+        const char* why = searching ? "a game search is running" : "the lobby browser is busy";
+        if (s.job.waiting != why) vpm_log_detail(blm_component, "%s: search waits (%s)", Kind(s.job.kind), why);
+        s.job.waiting = why;
         s.job.nextSearch = now + 0.5;
         return 1;
     }
+    s.job.waiting = NULL;
     blm_native.clear_filters(handle);
     char* value = (char*)(g_scratch + SEARCH_VALUE);
     snprintf(value, 32, "%llu", (unsigned long long)s.job.target);
     blm_native.filter_string(field, BLM_KEY_HOST_PEER, (uint64_t)(uintptr_t)value, BLM_OP_EQUAL);
     (void)blm_native.browser_start(field);
     s.job.searches++;
+    vpm_log_detail(blm_component, "%s: search %d for %s's lobby (string_key2 eq %s)", Kind(s.job.kind), s.job.searches,
+        s.job.name, value);
     Goto(STEP_RESULTS, now, RESULT_TIMEOUT);
     return 1;
 }
@@ -394,6 +402,7 @@ static int ReadResults(const BlmSession* snap, double now)
     {
         if (now >= s.job.deadline)
         {
+            vpm_log_detail(blm_component, "%s: search timed out", Kind(s.job.kind));
             Goto(STEP_SEARCH, now, 0);
             s.job.nextSearch = now;
         }
@@ -407,6 +416,10 @@ static int ReadResults(const BlmSession* snap, double now)
         (void)blm_native.browser_result(field, (uint64_t)(uintptr_t)(g_scratch + INFO), 0);
         joinable = g_scratch[INFO + INFO_CONNECTION] != 0;
     }
+    if (count > 0)
+        vpm_log_detail(blm_component, "%s: successor search: %d result(s), first lobby %.63s (%s)", Kind(s.job.kind), count,
+            g_scratch[INFO] != 0 ? (const char*)(g_scratch + INFO) : "?", joinable ? "has a connection string" : "no connection string");
+    else vpm_log_detail(blm_component, "%s: successor search: %d result(s)", Kind(s.job.kind), count);
     if (count > 0 && joinable) return Join(snap, now);
     Goto(STEP_SEARCH, now, 0);
     s.job.nextSearch = now + (now - s.job.goneAt < FAST_SEARCHES ? SEARCH_INTERVAL : SLOW_SEARCH_INTERVAL);
