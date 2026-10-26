@@ -126,6 +126,8 @@ int apc_native_acquire(uint64_t id, const uint64_t owner[2], int* acquired);
 int apc_native_release(uint64_t id, const uint64_t owner[2], int* released);
 /* resolve_all: the item's package and its dependencies' packages (deduplicated as the Lua did); *count of max. */
 int apc_native_resolve_all(const ApcAssetItem* item, uint64_t* ids, int max, int* count);
+/* Loadout package rows the last catalogue skipped: HellForge's records for mod content, past the Lua's bound. */
+uint32_t apc_native_skipped(void);
 
 /* apc_deps.c */
 void apc_deps_reset(void);
@@ -134,6 +136,8 @@ int apc_deps_refresh(void);
 int apc_deps_resolve(const ApcAssetItem* item, uint64_t* packages, int max);
 /* The weapons queued for preview and their configured attachments (known ones only): fills each item's attachments. */
 int apc_deps_queued(ApcAssetItem* items, int count);
+/* Weapon configuration rows the last refresh skipped: HellForge's records for mod content, past the Lua's bound. */
+uint32_t apc_deps_skipped(void);
 
 /* apc_policy.c: the memory guard */
 #define APC_PRESSURE_NONE 0
