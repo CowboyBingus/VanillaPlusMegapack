@@ -28,15 +28,17 @@ typedef void (*DestroyFn)(void* texture);
 typedef void (*RegisterFn)(uint32_t name, void* texture);
 
 static const ApcSignature kSignatures[] = {
-    {0, 0x14499E0u, "48895c24084889742410574883ec20498bd88bfa488bf1e8e45c0000488bd0e8"},
-    {0, 0x143EEF0u, "4c8944241848895424104883ec28f30f1081140100000f2e4424387a357533f3"},
-    {0, 0x1447160u, "48895c241848896c24204889542410565741574883ec20f30f10410c488bda0f"},
-    {0, 0x1448AD0u, "40574883ec20f30f104144488bf90f2ec17a237521f701000000080f84770100"},
-    {1, 0x31AF50u, "48896c2410488974241857415641574883ec40488b059e526f01458bf9418bf0"},
-    {1, 0x31B360u, "48895c2408574883ec20488b1d974e6f01488bf9488b833803000080b8801400"},
-    {1, 0x31E030u, "4c8bc28bd1488b0dcc216f01488b8938030000e948b0deffcccccccccccccccc"},
-    {0, 0x144F800u, "48895c2408574883ec20410fb6f8488bd94885d2750f488b5c24304883c4205f"},
-    {0, 0x1392680u, "40534883ec204533c9488bda488b15eda60e02418bc9448b82802b00004585c0"},
+    {0, 0x14499E0u, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 49 8B D8 8B FA 48 8B F1 E8 E4 5C 00 00 48 8B D0 E8"},
+    {0, 0x143EEF0u, "4C 89 44 24 18 48 89 54 24 10 48 83 EC 28 F3 0F 10 81 14 01 00 00 0F 2E 44 24 38 7A 35 75 33 F3"},
+    {0, 0x1447160u, "48 89 5C 24 18 48 89 6C 24 20 48 89 54 24 10 56 57 41 57 48 83 EC 20 F3 0F 10 41 0C 48 8B DA 0F"},
+    {0, 0x1448AD0u, "40 57 48 83 EC 20 F3 0F 10 41 44 48 8B F9 0F 2E C1 7A 23 75 21 F7 01 00 00 00 08 0F 84 77 01 00"},
+    {0, 0x144F800u, "48 89 5C 24 08 57 48 83 EC 20 41 0F B6 F8 48 8B D9 48 85 D2 75 0F 48 8B 5C 24 30 48 83 C4 20 5F"},
+    {0, 0x1392680u, "40 53 48 83 EC 20 45 33 C9 48 8B DA 48 8B 15 ED A6 0E 02 41 8B C9 44 8B 82 80 2B 00 00 45 85 C0"},
+};
+static const ApcSignature kExeSignatures[] = {
+    {1, 0x31AF50u, "48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 40 48 8B 05 9E 52 6F 01 45 8B F9 41 8B F0"},
+    {1, 0x31B360u, "48 89 5C 24 08 57 48 83 EC 20 48 8B 1D 97 4E 6F 01 48 8B F9 48 8B 83 38 03 00 00 80 B8 80 14 00"},
+    {1, 0x31E030u, "4C 8B C2 8B D1 48 8B 0D CC 21 6F 01 48 8B 89 38 03 00 00 E9 48 B0 DE FF CC CC CC CC CC CC CC CC"},
 };
 
 static struct
@@ -86,7 +88,8 @@ static int AppPointer(uintptr_t app, uint32_t offset, uint32_t rva)
  * texture format size. */
 int apc_present_init(void)
 {
-    if (!apc_signatures_match(kSignatures, (int)(sizeof kSignatures / sizeof kSignatures[0])))
+    if (!apc_signatures_match(kSignatures, (int)(sizeof kSignatures / sizeof kSignatures[0])) ||
+        !apc_signatures_match(kExeSignatures, (int)(sizeof kExeSignatures / sizeof kExeSignatures[0])))
         return apc_fail("Image instruction mismatch");
     uintptr_t root = ApcGamePointer(APC_RVA_ROOT_API);
     if (!root) return apc_fail("assertion failed!");

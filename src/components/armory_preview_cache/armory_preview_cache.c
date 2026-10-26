@@ -11,11 +11,12 @@
  * Everything it changes it gives back: leases are released when the screen closes, the world changes or memory runs low,
  * and tiles go back to the native pipeline before a retained atlas is released.
  *
- * On HellForge. The Lua ran inside the game's Lua update: its step before the update below it (the binding check), its
- * frame after (the image tick, then a policy step every 50 ms). HellForge's game-thread tick runs once per frame before
- * the game's update, so each tick runs the previous frame's after-work, then this frame's step: each keeps its place
- * relative to the game's updates; only the render (if it falls between the game's update and the next tick) now comes
- * before the after-work, which matters for one frame when the game rebuilds a tile. The tick can start before
+ * On HellForge. The Lua ran in the game's Lua `update`: its step (the binding check) before the Lua updates below it in
+ * the chain, its frame (the image tick, then a policy step every 50 ms) after them, both before game.dll's frame update.
+ * The core's tick runs at the start of that update, the same point (vpm.h), so one tick runs the step and then the frame
+ * with the frame's dt: the handoffs and bindings land before game.dll's UI pass and the render, as in the Lua. (The Lua
+ * updates below the mod, other mods' and the game's own, now come before the step too; the thumbnail pipeline the step
+ * checks is game.dll's, which runs after.) The tick can start before
  * the game sets up its engine API (the Lua's first update came later): it waits for that pointer (one plain load per
  * frame, at most 600 s) before the checks the Lua made at its first update. The Lua's profile and settings lived in
  * %LOCALAPPDATA%: the profile is now %LOCALAPPDATA%\CowboyBingus\VanillaPlusMegapack\armory_preview_cache\
@@ -30,8 +31,9 @@
  * whose stop hands everything back), and a failed asset snapshot only waits ("waiting_for_ui"), as the Lua's pcall did.
  *
  * COST per frame (pinned by tests/components/armory_preview_cache_test.c; the Lua's pins are its tests/test_frame_budget.lua,
- * which counted a stand-in asset adapter without reads). Reads are HfApi.read (ReadProcessMemory); game.dll's statics
- * are plain loads (the Lua read them with ReadProcessMemory too).
+ * which counted a stand-in asset adapter without reads). A read is vpm_read, a guarded plain load (about 25 ns; the Lua's
+ * api.read was ReadProcessMemory, 1-2 us in game); game.dll's statics are plain loads (the Lua read those through
+ * ReadProcessMemory too).
  *   Idle (ship or mission with nothing held; images held outside a menu between memory polls): 1 read (the state stack;
  *   the globals block is a plain load), no Windows call. The Lua: 2 reads.
  *   Armory grid, nothing changed: nothing bound 8 reads (the Lua: 10), crops bound 17 (the Lua: 21); weapon pre-select 10
@@ -42,8 +44,9 @@
  *   preview ring); a lease taken or released 6 (the table before and after), the valid-lease check 3; the profile save
  *   after a menu closes (file I/O on that frame; 5 s throttle).
  *   A frame whose screen changed (a full image tick): the refresh, the decode (a grid: a column count per row, one read
- *   per tile), the setters for every tile with a crop, then the first binding check after it (7 reads per binding): 142
- *   reads on the first Armory frame of the test's 12-tile grid, a handoff included.
+ *   per tile), the setters for every tile with a crop; the next frame's binding check reads 7 per binding. The test's
+ *   12-tile grid: 53 reads on the first Armory frame (a handoff included), 200 and 98 on the next two (the binding
+ *   checks, a second full tick and the first step with its catalogue build), then 17.
  * Once per session: 20 code_matches (16 functions), 7 reads of the engine's application API, the profile read. Per
  * catalogue change: up to 1024 kit reads, the presets, the weapon table, the attachment rows and their package lookups. */
 #include <windows.h>
@@ -66,8 +69,6 @@ static struct
     double waited;                       /* for the engine API */
     unsigned long thread;
     double clock;
-    int has_previous;
-    float previous_dt;
     int thread_checked;
     double elapsed, memory_wait;
     int has_last;                        /* the Lua's last_s */
@@ -153,19 +154,37 @@ static int CodeMatches(int exe, uint32_t rva, const char* pattern)
     return vpm_exe() != 0 && rva < vpm_exe_size() && vpm_hf()->code_matches(vpm_exe() + rva, pattern);
 }
 
-/* Each signature as patterns of at most 128 bytes (HellForge's code_matches takes 256). */
+/* The next at most 128 bytes of an IDA-style pattern ("45 85 C0 ..."), as a pattern of their own; how many it took. */
+static uint32_t Chunk(const char* hex, size_t* at, char* out)
+{
+    uint32_t bytes = 0;
+    size_t n = 0;
+    while (hex[*at] != 0 && bytes < 128)
+    {
+        if (hex[*at] == ' ') { (*at)++; continue; }
+        if (n > 0) out[n++] = ' ';
+        out[n++] = hex[*at];
+        out[n++] = hex[*at + 1] != 0 ? hex[*at + 1] : '?';
+        *at += hex[*at + 1] != 0 ? 2 : 1;
+        bytes++;
+    }
+    out[n] = 0;
+    return bytes;
+}
+
+/* Each signature in patterns of at most 128 bytes (HellForge's code_matches takes 256). */
 int apc_signatures_match(const ApcSignature* signatures, int count)
 {
-    char pattern[2 * 128 + 1];
+    char pattern[3 * 128 + 1];
     for (int i = 0; i < count; i++)
     {
-        size_t bytes = strlen(signatures[i].hex) / 2;
-        for (size_t at = 0; at < bytes; at += 128)
+        size_t at = 0;
+        for (uint32_t offset = 0;;)
         {
-            size_t take = bytes - at < 128 ? bytes - at : 128;
-            memcpy(pattern, signatures[i].hex + at * 2, take * 2);
-            pattern[take * 2] = 0;
-            if (!CodeMatches(signatures[i].exe, signatures[i].rva + (uint32_t)at, pattern)) return 0;
+            uint32_t bytes = Chunk(signatures[i].hex, &at, pattern);
+            if (bytes == 0) break;
+            if (!CodeMatches(signatures[i].exe, signatures[i].rva + offset, pattern)) return 0;
+            offset += bytes;
         }
     }
     return 1;
@@ -529,17 +548,16 @@ static void Failed(void)
     if (s.errors >= ERRORS_STOP) vpm_fail(s.self, "stopped after %d errors: %s", ERRORS_STOP, s.burst);
 }
 
-/* lint: per-frame */
+/* The Lua's update: its step, then (after the Lua updates below it, which came before this point too) its frame. lint:
+ * per-frame */
 static void Tick(VpmComponent* self, float dt)
 {
     s.clock += dt;
     s.failed = 0;
     apc_error_clear();
-    if (s.has_previous && !Frame(s.previous_dt)) Failed();
-    if (!vpm_running(self)) return;
-    s.has_previous = 1;
-    s.previous_dt = dt;
     if (!Step()) Failed();
+    if (!vpm_running(self)) return;
+    if (!Frame(dt)) Failed();
     if (!vpm_running(self) || s.failed) return;
     if (++s.clean_run == CLEAN_FRAMES) s.errors = 0;
 }

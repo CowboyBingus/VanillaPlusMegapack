@@ -61,8 +61,8 @@
 static inline uint32_t ApcU32(const void* bytes, size_t at) { uint32_t v; memcpy(&v, (const uint8_t*)bytes + at, 4); return v; }
 static inline uint64_t ApcU64(const void* bytes, size_t at) { uint64_t v; memcpy(&v, (const uint8_t*)bytes + at, 8); return v; }
 static inline float ApcF32(const void* bytes, size_t at) { float v; memcpy(&v, (const uint8_t*)bytes + at, 4); return v; }
-/* api.pointer's test: a user-mode address, not a small number. */
-static inline int ApcPlausible(uint64_t v) { return v >= 0x10000u && v < 0x800000000000ull; }
+/* api.pointer's test: a user-mode address, not a small number (the core's vpm_plausible). */
+static inline int ApcPlausible(uint64_t v) { return vpm_plausible((uintptr_t)v); }
 static inline uintptr_t ApcPointer(const void* bytes, size_t at) { uint64_t v = ApcU64(bytes, at); return ApcPlausible(v) ? (uintptr_t)v : 0; }
 static inline uintptr_t ApcGamePointer(uint32_t rva) { uint64_t v = vpm_game_u64(rva); return ApcPlausible(v) ? (uintptr_t)v : 0; }
 static inline int ApcFinite(double n) { return n == n && n < 1000000.0 && n > -1000000.0; }
@@ -76,7 +76,9 @@ void apc_error_clear(void);
 /* A heap read as the Lua's api.read made it (1 .. 32768 bytes), and the same read that fails with message. */
 int apc_read(uintptr_t address, void* out, size_t size);
 int apc_need(uintptr_t address, void* out, size_t size, const char* message);
-/* The code-byte checks: hex text ("4585c00f..."), split into patterns HellForge's code_matches takes (256 bytes). */
+/* The code-byte checks: the Lua's signature lists as IDA-style patterns ("45 85 C0 ..."; game.dll's and the exe's in
+ * arrays of their own, the form scripts/check_code_pins.py reads), checked through code_matches in parts of at most 128
+ * bytes (HellForge's code_matches takes 256). */
 typedef struct ApcSignature { int exe; uint32_t rva; const char* hex; } ApcSignature;
 int apc_signatures_match(const ApcSignature* signatures, int count);
 
