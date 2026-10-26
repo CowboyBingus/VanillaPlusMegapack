@@ -996,6 +996,165 @@ static void PageCheckedPerBinding(void)
     CHECK_LOG("is not private read-write memory (state 0x1000, protection 0x40, type 0x20000)");
 }
 
+/* ---- the detailed lines (the pack's Diagnostics option) and the mark's describe line ------------------------- */
+
+static VpmOption* PackOption(const char* id)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack() && strcmp(vpm_option_def(vpm_option_at(i))->id, id) == 0)
+            return vpm_option_at(i);
+    return NULL;
+}
+
+static void Diagnostics(int detailed) { CHECK(vpm_option_apply(PackOption("diagnostics"), detailed ? 2 : 1)); }
+
+/* Fire held with another weapon, then an Arc Thrower press: two shots, two stalls, an input gap, a moved entry, the
+ * release; a mission's end and start; a cleared record flag; the game's entity data reloaded. */
+static void DetailScenario(void)
+{
+    w.k.down = 1;
+    Ticks(5);
+    w.k.down = 0;
+    Frame();
+    w.k.arc = w.k.down = 1;
+    Frame();
+    for (int shot = 0; shot < 2; shot++)
+    {
+        w.k.charge = 0.8f;
+        Frame();
+        w.k.charge = 0;
+        Frame();
+    }
+    w.k.command = 0;
+    Ticks(280);
+    InputGone();
+    Frame();
+    InputBack();
+    Frame();
+    Relocate();
+    Frame();
+    w.k.relocated = 0;
+    w.k.down = 0;
+    Frame();
+    w.k.mission = 0;
+    Settle();
+    w.k.mission = 1;
+    Settle();
+    w.record[AUTO_FIRE] = 0;
+    Settle();
+    w.record2 = MakeRecord();
+    w.identity = w.record2;
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    Mirror();
+}
+
+static const char* const kDetailLines[] = {
+    "[Arc Thrower Revamped] idle: waiting for the engine fire command\n",
+    "[Arc Thrower Revamped] assist armed: entity 0x",
+    "[Arc Thrower Revamped] charge entry 0x",
+    "[Arc Thrower Revamped] shot 1 (charge 0.800 -> 0.000, interval n/a)\n",
+    "[Arc Thrower Revamped] shot 2 (charge 0.800 -> 0.000, interval 0.020)\n",
+    ") - checking the current binding (#2)\n",
+    "[Arc Thrower Revamped] no charge progress for ",
+    "[Arc Thrower Revamped] charge record lookup 2: the record found is the one already patched",
+    "[Arc Thrower Revamped] idle: native Fire input unavailable\n",
+    "[Arc Thrower Revamped] charge entry moved: 0x",
+    "[Arc Thrower Revamped] released after 2 shot(s); interval min 0.020 mean 0.020 max 0.020 (1)\n",
+    "[Arc Thrower Revamped] mission ended: holds=1 stalls=2 record lookups=2 record repairs=0 (this session)\n",
+    "[Arc Thrower Revamped] mission started\n",
+    "[Arc Thrower Revamped] the charge record's auto-fire flag was clear: set again (repair 1)\n",
+    "[Arc Thrower Revamped] the game reloaded its entity data: the charge record is looked up again\n",
+    "[Arc Thrower Revamped] charge record at 0x",
+};
+
+static void DetailedLines(void)
+{
+    for (int detailed = 0; detailed < 2; detailed++)
+    {
+        fake_setup();
+        Running();
+        Diagnostics(detailed);
+        fake_log_clear();
+        DetailScenario();
+        CHECK_LOG("stalled (peak 0.000) - checking the current binding (#1); logged once per session");
+        for (int i = 0; i < (int)(sizeof kDetailLines / sizeof kDetailLines[0]); i++)
+        {
+            if (detailed) CHECK_LOG(kDetailLines[i]);
+            else CHECK_NO_LOG(kDetailLines[i]);
+        }
+        CHECK_EQ(w.wrong, 0);
+        CHECK(vpm_running(fake_component(0)));
+    }
+}
+
+/* Idle ticks (Fire up in a mission, its check and poll frames; the ship) keep their reads and log nothing in either
+ * mode; so do the ticks of a hold that changes nothing. */
+static void DetailedIdleFrames(void)
+{
+    uint32_t reads[2] = {0, 0};
+    for (int detailed = 0; detailed < 2; detailed++)
+    {
+        fake_setup();
+        Running();
+        Diagnostics(detailed);
+        Settle();
+        for (int i = 0; i < 300; i++)
+        {
+            FakeCounts c = Pin();
+            CHECK_EQ(c.log + c.write + c.other, 0);
+            reads[detailed] += c.read;
+        }
+        w.k.arc = w.k.engineFlag = w.k.down = 1;
+        Frame();
+        for (int i = 0; i < 30; i++) CHECK_EQ(Pin().log, 0); /* held, the engine's flag set: nothing changes */
+        w.k.down = w.k.engineFlag = 0;
+        Frame();
+        w.k.mission = 0;
+        Settle();
+        for (int i = 0; i < 300; i++)
+        {
+            FakeCounts c = Pin();
+            CHECK_EQ(c.log + c.write + c.other, 0);
+            reads[detailed] += c.read;
+        }
+    }
+    CHECK_EQ(reads[0], reads[1]);
+}
+
+/* Many presses in a short time: the limiter's 20 lines per 600 ticks, then its count of the lines left out. */
+static void DetailedLinesThroughTheLimiter(void)
+{
+    Running();
+    Diagnostics(1);
+    w.k.arc = 1;
+    for (int i = 0; i < 10; i++)
+    {
+        w.k.down = 1;
+        Frame();
+        w.k.down = 0;
+        Frame();
+    }
+    CHECK_NO_LOG("detailed lines suppressed");
+    Ticks(600);
+    w.k.down = 1;
+    Frame();
+    CHECK_LOG(" detailed lines suppressed (at most 20 per 600 frames)\n[Arc Thrower Revamped] assist armed: entity 0x");
+}
+
+/* The mark's line: the status, then the describe text. */
+static void MarkDescribes(void)
+{
+    Running();
+    w.k.arc = w.k.down = 1;
+    Frame();
+    fake_log_clear();
+    CHECK(vpm_option_apply(PackOption("note_problem"), 1));
+    CHECK_LOG("[core] MARK 1: Arc Thrower Revamped: running | in a mission; charge record 0x");
+    CHECK_LOG(" patched; hold armed (entity 0x");
+    CHECK_LOG("); Fire slot 0x");
+    CHECK_LOG("; holds=1 stalls=0 lookups=1 repairs=0\n");
+}
+
 int main(void)
 {
     RUN(PatchesTheRecordAtLoad);
@@ -1023,5 +1182,9 @@ int main(void)
     RUN(DenseTriggerTable);
     RUN(EntryRefused);
     RUN(PageCheckedPerBinding);
+    RUN(DetailedLines);
+    RUN(DetailedIdleFrames);
+    RUN(DetailedLinesThroughTheLimiter);
+    RUN(MarkDescribes);
     TEST_END();
 }
