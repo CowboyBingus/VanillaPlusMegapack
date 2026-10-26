@@ -77,10 +77,11 @@ void apc_error_clear(void);
 int apc_read(uintptr_t address, void* out, size_t size);
 int apc_need(uintptr_t address, void* out, size_t size, const char* message);
 /* The code-byte checks: the Lua's signature lists as IDA-style patterns ("45 85 C0 ..."; game.dll's and the exe's in
- * arrays of their own, the form scripts/check_code_pins.py reads), checked through code_matches in parts of at most 128
- * bytes (HellForge's code_matches takes 256). */
+ * arrays of their own, the form scripts/check_code_pins.py reads), handed to the core's wait for decoded code
+ * (vpm_when_code_ready) in parts of at most 128 bytes (HellForge's code_matches takes 256), at start-up. */
 typedef struct ApcSignature { int exe; uint32_t rva; const char* hex; } ApcSignature;
-int apc_signatures_match(const ApcSignature* signatures, int count);
+const ApcSignature* apc_native_signatures(int* count);
+const ApcSignature* apc_present_signatures(int exe, int* count);
 
 /* ---- the open-addressing maps (u64 key -> u64 value) the Lua's tables became -------------------------------- */
 

@@ -18,7 +18,11 @@
  * updates below the mod, other mods' and the game's own, now come before the step too; the thumbnail pipeline the step
  * checks is game.dll's, which runs after.) The tick can start before
  * the game sets up its engine API (the Lua's first update came later): it waits for that pointer (one plain load per
- * frame, at most 600 s) before the checks the Lua made at its first update. The Lua's profile and settings lived in
+ * frame, at most 600 s) before the checks the Lua made at its first update. The code-byte checks among them are the
+ * core's wait (vpm_when_code_ready, from HF_EVENT_GAME_LOADED): game.dll's code is decoded in parts after that event,
+ * and the first tick comes right after it; the tick does nothing until every signature reads as shipped (checked again
+ * every 30 frames; the core stops the component, naming the instruction, if they do not within 60 s, before anything
+ * was leased or bound). The Lua's profile and settings lived in
  * %LOCALAPPDATA%: the profile is now ArmoryPreviewCache.profile in the component's data folder (vpm_data_folder:
  * %LOCALAPPDATA%\CowboyBingus\VanillaPlusMegapack\armory_preview_cache, HellForge's LOCALAPPDATA), the settings (prewarm, images) are keys of
  * the pack's settings file ([armory_preview_cache]), "enabled" is the component's switch. verify_gate (a developer
@@ -58,8 +62,10 @@
  *   per tile), the setters for every tile with a crop; the next frame's binding check reads 7 per binding. The test's
  *   12-tile grid: 53 reads on the first Armory frame (a handoff included), 200 and 98 on the next two (the binding
  *   checks, a second full tick and the first step with its catalogue build), then 17.
- * Once per session: 20 code_matches (16 functions), 7 reads of the engine's application API, the profile read. Per
- * catalogue change: up to 1024 kit reads, the presets, the weapon table, the attachment rows and their package lookups. */
+ * Once per session: 20 code_matches (16 functions) at HF_EVENT_GAME_LOADED (again every 30 frames while the code is not
+ * decoded, at most 60 s; the tick reads nothing meanwhile), 7 reads of the engine's application API, the profile read.
+ * Per catalogue change: up to 1024 kit reads, the presets, the weapon table, the attachment rows and their package
+ * lookups. */
 #include <windows.h>
 #include <stdio.h>
 #include "apc.h"
@@ -76,6 +82,7 @@ static struct
 {
     VpmComponent* self;
     int prewarm, images;                 /* the settings */
+    int code_ready;                      /* every signature read as shipped (the core's wait) */
     int started, ready, policy_ready, profile_loaded;
     double waited;                       /* for the engine API */
     unsigned long thread;
@@ -160,11 +167,6 @@ int apc_map_get(const ApcMap* map, uint64_t key, uint64_t* value)
     return 0;
 }
 
-static int CodeMatches(int exe, uint32_t rva, const char* pattern)
-{
-    return exe ? vpm_exe_code_matches(rva, pattern) : vpm_game_code_matches(rva, pattern);
-}
-
 /* The next at most 128 bytes of an IDA-style pattern ("45 85 C0 ..."), as a pattern of their own; how many it took. */
 static uint32_t Chunk(const char* hex, size_t* at, char* out)
 {
@@ -183,22 +185,47 @@ static uint32_t Chunk(const char* hex, size_t* at, char* out)
     return bytes;
 }
 
-/* Each signature in patterns of at most 128 bytes (HellForge's code_matches takes 256). */
-int apc_signatures_match(const ApcSignature* signatures, int count)
+/* The signatures as the core's wait checks them: each in patterns of at most 128 bytes (HellForge's code_matches takes
+ * 256), in the Lua's order, named for the refusal ("Native instruction changed (game.dll 0x12FE361)"). */
+#define MAX_PINS 32
+static VpmCodePin g_pins[MAX_PINS];
+static char g_pinText[MAX_PINS][3 * 128 + 1];
+static int g_pinCount;
+
+/* 1, or 0 when they do not fit (not with the pack's lists). */
+static int AddPins(const ApcSignature* signatures, int count, const char* name)
 {
-    char pattern[3 * 128 + 1];
     for (int i = 0; i < count; i++)
     {
         size_t at = 0;
         for (uint32_t offset = 0;;)
         {
+            if (g_pinCount >= MAX_PINS) return 0;
+            char* pattern = g_pinText[g_pinCount];
             uint32_t bytes = Chunk(signatures[i].hex, &at, pattern);
             if (bytes == 0) break;
-            if (!CodeMatches(signatures[i].exe, signatures[i].rva + offset, pattern)) return 0;
+            g_pins[g_pinCount] = (VpmCodePin){signatures[i].rva + offset, pattern, name, signatures[i].exe ? VPM_PIN_EXE : 0u};
+            g_pinCount++;
             offset += bytes;
         }
     }
     return 1;
+}
+
+static void CodeReady(VpmComponent* self, HfEvent event) { s.code_ready = 1; }
+
+/* Every signature the Lua checked (the image ones with images on) handed to the core's wait. 1, or 0 refused. */
+static int WaitForCode(VpmComponent* self)
+{
+    int native = 0, game = 0, exe = 0;
+    const ApcSignature* nativeSignatures = apc_native_signatures(&native);
+    const ApcSignature* gameSignatures = apc_present_signatures(0, &game);
+    const ApcSignature* exeSignatures = apc_present_signatures(1, &exe);
+    g_pinCount = 0;
+    if (!AddPins(nativeSignatures, native, "Native instruction")) return 0;
+    if (s.images && (!AddPins(gameSignatures, game, "Image instruction") || !AddPins(exeSignatures, exe, "Image instruction")))
+        return 0;
+    return vpm_when_code_ready(self, g_pins, g_pinCount, CodeReady);
 }
 
 void apc_set_memory_source(ApcMemoryFn fn) { g_memory = fn; }
@@ -380,10 +407,11 @@ static int Initialize(void)
     return 1;
 }
 
-/* The engine API's root and the application table it points at: set up by the game, maybe after the first tick.
- * 1 initialized, 0 waiting, -1 stopped. */
+/* The engine API's root and the application table it points at: set up by the game, maybe after the first tick; and
+ * the code checked (the core's wait). 1 initialized, 0 waiting, -1 stopped. */
 static int StartWhenReady(double dt)
 {
+    if (!s.code_ready) return 0;
     uintptr_t root = ApcGamePointer(APC_RVA_ROOT_API);
     int waiting = root == 0 || (root == vpm_exe() + APC_EXE_ROOT_API && vpm_exe_u64(APC_EXE_ROOT_API + 16) == 0);
     if (waiting)
@@ -611,6 +639,7 @@ static int Start(VpmComponent* self)
     apc_policy_reset(s.prewarm);
     vpm_set_status(self, "starting");
     s.status = "starting";
+    if (!WaitForCode(self)) return vpm_fail(self, "game.dll's code checks refused");
     return vpm_tick_start(self, Tick) ? 0 : vpm_fail(self, "the game thread could not be reached");
 }
 
