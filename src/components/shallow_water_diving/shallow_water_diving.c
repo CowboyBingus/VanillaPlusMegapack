@@ -62,7 +62,8 @@
  * - a dive not assisted (deep water): 24 + 24 reads per frame [62];
  * - a stop with a lease held: 27 reads, 1 page check, 1 store.
  * The 1:1 port made the tick's share alone (idle in a mission 1 read, a dive held 24): the post check's reads are the
- * Lua's second boundary, back where it watched, at about 25 ns per read where the Lua's ReadProcessMemory cost 1-2 us.
+ * Lua's second boundary, back where it watched, guarded plain loads (unmeasured in game) where the Lua's
+ * ReadProcessMemory cost 1-2 us.
  * The post tick costs the core a guarded call and two time-stamp reads per frame while it runs; nothing while it is
  * stopped. No Windows call on a frame that does not act (the page check runs only right before a dive's first write in
  * a table), no allocation (all state is static), no logging (an error's first line in a burst only). Once: the option's

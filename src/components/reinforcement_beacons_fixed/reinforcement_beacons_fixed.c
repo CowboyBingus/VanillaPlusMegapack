@@ -65,9 +65,9 @@
  *   the Lua: 25).
  * - The landing's frame: the last full snapshot (4 co-op, 5 solo), which stops the post check.
  * The 1:1 port made the tick's share alone (a queued frame 10 reads); the post check's share is the Lua's second check,
- * back under its own condition, at about 25 ns per read where the Lua's ReadProcessMemory cost 1-2 us. The post tick
- * costs the core a guarded call and two time-stamp reads per frame while it runs; nothing between deaths. No
- * allocation; one log line per status change only. Once: the tick starts at HF_EVENT_GAME_LOADED. */
+ * back under its own condition, guarded plain loads (unmeasured in game) where the Lua's ReadProcessMemory cost 1-2 us.
+ * The post tick costs the core a guarded call and two time-stamp reads per frame while it runs; nothing between deaths.
+ * No allocation; one log line per status change only. Once: the tick starts at HF_EVENT_GAME_LOADED. */
 #include <stdio.h>
 #include <string.h>
 #include "../../core/vpm.h"

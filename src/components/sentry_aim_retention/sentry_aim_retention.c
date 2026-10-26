@@ -50,10 +50,10 @@
  * Later improvement, not built: detours of the targeting update and the Gatling and machine gun fire handlers would
  * remove the per-frame polling.
  *
- * Cost (heap reads are vpm_read, guarded plain loads of about 25 ns, where the Lua's were ReadProcessMemory; plain loads
- * and the game's functions are not reads), pinned by the test. The Lua's numbers are its test_snapshot.lua pins per
- * frame, read and read_into together, which leave out its pose and terrain reads (natives in its fixture: 7 and 4 more
- * per check).
+ * Cost (heap reads are vpm_read, guarded plain loads with no Windows call (unmeasured in game), where the Lua's were
+ * ReadProcessMemory; plain loads and the game's functions are not reads), pinned by the test. The Lua's numbers are its
+ * test_snapshot.lua pins per frame, read and read_into together, which leave out its pose and terrain reads (natives in
+ * its fixture: 7 and 4 more per check).
  * - Waiting, no sentry this machine controls: no call on most frames, no post-update tick. On the ship the mission
  *   check reads the mode record on every 60th frame: 1 read (the Lua: 2). In a mission every 30th check classifies
  *   every targeting entry again: the registry header, a read per 256 entries and one per entity header, 3 for one

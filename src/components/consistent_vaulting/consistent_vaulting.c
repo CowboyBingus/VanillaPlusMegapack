@@ -60,8 +60,9 @@
  * Detours on the selector (game.dll 0xA9E450) and the settings lookup would replace the per-frame checks: a later
  * improvement, not built.
  *
- * COST (tests/components/consistent_vaulting_test.c pins each count; reads are vpm_read, guarded plain loads of about
- * 25 ns, and the Lua's are its frame_budget pins of read + read_into, each one ReadProcessMemory; VQ is VirtualQuery):
+ * COST (tests/components/consistent_vaulting_test.c pins each count; reads are vpm_read, guarded plain loads with no
+ * Windows call (unmeasured in game), and the Lua's are its frame_budget pins of read + read_into, each one
+ * ReadProcessMemory; VQ is VirtualQuery):
  * - Idle frames, with the idle gate: outside a mission 59 of 60 frames no call, the 60th 1 read (Lua 2: the mode
  *   pointer is a plain load now); in a mission 9 of 10 frames 1 read (the input byte at the kept avatar index), the
  *   10th 6 reads (Lua 7). No VQ, no write, no native call, no allocation, no log, no post-update tick (pinned with and

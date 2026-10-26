@@ -108,9 +108,9 @@ uint64_t vpm_game_u64(uint32_t rva);
 uint32_t vpm_game_u32(uint32_t rva);
 uint64_t vpm_exe_u64(uint32_t rva);
 
-/* Heap reads: 1 read, 0 not (outside the user-mode range, unmapped, no-access or guard page). Plain loads under a guard of
- * their own: a bad pointer fails the read, never the game, and stops nothing; about 25 ns where the Lua's
- * ReadProcessMemory cost 1-2 us in game. */
+/* Heap reads: 1 read, 0 not (outside the user-mode range, unmapped, no-access or guard page). Plain loads under a guard
+ * of their own: a bad pointer fails the read, never the game, and stops nothing; no Windows call (unmeasured in game;
+ * about 25 ns in the test process) where the Lua's ReadProcessMemory cost 1-2 us in game. */
 int vpm_read(uintptr_t address, void* out, size_t size);
 int vpm_read_u8(uintptr_t address, uint8_t* out);
 int vpm_read_u16(uintptr_t address, uint16_t* out);

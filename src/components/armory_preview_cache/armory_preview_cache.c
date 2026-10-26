@@ -41,10 +41,10 @@
  * reads the catalogues) its cached image. The log says how many rows were skipped, once per count (a new count when
  * HellForge loads its data again). Skipping reads nothing more: the tables are read whole, as before.
  *
- * COST per frame (pinned by tests/components/armory_preview_cache_test.c; the Lua's pins are its tests/test_frame_budget.lua,
- * which counted a stand-in asset adapter without reads). A read is vpm_read, a guarded plain load (about 25 ns; the Lua's
- * api.read was ReadProcessMemory, 1-2 us in game); game.dll's statics are plain loads (the Lua read those through
- * ReadProcessMemory too).
+ * COST per frame (pinned by tests/components/armory_preview_cache_test.c; the Lua's pins are its
+ * tests/test_frame_budget.lua, which counted a stand-in asset adapter without reads). A read is vpm_read, a guarded
+ * plain load (no Windows call, unmeasured in game; the Lua's api.read was ReadProcessMemory, 1-2 us in game);
+ * game.dll's statics are plain loads (the Lua read those through ReadProcessMemory too).
  *   Idle (ship or mission with nothing held; images held outside a menu between memory polls): 1 read (the state stack;
  *   the globals block is a plain load), no Windows call. The Lua: 2 reads.
  *   Armory grid, nothing changed: nothing bound 8 reads (the Lua: 10), crops bound 17 (the Lua: 21); weapon pre-select 10
