@@ -8,7 +8,9 @@ param([switch]$Test,[string]$Only,[string]$HellForge=$env:HELLFORGE_OPEN,[string
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $root=Split-Path -Parent $PSScriptRoot
+# The HellForge folder holding sdk-dev/ and HellForge-Open/: this repository's parent, or a parent of a worktree of it.
 $workspace=Split-Path -Parent $root
+foreach($up in 1..3){if(Test-Path -LiteralPath (Join-Path $workspace 'sdk-dev/HellForge-Open')){break};$workspace=Split-Path -Parent $workspace}
 if(-not $HellForge){$HellForge=Join-Path $workspace 'sdk-dev/HellForge-Open'}
 $sdk=Join-Path $HellForge 'native/mod-sdk'
 if(-not(Test-Path -LiteralPath (Join-Path $sdk 'hellforge_mod.h'))){throw "No HellForge mod SDK at $sdk (pass -HellForge <HellForge-Open checkout>)."}
