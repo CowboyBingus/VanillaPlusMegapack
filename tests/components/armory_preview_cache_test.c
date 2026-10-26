@@ -1743,6 +1743,142 @@ static void DependenciesBesideOverBound(void)
     CHECK_EQ(strcmp(vpm_status(C()), "resident"), 0);
 }
 
+
+/* ---- diagnostics: the Detailed mode's lines and the tester's mark ------------------------------------------------ */
+
+/* The pack's own option (Diagnostics, Note a problem now), by id. */
+static VpmOption* PackOption(const char* id)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack() && strcmp(vpm_option_def(vpm_option_at(i))->id, id) == 0)
+            return vpm_option_at(i);
+    return NULL;
+}
+
+/* Diagnostics: 1 Normal, 2 Detailed (applied as the player applies it). */
+static void Diagnostics(int mode)
+{
+    VpmOption* option = PackOption("diagnostics");
+    CHECK(option != NULL && vpm_option_apply(option, mode));
+}
+
+static void MissionEnds(void)
+{
+    HfStateEvent end = {{sizeof end, HF_ON_MISSION_END, 1}, HF_STATE_MISSION, HF_STATE_SHIP};
+    fake_emit(&end.info);
+}
+
+/* A visit, its steady frames, leaving, a new thumbnail manager and a mission's end, in a Diagnostics mode. */
+static void DiagnosedVisit(int mode)
+{
+    BuildWorld();
+    ForgetProfile();
+    Boot();
+    Diagnostics(mode);
+    Frames(12);
+    Top(5, 1);
+    Frames(60);
+    int logged = 0;
+    for (int i = 0; i < 30; i++) logged += (int)Frame().log; /* nothing changes: no line */
+    CHECK_EQ(logged, 0);
+    Top(3, 1);
+    Frames(30);
+    uint8_t* copy = fake_heap(APC_MANAGER_SIZE);
+    memcpy(copy, w.manager, APC_MANAGER_SIZE);
+    Put64(Game(APC_RVA_GLOBALS), P(copy));
+    Frames(2);
+    CHECK_EQ(apc_images_stats()->clear_count, 1);
+    MissionEnds();
+}
+
+static const char* const kVisitLines[] = {
+    "[Armory Preview Cache] images: showing_retained_images on the Armory grid; 1 atlases held (",
+    "[Armory Preview Cache] state: thumbnail manager 0x",
+    "; screen kind 224, world 0x",
+    "[Armory Preview Cache] asset snapshot: top 5, 18 items, menu 1, ",
+    "[Armory Preview Cache] images cleared (thumbnail_manager_changed): every tile back to the game, retained atlases released",
+    "[Armory Preview Cache] at the mission's end: steps ",
+    " reused; leases 0 held, 18 taken, 18 released, ",
+};
+
+static void DetailedModeLogsTheDiagnosticsDump(void)
+{
+    DiagnosedVisit(2);
+    for (size_t i = 0; i < sizeof kVisitLines / sizeof kVisitLines[0]; i++) CHECK_LOG(kVisitLines[i]);
+    CHECK_LOG("images 1 retained, 1 released, 0 evicted, ");
+    CHECK_LOG(" 1 clears, 0 atlases held; memory guard 0 trips; errors 0\n");
+    CHECK_LOG("menu closed: leases 18 taken, 18 released, "); /* the lines every log has are there as before */
+}
+
+static void NormalModeLogsNoneOfThem(void)
+{
+    DiagnosedVisit(1);
+    for (size_t i = 0; i < sizeof kVisitLines / sizeof kVisitLines[0]; i++) CHECK_NO_LOG(kVisitLines[i]);
+    CHECK_NO_LOG("images: ");
+    CHECK_NO_LOG("asset snapshot");
+    CHECK_NO_LOG("detailed lines suppressed");
+    CHECK_LOG("menu closed: leases 18 taken, 18 released, ");
+}
+
+/* Idle frames in Detailed mode: the Normal pins (1 read, no log, no memory poll), on the ship and in a mission. */
+static void IdlesOnTheShipInDetailedMode(void)
+{
+    BuildWorld();
+    ForgetProfile();
+    Boot();
+    Diagnostics(2);
+    Frames(12);
+    for (int i = 0; i < 240; i++)
+    {
+        FakeCounts c = Frame();
+        CHECK_EQ(c.read, 1);
+        CHECK_EQ(c.log + c.write + c.code_matches + e.polls, 0);
+    }
+    Top(20, 2);
+    Frames(12);
+    for (int i = 0; i < 60; i++)
+    {
+        FakeCounts c = Frame();
+        CHECK_EQ(c.read, 1);
+        CHECK_EQ(c.log + e.polls, 0);
+    }
+}
+
+/* Visits in quick succession: the limiter keeps 20 lines a window and says how many it left out (at the mission's end
+ * when no line follows). */
+static void QuickVisitsHitTheLimiter(void)
+{
+    Visit();
+    Diagnostics(2);
+    for (int i = 0; i < 12; i++)
+    {
+        Top(3, 1);
+        Frames(10);
+        Top(5, 1);
+        Frames(10);
+    }
+    MissionEnds();
+    CHECK_LOG(" detailed lines suppressed (at most 20 per 600 frames)");
+}
+
+/* "Note a problem now": the mark carries the describe line. */
+static void DescribeInTheMark(void)
+{
+    Visit();
+    VpmOption* note = PackOption("note_problem");
+    CHECK(note != NULL && vpm_option_apply(note, 1));
+    CHECK_LOG("MARK 1: Armory Preview Cache: resident | resident; images showing_retained_images on the Armory grid, 1 "
+              "atlases (");
+    CHECK_LOG(" KiB); leases 18 held, 18 learned; memory guard 0 trips; errors 0\n");
+    /* before the engine API: where start-up waits */
+    fake_setup();
+    BuildWorld();
+    Put64(Game(APC_RVA_ROOT_API), 0);
+    Boot();
+    CHECK(vpm_option_apply(PackOption("note_problem"), 1));
+    CHECK_LOG("MARK 1: Armory Preview Cache: starting | waiting for the engine API\n");
+}
+
 int main(void)
 {
     RUN(IdlesOnTheShip);
@@ -1785,5 +1921,10 @@ int main(void)
     RUN(BriefingLoadout);
     RUN(WeaponDependencies);
     RUN(DependenciesBesideOverBound);
+    RUN(DetailedModeLogsTheDiagnosticsDump);
+    RUN(NormalModeLogsNoneOfThem);
+    RUN(IdlesOnTheShipInDetailedMode);
+    RUN(QuickVisitsHitTheLimiter);
+    RUN(DescribeInTheMark);
     TEST_END();
 }

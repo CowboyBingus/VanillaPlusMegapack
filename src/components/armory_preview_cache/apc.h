@@ -374,6 +374,7 @@ typedef struct ApcImageStats
     uint64_t bytes;
     const char* status;
     int screen;
+    const char* last_clear_reason;       /* why the last clear that held atlases ran (the Lua's image_last_clear_reason) */
 } ApcImageStats;
 void apc_images_reset(int enabled);
 int apc_images_enabled(void);

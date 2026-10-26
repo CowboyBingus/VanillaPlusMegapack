@@ -26,9 +26,19 @@
  * %LOCALAPPDATA%: the profile is now ArmoryPreviewCache.profile in the component's data folder (vpm_data_folder:
  * %LOCALAPPDATA%\CowboyBingus\VanillaPlusMegapack\armory_preview_cache, HellForge's LOCALAPPDATA), the settings (prewarm, images) are keys of
  * the pack's settings file ([armory_preview_cache]), "enabled" is the component's switch. verify_gate (a developer
- * check), the diagnostics log file, the shutdown cleanup (HellForge has no shutdown event) and the update-chain pause
- * (no update chain) are not ported. Memory telemetry reads GlobalMemoryStatusEx only (the Lua's process memory read fed
+ * check), the shutdown cleanup (HellForge has no shutdown event) and the update-chain pause (no update chain) are not
+ * ported. Memory telemetry reads GlobalMemoryStatusEx only (the Lua's process memory read fed
  * the diagnostics log only). The session clock is the sum of the frames' dt (the Lua read GetTickCount).
+ *
+ * Diagnostics. The Lua's diagnostics log (ArmoryPreviewCache.log, a state dump rewritten every 2 s while
+ * CowboyBingusDiagnostics was set) comes back as the pack's Detailed mode (vpm_log_detail), as lines on change from
+ * frames that already act: the image cache's status and screen, a clear that released atlases and why (the Lua's
+ * image_last_clear_reason), the state view's objects when the thumbnail manager, the screen kind or the world changed
+ * (the pointers found), an asset snapshot read afresh when what it says changed (top, items, menu, prefetch, active,
+ * blocked, world), and at each mission's end the dump's counters (steps, leases, images, the memory guard, errors).
+ * Left out: the dump's process id and creation time, its constant lines (max_packages, the removed disk cache) and the
+ * frame count (a store on every frame, idle ones included). describe gives start-up, the policy status, the images, the
+ * leases and the guard.
  *
  * Errors. Every check the Lua asserted fails the same way here: the frame's work stops, the error counts as the Lua's
  * update guard counted it (the first of a burst is logged; 8 without 3600 clean frames between them stop the component,
@@ -62,6 +72,8 @@
  *   per tile), the setters for every tile with a crop; the next frame's binding check reads 7 per binding. The test's
  *   12-tile grid: 53 reads on the first Armory frame (a handoff included), 200 and 98 on the next two (the binding
  *   checks, a second full tick and the first step with its catalogue build), then 17.
+ *   Detailed mode: idle frames unchanged (the gate reads nothing new and checks no mode); a working frame +1 global read
+ *   (and in Detailed mode the comparisons above, a line only on change); a 50 ms step that read a snapshot +1.
  * Once per session: 20 code_matches (16 functions) at HF_EVENT_GAME_LOADED (again every 30 frames while the code is not
  * decoded, at most 60 s; the tick reads nothing meanwhile), 7 reads of the engine's application API, the profile read.
  * Per catalogue change: up to 1024 kit reads, the presets, the weapon table, the attachment rows and their package
@@ -77,6 +89,21 @@
 #define ERRORS_STOP 8
 #define CLEAN_FRAMES 3600
 #define WAIT_SECONDS 600.0
+
+/* Detailed mode: what the lines below last said, so each is logged on change only. */
+typedef struct ApcDetail
+{
+    const char* image_status;
+    int image_screen;
+    uint32_t clears;
+    int has_state;
+    uintptr_t tm, world;
+    uint32_t kind;
+    int has_snap;
+    int32_t top;
+    int items, menu, prefetch, active, blocked;
+    uint64_t world_id;
+} ApcDetail;
 
 static struct
 {
@@ -107,6 +134,8 @@ static struct
     const char* status;
     int was_open;
     uint32_t skipped_weapons, skipped_configurations; /* the last counts logged */
+    uint32_t steps_full, steps_reused;   /* the 50 ms steps that read a snapshot, and those that reused one */
+    ApcDetail detail;                    /* Detailed mode: what its lines last said */
 } s;
 
 static ApcAssetSnap g_last;
@@ -426,6 +455,107 @@ static int StartWhenReady(double dt)
     return -1;
 }
 
+/* ---- diagnostics (the pack's Detailed mode: the Lua's ArmoryPreviewCache.log, as lines on change) ---------------- */
+
+static const char* ScreenName(int screen)
+{
+    static const char* const names[] = {"no thumbnail screen", "the Armory grid", "a weapon pre-select",
+        "a cosmetic pre-select", "the briefing grid", "the briefing loadout"};
+    return screen >= 0 && screen <= APC_SCREEN_BRIEFING_LOADOUT ? names[screen] : "an unknown screen";
+}
+
+/* The image cache's status and screen, and a clear that released atlases, when they changed. lint: per-frame (a frame
+ * that acts, Detailed mode only) */
+static void DetailImages(void)
+{
+    ApcDetail* d = &s.detail;
+    const ApcImageStats* st = apc_images_stats();
+    if (st->clear_count != d->clears)
+    {
+        d->clears = st->clear_count;
+        vpm_log_detail(s.self, "images cleared (%s): every tile back to the game, retained atlases released",
+            st->last_clear_reason != NULL ? st->last_clear_reason : "?");
+    }
+    if (st->status == d->image_status && st->screen == d->image_screen) return;
+    d->image_status = st->status;
+    d->image_screen = st->screen;
+    vpm_log_detail(s.self, "images: %s on %s; %u atlases held (%llu KiB), %u retained, %u shown from the cache, %u misses",
+        st->status, ScreenName(st->screen), st->textures, (unsigned long long)(st->bytes >> 10), st->retained, st->hits,
+        st->misses);
+}
+
+/* The state view's objects (the pointers the tick found), when the manager, the screen kind or the world changed.
+ * lint: per-frame (a frame that acts, Detailed mode only) */
+static void DetailState(void)
+{
+    ApcDetail* d = &s.detail;
+    const ApcState* st = apc_state();
+    if (d->has_state && st->tm == d->tm && st->kind == d->kind && st->world == d->world) return;
+    d->has_state = 1;
+    d->tm = st->tm;
+    d->kind = st->kind;
+    d->world = st->world;
+    vpm_log_detail(s.self, "state: thumbnail manager 0x%llX, UI 0x%llX, state machine 0x%llX, preview 0x%llX, lease table "
+        "0x%llX; screen kind %u, world 0x%llX, stack depth %u", (unsigned long long)st->tm, (unsigned long long)st->ui,
+        (unsigned long long)st->sm, (unsigned long long)st->preview, (unsigned long long)st->lease, st->kind,
+        (unsigned long long)st->world, st->has_depth ? st->depth : 0u);
+}
+
+/* A snapshot the step read afresh, when what it says changed (the Lua's last_top, last_items, last_active,
+ * last_blocked). lint: per-frame (a 50 ms step that read one, Detailed mode only) */
+static void DetailSnapshot(const ApcAssetSnap* snap)
+{
+    ApcDetail* d = &s.detail;
+    uint64_t world = snap->has_world ? snap->world : 0;
+    if (d->has_snap && d->top == snap->top && d->items == snap->item_count && d->menu == snap->menu &&
+        d->prefetch == snap->prefetch && d->active == snap->active && d->blocked == snap->blocked && d->world_id == world)
+        return;
+    d->has_snap = 1;
+    d->top = snap->top;
+    d->items = snap->item_count;
+    d->menu = snap->menu;
+    d->prefetch = snap->prefetch;
+    d->active = snap->active;
+    d->blocked = snap->blocked;
+    d->world_id = world;
+    vpm_log_detail(s.self, "asset snapshot: top %d, %d items, menu %d, prefetch %d, active %d, blocked %d, world 0x%llX; "
+        "package system 0x%llX", snap->top, snap->item_count, snap->menu, snap->prefetch, snap->active, snap->blocked,
+        (unsigned long long)world, (unsigned long long)snap->system);
+}
+
+/* Detailed mode: the session's counters at each mission's end (the Lua's diagnostics log had them). */
+static void MissionEnded(VpmComponent* self, const HfEventInfo* event)
+{
+    if (!s.ready || !vpm_detailed()) return;
+    const ApcPolicy* p = apc_policy();
+    const ApcImageStats* st = apc_images_stats();
+    vpm_log_detail(self, "at the mission's end: steps %u read, %u reused; leases %d held, %u taken, %u released, %u reused, "
+        "%u unresolved, %u retired, %u prewarmed, %u for attachments, %u at start-up; images %u retained, %u released, %u "
+        "evicted, %u shown (grid %u, pre-select %u, briefing %u), %u misses, %u clears, %u atlases held; memory guard %u "
+        "trips; errors %d", s.steps_full, s.steps_reused, p->lease_count, p->acquires, p->releases, p->hits, p->unresolved,
+        p->retired, p->prewarms, p->dependency_acquires, p->startup_acquires, st->retained, st->released, st->evicted,
+        st->hits, st->grid_hits, st->preselect_hits, st->briefing_hits, st->misses, st->clear_count, st->textures,
+        s.guard.trips, s.errors);
+}
+
+/* The tester's mark: start-up, the status, the images, the leases and the guard. */
+static void Describe(VpmComponent* self, char* out, size_t size)
+{
+    const ApcPolicy* p = apc_policy();
+    const ApcImageStats* st = apc_images_stats();
+    if (!s.ready)
+    {
+        snprintf(out, size, "%s", !s.code_ready ? "waiting for game code" : "waiting for the engine API");
+        return;
+    }
+    char images[160] = "images off";
+    if (s.images)
+        snprintf(images, sizeof images, "images %s on %s, %u atlases (%llu KiB)", st->status, ScreenName(st->screen),
+            st->textures, (unsigned long long)(st->bytes >> 10));
+    snprintf(out, size, "%s; %s; leases %d held, %d learned; memory guard %u trips%s; errors %d", p->status, images,
+        p->lease_count, p->learned_count, s.guard.trips, s.guard.active ? " (active)" : "", s.errors);
+}
+
 /* ---- the frame ------------------------------------------------------------------------------------------------- */
 
 static int AssertThread(void)
@@ -537,7 +667,10 @@ static int PolicyStep(double seconds, uint64_t refreshes)
         s.policy_version = apc_state()->policy_version;
         s.lease_version = apc_state()->lease_version;
         NoteSkipped();
+        if (vpm_detailed()) DetailSnapshot(&g_last);
     }
+    if (reuse) s.steps_reused++;
+    else s.steps_full++;
     if (!PollMemory(&g_last, seconds)) return 0;
     if (reuse && apc_policy()->settled && s.pressure_reason == s.policy_pressure) apc_policy_replay();
     else
@@ -563,6 +696,11 @@ static int Frame(double dt)
     uint64_t refreshes = apc_state()->refreshes;
     /* Presentation runs every frame, independent of the slower asset step: a 50 ms image poll would itself delay. */
     if (s.images && !apc_images_tick(s.pressure_reason != APC_PRESSURE_NONE)) return 0;
+    if (vpm_detailed())
+    {
+        if (s.images) DetailImages();
+        DetailState();
+    }
     s.has_gate = 1;
     s.gate_tm = apc_state()->tm;
     s.elapsed += seconds;
@@ -640,8 +778,10 @@ static int Start(VpmComponent* self)
     apc_policy_reset(s.prewarm);
     vpm_set_status(self, "starting");
     s.status = "starting";
+    (void)vpm_listen(self, HF_ON_MISSION_END, MissionEnded, 0); /* Detailed lines only; the core logs a refusal */
     if (!WaitForCode(self)) return vpm_fail(self, "game.dll's code checks refused");
     return vpm_tick_start(self, Tick) ? 0 : vpm_fail(self, "the game thread could not be reached");
 }
 
-const VpmComponentDef vpm_component_armory_preview_cache = {"armory_preview_cache", "Armory Preview Cache", "23.1", 0, Start, Stop};
+const VpmComponentDef vpm_component_armory_preview_cache = {"armory_preview_cache", "Armory Preview Cache", "23.1", 0, Start, Stop,
+    Describe};
