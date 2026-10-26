@@ -150,6 +150,43 @@ static void AFaultingListenerStopsAndOthersHear(void)
     CHECK_EQ(g_events, 1 + 2);
 }
 
+/* The guard off the game thread: a worker's fault comes back as text, stops nothing and logs nothing; a call that ends
+ * normally answers 1; a second call on the same thread after a fault is guarded again. */
+typedef struct OffThread { int faults, ran, answers[3]; char text[160]; } OffThread;
+static void OffThreadFault(void* arg) { ((OffThread*)arg)->faults++; (void)*g_null; }
+static void OffThreadRuns(void* arg) { ((OffThread*)arg)->ran++; }
+static DWORD WINAPI OffThreadMain(LPVOID arg)
+{
+    OffThread* t = arg;
+    t->answers[0] = vpm_guarded_off_thread(OffThreadFault, t, t->text, sizeof t->text);
+    t->answers[1] = vpm_guarded_off_thread(OffThreadRuns, t, NULL, 0);
+    t->answers[2] = vpm_guarded_off_thread(OffThreadFault, t, NULL, 0);
+    return 0;
+}
+
+static void TheGuardWorksOffTheGameThread(void)
+{
+    Reset();
+    const VpmComponentDef* defs[] = {&kTicking};
+    fake_start(defs, 1);
+    fake_log_clear();
+    OffThread t = {0};
+    HANDLE thread = CreateThread(NULL, 0, OffThreadMain, &t, 0, NULL); /* lint-ok: C6 the test's own worker */
+    CHECK(thread != NULL);
+    CHECK_EQ(WaitForSingleObject(thread, 10000), WAIT_OBJECT_0);
+    CloseHandle(thread); /* lint-ok: C4 the test's own worker */
+    CHECK_EQ(t.answers[0], 0);
+    CHECK_EQ(t.answers[1], 1);
+    CHECK_EQ(t.answers[2], 0);
+    CHECK(t.faults == 2 && t.ran == 1);
+    CHECK(strstr(t.text, "fault 0xC0000005") != NULL);
+    CHECK(vpm_running(fake_component(0)));
+    CHECK(strcmp(fake_log_text(), "") == 0);
+    fake_frames(3, 1.0f / 60);
+    CHECK_EQ(g_ticks, 3); /* the game thread's ticks go on */
+    CHECK_EQ(vpm_guarded_off_thread(OffThreadRuns, &t, NULL, 0), 1); /* and on the game thread too */
+}
+
 static void AGuardNestsAndManyCallsRun(void)
 {
     Reset();
@@ -1760,6 +1797,7 @@ int main(void)
     RUN(AFaultInStartStopsIt);
     RUN(AFaultingListenerStopsAndOthersHear);
     RUN(AGuardNestsAndManyCallsRun);
+    RUN(TheGuardWorksOffTheGameThread);
     RUN(TicksStopThemselves);
     RUN(OptionsHaveDefaultsAndPersist);
     RUN(SwitchesPersistAndUnknownEntriesStay);
