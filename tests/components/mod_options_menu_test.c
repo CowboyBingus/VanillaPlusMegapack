@@ -1,7 +1,8 @@
 /* Mod Options Menu: the Lua tests' scenarios on the fake game (components/ModOptionsMenu/tests/test_options_tab.lua,
  * and test_categories.lua and test_slider_numbers.lua where they concern the MODS tab rather than the Lua API), plus
- * the pack's switches, the options the tab cannot show, and stop() handing the view back. The Lua's values file
- * (test_values.lua) is the core's settings file; its translation, update-guard and LuaJIT tests have no C counterpart.
+ * the pack's switches, the options the tab cannot show, values set from code, and stop() handing the view back. The
+ * Lua's values file (test_values.lua) is the core's settings file, written at once on APPLY as the Lua wrote its file;
+ * its translation, update-guard and LuaJIT tests have no C counterpart.
  *
  * game.dll's functions are stand-ins: the fake image holds each function's first bytes as reviewed, so the component's
  * code checks pass at its first tick, and after them a jump to the stand-in (an absolute jmp [rip] over those bytes, its
@@ -574,6 +575,17 @@ static int LogCount(const char* text)
 
 static int Near(double a, double b) { return fabs(a - b) < 1e-6; }
 
+/* Whether the settings file on disk holds this text now. */
+static int SettingsFileHas(const char* text)
+{
+    char buffer[4096] = "";
+    FILE* file = fopen("vpm-test-settings.ini", "r");
+    if (file == NULL) return 0;
+    buffer[fread(buffer, 1, sizeof buffer - 1, file)] = 0;
+    fclose(file);
+    return strstr(buffer, text) != NULL;
+}
+
 #define UNAPPLIED (w.content + 1319449)
 #define DESCRIBED (w.content + 1318500)
 #define SHOWN (w.content + 1318476)
@@ -700,9 +712,12 @@ static void AppliesEdits(void)
     CHECK(vpm_option_value(g_alpha[0]) == 1 && vpm_option_value(g_alpha[1]) == 2 && vpm_option_value(g_alpha[3]) == 0.5);
     CHECK(g_changeCount == 0 && Shows(Row(1) + 16832, "AUTO") && G8(UNAPPLIED) == 1);
     CHECK(w.visuals == 3 && w.boxes == 3); /* same selection: no description work */
+    CHECK(!SettingsFileHas("alpha.hints"));
     Press(APPLY);
     Frame();
     ReleaseKeys();
+    /* Written at once, as the Lua wrote its values file on apply (the core alone saves a second later). */
+    CHECK(SettingsFileHas("alpha.hints = 0") && SettingsFileHas("alpha.mode = 3") && SettingsFileHas("alpha.volume = 0.75"));
     CHECK(vpm_option_value(g_alpha[0]) == 0 && vpm_option_value(g_alpha[1]) == 3 && Near(vpm_option_value(g_alpha[3]), 0.75));
     CHECK(g_changeCount == 3 && g_changes[0].option == g_alpha[0] && g_changes[1].option == g_alpha[1]);
     CHECK(g_changes[2].option == g_alpha[3] && Near(g_changes[2].value, 0.75));
@@ -1032,8 +1047,8 @@ static int DivingStart(VpmComponent* self) { return (g_depth = vpm_option(self, 
 static const VpmComponentDef kDiving = {"shallow_water_diving", "Shallow Water Diving", "3.10.1", 0, DivingStart, NULL};
 static const VpmComponentDef* const kDivingDefs[] = {&kDiving, &vpm_component_mod_options_menu};
 
-/* Two decimals (0.05 steps from 0.20), shown as a float slider; a value the core keeps snapped without the shown
- * decimals still withdraws an edit back to it. */
+/* Two decimals (0.05 steps from 0.20), shown as a float slider; the core keeps the value rounded to those decimals,
+ * so an edit back to it, as the row holds it, withdraws. */
 static void SlidersAsShallowWaterDivingRegistersThem(void)
 {
     Ready(kDivingDefs, 2);
@@ -1260,6 +1275,7 @@ static void ThePacksSwitches(void)
     ReleaseKeys();
     CHECK(G8(UNAPPLIED) == 0 && !vpm_component_switched_on(fake_component(1)) && vpm_component_switched_on(fake_component(2)));
     CHECK_LOG("Applied 2 option changes.");
+    CHECK(SettingsFileHas("beta = off") && SettingsFileHas("zulu = on")); /* written at once */
     const char* beta = vpm_setting("components", "beta");
     const char* zulu = vpm_setting("components", "zulu");
     CHECK(beta != NULL && strcmp(beta, "off") == 0 && zulu != NULL && strcmp(zulu, "on") == 0);
@@ -1270,13 +1286,90 @@ static void ThePacksSwitches(void)
     P32(Row(1) + 29068, 0);
     Frame();
     CHECK(G8(UNAPPLIED) == 0);
-    /* The core writes the settings file about a second later. */
     fake_frames(70, DT);
-    char text[512] = "";
-    file = fopen("vpm-test-settings.ini", "r");
-    CHECK(file != NULL);
-    if (file != NULL) { text[fread(text, 1, sizeof text - 1, file)] = 0; fclose(file); }
-    CHECK(strstr(text, "beta = off") != NULL && strstr(text, "zulu = on") != NULL);
+    CHECK(SettingsFileHas("beta = off") && SettingsFileHas("zulu = on"));
+}
+
+/* ---- values set from code (test_options_tab.lua's set()) ---------------------------------------------------------- */
+
+static VpmOption* OptionOf(const VpmOptionDef* def)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_def(vpm_option_at(i)) == def) return vpm_option_at(i);
+    return NULL;
+}
+
+/* An on_change that sets another option from code, as a mod keeping two options in step would. */
+static void SetsCount(VpmComponent* self, VpmOption* option, double value) { (void)vpm_option_set(g_alpha[4], 5); }
+
+static void OpenTheModsTab(void)
+{
+    MenuOnOptions();
+    Frame();
+    SelectMods();
+    Frame();
+}
+
+/* A value set from code replaces the player's unapplied edit of that option and shows on its row from the next step,
+ * without on_change; the set writes no row itself, nor does an option on another page. That frame keeps the MODS budget
+ * (two reads), and the frames after it write nothing; neither do the frames after the player's own apply. A value an
+ * on_change sets shows the same way. With the escape menu closed nothing is written; the reopened page shows it. */
+static void ValuesSetFromCodeShowOnTheOpenRows(void)
+{
+    Ready(kDefs, 4);
+    OpenTheModsTab();
+    CHECK(mom.hasView && GF(Row(4) + 31408) == 3);
+    PF(Row(4) + 31408, 9);
+    Frame();
+    CHECK(G8(UNAPPLIED) == 1 && mom.pendingCount == 1);
+    int sliders = w.sliders, choices = w.choices;
+    VpmOption* zulu = OptionOf(&kZuluDefs[0]);
+    CHECK(zulu != NULL && vpm_option_set(g_alpha[4], 7.4) && vpm_option_set(zulu, 1));
+    CHECK(vpm_option_value(g_alpha[4]) == 7 && GF(Row(4) + 31408) == 9 && w.sliders == sliders);
+    CHECK_EQ(Reads(1), 2);
+    CHECK(w.sliders == sliders + 1 && w.choices == choices && GF(Row(4) + 31408) == 7);
+    CHECK(G8(UNAPPLIED) == 0 && mom.pendingCount == 0 && g_changeCount == 0);
+    CHECK_EQ(Reads(200), 400);
+    CHECK(w.sliders == sliders + 1 && w.choices == choices);
+    /* A toggle and a choice on the page; the same value again counts as no change and writes nothing. */
+    CHECK(vpm_option_set(g_alpha[0], 0) && vpm_option_set(g_alpha[1], 3));
+    Frame();
+    CHECK(G32(Row(0) + 29068) == 0 && G32(Row(1) + 29068) == 2 && Shows(Row(1) + 16832, "AUTO"));
+    choices = w.choices;
+    CHECK(vpm_option_set(g_alpha[0], 0));
+    Frame();
+    CHECK(w.choices == choices && g_changeCount == 0);
+    /* The player's apply: its rows already show the applied values. Its on_change setting Count from code: that row
+     * shows 5 from the next step. */
+    vpm_option_on_change(g_alpha[0], SetsCount);
+    P32(Row(0) + 29068, 1);
+    Frame();
+    Press(APPLY);
+    Frame();
+    ReleaseKeys();
+    CHECK(vpm_option_value(g_alpha[0]) == 1 && vpm_option_value(g_alpha[4]) == 5 && GF(Row(4) + 31408) == 7);
+    sliders = w.sliders;
+    choices = w.choices;
+    Frame();
+    CHECK(w.sliders == sliders + 1 && w.choices == choices && GF(Row(4) + 31408) == 5 && G8(UNAPPLIED) == 0);
+    Frame();
+    CHECK(w.sliders == sliders + 1 && w.choices == choices);
+    vpm_option_on_change(g_alpha[0], Changed);
+    /* Set while the tab is open, saved at once when the player leaves it (as the Lua's leave_view). */
+    CHECK(vpm_option_set(g_alpha[2], 2));
+    CHECK(!SettingsFileHas("alpha.level = 2"));
+    P32(w.bar + 57452, 2);
+    Frame();
+    CHECK(!mom.hasView && SettingsFileHas("alpha.level = 2"));
+    /* The escape menu closed: a set writes no row; the reopened page shows it. */
+    SetStack(0, 0, 0);
+    Frame();
+    sliders = w.sliders;
+    CHECK(vpm_option_set(g_alpha[4], 2));
+    Frame();
+    CHECK(w.sliders == sliders);
+    OpenTheModsTab();
+    CHECK(mom.hasView && mom.view.page.index == 0 && GF(Row(4) + 31408) == 2 && G32(Row(2) + 29068) == 1);
 }
 
 /* ---- new on HellForge: options the core accepts that the tab cannot show -------------------------------------------- */
@@ -1429,6 +1522,7 @@ int main(void)
     RUN(SlidersAsShallowWaterDivingRegistersThem);
     RUN(PagesOfCategories);
     RUN(ThePacksSwitches);
+    RUN(ValuesSetFromCodeShowOnTheOpenRows);
     RUN(OptionsTheTabCannotShow);
     RUN(StopHandsTheViewBack);
     RUN(UpperCaseInEveryScript);
