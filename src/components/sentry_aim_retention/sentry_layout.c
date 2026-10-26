@@ -493,6 +493,10 @@ static int Locate(const SarCache* c, uint32_t i, const SarProfile* profile, uint
     L->used = 1;
     sar_entries.layout[i] = (uint8_t)(slot + 1);
     *out = L;
+    vpm_log_detail(sar_state.self, "located %s sentry %u (targeting entry %u): entity 0x%llX, behavior 0x%llX, aim 0x%llX, "
+        "runtime 0x%llX, weapon manager 0x%llX", profile->name, s->id, i, (unsigned long long)s->entity,
+        (unsigned long long)s->behavior_address, (unsigned long long)s->raw_address, (unsigned long long)L->runtime_address,
+        (unsigned long long)s->fire.manager);
     return 1;
 }
 

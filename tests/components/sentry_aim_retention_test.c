@@ -416,6 +416,21 @@ static Counts Frames(int n)
         sar_state.polls - polls};
 }
 
+static VpmOption* PackOption(const char* id)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack() && strcmp(vpm_option_def(vpm_option_at(i))->id, id) == 0)
+            return vpm_option_at(i);
+    return NULL;
+}
+
+/* The pack's Diagnostics option: Normal (0) or Detailed (1). */
+static void Diagnostics(int detailed)
+{
+    CHECK(vpm_option_apply(PackOption("diagnostics"), detailed ? 2 : 1));
+    CHECK_EQ(vpm_detailed(), detailed);
+}
+
 /* Idle-gated frames up to the next full check: each makes no call at all and leaves the status as it was. */
 static int IdleUntilCheck(void)
 {
@@ -635,7 +650,7 @@ static void ClassifiesOncePerPointer(void)
 /* The per-frame budget through the component, as the Lua pinned it (test_snapshot.lua): waiting frames make no call;
  * on the ship a mission check every 60th frame, in a mission a rescan every 30th; a kept sentry layout; protection
  * queried once per range. */
-static void WaitsOnTheShipAndInAMission(void)
+static void WaitsOnTheShipAndInAMissionIn(int detailed)
 {
     MakeWorld();
     Ptr(Game(0x3326D30), NULL);
@@ -643,6 +658,7 @@ static void WaitsOnTheShipAndInAMission(void)
     Ptr(Game(0x3326D70), NULL);
     Mission(0);
     Started();
+    Diagnostics(detailed);
     /* On the ship (no mission, no targeting registry): the first check reads nothing (its root is a plain load). */
     Exact(1, 0, 0, "waiting_for_sentries");
     CHECK_EQ(IdleUntilCheck(), 28);
@@ -673,13 +689,17 @@ static void WaitsOnTheShipAndInAMission(void)
     CHECK(sar_state.polls == 4 && sar_state.updates == 240);
 }
 
+static void WaitsOnTheShipAndInAMission(void) { WaitsOnTheShipAndInAMissionIn(0); }
+static void WaitsOnTheShipAndInAMissionDetailed(void) { WaitsOnTheShipAndInAMissionIn(1); }
+
 /* A sentry located, tracking, losing and reacquiring its target, removed while held, then placed again. Per frame, as the
  * Lua's frame_budget pinned it (its read and read_into together): two checks while a sentry is engaged, here without
  * the frame hook, so the second runs right after the first. */
-static void HoldsAndPausesOnceATargetIsLost(void)
+static void HoldsAndPausesOnceATargetIsLostIn(int detailed)
 {
     MakeWorld();
     Started();
+    Diagnostics(detailed);
     Frames(1); /* located; the functions bound */
     CHECK(StatusIs("observing"));
     /* Tracking, per check: the kept layout 20, the pose 6, the target guard twice, the scheduler 2, the transition 1. The
@@ -736,6 +756,124 @@ static void HoldsAndPausesOnceATargetIsLost(void)
     CHECK(StatusIs("observing") && !sar_cache.idle);
     Exact(1, 26, 0, "observing"); /* not engaged: one check (the Lua: 26) */
     CHECK(!vpm_post_ticking(Self()));
+}
+
+static void HoldsAndPausesOnceATargetIsLost(void) { HoldsAndPausesOnceATargetIsLostIn(0); }
+static void HoldsAndPausesOnceATargetIsLostDetailed(void) { HoldsAndPausesOnceATargetIsLostIn(1); }
+
+/* ---- diagnostics: the detailed lines (the Lua's diagnostics log), the summary, the mark ------------------------- */
+
+static void MissionEnds(void)
+{
+    HfStateEvent end = {{sizeof end, HF_ON_MISSION_END}, HF_STATE_MISSION, HF_STATE_SHIP};
+    fake_emit(&end.info);
+}
+
+/* Located, tracking, lost (hold, pause, search), reacquired, behind terrain and clear again, lost and removed, then a
+ * failed check. */
+static void Engagement(int detailed)
+{
+    MakeWorld();
+    Started();
+    Diagnostics(detailed);
+    fake_log_clear();
+    Frames(2);
+    Target(0, 32);
+    Frames(2);
+    Target(TARGET, 3);
+    Frames(2);
+    g_scene.count = 1;
+    g_scene.hit[0] = (SceneHit){1, 999, 4242, 0};
+    Frames(2);
+    g_scene.count = 0;
+    Frames(2);
+    Target(0, 32);
+    Frames(1);
+    Put32(w.tm + 324, 0);
+    Frames(1);
+    Put32(w.tm + 324, 1);
+    Target(TARGET, 3);
+    Frames(30);
+    Put32(w.behavior, 999);
+    Frames(1);
+    Put32(w.behavior, 213);
+    Frames(1);
+    CHECK(sar_state.holds == 2 && sar_state.releases == 1 && sar_state.reselections == 2 && sar_state.fire_pauses >= 2);
+}
+
+static void DetailedModeSaysWhatTheSentriesDid(void)
+{
+    Engagement(1);
+    CHECK_LOG("[Sentry Aim Retention] the game's 7 functions as reviewed: setters bound");
+    CHECK_LOG("[Sentry Aim Retention] located Gatling sentry 9 (targeting entry 0): entity 0x");
+    CHECK_LOG(", weapon manager 0x");
+    CHECK_LOG("[Sentry Aim Retention] 1 sentries this machine controls (holding 0, fire paused 0, searches pending 0)\n");
+    CHECK_LOG("[Sentry Aim Retention] Gatling sentry 9 lost its target on node 12: aim held at ");
+    CHECK_LOG("[Sentry Aim Retention] Gatling sentry 9: fire paused");
+    CHECK_LOG("(target lost; error ");
+    CHECK_LOG("[Sentry Aim Retention] Gatling sentry 9 lost its target on the firing node: target search 0.700 s sooner\n");
+    CHECK_LOG("[Sentry Aim Retention] Gatling sentry 9: hold released, it tracks a target again (restored)\n");
+    CHECK_LOG("[Sentry Aim Retention] Gatling sentry 9: fire resumed");
+    CHECK_LOG("[Sentry Aim Retention] sentry 9: search request released (it tracks a target)\n");
+    CHECK_LOG("[Sentry Aim Retention] sentry 9: target 77 behind terrain (static obstruction: hit unit 000003E7 actor "
+              "00001092 at 1.00 of 20.00 m, 0 hits)\n");
+    CHECK_LOG("[Sentry Aim Retention] sentry 9: target 77 clear again (clear)\n");
+    CHECK_LOG("[Sentry Aim Retention] sentry 9 is gone: its hold is released (restored)\n");
+    CHECK_LOG("[Sentry Aim Retention] 0 sentries this machine controls");
+    CHECK_LOG("[Sentry Aim Retention] check failed (0 before it in this burst; 8 stop it): Unsupported sentry behavior; "
+              "everything restored, a fresh start\n");
+}
+
+static void NormalModeLogsNoneOfThem(void)
+{
+    Engagement(0);
+    CHECK_NO_LOG("functions as reviewed");
+    CHECK_NO_LOG("located");
+    CHECK_NO_LOG("sentries this machine controls");
+    CHECK_NO_LOG("lost its target");
+    CHECK_NO_LOG("fire paused");
+    CHECK_NO_LOG("released");
+    CHECK_NO_LOG("terrain");
+    CHECK_NO_LOG("check failed");
+    CHECK_LOG("[Sentry Aim Retention] error: Unsupported sentry behavior\n"); /* the burst's own line, in both modes */
+}
+
+/* Many lines in a short time: the limiter counts them and says so at the mission's end. */
+static void ManyLinesAreLimited(void)
+{
+    MakeWorld();
+    Started();
+    Diagnostics(1);
+    Frames(2);
+    fake_log_clear();
+    for (int i = 0; i < 12; i++)
+    {
+        Target(0, 32);
+        Frames(2);
+        Target(TARGET, 3);
+        Frames(2);
+    }
+    CHECK_EQ(fake_log_count("[Sentry Aim Retention]"), 17); /* the window's 20 less the first checks' three */
+    MissionEnds();
+    CHECK_LOG(" detailed lines suppressed (at most 20 per 600 frames)\n");
+    CHECK_LOG("[core]   Sentry Aim Retention: checks ");
+    CHECK_LOG(", holds 12, releases 12, late aim ");
+}
+
+/* "Note a problem now": the describe line and the counters in the mark. */
+static void TheMarkCarriesItsState(void)
+{
+    MakeWorld();
+    Started();
+    Frames(2);
+    Target(0, 32);
+    Frames(1);
+    fake_log_clear();
+    CHECK(vpm_option_apply(PackOption("note_problem"), 1));
+    CHECK_LOG("[core] MARK 1: Sentry Aim Retention: firing_paused | firing_paused; 1 sentries (1 located); holding 1, "
+              "fire paused 1, searches pending 1; engaged 1; functions bound; mission not checked yet; errors in this burst 0 | "
+              "checks ");
+    CHECK_LOG(", holds 1, releases 0, late aim 0, fire pauses 1, resumes 0, searches shortened 1\n");
 }
 
 /* A hold that fails part way (the vertical setter refused) is undone in the same check: the search request, fire and
@@ -2479,6 +2617,22 @@ static void BusyWorkersPreventCasts(void)
 
 /* ---- main -------------------------------------------------------------------------------------------------------- */
 
+/* A hold refused, said once per record: a native disable bit is set when the target is lost. */
+static void ARefusedHoldIsSaidOnce(void)
+{
+    AimStarted();
+    Diagnostics(1);
+    SarRow* s = NewSentry(0, 1, Block(128));
+    AimStep1(s);
+    s->target = 0;
+    s->flags = 16;
+    Put32((void*)s->flags_address, 16);
+    for (int i = 0; i < 3; i++) CHECK(AimStep1(s));
+    CHECK_EQ(sar_state.holds, 0);
+    CHECK_EQ(fake_log_count(" sentry 1 lost its target on node "), 1);
+    CHECK_LOG(": no hold, a native disable bit is set (flags 10)");
+}
+
 int main(void)
 {
     RUN(DecodesTheFixture);
@@ -2490,6 +2644,13 @@ int main(void)
     RUN(ClassifiesOncePerPointer);
     RUN(WaitsOnTheShipAndInAMission);
     RUN(HoldsAndPausesOnceATargetIsLost);
+    RUN(WaitsOnTheShipAndInAMissionDetailed);
+    RUN(HoldsAndPausesOnceATargetIsLostDetailed);
+    RUN(DetailedModeSaysWhatTheSentriesDid);
+    RUN(NormalModeLogsNoneOfThem);
+    RUN(ARefusedHoldIsSaidOnce);
+    RUN(ManyLinesAreLimited);
+    RUN(TheMarkCarriesItsState);
     RUN(UndoesAFailedHold);
     RUN(FollowsMovedArrays);
     RUN(TargetLostInsideTheUpdate);

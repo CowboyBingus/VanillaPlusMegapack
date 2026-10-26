@@ -45,7 +45,8 @@
  *   release, pause and request (5 queries per target loss, each up to a few ms in game).
  * - Writes to the sentry's own runtime data (the aim, the search deadline) are plain stores to that verified memory.
  * - The game's update errors no longer reach the pack, so the Lua's pause after an error below it is gone; there is no
- *   shutdown event, so neither is the shutdown restore. The diagnostics log (opt-in) and the JIT notes are dropped.
+ *   shutdown event, so neither is the shutdown restore. The JIT notes are dropped; the diagnostics log (opt-in, its
+ *   counters and records rewritten with each status, at most every 2 s) is now the detailed lines below.
  * - The sentries are found by the Lua's own scan of the targeting registry, not HellForge's HF_ON_SPAWN: the spawn event
  *   reports authority from the spawn info, not the entity record's control bits the Lua tests, it does not give the
  *   targeting index the runtime rows are reached by, and it misses control passing to this machine in place. The
@@ -54,6 +55,17 @@
  * is for a player's sentry is not established offline); the retention flag, turn speed and fire mode setters go through
  * the game's replication, the aim and the search deadline are this machine's simulation state. A sentry whose control
  * moves away is left alone (its release refuses to write). Authority transitions are unverified in game.
+ * Diagnostics. With the pack's Diagnostics set to Detailed (vpm_log_detail; nothing in Normal mode), on the check that
+ * saw it: the functions checked and bound; a sentry located (its targeting entry, entity, behavior, aim, runtime and
+ * weapon manager addresses); a change of how many sentries this machine controls; a hold (node, the held aim, a late
+ * aim put back) or why one was refused (once per record); a hold released and why (tracking, scanning, disabled, speeds
+ * or another disable bit changed, targeting reclaimed; or the sentry gone, or another instance under its id); a fire
+ * pause or resume with the Lua's fire record (reason, error, travel, terrain, synced, targets); a fire mode the game
+ * changed; a target behind terrain (the query's result: hit unit, actor, distance) and clear again; a search shortened,
+ * released or consumed; a failed check (the burst count; its first line stays in the log in both modes). At each
+ * mission's end and at a mark the core logs the counters (vpm_on_summary: checks, holds, releases, late aim, fire
+ * pauses, resumes, searches shortened); describe (a mark) gives the status, the sentries and leases, whether the
+ * functions are bound and the mission state.
  * Later improvement, not built: detours of the targeting update and the Gatling and machine gun fire handlers would
  * remove the per-frame polling.
  *
@@ -80,6 +92,11 @@
  *   removing it, one each per engaged period (a list scan of the core's, no Windows call).
  * - Locating a sentry: 48 reads, once (the Lua: 52).
  * - Once per session, at the first sentry: 7 code checks (HfApi.code_matches; the Lua read the bytes).
+ * - Diagnostics: the idle gate and the idle frames above are unchanged (no call, no detailed check; the test pins them in
+ *   both modes). Each check compares the sentry count with the last one said; a check that acts (a hold, a release, a
+ *   pause, a resume, a search, a block, a located sentry, a failure) adds one global read (the Diagnostics flag) per
+ *   detailed line, and a terrain query keeps its result (a copy). Nothing else in Normal mode; the summary runs at a
+ *   mission's end only.
  * Nothing is allocated; no clock is read (the time is the frames' dt summed). */
 #include <stdio.h>
 #include <string.h>
@@ -99,6 +116,7 @@ static struct
     int failed;               /* an own error this frame */
     uint32_t errors, clean_run;
     char burst[160];          /* the first error of the burst */
+    int observed_said;        /* the sentry count a detailed line last said (-1: none yet) */
 } s;
 
 static SarRow* g_rows[SAR_MAX_SENTRIES];
@@ -145,6 +163,8 @@ static void OwnError(VpmComponent* self, const char* problem)
  * restore the component stops at once. */
 static void Failed(VpmComponent* self, const char* problem)
 {
+    vpm_log_detail(self, "check failed (%u before it in this burst; %d stop it): %s; everything restored, a fresh start",
+        s.errors, ERRORS_TO_STOP, problem);
     if (!Restore()) { vpm_fail(self, "%s", problem); return; }
     FreshStart();
     Report(self, problem);
@@ -187,11 +207,21 @@ static int Apply(const char** reason)
     return 1;
 }
 
+/* A change of how many sentries this machine controls, on the check that saw it. */
+static void Observed(VpmComponent* self)
+{
+    if ((int)sar_state.observed == s.observed_said) return;
+    s.observed_said = (int)sar_state.observed;
+    vpm_log_detail(self, "%u sentries this machine controls (holding %u, fire paused %u, searches pending %u)",
+        sar_state.observed, sar_state.holding, sar_state.fire_paused, sar_state.selections);
+}
+
 static void Check(VpmComponent* self)
 {
     const char* reason = "";
     sar_state.polls++;
     if (!Apply(&reason)) { Failed(self, reason); return; }
+    Observed(self);
     Report(self, reason);
 }
 
@@ -256,6 +286,27 @@ static void GameLoaded(VpmComponent* self, HfEvent event)
     vpm_log(self, "waiting_for_sentries");
 }
 
+/* Its key state for a mark: the status, what the checks found, the leases in force. */
+static void Describe(VpmComponent* self, char* out, size_t size)
+{
+    int located = 0;
+    for (int k = 0; k < SAR_MAX_SENTRIES; k++) located += sar_layouts[k].used;
+    snprintf(out, size, "%s; %u sentries (%d located); holding %u, fire paused %u, searches pending %u; engaged %d; "
+        "functions %s; %s; errors in this burst %u",
+        s.status != NULL ? s.status : "starting", sar_state.observed, located, sar_state.holding, sar_state.fire_paused,
+        sar_state.selections, s.engaged, sar_natives_bound() ? "bound" : "not bound yet",
+        !sar_cache.exists || sar_cache.outside == SAR_UNKNOWN ? "mission not checked yet" :
+            sar_cache.outside ? "outside a mission" : "in a mission", s.errors);
+}
+
+/* The counters of the Lua's diagnostics log, at each mission's end and at a mark. */
+static void Summary(VpmComponent* self, char* out, size_t size)
+{
+    snprintf(out, size, "checks %u, holds %u, releases %u, late aim %u, fire pauses %u, resumes %u, searches shortened %u",
+        sar_state.polls, sar_state.holds, sar_state.releases, sar_state.late_aim, sar_state.fire_pauses,
+        sar_state.fire_resumes, sar_state.reselections);
+}
+
 /* The core stopping the component (an error burst, a refused restore, a fault): everything this module owns goes back. */
 static void Stop(VpmComponent* self)
 {
@@ -266,10 +317,13 @@ static int Start(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
     memset(&sar_state, 0, sizeof sar_state);
+    sar_state.self = self;
+    s.observed_said = -1;
     sar_layout_start();
     sar_natives_start();
     Report(self, "waiting_for_sentries");
+    vpm_on_summary(self, Summary);
     return vpm_on_load(self, HF_EVENT_GAME_LOADED, GameLoaded) ? 0 : 1;
 }
 
-const VpmComponentDef vpm_component_sentry_aim_retention = {"sentry_aim_retention", "Sentry Aim Retention", "1.1.1", 0, Start, Stop};
+const VpmComponentDef vpm_component_sentry_aim_retention = {"sentry_aim_retention", "Sentry Aim Retention", "1.1.1", 0, Start, Stop, Describe};

@@ -154,12 +154,17 @@ int sar_aim_release(SarLease* lease, const char** why)
 
 /* ---- the hold ---------------------------------------------------------------------------------------------------- */
 
-/* A hold may start: no native disable bit, unchanged identity and transition state, and this machine controls it. */
-static int MayHold(const SarRow* s)
+/* A hold may start: no native disable bit, unchanged identity and transition state, and this machine controls it. NULL,
+ * or why not. */
+static const char* MayHold(const SarRow* s)
 {
     uint8_t flags;
-    if (s->flags != 0 || !sar_matches(s->guards, s->guard_count) || !sar_matches(s->transition, s->transition_count)) return 0;
-    return !s->authority_address || (sar_load(s->authority_address, &flags, 1) && (flags & 3) == 1);
+    if (s->flags != 0) return "a native disable bit is set";
+    if (!sar_matches(s->guards, s->guard_count)) return "its identity changed";
+    if (!sar_matches(s->transition, s->transition_count)) return "its transition state changed";
+    if (s->authority_address && !(sar_load(s->authority_address, &flags, 1) && (flags & 3) == 1))
+        return "this machine no longer controls it";
+    return NULL;
 }
 
 /* The retention bit first, then both turn speeds to zero, each journaled before its setter runs. */
@@ -199,7 +204,15 @@ static int HoldAim(const SarRow* s, const SarAimRecord* r, SarLease* lease, cons
 /* 1 holding or busy, 0 failed. The lease keeps its own copy of the row: the hold must keep the speeds it saved here. */
 static int Acquire(const SarRow* s, SarAimRecord* r, const char** why)
 {
-    if (!MayHold(s)) return 1;
+    const char* refused = MayHold(s);
+    if (refused != NULL)
+    {
+        if (!r->refusal_said)
+            vpm_log_detail(sar_state.self, "%s sentry %u lost its target on node %u: no hold, %s (flags %X)", s->profile->name,
+                s->id, s->node, refused, s->flags);
+        r->refusal_said = 1;
+        return 1;
+    }
     if (!Writable(s)) return Fail(why, "hold_memory_unavailable");
     SarLease* lease = &r->lease;
     memset(lease, 0, sizeof *lease);
@@ -207,10 +220,14 @@ static int Acquire(const SarRow* s, SarAimRecord* r, const char** why)
     lease->held = *s;
     lease->flag = 1;
     if (!HoldControls(s, lease, why)) return 0;
-    if (memcmp(s->raw, r->raw, 12) != 0) sar_state.late_aim++;
+    int late = memcmp(s->raw, r->raw, 12) != 0;
+    if (late) sar_state.late_aim++;
     if (!HoldAim(s, r, lease, why)) return 0;
     sar_state.holds++;
     lease->completed = 1;
+    vpm_log_detail(sar_state.self, "%s sentry %u lost its target on node %u: aim held at %.2f %.2f %.2f%s", s->profile->name,
+        s->id, s->node, (double)sar_f32(r->raw), (double)sar_f32(r->raw + 4), (double)sar_f32(r->raw + 8),
+        late ? " (its aim had moved on since the record: put back)" : "");
     return 1;
 }
 
@@ -238,6 +255,8 @@ static int RecordFor(const SarRow* s, SarAimRecord** out, const char** why)
     }
     else if (r != NULL && !Same(&r->snapshot, s))
     {
+        if (r->lease.active)
+            vpm_log_detail(sar_state.self, "sentry %u: another instance under its id: its hold is released", s->id);
         if (r->lease.active && !sar_aim_release(&r->lease, why)) return 0;
         r->used = 0;
         r = NULL;
@@ -256,11 +275,24 @@ static int HoldEnded(const SarRow* s, int tracking, int scan)
     return (s->flags & 2u) == 0;
 }
 
-static int ReleaseHold(SarAimRecord* r, const char** why)
+/* Why HoldEnded said so, for the detailed line. */
+static const char* EndReason(const SarRow* s, int tracking, int scan)
+{
+    if (tracking) return "it tracks a target again";
+    if (scan) return "it scans again";
+    if (!s->enabled) return "it was disabled";
+    if (memcmp(s->horizontal, kZero, 4) != 0 || memcmp(s->vertical, kZero, 4) != 0) return "its turn speeds changed";
+    if ((s->flags & ~2u) != 0) return "another disable bit is set";
+    return "the engine reclaimed targeting";
+}
+
+static int ReleaseHold(SarAimRecord* r, const char* reason, const char** why)
 {
     if (!sar_aim_release(&r->lease, why)) return 0;
+    vpm_log_detail(sar_state.self, "%s sentry %u: hold released, %s (%s)", r->snapshot.profile->name, r->id, reason, *why);
     r->lease.active = 0;
     r->has_raw = 0;
+    r->refusal_said = 0;
     sar_state.releases++;
     return 1;
 }
@@ -283,6 +315,7 @@ static int TrackOrHold(const SarRow* s, SarAimRecord** record, int tracking, int
     }
     else if (r != NULL && r->has_raw && !r->lease.active && !tracking && s->enabled)
     {
+        if (scan) r->refusal_said = 0;
         if (scan) r->has_raw = 0;
         else if (!Acquire(s, r, why)) return 0;
     }
@@ -309,7 +342,8 @@ static int AimRow(const SarRow* s, SarAimRecord** out, const char** why)
     if (!RecordFor(s, &r, why)) return 0;
     int tracking = s->enabled && s->has && s->target != 0 && (s->source_flags & 1u) != 0;
     int scan = Scanning(s, r);
-    if (r != NULL && r->lease.active && HoldEnded(s, tracking, scan) && !ReleaseHold(r, why)) return 0;
+    if (r != NULL && r->lease.active && HoldEnded(s, tracking, scan) && !ReleaseHold(r, EndReason(s, tracking, scan), why))
+        return 0;
     if (!TrackOrHold(s, &r, tracking, scan, why)) return 0;
     *out = r;
     return 1;
@@ -322,6 +356,7 @@ static int ReleaseUnseen(uint32_t stamp, const char** why)
         SarAimRecord* r = &sar_state.records[k];
         if (!r->used || r->seen == stamp) continue;
         if (r->lease.active && !sar_aim_release(&r->lease, why)) return 0;
+        if (r->lease.active) vpm_log_detail(sar_state.self, "sentry %u is gone: its hold is released (%s)", r->id, *why);
         r->used = 0;
     }
     return 1;

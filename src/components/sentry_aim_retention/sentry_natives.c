@@ -97,6 +97,8 @@ int sar_bind_natives(const char** why)
         g.natives.raycast = (SarRaycastFn)(void*)(vpm_exe() + EXE_RAYCAST);
     }
     g.bound = 1;
+    vpm_log_detail(sar_state.self, "the game's 7 functions as reviewed: setters bound (retention, turn speeds, fire mode), "
+        "pose getter and terrain query checked");
     return 1;
 }
 
@@ -402,8 +404,25 @@ int sar_terrain_path(uint32_t unit, const uint8_t origin[12], const uint8_t targ
     SarHit hit;
     int r = sar_cast_terrain(&cast, &hit, why);
     if (r < 0) return -1;
+    sar_last_hit = hit;
     *blocked = r;
     return 1;
+}
+
+SarHit sar_last_hit;
+
+const char* sar_hit_name(int reason)
+{
+    switch (reason)
+    {
+    case SAR_HIT_CLEAR: return "clear";
+    case SAR_HIT_TARGET_SURFACE: return "target surface";
+    case SAR_HIT_ENDPOINT: return "endpoint";
+    case SAR_HIT_DESTRUCTIBLE_COVER: return "destructible cover";
+    case SAR_HIT_STATIC_OBSTRUCTION: return "static obstruction";
+    case SAR_HIT_COVER_QUERY_LIMIT: return "cover query limit";
+    default: return "within 5 cm";
+    }
 }
 
 /* ---- prepare_fire ------------------------------------------------------------------------------------------------ */
