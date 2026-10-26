@@ -1,9 +1,10 @@
 /* Mod Options Menu's files share this (the Lua's `mom` table and `state`): the model of what the MODS tab shows, the
  * view of an open MODS tab, the escape menu's layout and the plain loads and stores on its screen object.
  *
- * Files (the Lua's, by the same names): native.c game.dll's functions and labels; text.c texts (UTF-8 checks, upper
- * case, one buffer per distinct text); model.c the rows each category lists, over the core's options and the pack's
- * switches (options.lua's presentation part); widgets.c text widgets, the MODS tab, category buttons and the
+ * Files (the Lua's, by the same names): native.c game.dll's functions and labels; text.c texts (what the tab can show,
+ * upper case, one buffer per distinct text); model.c the rows each category lists, over the core's options and the
+ * pack's switches (options.lua's presentation part), and values set from code; widgets.c text widgets, the MODS tab,
+ * category buttons and the
  * description box; rows.c option rows and category pages; view.c the idle gate, entering, keeping and leaving the MODS
  * tab, apply and the UNAPPLIED CHANGES dialog; mod_options_menu.c the component and its tick. */
 #ifndef MOM_H
@@ -77,8 +78,15 @@ void mom_page_turned(int page);
 double mom_applied(const MomItem* item);
 double mom_shown(const MomItem* item);
 void mom_set_pending(const MomItem* item, double value);
+/* Every pending edit applied, then the settings file written at once (as the Lua saved its values file on apply); the
+ * number applied. */
 int mom_apply_pending(void);
 void mom_drop_pending(void);
+/* Values set from code (vpm_option_set), as the Lua's set(): mom_values_seen takes every option's applied value as the
+ * open view shows it; mom_values_set finds the options whose value changed since, replaces their pending edits and marks
+ * them in changed[option index] (room for MOM_MAX_OPTIONS), and returns how many. */
+void mom_values_seen(void);
+int mom_values_set(uint8_t* changed);
 /* A slider's value snapped to its step and shown decimals: 1, or 0 for NaN and the infinities. */
 int mom_snap(const MomItem* item, double value, double* out);
 
@@ -87,9 +95,11 @@ int mom_snap(const MomItem* item, double value, double* out);
 void mom_text_reset(void);
 /* The one buffer holding this text (the widgets compare a shown text by its address); it lives for the session. */
 const char* mom_intern(const char* text);
-/* A registered text as shown: control characters as spaces, trimmed; NULL when it is longer than `limit`
- * characters, empty, or not valid UTF-8 without control characters. */
-const char* mom_text_resolve(const char* text, size_t limit);
+/* A registered text as shown: control characters as spaces, trimmed; NULL when it is blank or not valid UTF-8 without
+ * control characters (the tab cannot show it). Its length is the core's registration check. */
+const char* mom_text_resolve(const char* text);
+/* A component's name as shown, NULL also when it is longer than `limit` characters (the Lua's mod name limit). */
+const char* mom_text_named(const char* name, size_t limit);
 /* Upper case in every script the game's font has (Latin, Greek, Cyrillic), into a text buffer. */
 const char* mom_text_upper(const char* text);
 /* {page} and {pages} in a template replaced by the numbers. */
@@ -119,6 +129,7 @@ typedef struct MomView
 {
     uintptr_t screen, content;
     int revision;               /* the model's when listed */
+    uint32_t values;            /* vpm_option_revision() when the rows last showed every value set from code */
     uint32_t saved;             /* the category OPTIONS showed, given back on leaving */
     int64_t described;          /* the entry the description box shows: MOM_DESCRIBED_... or generation * 64 + index */
     uint8_t unapplied;          /* the game's unapplied-changes flag as last written */

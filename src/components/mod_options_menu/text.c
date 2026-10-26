@@ -1,5 +1,7 @@
-/* Mod Options Menu: the texts the MODS tab shows (the Lua's options.lua display_text and translation.resolve). The parts
- * of the shared text module they use (UTF-8 checks, character counts, upper case) are the core's (core text.c).
+/* Mod Options Menu: the texts the MODS tab shows (the Lua's options.lua display_text and translation.resolve). The
+ * shared text module's parts they use (UTF-8 checks, character counts, upper case) are the core's one copy (vpm.h
+ * "text", core text.c), and the lengths the Lua's register_option checked are the core's registration checks: here a
+ * text is only checked for what the tab can show (valid UTF-8 without control characters, not blank).
  *
  * Text widgets keep a pointer to the text they show, and a hidden widget may still point at one after the MODS view
  * closes, until the game re-initialises that widget. So every text lives in one buffer for the session, one buffer per
@@ -52,6 +54,8 @@ const char* mom_intern(const char* text)
     return g_pool + g_at[g_count - 1];
 }
 
+/* ---- shown texts ----------------------------------------------------------------------------------------------- */
+
 /* Control bytes as spaces, then leading and trailing white space trimmed (display_text). */
 static void Display(const char* text, char* out, size_t size)
 {
@@ -62,15 +66,19 @@ static void Display(const char* text, char* out, size_t size)
     out[n] = 0;
 }
 
-const char* mom_text_resolve(const char* text, size_t limit)
+const char* mom_text_resolve(const char* text)
 {
     static char work[WORK_SIZE];
-    if (text == NULL) return NULL;
-    size_t n = strlen(text);
-    if (vpm_utf8_length(text, n) > limit || n >= sizeof work) return NULL;
+    if (text == NULL || strlen(text) >= sizeof work) return NULL;
     Display(text, work, sizeof work);
     if (work[0] == 0 || vpm_utf8_check(work, 0, NULL) != 1) return NULL;
     return mom_intern(work);
+}
+
+const char* mom_text_named(const char* name, size_t limit)
+{
+    if (name == NULL || vpm_utf8_length(name, strlen(name)) > limit) return NULL;
+    return mom_text_resolve(name);
 }
 
 const char* mom_text_upper(const char* text)

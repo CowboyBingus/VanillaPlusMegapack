@@ -4,21 +4,23 @@
  * registration order, plus one category of the pack itself, VANILLA PLUS MEGAPACK, with a switch per component
  * (vpm_component_switched_on / vpm_component_switch; a switch applies from the next session). Values are the core's:
  * the applied value is vpm_option_value, and the player's edits stay pending here until APPLY, which hands each to
- * vpm_option_apply (set, saved, the owner's on_change) in registration order, switches after options.
+ * vpm_option_apply (set, the owner's on_change) in registration order, switches after options, and the settings file
+ * is written at once. A value set from code (vpm_option_set) replaces the player's pending edit of it, as the Lua's
+ * set() did (mom_values_set).
  *
- * Each row's text, choices and range are checked as the Lua's register_option checked them (lengths in characters,
- * 2 to 16 choices, a slider range a float can hold); an option that fails is not shown, and the log says why once. The
- * model is built when the MODS tab opens and again when the registry has grown (its revision is the option count). */
+ * The core refuses at registration what the Lua's register_option refused (lengths in characters, 2 to 16 choices, a
+ * slider range a float can hold, the kind, the default) and keeps a slider's value rounded to its shown decimals. Here
+ * an option is left out only when the tab cannot show one of its texts (not valid UTF-8, a control character after
+ * display_text, or blank), and the log says why once. The model is built when the MODS tab opens and again when the
+ * registry has grown (its revision is the option count). */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "mom.h"
 
-#define LABEL_LIMIT 64
-#define DESCRIPTION_LIMIT 400
-#define CHOICE_LIMIT 48
-#define TITLE_LIMIT 40
+#define LABEL_LIMIT 64 /* a component's name as a switch's label, as an option's label */
+#define TITLE_LIMIT 40 /* a component's name as a category title, as the Lua's mod name */
 #define MAX_CATEGORIES (MOM_MAX_SWITCHES + 1)
 #define DESCRIPTOR_SIZE 216u
 #define DESCRIPTOR_STRIDE 224u
@@ -28,10 +30,6 @@
 #define WIDGET_FLOAT_SLIDER 1u
 #define WIDGET_SELECTOR 2u
 #define INERT_CATEGORY 10u
-/* The game keeps a slider's min, max, step and value as floats: a magnitude above FLOAT_MAX reaches it as an infinity,
- * a step below FLOAT_MIN (the smallest normal float) as a denormal or 0. */
-#define FLOAT_MAX 3.4028234663852886e38
-#define FLOAT_MIN 1.1754943508222875e-38
 
 /* Choice words the game already translates; other text is shown verbatim. */
 typedef struct NativeWord { const char* word; uint32_t label; } NativeWord;
@@ -117,14 +115,14 @@ static void ToggleFields(MomItem* item)
     item->labels[1] = ON_TEXT;
 }
 
+/* The core registered 2 to 16 choices of at most 48 characters. */
 static const char* ChoiceFields(MomItem* item, const VpmOptionDef* def)
 {
     int count = 0;
-    while (def->choices[count] != NULL) count++;
-    if (count < 2 || count > MOM_MAX_CHOICES) return "choices must list 2 to 16 names";
+    while (count < MOM_MAX_CHOICES && def->choices[count] != NULL) count++;
     for (int i = 0; i < count; i++)
     {
-        const char* text = mom_text_resolve(def->choices[i], CHOICE_LIMIT);
+        const char* text = mom_text_resolve(def->choices[i]);
         if (text == NULL) return "invalid choice name";
         item->choices[i] = mom_text_upper(text);
         /* A word the game translates itself (ON, OFF, LOW...) shows the game's own label. */
@@ -143,36 +141,33 @@ static int SliderDecimals(double min, double step)
     return decimals;
 }
 
-/* The core's step 0 (no snapping) is the Lua's default step, 1. */
-static const char* SliderFields(MomItem* item, const VpmOptionDef* def)
+/* The core registered a range and step a float holds (min < max, 0 < step <= max - min); its step 0 is the Lua's
+ * default step, 1. */
+static void SliderFields(MomItem* item, const VpmOptionDef* def)
 {
-    double min = def->min, max = def->max, step = def->step == 0 ? 1 : def->step;
-    if (!(min < max) || step <= 0 || step > max - min) return "slider needs min < max and 0 < step <= max - min";
-    if (!(min >= -FLOAT_MAX && max <= FLOAT_MAX && max - min <= FLOAT_MAX && step >= FLOAT_MIN))
-        return "slider min, max and step must be finite floats";
-    item->min = min;
-    item->max = max;
-    item->step = step;
-    item->decimals = SliderDecimals(min, step);
-    return NULL;
+    item->min = def->min;
+    item->max = def->max;
+    item->step = def->step == 0 ? 1 : def->step;
+    item->decimals = SliderDecimals(item->min, item->step);
 }
 
-/* The item for an option's definition, or the reason it cannot be shown. */
+/* The item for an option's definition (the core registered it: a toggle, a choice or a slider), or the reason the tab
+ * cannot show it. */
 static const char* OptionFields(MomItem* item, const VpmOptionDef* def)
 {
     item->kind = def->kind;
     item->gap = def->gap != 0;
-    item->label = mom_text_resolve(def->label, LABEL_LIMIT);
+    item->label = mom_text_resolve(def->label);
     if (item->label == NULL) return "invalid option registration";
     if (def->description != NULL)
     {
-        item->description = mom_text_resolve(def->description, DESCRIPTION_LIMIT);
+        item->description = mom_text_resolve(def->description);
         if (item->description == NULL) return "invalid description";
     }
     if (def->kind == VPM_TOGGLE) { ToggleFields(item); return NULL; }
     if (def->kind == VPM_CHOICE) return ChoiceFields(item, def);
-    if (def->kind == VPM_SLIDER) return SliderFields(item, def);
-    return "type must be toggle, choice or slider";
+    SliderFields(item, def);
+    return NULL;
 }
 
 /* ---- categories -------------------------------------------------------------------------------------------------- */
@@ -193,7 +188,7 @@ static MomCategory* OwnerCategory(VpmComponent* owner)
 {
     for (int i = 0; i < g_categoryCount; i++)
         if (g_categories[i].owner == owner) return &g_categories[i];
-    const char* name = mom_text_resolve(vpm_def(owner)->name, TITLE_LIMIT);
+    const char* name = mom_text_named(vpm_def(owner)->name, TITLE_LIMIT);
     return NewCategory(mom_text_upper(name != NULL ? name : vpm_def(owner)->id), owner);
 }
 
@@ -235,10 +230,10 @@ static void AddSwitches(void)
         item->component = component;
         item->key = MOM_MAX_OPTIONS + i;
         item->kind = VPM_TOGGLE;
-        item->label = mom_text_resolve(vpm_def(component)->name, LABEL_LIMIT);
+        item->label = mom_text_named(vpm_def(component)->name, LABEL_LIMIT);
         if (item->label == NULL) item->label = mom_intern(vpm_def(component)->id);
         snprintf(text, sizeof text, "Switches %s on or off. Applies from the next session.", vpm_def(component)->name);
-        item->description = mom_text_resolve(text, DESCRIPTION_LIMIT);
+        item->description = mom_text_resolve(text);
         ToggleFields(item);
         if (descriptor == NULL) descriptor = Descriptor(g_descriptors[MOM_MAX_OPTIONS], item);
         item->descriptor = descriptor;
@@ -343,18 +338,12 @@ int mom_snap(const MomItem* item, double value, double* out)
     return 1;
 }
 
-/* The applied value as the row would show it: the core keeps a slider's value snapped without the shown decimals. */
-static double AppliedAsShown(const MomItem* item)
-{
-    double value = mom_applied(item), snapped;
-    return item->kind == VPM_SLIDER && mom_snap(item, value, &snapped) ? snapped : value;
-}
-
-/* Player edits wait for the apply action; editing back to the applied value withdraws the edit. */
+/* Player edits wait for the apply action; editing back to the applied value withdraws the edit (the core keeps a
+ * slider's value rounded to its shown decimals, as a row's value is). */
 void mom_set_pending(const MomItem* item, double value)
 {
     if (item->key == MOM_NO_KEY) return;
-    int had = mom.pendingSet[item->key], has = value != AppliedAsShown(item);
+    int had = mom.pendingSet[item->key], has = value != mom_applied(item);
     mom.pendingSet[item->key] = (uint8_t)has;
     mom.pending[item->key] = has ? value : 0;
     if (had != has) mom.pendingCount += has ? 1 : -1;
@@ -367,6 +356,54 @@ void mom_drop_pending(void)
     mom.pendingCount = 0;
 }
 
+/* ---- values set from code ------------------------------------------------------------------------------------------
+ * The Lua's set() replaced the player's pending edit of the option and queued its row for the next step. The core's
+ * vpm_option_set only moves its revision, so an open view compares each option's applied value with the one it last
+ * showed, on the frames the revision moved (view.c). */
+
+static double g_seen[MOM_MAX_OPTIONS]; /* each option's applied value as the open view shows it */
+static int g_seenCount;
+
+static int Options(void)
+{
+    int count = vpm_option_count();
+    return count < MOM_MAX_OPTIONS ? count : MOM_MAX_OPTIONS;
+}
+
+void mom_values_seen(void)
+{
+    g_seenCount = Options();
+    for (int i = 0; i < g_seenCount; i++) g_seen[i] = vpm_option_value(vpm_option_at(i));
+}
+
+static void DropPending(int key)
+{
+    if (!mom.pendingSet[key]) return;
+    mom.pendingSet[key] = 0;
+    mom.pendingCount--;
+}
+
+/* Options registered since the view last looked are taken as seen: the view's next build shows them. */
+int mom_values_set(uint8_t* changed)
+{
+    int count = Options(), n = 0;
+    for (int i = 0; i < count; i++)
+    {
+        double value = vpm_option_value(vpm_option_at(i));
+        changed[i] = (uint8_t)(i < g_seenCount && value != g_seen[i]);
+        g_seen[i] = value;
+        if (!changed[i]) continue;
+        DropPending(i);
+        n++;
+    }
+    g_seenCount = count;
+    return n;
+}
+
+/* ---- apply ------------------------------------------------------------------------------------------------------- */
+
+/* An option's applied value is the one its row shows; a value its on_change sets from code is not, so the view shows
+ * that one from its next step. */
 static void ApplyOne(int key, double value)
 {
     if (key >= MOM_MAX_OPTIONS)
@@ -376,11 +413,12 @@ static void ApplyOne(int key, double value)
         return;
     }
     VpmOption* option = vpm_option_at(key);
-    if (option == NULL || !vpm_option_apply(option, value)) vpm_log(mom.self, "An option change was refused: %g.", value);
+    if (option != NULL && vpm_option_apply(option, value)) g_seen[key] = value;
+    else vpm_log(mom.self, "An option change was refused: %g.", value);
 }
 
-/* Every pending edit applied in registration order (options, then switches); the core saves them about a second
- * later. */
+/* Every pending edit applied in registration order (options, then switches), then saved at once, as the Lua saved its
+ * values file on apply (and the game its settings). */
 int mom_apply_pending(void)
 {
     int applied = 0;
@@ -392,5 +430,6 @@ int mom_apply_pending(void)
         applied++;
         ApplyOne(key, mom.pending[key]);
     }
+    vpm_settings_save_now();
     return applied;
 }

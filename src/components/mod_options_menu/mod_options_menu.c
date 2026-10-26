@@ -11,16 +11,23 @@
  *
  * On HellForge: the options are the core's registry (vpm.h "options"), not the Lua's own API and values file: each
  * component that registered options is a category (named after it, in upper case) listing its options, applied values
- * are vpm_option_value, and APPLY hands each edit to vpm_option_apply (set, saved by the core about a second later, the
- * owner's on_change). New here: a VANILLA PLUS MEGAPACK category with a switch per component (vpm_component_switch),
- * which applies from the next session (the row's description says so). The game.dll functions are checked with
- * vpm_game_code_matches (the bytes as shipped, so another mod's hook does not fail them) at the first tick, as the Lua
- * checked them in its first update. Texts are English (vpm_text). Dropped: the _G.ModOptionsMenu API for Lua mods, the
- * values file and its backup (the core saves), the game's Text Language query and text refresh on each opening (no
- * translations yet), the Lua's set() refreshing an open row (no component sets an option from code, and the core's
- * vpm_option_set signals nothing: an open page shows such a value from its next build), and the Lua update guard (error
- * bursts, pauses, shutdown save): the core's crash guard stops the component on a fault, and stop() hands an open view
- * back to the game as the Lua's guard did.
+ * are vpm_option_value, and APPLY hands each edit to vpm_option_apply (set, the owner's on_change), then writes the
+ * settings file at once (vpm_settings_save_now), as the Lua wrote its values file on apply; leaving the tab writes a
+ * waiting change too, as the Lua's leave_view. A value set from code (vpm_option_set) replaces the player's pending edit
+ * of it and shows on its open row from the next step, as the Lua's set() did: the view compares the core's option
+ * revision once per MODS frame, and only on a frame it moved compares the options' values (view.c ShowSetValues); one
+ * difference, a set to the value the option already has is no change for the core, so it leaves a pending edit of that
+ * option where the Lua's set() dropped it. The core refuses at registration what the Lua's register_option refused
+ * (lengths, choices, ranges, kinds, defaults); the tab leaves out only an option whose texts it cannot show (not UTF-8,
+ * control characters, blank), with the core's text functions (vpm_utf8_*, vpm_upper). New here: a VANILLA PLUS
+ * MEGAPACK category with a switch per component (vpm_component_switch), which applies from the next session (the row's
+ * description says so). The game.dll functions are checked with vpm_game_code_matches (the bytes as shipped, so another
+ * mod's hook does not fail them) at the first tick, as the Lua checked them in its first update; their calling
+ * convention and the arguments they take are checked against the decoded game.dll of 25480438, function by function
+ * (native.h). Texts are English (vpm_text). Dropped: the _G.ModOptionsMenu API for Lua mods, the values file and its
+ * backup (the core saves), the game's Text Language query and text refresh on each opening (no translations yet), and
+ * the Lua update guard (error bursts, pauses, shutdown save): the core's crash guard stops the component on a fault, and
+ * stop() hands an open view back to the game as the Lua's guard did.
  *
  * Cost (the Lua's test_options_tab.lua budgets: ReadProcessMemory calls per frame):
  * - Escape menu closed (most of every session): 1 plain load (the UI state pointer in game.dll) and 1 read (the UI stack,
@@ -28,9 +35,13 @@
  * - Menu open on another tab, or covered: 2 reads (the stack, the screen pointer; covered: 1) and plain loads of the tab
  *   bar. The Lua: 2.
  * - MODS shown, nothing changing: 2 reads, 1 native call (the OPTIONS visual pass), plain loads for the page check, the
- *   row polls and the selection (and the dialog and the apply key while an edit is pending). The Lua: 2 reads, 1 pass.
+ *   row polls and the selection (and the dialog and the apply key while an edit is pending), and one compare of the
+ *   core's option revision (a call returning a static, no read). The Lua: 2 reads, 1 pass, a queued-set flag.
+ * - The frame after a value is set from code: the same 2 reads, plus the options' values compared (plain loads, at most
+ *   256) and the native value call of each row showing a changed one. The Lua: its queued rows' native calls.
  * - Frames that act (entering or leaving MODS, a page build, an edit, apply, a description): native calls and a log line,
- *   as the Lua made them.
+ *   as the Lua made them; APPLY, and leaving the tab with a change waiting, also write the settings file (the core's
+ *   save: CreateFileW, WriteFile, MoveFileExW), as the Lua wrote its values file then.
  * - Once per session (the first tick): 25 code checks (HfApi.code_matches) and 15 plain loads of the native labels and
  *   setting 139's descriptor. The Lua: the shared runtime's build hash, 25 byte compares, 15 loads. */
 #include "mom.h"

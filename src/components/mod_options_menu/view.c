@@ -1,6 +1,6 @@
 /* Mod Options Menu: the MODS view (the Lua's view.lua). The idle gate (is the escape menu open on top?), entering,
- * keeping and leaving the MODS tab, the description following the selection, and applying or discarding edits as the
- * OPTIONS tab does. */
+ * keeping and leaving the MODS tab, the description following the selection, values set from code shown on their rows,
+ * and applying or discarding edits as the OPTIONS tab does. */
 #include "mom.h"
 
 #define MENU_SYSTEM_PTR_RVA 0x347CE38u
@@ -261,6 +261,8 @@ void mom_enter_view(uintptr_t screen)
     view->content = content;
     view->saved = shown < MOM_MOD_BUTTONS ? shown : 0;
     view->described = MOM_DESCRIBED_NEVER;
+    view->values = vpm_option_revision();
+    mom_values_seen(); /* the new page shows every value */
     ListMods(view);
     /* The game's tab switch hid every content; MODS shows the OPTIONS content, which the screen feeds input while its
      * shown content is OPTIONS (its visual pass follows the tab instead: mom_update_visuals). */
@@ -291,6 +293,7 @@ void mom_leave_view(MomView* view)
     if (shown >= MOM_MOD_BUTTONS) shown = MOM_CATEGORIES; /* no panel to deactivate */
     mom_select_category(content, shown, view->saved);
     mom.hasView = 0;
+    vpm_settings_save_now(); /* as the Lua's leave_view: a value set from code while the tab was open */
     vpm_log(mom.self, "Closed MODS tab.");
 }
 
@@ -308,7 +311,23 @@ static void RefreshView(MomView* view)
     (void)mom_build_page(view, current);
 }
 
-/* lint: per-frame */
+/* Values set from code since the view last looked (the core's option revision moved), as the Lua's set() and its next
+ * step: each replaces the player's pending edit of its option, and the page's rows show it. Only on a frame the
+ * revision moved; after the player's own apply nothing differs (mom_apply_pending). lint: per-frame */
+static void ShowSetValues(MomView* view)
+{
+    static uint8_t changed[MOM_MAX_OPTIONS];
+    view->values = vpm_option_revision();
+    if (mom_values_set(changed) == 0) return;
+    for (int i = 0; view->hasPage && i < view->page.count; i++)
+    {
+        MomEntry* entry = &view->page.entries[i];
+        if (entry->item->option != NULL && changed[entry->item->key]) mom_apply_value(entry, mom_applied(entry->item));
+    }
+}
+
+/* The page as the game left it, then the values set from code, then the player's row changes: one compare of the
+ * option revision on a frame nothing was set. lint: per-frame */
 void mom_maintain_view(MomView* view)
 {
     uint32_t current = mom_get32(view->content + CURRENT_CATEGORY);
@@ -325,5 +344,6 @@ void mom_maintain_view(MomView* view)
     }
     else if (!mom_page_intact(view))
         (void)mom_build_page(view, current);
+    if (view->values != vpm_option_revision()) ShowSetValues(view);
     if (view->hasPage) mom_poll_page(view);
 }
