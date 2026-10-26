@@ -33,8 +33,14 @@
  *   game.dll's update (its code not decoded yet, or another mod's hook there first) the post tick runs right after the
  *   tick inside HellForge's callback: its check then sees what the tick's saw (a commit inside the update is corrected
  *   at the next frame, as in the 1:1 port), at the Lua's two-check cost; the component cannot tell the two cases apart
- *   through vpm.h. A refused post tick is logged once and leaves one check per frame. The pod waits about 5 s and the
- *   window is 0.1 .. 5.1 s, so either way the correction is the same.
+ *   through vpm.h. The pod waits about 5 s and the window is 0.1 .. 5.1 s, so either way the correction is the same.
+ * - A refused post tick is logged once and leaves one check per frame for the session (the 1:1 port's), however a
+ *   later start would answer.
+ * - game.dll's decoding (HF_EVENT_GAME_LOADED fires once one pin of game.dll reads as decoded; the rest of its code is
+ *   decoded in parts after that): no code bytes are checked (no code_matches, no hook). The image reads are game.dll's
+ *   and the exe's globals (data the game writes; null ones wait), and the one check against an image address, the
+ *   unit's scene-graph method (exe + 0x2BD870: a vtable entry compared, no bytes read), runs on a solo death in a
+ *   mission, long after the event. So nothing here waits on vpm_when_code_ready.
  * - The globals (game.dll and the exe's unit registry) are plain loads; only heap data goes through vpm_read.
  * - The pending X, Y's page is checked (VirtualQuery) at the first correction on each player manager, then the store is
  *   a plain one; the Lua checked at every correction. A player manager lives for the mission.

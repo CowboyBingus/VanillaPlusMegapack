@@ -988,6 +988,86 @@ static void FaultAfterTheUpdate(void)
     CHECK_EQ(fake_counts().read, 0);
 }
 
+/* ---- a refused post-update tick: one check per frame for the session ----------------------------------------------- */
+
+static const char kRefused[] =
+    "[Reinforcement Beacons Fixed] no check after the game's update (its tick was refused): one check per frame";
+
+/* The next death, its beacon unused again. */
+static void DieAgain(void)
+{
+    Put32(w.used, 0);
+    Put32(w.rm + 12, 1);
+    Die();
+}
+
+/* Refused at the death: one log line, and from then on the 1:1 port's one check per frame, also once the refusal is
+ * lifted and at the next death. Idle frames make the gate's read alone; a commit inside the update is corrected at the
+ * next frame's tick; a refusal of the data on that branch still stops the component and puts the correction back. */
+static void RefusedPostTick(void)
+{
+    MakeWorld();
+    Started();
+    Mission(2);
+    Beacon(77, 11, 22);
+    READS(1, 0);
+    fake_refuse_ticks(0, 1);
+    Die();
+    READS(11, 0);
+    CHECK(!Posting());
+    CHECK_EQ(fake_log_count(kRefused), 1);
+    fake_refuse_ticks(0, 0);
+    READS(10, 0);
+    g_inside = CommitOne;
+    READS(10, 0);
+    CHECK(X() == 50 && Y() == 60);
+    READS(21, 0);
+    CHECK(X() == 11 && Y() == 22);
+    g_inside = LandInTheUpdate;
+    READS(10, 0);
+    READS(4, 0);
+    READS(1, 0);
+    DieAgain();
+    READS(11, 0);
+    READS(10, 0);
+    CHECK(!Posting());
+    Commit(1);
+    READS(21, 0);
+    CHECK(X() == 11 && Y() == 22);
+    CHECK_LOG("corrections=2;");
+    CHECK_EQ(fake_log_count(kRefused), 1);
+    Put32(w.pm + 0x84, 99);
+    Frame();
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("disabled: Unsupported player layout; correction_restored");
+    CHECK(X() == 50 && Y() == 60);
+}
+
+/* A start refused later, after an earlier one worked and was stopped (the landing): logged once, one check per frame
+ * from then on. */
+static void RefusedPostTickLater(void)
+{
+    MakeWorld();
+    Started();
+    Corrected();
+    CHECK(Posting());
+    Land();
+    Frame();
+    CHECK(!Posting());
+    fake_refuse_ticks(0, 1);
+    DieAgain();
+    READS(11, 0);
+    CHECK(!Posting());
+    CHECK_EQ(fake_log_count(kRefused), 1);
+    fake_refuse_ticks(0, 0);
+    READS(10, 0);
+    Commit(1);
+    READS(21, 0);
+    CHECK(X() == 11 && Y() == 22);
+    CHECK_LOG("corrections=2;");
+    CHECK_EQ(fake_log_count(kRefused), 1);
+}
+
 /* ---- the idle gate's transitions (test_startup.lua's last block) ------------------------------------------------ */
 
 /* The frame's tick decides (test_startup.lua checked patch.apply alone); the check after the update follows. */
@@ -1356,7 +1436,7 @@ static void PlayMain(int hooked)
     MakeWorld();
     StartedOn(hooked);
     int corrected = 0;
-    uint32_t idle_reads = 0, idle_frames = 0, idle_logs = 0, idle_posts = 0;
+    uint32_t idle_reads = 0, idle_frames = 0, idle_logs = 0, idle_posts = 0, code_checks = 0;
     for (g_mainFrame = 1; g_mainFrame <= 2100; g_mainFrame++)
     {
         int frame = g_mainFrame;
@@ -1365,6 +1445,7 @@ static void PlayMain(int hooked)
         g_inside = MainDuring;
         fake_counts_reset();
         Frame();
+        code_checks += fake_counts().code_matches + fake_counts().find_pattern;
         int idle = (frame > 110 && frame < 300) || (frame > 710 && frame < 800) || (frame > 1270 && frame < 1400);
         if (idle)
         {
@@ -1390,6 +1471,7 @@ static void PlayMain(int hooked)
     CHECK(!vpm_running(fake_component(0)) && !Posting());
     CHECK_EQ(idle_reads, idle_frames); /* 1 read per idle frame: the spawn state */
     CHECK_EQ(idle_logs + idle_posts, 0); /* no log, no check after the update */
+    CHECK_EQ(code_checks, 0); /* no code bytes checked at any time: nothing waits for game.dll's decoding */
 }
 
 static void MainScenario(void) { PlayMain(1); }
@@ -1424,6 +1506,8 @@ int main(void)
     RUN(CommitInsideTheUpdateWithoutTheHook);
     RUN(PostCheckStopsWithTheComponent);
     RUN(FaultAfterTheUpdate);
+    RUN(RefusedPostTick);
+    RUN(RefusedPostTickLater);
     RUN(GateInitialDeploymentAndAliveToPending);
     RUN(GateSoloDeaths);
     RUN(GateAmbiguousAndLateRows);
