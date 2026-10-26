@@ -312,4 +312,22 @@ const VpmUser32* vpm_user32(void);
 /* A component's text in the game's language: English until translations are added. */
 const char* vpm_text(const VpmComponent* self, const char* key, const char* english);
 
+/* UTF-8, as the Lua text module (bingus_text.lua v1) every text-showing component carried (core text.c):
+ * - decode: the code point at text (at most size bytes), its length in bytes, or 0 when the bytes are not valid UTF-8
+ *   (overlong forms, surrogates and values above U+10FFFF are invalid);
+ * - encode: a code point's bytes into out (room for 4), their count;
+ * - check: 1 for text a mod may show (valid UTF-8 without control characters; a line feed only with multiline), -1
+ *   invalid UTF-8 or -2 a control character, at byte *bad (1-based, when bad is not NULL);
+ * - length: code points in the first size bytes (an invalid byte counts as one);
+ * - upper: upper case for the scripts the game's fonts carry (ASCII, Latin-1, Latin Extended-A, Greek, Cyrillic) into
+ *   out (size bytes, always terminated), its length; others, invalid bytes included, stay as they are;
+ * - clip: the longest start of text within `bytes` that cuts no character, its length. */
+int vpm_utf8_decode(const char* text, size_t size, uint32_t* value);
+int vpm_utf8_encode(uint32_t value, char* out);
+int vpm_utf8_check(const char* text, int multiline, size_t* bad);
+size_t vpm_utf8_length(const char* text, size_t size);
+uint32_t vpm_upper_char(uint32_t value);
+size_t vpm_upper(const char* text, char* out, size_t size);
+size_t vpm_utf8_clip(const char* text, size_t bytes);
+
 #endif
