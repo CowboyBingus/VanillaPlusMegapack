@@ -36,6 +36,10 @@ scripts/build.ps1 -Test -Only foliage_pass_through
 default, as HellForge's "Zip to share" packs one (each player's HellForge builds the DLL), or with `-Prebuilt` the
 built DLL, marked for game build 25480438. `scripts/lint.ps1` runs HellForge's C lint over the pack.
 
+`scripts/check_code_pins.py <decoded game.dll image>` checks every code pin in the sources (each RVA a component
+checks, calls or hooks, with the bytes it expects there) against a dump of the running game's game.dll on build
+25480438 (the research workspace keeps one: `artifacts/game-update-25480438/game.dll.live.bin`).
+
 It uses HellForge's pinned Zig and the mod SDK of a HellForge-Open checkout (`-HellForge`, `HELLFORGE_OPEN`, or
 `../sdk-dev/HellForge-Open`), with the flags HellForge builds every mod with. HellForge's own `scripts/Build-Mod.ps1`
 builds the same DLL from this folder.
