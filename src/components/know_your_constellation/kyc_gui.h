@@ -51,8 +51,9 @@ typedef struct KycGui
     void (*update_text)(KycRef gui, KycRef id, const KycLabel* label);
 } KycGui;
 
-/* The route the panel draws through: the one kyc_gui.c can build, or a test's. */
+/* The route the panel draws through: kyc_gui.c's none route, the pack's Lua part (kyc_lua.c), or a test's. */
 const KycGui* kyc_gui(void);
-void kyc_gui_use(const KycGui* gui); /* NULL: back to kyc_gui.c's route */
+void kyc_gui_use(const KycGui* gui); /* NULL: back to kyc_gui.c's none route */
+int kyc_gui_is_none(void);           /* 1 while the route is the none route */
 
 #endif

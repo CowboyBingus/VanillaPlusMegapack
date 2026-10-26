@@ -14,11 +14,13 @@
  * one end a burst), as the Lua's update guard counted them.
  *
  * On HellForge:
- * - The panel. The Lua drew it with stingray.Gui; C reaches the engine's Gui through kyc_gui.h, and no route can be
- *   built from what is known offline (kyc_gui.c: the ScriptApi Gui table or the game's lua_State, both needing an
- *   in-game probe). Until a route exists the panel is off ("panel off" in the status and the log); the component
- *   still reads missions and computes every forecast, and logs each new one (headline, large enemies with their
- *   meters, small enemies), which checks the port in game without the panel.
+ * - The panel. The Lua drew it with stingray.Gui, which only the game's Lua reaches on HellForge. The pack ships one
+ *   Lua file for it (lua/forecast_panel.lua, in the pack's data patch, started by Bingus Shared Loader): it makes the
+ *   engine Gui calls and nothing else. This file still decides everything (which screen and mission, show, wait, hide,
+ *   move), kyc_panel.c still lays the panel out, and kyc_lua.c hands each change to the Lua part's next update, which
+ *   draws it in one call into the DLL (kyc_lua.c says how). So a change is drawn one frame later than the Lua drew it.
+ *   Without the Lua part (no Bingus Shared Loader, another version) the panel is off: the first forecast logs why
+ *   ("panel off: ..."), and every new forecast is logged (headline, large enemies with their meters, small enemies).
  * - Level 11. HellForge moves the difficulty table and adds level 11: the settings row comes from
  *   HfApi.difficulty_row while it has moved, else from the game's own table (as the Lua), checked by its level; a
  *   level-11 mission is accepted once HellForge has that level (the Lua refused every difficulty above 10), and its
@@ -44,14 +46,18 @@
  * - A re-sample frame (every 0.5 s while a report is up, 0.1 s while one is pending): map 43 reads (Lua 64), with
  *   campaign spawn weights the same, briefing 44 (Lua 68), client 73 (Lua 99). The frame the war table opens: 44
  *   (Lua 70, with its 5 Text Language reads). The roster and the model are made again only when their inputs change.
- * - The panel (once a Gui route exists): while it is up, 3 engine calls per frame (worlds, main world, window size),
- *   plus one text update per frame while a long headline scrolls, as the Lua; none while hidden. Now: none.
+ * - The panel (kyc_lua.c, the Lua part included): while it is hidden or still, no engine call and no ffi call; the
+ *   Lua part's update reads one integer. A change (a new forecast, the native panel moved, shown, hidden): one call
+ *   into the DLL from the Lua part with the panel's engine calls. Up and still, every 30th frame: the 3 checks (worlds,
+ *   main world, window size; the Lua made them every frame). A scrolling headline: those 3 every frame plus one text
+ *   update while it moves, as the Lua. Engine calls through the Lua part are unmeasured in game.
  * Once-only: nothing at start (the roster is static data); the first level-11 descriptor asks HellForge once whether
  * it has that level. */
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include "kyc.h"
+#include "kyc_lua.h"
 #include "kyc_panel.h"
 
 #define QUIET_CHECK 30        /* the idle gate's full check: every 30th frame */
@@ -118,6 +124,7 @@ static struct
     /* the burst of genuine errors */
     int burst_errors, clean_run;
     char burst_error[192];
+    int told_off;             /* "panel off" is logged, once per start */
 } s;
 
 static KycDescriptor g_before, g_after;
@@ -151,7 +158,7 @@ static void Report(VpmComponent* self, const char* message)
     snprintf(s.status, sizeof s.status, "%s", message);
     vpm_log(self, "%s", message);
     char shown[192];
-    if (PanelOff()) snprintf(shown, sizeof shown, "panel off (no engine Gui route yet); %s", message);
+    if (PanelOff()) snprintf(shown, sizeof shown, "panel off (no Lua part); %s", message);
     vpm_set_status(self, PanelOff() ? shown : message);
 }
 
@@ -222,7 +229,7 @@ static int Select(const KycDescriptor* d)
     int changed = !s.has_selected || strcmp(s.selected_key.text, d->key.text) != 0 || s.selected_screen != d->screen;
     if (changed)
     {
-        if (s.selected_screen != KYC_SCREEN_NONE && s.selected_screen != d->screen && !kyc_panel_clear()) return 0;
+        if (s.selected_screen != KYC_SCREEN_NONE && s.selected_screen != d->screen && !kyc_surface_clear()) return 0;
         s.has_current = 0;
     }
     if (changed || (d->controller_matches && !s.controller_matches)) s.elapsed = 0.5;
@@ -238,7 +245,7 @@ static int Select(const KycDescriptor* d)
 static int Hide(VpmComponent* self, const char* message)
 {
     ResetSelection();
-    if (!kyc_panel_clear()) return 0;
+    if (!kyc_surface_clear()) return 0;
     Report(self, message);
     return 1;
 }
@@ -276,7 +283,10 @@ static int Forecast(VpmComponent* self, const KycSnapshot* snapshot)
     s.made_key = snapshot->d.key;
     s.made_screen = snapshot->d.screen;
     s.made_tags = tags;
-    if (PanelOff()) LogForecast(self, &g_model);
+    if (!PanelOff()) return 1;
+    if (!s.told_off) vpm_log(self, "panel off: %s; forecasts are computed and logged", kyc_gui()->unavailable());
+    s.told_off = 1;
+    LogForecast(self, &g_model);
     return 1;
 }
 
@@ -328,11 +338,11 @@ static int Draw(VpmComponent* self, int screen, const KycAnchor* anchor, float d
     s.state.complete = s.has_current;
     if (!s.has_current)
     {
-        if (kyc_panel_suspend(anchor) == KYC_ERROR) return 0;
+        if (kyc_surface_suspend(anchor) == KYC_ERROR) return 0;
         ReportDraw(self, PHASE_WAITING, screen, s.has_selected ? s.selected_key.text : NULL);
         return 1;
     }
-    int drawn = kyc_panel_show(&g_model, dt, anchor);
+    int drawn = kyc_surface_show(&g_model, dt, anchor);
     if (drawn == KYC_ERROR) return 0;
     ReportDraw(self, drawn ? PHASE_VISIBLE : PanelOff() ? PHASE_PANEL_OFF : PHASE_WAITING_GUI, screen, g_model.key.text);
     return 1;
@@ -343,7 +353,7 @@ static int ScreenChange(int screen)
 {
     if (s.selected_screen == KYC_SCREEN_NONE || s.selected_screen == screen) return 1;
     ResetSelection();
-    return kyc_panel_clear();
+    return kyc_surface_clear();
 }
 
 /* This frame's selection. The native selection ends before the card's fade: a client's unhover hides at once (*hid),
@@ -361,11 +371,20 @@ static int Selection(VpmComponent* self, int screen, int* hid)
     return Select(has ? &g_before : NULL);
 }
 
+/* The Lua part, once: adopted as the panel's route, or refused. */
+static void LuaPart(VpmComponent* self)
+{
+    int adopted = kyc_lua_adopt();
+    if (adopted > 0) vpm_log(self, "panel: drawn through the pack's Lua part (the engine's Gui)");
+    else if (adopted < 0) vpm_log(self, "panel off: %s", kyc_lua_absent());
+}
+
 /* One frame that may act: 1, or 0 after an error (kyc_error says which kind). */
 static int Frame(VpmComponent* self, float dt)
 {
     int screen, found = 0, hid;
     s.state.frames++;
+    LuaPart(self);
     if (!s.readers->screen(&screen)) return 0;
     if (screen != KYC_SCREEN_NONE && !s.readers->anchor(screen, &g_anchor, &found)) return 0;
     if (!found) return Hidden(self, screen);
@@ -389,7 +408,7 @@ static void Restore(void)
 {
     s.quiet = 0;
     ResetSelection();
-    (void)kyc_panel_clear();
+    (void)kyc_surface_drop();
     kyc_error_clear();
 }
 
@@ -462,7 +481,7 @@ static void GameLoaded(VpmComponent* self, HfEvent event)
 
 static void Stop(VpmComponent* self)
 {
-    (void)kyc_panel_clear();
+    (void)kyc_surface_clear();
     kyc_error_clear();
 }
 
@@ -473,11 +492,10 @@ static int Start(VpmComponent* self)
     kyc_error_clear();
     kyc_mission_reset();
     kyc_roster_reset();
-    kyc_panel_reset();
+    if (!kyc_lua_route() || kyc_panel_view()->gui == 0) kyc_panel_reset(); /* else a stop's clear waits for the Lua */
+    kyc_lua_bind(self);
     kyc_use_readers(override);
     snprintf(s.status, sizeof s.status, "starting");
-    const char* off = kyc_gui()->unavailable();
-    if (off != NULL) vpm_log(self, "panel off: %s; forecasts are computed and logged", off);
     Report(self, "ready");
     return vpm_on_load(self, HF_EVENT_GAME_LOADED, GameLoaded) ? 0 : 1;
 }

@@ -3,7 +3,9 @@
 # mod"): the manifest, icon, README, LICENSE and src/, and every player's HellForge builds the DLL. With -Prebuilt it
 # ships the DLL instead, its manifest marked "prebuilt": true for game build 25480438. Builds and tests first. Beside
 # it, <zip name>-symbols-<commit>.zip holds the unstripped DLL and PDB of that build for scripts/symbolize.py: they
-# match the prebuilt DLL; a player's own build of the source mod is a different build.
+# match the prebuilt DLL; a player's own build of the source mod is a different build. Both forms carry data/, the game
+# patch of Know Your Constellation's Lua part (scripts/lua_patch.py), which HellForge stages with the pack and Bingus
+# Shared Loader starts: one mod, one download.
 # Usage: scripts/package.ps1 [-Prebuilt] [-HellForge <HellForge-Open checkout>]
 param([switch]$Prebuilt,[string]$HellForge=$env:HELLFORGE_OPEN)
 $ErrorActionPreference='Stop'
@@ -31,6 +33,14 @@ if($Prebuilt){
         Copy-Item -LiteralPath (Join-Path $root $file) -Destination $destination
     }
 }
+# The Lua part's patch, built from its source and checked to hold exactly that source.
+$python=Get-Command python -ErrorAction SilentlyContinue
+if(-not $python){throw 'No python: the Lua part''s patch (scripts/lua_patch.py) cannot be built; nothing packed.'}
+$lua=Join-Path $root 'src/components/know_your_constellation/lua/forecast_panel.lua'
+& $python.Source (Join-Path $PSScriptRoot 'lua_patch.py') $lua $staging
+if($LASTEXITCODE){throw 'The Lua part''s patch did not build: nothing packed.'}
+& $python.Source (Join-Path $PSScriptRoot 'lua_patch.py') --check $lua (Join-Path $staging 'data/9ba626afa44a3aa3.patch_0')
+if($LASTEXITCODE){throw 'The Lua part''s patch does not hold its source: nothing packed.'}
 [IO.File]::WriteAllText((Join-Path $staging 'hellforge-mod.json'),($manifest|ConvertTo-Json -Depth 8).Replace("`r`n","`n")+"`n")
 $zip=Join-Path $root ('build/release/Vanilla-Plus-Megapack-HellForge-{0}{1}.zip' -f $manifest.version,$(if($Prebuilt){'-prebuilt'}else{''}))
 if(Test-Path -LiteralPath $zip){Remove-Item -Force -LiteralPath $zip}

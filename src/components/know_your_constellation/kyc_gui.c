@@ -1,10 +1,16 @@
 /* The route Know Your Constellation's panel reaches the engine's Gui through (kyc_gui.h). The decision (user,
  * 2026-10-22): keep the game's look, no ImGui; draw with the same engine Gui calls the Lua made through stingray.Gui
  * (World.create_screen_gui, Gui.rect, text, update_rect, update_text, text_extents, material and resolution, the
- * Material setters, Application.worlds and main_world). Two routes reach those calls from C (KB
- * hellforge-megapack-native-port, section 5). Neither
- * can be finished from what is known offline on build 25480438, so the route here is none: the panel stays off, and
- * the component reads missions and computes forecasts as before, logging each new one.
+ * Material setters, Application.worlds and main_world). Two routes reach those calls from C alone (KB
+ * hellforge-megapack-native-port, section 5); neither can be finished from what is known offline on build 25480438.
+ * Without a route the panel stays off, and the component reads missions and computes forecasts as before, logging
+ * each new one and why the panel is off.
+ *
+ * Route 3, the one in use: the pack's own Lua part (kyc_lua.c, lua/forecast_panel.lua). Bingus Shared Loader starts it
+ * from the pack's data patch, inside the game's Lua, where stingray.* is there by construction; it attaches to the DLL
+ * and makes each engine call for the panel from its own update, through one ffi callback. It needs no in-game probe,
+ * only Bingus Shared Loader, which the player adds (HellForge does not ship it). Routes 1 and 2 below stay notes for
+ * a route without it.
  *
  * Route 1, the engine's script C API tables. game.dll keeps the master struct's pointer at game.dll + 0x3326308 (exe
  * 0x27C8D80, live: Match Your Colors calls its World +0x08, Unit +0x18, Material +0x28 and Mesh +0xE8 tables). The 2017
@@ -33,18 +39,17 @@
  * on the war table. With those, this file gets a KycGui whose members push the arguments and lua_pcall the bindings, keeping
  * worlds, GUIs and materials in the registry (luaL_ref) as their KycRef.
  *
- * Until then: kyc_gui() is the none route, and kyc_gui_use lets the tests (and a route under test) take its place. */
+ * kyc_gui() is the none route until the Lua part attaches (kyc_lua_adopt); kyc_gui_use lets the tests (and a route
+ * under test) take its place. */
 #include <stddef.h>
 #include "kyc_gui.h"
+#include "kyc_lua.h"
 
-static const char* NoRoute(void)
-{
-    return "no engine Gui route on HellForge yet (the in-game probe must find the ScriptApi Gui table or the game's "
-           "lua_State)";
-}
+static const char* NoRoute(void) { return kyc_lua_absent(); }
 
 static const KycGui kNone = {"none", NoRoute};
 static const KycGui* g_gui = &kNone;
 
 const KycGui* kyc_gui(void) { return g_gui; }
 void kyc_gui_use(const KycGui* gui) { g_gui = gui != NULL ? gui : &kNone; }
+int kyc_gui_is_none(void) { return g_gui == &kNone; }
