@@ -56,7 +56,25 @@ def row_rva(prefix, defines):
     return None, None
 
 
-def pins_of(path, defines):
+ARRAY = re.compile(r'(\w+)\s*\[\s*\w*\s*\]\s*=\s*\{(.*?)\n\};', re.S)
+
+
+def table_pins(text, defines):
+    """Rows of the file's arrays: {..., <rva>, ..., "<pattern>"}; an array whose name says exe holds exe pins."""
+    found = []
+    for name, body in ARRAY.findall(text):
+        if 'slot' in name.lower():
+            continue  # offsets into an API table, checked through the pointer the table holds: not image RVAs
+        for row in ROW.findall(body):
+            for literal in re.finditer(STRINGS, row):
+                pattern = unquote(literal.group(0))
+                rva, module = row_rva(row[:literal.start()], defines)
+                if PATTERN.match(pattern) and rva is not None:
+                    found.append(('exe' if 'exe' in name.lower() else module, rva, pattern))
+    return found
+
+
+def pins_of(path, defines, checks_code):
     text = path.read_text(encoding='utf-8')
     found, unresolved = [], []
     for kind, args in CALL.findall(text):
@@ -69,13 +87,8 @@ def pins_of(path, defines):
             found.append((module, rva, pattern))
         elif '[' not in rva_text:
             unresolved.append(f'{kind}({rva_text}, {pattern_text})')
-    if CALL.search(text):
-        for row in ROW.findall(text):
-            for literal in re.finditer(STRINGS, row):
-                pattern = unquote(literal.group(0))
-                rva, module = row_rva(row[:literal.start()], defines)
-                if PATTERN.match(pattern) and rva is not None:
-                    found.append((module, rva, pattern))
+    if checks_code:
+        found += table_pins(text, defines)
     return found, unresolved
 
 
@@ -95,7 +108,9 @@ def main():
     frame = ' '.join('%02X' % number(b.strip()) for b in frame_bytes.split(','))
     sources = [(pathlib.Path('src/core/vpm_core.h'), [('game.dll', frame_rva, frame)], [])]
     for path in sorted((ROOT / 'src').rglob('*.[ch]')):
-        found, unresolved = pins_of(path, defines_of(sorted(path.parent.glob('*.[ch]'))))
+        folder = sorted(path.parent.glob('*.[ch]'))
+        checks_code = any(CALL.search(f.read_text(encoding='utf-8')) for f in folder)
+        found, unresolved = pins_of(path, defines_of(folder), checks_code)
         if found or unresolved:
             sources.append((path.relative_to(ROOT), sorted(set(found)), unresolved))
     for path, found, unresolved in sources:
