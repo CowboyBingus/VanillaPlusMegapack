@@ -1415,6 +1415,128 @@ static void FaultAfterTheUpdate(void)
     CHECK_EQ(fake_counts().read, 0);
 }
 
+/* ---- a refused post-update tick: one check per frame for the session ----------------------------------------------- */
+
+static const char kRefused[] =
+    "[Shallow Water Diving] no check after the game's update (its tick was refused): one check per frame";
+static void TimerNan(void) { PutF(w.ctl + 0xB84 + 8, NAN); }
+static void TimerFinite(void) { PutF(w.ctl + 0xB84 + 8, 0); }
+/* One frame whose check meets a non-finite dive timer (an error), the timer finite again before the next one. */
+static void ErrorFrame(void) { TimerNan(); Frames(1); TimerFinite(); }
+
+/* Refused at the first start (Reset's dive, at once): one log line, and from then on the 1:1 port's one check per frame,
+ * also once the refusal is lifted. Idle frames make the tick's reads alone; a dive the update starts waits for the
+ * next frame's tick. */
+static void RefusedPostTick(void)
+{
+    Fresh();
+    fake_refuse_ticks(0, 1);
+    fake_counts_reset();
+    Frames(1);
+    CHECK_EQ(fake_counts().read, 75); /* the lease, and no check after the update */
+    CHECK(StatusIs("airborne_reference") && !Posting());
+    CHECK_EQ(fake_log_count(kRefused), 1);
+    fake_refuse_ticks(0, 0);
+    PIN(24, 0);
+    Dive(0);
+    PIN(37, 0);
+    for (int i = 0; i < 5; i++) PIN(1, 0); /* idle in a mission: the gate once */
+    PutF(w.water + 16, 0.011f);
+    g_inside = DiveInTheUpdate;
+    PIN(1, 0);
+    CHECK(StatusIs("dive_ended"));
+    PIN(76, 0);
+    CHECK(StatusIs("airborne_reference") && !Posting());
+    CHECK_EQ(fake_log_count(kRefused), 1);
+}
+
+/* On that branch a frame is counted where its one check runs: an error, 3599 clean frames and another error are one
+ * burst; 3600 clean frames end it, and the 8th error of a burst stops the component. */
+static void RefusedPostTickCountsErrors(void)
+{
+    Fresh();
+    Dive(0);
+    fake_refuse_ticks(0, 1);
+    Frames(1);
+    fake_refuse_ticks(0, 0);
+    CHECK(StatusIs("dive_ended") && !Posting());
+    ErrorFrame();
+    Frames(3599);
+    ErrorFrame();
+    CHECK_EQ(fake_log_count("[Shallow Water Diving] error: "), 1);
+    Frames(3600);
+    ErrorFrame();
+    CHECK_EQ(fake_log_count("[Shallow Water Diving] error: "), 2); /* a new burst */
+    for (int i = 2; i <= 7; i++) ErrorFrame();
+    CHECK(vpm_running(fake_component(0)) && !Posting());
+    ErrorFrame();
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Shallow Water Diving] disabled: stopped after 8 errors: Invalid movement or water value");
+}
+
+/* A start refused later, after an earlier one worked and was stopped (the mission ended): logged once, one check per
+ * frame from then on. */
+static void RefusedPostTickLater(void)
+{
+    Fresh();
+    Dive(0);
+    Frames(1);
+    PIN(1, 1);
+    Put32(w.mission + 8, 0);
+    for (int i = 0; i <= 120 && Posting(); i++) Frames(1);
+    CHECK(StatusIs("waiting_for_mission") && !Posting());
+    fake_refuse_ticks(0, 1);
+    Put32(w.mission + 8, 1);
+    for (int i = 0; i <= 30 && !StatusIs("dive_ended"); i++) Frames(1);
+    CHECK(StatusIs("dive_ended") && !Posting());
+    CHECK_EQ(fake_log_count(kRefused), 1);
+    fake_refuse_ticks(0, 0);
+    PIN(1, 0);
+    Dive(1);
+    PIN(76, 0);
+    CHECK(StatusIs("airborne_reference") && !Posting());
+    CHECK_EQ(fake_log_count(kRefused), 1);
+}
+
+/* ---- game.dll's decoding --------------------------------------------------------------------------------------------
+ * No code bytes are checked, and the game.dll read-only constants are read on the first dive of a session in a mission
+ * only: wrong (still encoded) at HF_EVENT_GAME_LOADED and for more than the core's 60 s wait, outside a mission and idle
+ * in one, they stop nothing; right by the first dive, it is assisted. */
+static void Constants(int decoded)
+{
+    if (!decoded)
+    {
+        memset(w.game + 0x23C6CCC, 0xCC, 4);
+        memset(w.game + 0x23C69F8, 0xCC, 4);
+        memset(w.constants, 0xCC, 0xA0);
+        return;
+    }
+    memset(w.constants, 0, 0xA0);
+    PutF(w.game + 0x23C6CCC, 0.9f);
+    PutF(w.game + 0x23C69F8, 0.4f);
+    PutF(w.constants + 0x90, 2);
+    PutF(w.constants + 0x80, 1.5f);
+}
+
+static void ConstantsWaitForTheFirstDive(void)
+{
+    MakeWorld(0);
+    Put32(w.mission + 8, 0);
+    Constants(0);
+    Started();
+    Frames(1800);
+    Put32(w.mission + 8, 1);
+    Dive(0);
+    Frames(1900);
+    CHECK(vpm_running(fake_component(0)) && StatusIs("dive_ended"));
+    CHECK_EQ(fake_log_count("[Shallow Water Diving] error: "), 0);
+    Constants(1);
+    Dive(1);
+    Frames(1);
+    CHECK(StatusIs("airborne_reference") && swd.constants_verified && swd.protected == 1);
+    CHECK_EQ(fake_counts().code_matches + fake_counts().find_pattern, 0);
+}
+
 /* The session's counters at each mission's end (the Lua wrote them to its log file). */
 static void MissionEndCounters(void)
 {
@@ -1464,6 +1586,10 @@ int main(void)
     RUN(DiveStartingInsideTheUpdateWithoutTheHook);
     RUN(ErrorsAfterTheUpdate);
     RUN(FaultAfterTheUpdate);
+    RUN(RefusedPostTick);
+    RUN(RefusedPostTickCountsErrors);
+    RUN(RefusedPostTickLater);
+    RUN(ConstantsWaitForTheFirstDive);
     RUN(MissionEndCounters);
     TEST_END();
 }
