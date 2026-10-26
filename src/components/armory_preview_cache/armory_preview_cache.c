@@ -19,8 +19,8 @@
  * checks is game.dll's, which runs after.) The tick can start before
  * the game sets up its engine API (the Lua's first update came later): it waits for that pointer (one plain load per
  * frame, at most 600 s) before the checks the Lua made at its first update. The Lua's profile and settings lived in
- * %LOCALAPPDATA%: the profile is now %LOCALAPPDATA%\CowboyBingus\VanillaPlusMegapack\armory_preview_cache\
- * ArmoryPreviewCache.profile (HellForge gives the game its own LOCALAPPDATA), the settings (prewarm, images) are keys of
+ * %LOCALAPPDATA%: the profile is now ArmoryPreviewCache.profile in the component's data folder (vpm_data_folder:
+ * %LOCALAPPDATA%\CowboyBingus\VanillaPlusMegapack\armory_preview_cache, HellForge's LOCALAPPDATA), the settings (prewarm, images) are keys of
  * the pack's settings file ([armory_preview_cache]), "enabled" is the component's switch. verify_gate (a developer
  * check), the diagnostics log file, the shutdown cleanup (HellForge has no shutdown event) and the update-chain pause
  * (no update chain) are not ported. Memory telemetry reads GlobalMemoryStatusEx only (the Lua's process memory read fed
@@ -29,6 +29,17 @@
  * Errors. Every check the Lua asserted fails the same way here: the frame's work stops, the error counts as the Lua's
  * update guard counted it (the first of a burst is logged; 8 without 3600 clean frames between them stop the component,
  * whose stop hands everything back), and a failed asset snapshot only waits ("waiting_for_ui"), as the Lua's pcall did.
+ * That wait releases the leases and saves the profile as the Lua's cleanup did, but keeps the retained images: the
+ * Lua's cleanup handed them back too, and the next frame retained the request again, an atlas created and destroyed
+ * every 50 ms for as long as the snapshot failed. The image tick checks its own state every frame.
+ *
+ * Mod content (HellForge). HellForge keeps mod content's own records after the vanilla ones in its copies of the game's
+ * tables: a loadout package record from 541, a weapon configuration from 325, past the Lua's bounds (540, 324). The
+ * Lua failed its whole catalogue then, so no lease and no image survived while such content was loaded. Those rows are
+ * skipped instead (apc_native.c, apc_deps.c): their items get no lease, as items the component does not know, and load as
+ * the game loads them; every vanilla item keeps its lease, every thumbnail (mod content's too, the image side never
+ * reads the catalogues) its cached image. The log says how many rows were skipped, once per count (a new count when
+ * HellForge loads its data again). Skipping reads nothing more: the tables are read whole, as before.
  *
  * COST per frame (pinned by tests/components/armory_preview_cache_test.c; the Lua's pins are its tests/test_frame_budget.lua,
  * which counted a stand-in asset adapter without reads). A read is vpm_read, a guarded plain load (about 25 ns; the Lua's
@@ -88,6 +99,7 @@ static struct
     char burst[192], logged[192];
     const char* status;
     int was_open;
+    uint32_t skipped_weapons, skipped_configurations; /* the last counts logged */
 } s;
 
 static ApcAssetSnap g_last;
@@ -150,8 +162,7 @@ int apc_map_get(const ApcMap* map, uint64_t key, uint64_t* value)
 
 static int CodeMatches(int exe, uint32_t rva, const char* pattern)
 {
-    if (!exe) return vpm_game_code_matches(rva, pattern);
-    return vpm_exe() != 0 && rva < vpm_exe_size() && vpm_hf()->code_matches(vpm_exe() + rva, pattern);
+    return exe ? vpm_exe_code_matches(rva, pattern) : vpm_game_code_matches(rva, pattern);
 }
 
 /* The next at most 128 bytes of an IDA-style pattern ("45 85 C0 ..."), as a pattern of their own; how many it took. */
@@ -272,19 +283,6 @@ static void LoadProfile(void)
     (void)apc_profile_decode(size ? text : NULL, size, VPM_GAME_BUILD, 1);
 }
 
-static int MakeFolders(void)
-{
-    wchar_t path[MAX_PATH];
-    for (size_t i = 0; s.folder[i] != 0 && i < MAX_PATH - 1; i++)
-    {
-        if (s.folder[i] != L'\\' || i < 3) continue;
-        memcpy(path, s.folder, i * sizeof(wchar_t));
-        path[i] = 0;
-        if (!CreateDirectoryW(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return 0; /* lint-ok: C4 a profile save, after a menu closes */
-    }
-    return CreateDirectoryW(s.folder, NULL) || GetLastError() == ERROR_ALREADY_EXISTS; /* lint-ok: C4 a profile save, after a menu closes */
-}
-
 /* Written to .tmp; the old file kept as .bak while it is replaced (a truncated file never decodes). */
 static int WriteProfile(const char* text, size_t size)
 {
@@ -292,7 +290,7 @@ static int WriteProfile(const char* text, size_t size)
     ProfilePath(temporary, MAX_PATH + 32, L".tmp");
     ProfilePath(backup, MAX_PATH + 32, L".bak");
     ProfilePath(path, MAX_PATH + 32, L"");
-    if (!MakeFolders()) return 0;
+    if (!vpm_data_folder(s.self, s.folder, MAX_PATH)) return 0; /* made again if it went missing */
     HANDLE file = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL); /* lint-ok: C4 a profile save, after a menu closes */
     if (file == INVALID_HANDLE_VALUE) return 0;
     DWORD wrote = 0;
@@ -336,15 +334,33 @@ static void Save(int force)
 
 /* ---- start-up, cleanup ------------------------------------------------------------------------------------------- */
 
+/* The profile saved, every lease released (only through revalidated ownership). */
+static void ReleaseLeases(void)
+{
+    if (!s.policy_ready) return;
+    Save(1);
+    if (!apc_policy_clear()) LogOnce("cleanup", apc_error());
+    apc_error_clear();
+}
+
 /* Every tile back to the native pipeline, every retained atlas and lease released, the profile saved. */
 static void Cleanup(void)
 {
     if (s.images && s.ready && !apc_images_clear("cleanup")) LogOnce("image cleanup", apc_error());
     apc_error_clear();
-    if (!s.policy_ready) return;
-    Save(1);
-    if (!apc_policy_clear()) LogOnce("cleanup", apc_error());
-    apc_error_clear();
+    ReleaseLeases();
+}
+
+/* HellForge's records for mod content the catalogues skipped: said once per count. */
+static void NoteSkipped(void)
+{
+    uint32_t weapons = apc_native_skipped(), configurations = apc_deps_skipped();
+    if (weapons == s.skipped_weapons && configurations == s.skipped_configurations) return;
+    s.skipped_weapons = weapons;
+    s.skipped_configurations = configurations;
+    if (weapons + configurations == 0) return;
+    vpm_log(s.self, "mod content: %u loadout package records and %u weapon configurations past the Lua's bounds (HellForge's records for mod content) skipped: those items load as the game loads them, without leases",
+        weapons, configurations);
 }
 
 static int Initialize(void)
@@ -467,8 +483,11 @@ static void NoteStartup(double now)
     s.startup_closed = !p->prewarm || p->seen_menu || (p->has_started && now - p->started >= 60);
 }
 
-/* The 50 ms asset step. Loading screens can remove managers: a snapshot that fails holds nothing new, and cleanup goes
- * only through revalidated ownership. lint: per-frame */
+/* The 50 ms asset step. Loading screens can remove managers: a snapshot that fails holds nothing new and releases the
+ * leases, only through revalidated ownership (as the Lua). The retained images stay: the image tick checks its own
+ * state every frame (the manager, the atlas owner, each texture's identity), and the Lua's handing them back here made
+ * the next frame retain the request again, an atlas created and destroyed every 50 ms while the snapshot failed.
+ * lint: per-frame */
 static int PolicyStep(double seconds, uint64_t refreshes)
 {
     int reuse = Reusable(refreshes);
@@ -480,7 +499,7 @@ static int PolicyStep(double seconds, uint64_t refreshes)
             snprintf(why, sizeof why, "%s", apc_error());
             apc_error_clear();
             s.has_last = 0;
-            Cleanup();
+            ReleaseLeases();
             NoteStatus("waiting_for_ui");
             LogOnce("waiting for the UI", why);
             return 1;
@@ -488,6 +507,7 @@ static int PolicyStep(double seconds, uint64_t refreshes)
         s.has_last = 1;
         s.policy_version = apc_state()->policy_version;
         s.lease_version = apc_state()->lease_version;
+        NoteSkipped();
     }
     if (!PollMemory(&g_last, seconds)) return 0;
     if (reuse && apc_policy()->settled && s.pressure_reason == s.policy_pressure) apc_policy_replay();
@@ -575,23 +595,13 @@ static int Setting(const char* key)
     return value == NULL || (value[0] != '0' && value[0] != '1') ? 1 : value[0] == '1';
 }
 
-static int ProfileFolder(void)
-{
-    wchar_t base[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH - 80) return 0;
-    _snwprintf(s.folder, MAX_PATH, L"%ls\\CowboyBingus\\VanillaPlusMegapack\\armory_preview_cache", base);
-    s.folder[MAX_PATH - 1] = 0;
-    return 1;
-}
-
 static int Start(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
     s.self = self;
     s.prewarm = Setting("prewarm");
     s.images = Setting("images");
-    s.has_folder = ProfileFolder();
+    s.has_folder = vpm_data_folder(self, s.folder, MAX_PATH); /* once, at start-up */
     apc_error_clear();
     apc_state_reset();
     apc_decode_reset();

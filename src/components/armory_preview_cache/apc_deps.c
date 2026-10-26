@@ -7,9 +7,13 @@
  * preview queue gives the attachments a queued weapon is shown with. Everything is rebuilt only when the catalogue's
  * identity (the definitions pointer, the group headers and the package map) changes.
  *
- * Bounds as in the Lua: 64 groups, 4096 rows per group, 8192 rows, 16 kinds per row, 324 configurations. A HellForge
- * weapon or entity with a configuration record of its own sits past the vanilla 325 and fails the refresh ("Weapon
- * configuration index bounds"), which stops the asset step while that content is loaded, as the Lua would. */
+ * Bounds as in the Lua: 64 groups, 4096 rows per group, 8192 rows, 16 kinds per row, 324 configurations, with one
+ * change for HellForge content: an index row naming a configuration past the Lua's 324 is skipped, not a failure of the
+ * whole refresh (the Lua's "Weapon configuration index bounds"). Such a row is HellForge's own record for a mod's weapon
+ * or entity (its copy of the table puts a mod's records after the vanilla 325); the Lua stopped every lease and image
+ * while one was loaded. That weapon now has no defaults and is not a known weapon (its queued attachments are not
+ * read), as a weapon the component does not know; every vanilla weapon keeps its dependencies. apc_deps_skipped counts
+ * them. */
 #include "apc.h"
 
 #define ATTACHMENTS 8192
@@ -23,6 +27,7 @@ static struct
     int has_identity;
     size_t identity_size;
     int attachment_count, default_count;
+    uint32_t skipped;                    /* configuration rows past the Lua's bound in the last tables built */
 } g;
 
 static uint8_t g_identity[8 + 64 * 8 + 28 + 64 * 16];
@@ -224,7 +229,7 @@ static void Configuration(Defaults* d, const uint8_t* config, const uint8_t* fal
         if (selected[kind] != NULL) d->ids[d->count++] = selected[kind]->id;
 }
 
-static int Configurations(const Catalogue* c)
+static int Configurations(const Catalogue* c, uint32_t* skipped)
 {
     uint8_t fallback[320], config[120];
     if (!Read(c->definitions, g_buckets, sizeof g_buckets)) return 0;
@@ -234,7 +239,7 @@ static int Configurations(const Catalogue* c)
         uint64_t id = ApcU64(g_buckets, i * 16);
         if (id == 0) continue;
         uint32_t index = ApcU32(g_buckets, i * 16 + 8);
-        if (index >= 324) return apc_fail("Weapon configuration index bounds");
+        if (index >= 324) { (*skipped)++; continue; } /* HellForge's own record for mod content: not ours to resolve */
         if (!Read(c->definitions + 10368 + (uintptr_t)index * 46600, config, sizeof config)) return 0;
         uint64_t at;
         if (!apc_map_get(&g_byWeapon, id, &at))
@@ -261,12 +266,16 @@ int apc_deps_refresh(void)
     apc_map_clear(&g_byNumber);
     apc_map_clear(&g_byHash);
     apc_map_clear(&g_byWeapon);
-    if (!Attachments(&c) || !Configurations(&c)) return 0;
+    uint32_t skipped = 0;
+    if (!Attachments(&c) || !Configurations(&c, &skipped)) return 0;
+    g.skipped = skipped;
     memcpy(g_identity, g_next, c.identity_size);
     g.identity_size = c.identity_size;
     g.has_identity = 1;
     return 1;
 }
+
+uint32_t apc_deps_skipped(void) { return g.skipped; }
 
 static const Attachment* ByHash(uint64_t id)
 {
