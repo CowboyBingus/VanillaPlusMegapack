@@ -511,7 +511,9 @@ static void Describe(VpmComponent* self, char* out, size_t size)
 }
 
 /* What it changed in the game goes back: the running action is cancelled, the region flags and the scanner's field are
- * restored. A kept SOS cancel ends (the next player leaving lists the SOS again). */
+ * restored. A kept SOS cancel ends (the next player leaving lists the SOS again). Switched off with the escape menu
+ * open, the buttons it added stay until the menu closes (the game rebuilds the list then) and do nothing; a KICK the
+ * game already holds still happens. */
 static void Stop(VpmComponent* self)
 {
     if (!s.ready) return;
@@ -520,7 +522,7 @@ static void Stop(VpmComponent* self)
     (void)blm_region_restore();
     if (s.scanner) (void)blm_scanner_stop("stopped_after_error");
     if (s.sos && blm_sos_cancelled()) vpm_log(self, "CANCEL SOS: no longer kept off; a player leaving lists the SOS again");
-    vpm_log(self, "Better Lobby Management stopped for this session; region flags restored");
+    vpm_log(self, "Better Lobby Management stopped; region flags restored");
 }
 
 static int Start(VpmComponent* self)
@@ -530,7 +532,8 @@ static int Start(VpmComponent* self)
     s.shown.count = -1;
     blm_component = self;
     blm_game_reset();
-    blm_text_reset();
+    /* No blm_text_reset: the game's widgets may still point at texts an earlier start showed (a live switch-off with the
+     * escape menu open); interning finds them again, so the pool only grows by texts it never had. */
     blm_chat_reset();
     blm_menu_reset();
     blm_lobby_reset_state();

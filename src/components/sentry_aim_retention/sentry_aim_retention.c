@@ -315,6 +315,9 @@ static void Stop(VpmComponent* self)
 
 static int Start(VpmComponent* self)
 {
+    /* A live switch-on after a stop whose restore failed: one more try before the reset forgets what is still held (the
+     * functions are still bound from the earlier start; on a first start no record is in use). */
+    if (!Restore()) vpm_log(self, "restore_failed: a sentry changed before this start stays as it is");
     memset(&s, 0, sizeof s);
     memset(&sar_state, 0, sizeof sar_state);
     sar_state.self = self;

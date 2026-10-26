@@ -410,6 +410,8 @@ static void Stop(VpmComponent* self)
 
 static int Start(VpmComponent* self)
 {
+    /* A live switch-on after a stop that could not put everything back: one more try before the reset forgets it. */
+    if ((s.state.has_lease || s.state.has_pending) && !cv_stop(&s.state)) vpm_log(self, "local_restore_failed: kept as it is");
     memset(&s, 0, sizeof s);
     cv_self = self;
     cv_state_reset(&s.state);

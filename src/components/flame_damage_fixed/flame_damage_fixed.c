@@ -583,9 +583,24 @@ static void Tick(VpmComponent* self, float dt)
 
 /* ---- start and stop --------------------------------------------------------------------------------------------- */
 
+/* The effect this start fixed, back to its shipped words, while it is still the loaded one (a switch-off mid-mission;
+ * the Lua left it, as the game reloads the effect with every mission, but a live switch-off must leave the flame as the
+ * game has it). Nothing when the effect was reloaded since (the game's own words again). */
+static void UnfixEffect(VpmComponent* self)
+{
+    FdfReason why = FDF_OK;
+    uintptr_t data = 0;
+    int writes = 0;
+    char text[64];
+    if (s.patched == 0 || !fdf_resolve_effect(&data, &why) || data != s.patched) return;
+    if (!fdf_unapply_effect(data, &writes, &why)) vpm_log(self, "Flame effect not put back: %s", fdf_reason_text(why, text, sizeof text));
+    else if (writes > 0) vpm_log(self, "Flame effect put back (%d words).", writes);
+    s.patched = 0;
+}
+
 /* Puts this mod's group stores back (the Lua's reset, run by its update guard's stop): every weapon's bodies leave its
  * group, flame systems of live instances still in a weapon's group go back to plain layer 11, and the weapons are
- * forgotten. The effect fix stays: it needs no upkeep, and the game reloads the effect with every mission. */
+ * forgotten. Then the effect fix (UnfixEffect). */
 static void Stop(VpmComponent* self)
 {
     uintptr_t slot = s.data != 0 ? fdf_flame_slot() : 0;
@@ -606,6 +621,7 @@ static void Stop(VpmComponent* self)
     s.since_scan = SCAN_SECONDS;
     char text[64];
     if (failure != FDF_OK) vpm_log(self, "Self-hit group writes not restored: %s", fdf_reason_text(failure, text, sizeof text));
+    UnfixEffect(self);
 }
 
 static void Loaded(VpmComponent* self, HfEvent event)

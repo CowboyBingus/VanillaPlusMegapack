@@ -70,6 +70,9 @@ int fdf_resolve_effect(uintptr_t* data, FdfReason* why);
 /* Writes the fixed value of every patched word that still holds the shipped one, after checking the header, the
  * layout and every patched word: 1 with *writes, or 0 with *why. */
 int fdf_apply_effect(uintptr_t data, int* writes, FdfReason* why);
+/* The reverse, for a stop: the shipped value back in every patched word that holds the fixed one, after the same checks
+ * (one read, one page check when a word changes): 1 with *writes, or 0 with *why. */
+int fdf_unapply_effect(uintptr_t data, int* writes, FdfReason* why);
 
 /* ---- physics: filter, family, body scan, groups (flame_physics.c) -------------------------------------------- */
 

@@ -360,4 +360,7 @@ static int MbmStart(VpmComponent* self)
     return 0;
 }
 
-const VpmComponentDef vpm_component_mod_bindings_menu = {"mod_bindings_menu", "Mod Bindings Menu", "2.3", 0, MbmStart, MbmStop};
+const VpmComponentDef vpm_component_mod_bindings_menu = {"mod_bindings_menu", "Mod Bindings Menu", "2.3", 0, MbmStart, MbmStop, NULL,
+    /* MbmStart resets what must last the session: the assignments' session count (reservation expiry), the defaults
+     * sweep's captured stock lists, and the binding page's borrowed title and label slots */
+    "it keeps this session's binding changes and the game's borrowed menu texts, which a restart would lose"};

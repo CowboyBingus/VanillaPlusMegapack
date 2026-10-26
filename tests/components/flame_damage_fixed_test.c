@@ -1198,8 +1198,12 @@ static void StopRestoresTheGroupStores(void)
     CostReset();
     vpm_core_stop(fake_component(0), "test");
     /* The flame slot (3), the bodies' span and 21 stores, both live instances and the 5 systems still in the group (the
-     * Lua's pause frame: 116 reads + 1 load, 2 writable_region, 26 writes). */
-    PIN(CostNow(), 3 + 1 + 2 + 16 + 16, 0, 2, OWN_ARM + 5);
+     * Lua's pause frame: 116 reads + 1 load, 2 writable_region, 26 writes). Then the effect fix put back (new for live
+     * switches: a switch-off mid-mission leaves the flame as the game has it): its lookup (6 reads) and check (1 read),
+     * one page check and its 18 words. */
+    PIN(CostNow(), 3 + 1 + 2 + 16 + 16 + 6 + 1, 1, 2, OWN_ARM + 5 + FDF_PATCH_COUNT);
+    CHECK(EffectShipped());
+    CHECK_LOG("Flame effect put back (18 words).");
     CHECK(BodiesAre(NO_BODIES, 2047));
     for (uint32_t index = 1; index <= 12; index++) CHECK_EQ(LayerOf(index), index == 6 || index == 12 ? 0x4Au : 11u);
     CHECK(!vpm_running(fake_component(0)));
