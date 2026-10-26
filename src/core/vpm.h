@@ -315,9 +315,9 @@ const char* vpm_text(const VpmComponent* self, const char* key, const char* engl
 /* UTF-8, as the Lua text module (bingus_text.lua v1) every text-showing component carried (core text.c):
  * - decode: the code point at text (at most size bytes), its length in bytes, or 0 when the bytes are not valid UTF-8
  *   (overlong forms, surrogates and values above U+10FFFF are invalid);
- * - encode: a code point's bytes into out (room for 4), their count;
+ * - encode: a code point's bytes (U+10FFFF at most) into out (room for 4), their count;
  * - check: 1 for text a mod may show (valid UTF-8 without control characters; a line feed only with multiline), -1
- *   invalid UTF-8 or -2 a control character, at byte *bad (1-based, when bad is not NULL);
+ *   invalid UTF-8 or -2 a control character, at byte *bad (1-based, when bad is not NULL); NULL is no text: -1 at 0;
  * - length: code points in the first size bytes (an invalid byte counts as one);
  * - upper: upper case for the scripts the game's fonts carry (ASCII, Latin-1, Latin Extended-A, Greek, Cyrillic) into
  *   out (size bytes, always terminated), its length; others, invalid bytes included, stay as they are;
