@@ -2115,6 +2115,72 @@ static int StartSummarized(VpmComponent* self)
 }
 static const VpmComponentDef kSummarized = {"summarized", "Summarized", "1.0", 0, StartSummarized, NULL, DescribeMe};
 
+static uint64_t BucketTotal(const VpmComponent* c)
+{
+    uint64_t total = 0;
+    for (int b = 0; b < VPM_COST_BUCKETS; b++) total += c->buckets[b];
+    return total;
+}
+
+static int g_slowTicks;
+static void SometimesSlowTick(VpmComponent* self, float dt)
+{
+    if (++g_slowTicks == 50) Sleep(3); /* one tick of about 3 ms (a sleep stands in for an interruption or real work) */
+}
+static int StartSometimesSlow(VpmComponent* self) { return vpm_tick_start(self, SometimesSlowTick) ? 0 : 1; }
+static const VpmComponentDef kSometimesSlow = {"sometimes_slow", "Sometimes Slow", "1.0", 0, StartSometimesSlow, NULL};
+
+/* item 7: one slow tick among 100 is counted as one, with its bucket, not reported as the component's speed; the
+ * histogram holds every tick; Detailed mode lists the buckets. Before the counter's rate is known (the mission started
+ * within 50 ms of the pack's start), nothing is counted as slow. */
+static void OneSlowTickIsCountedAsOne(void)
+{
+    Reset();
+    g_slowTicks = 0;
+    const VpmComponentDef* defs[] = {&kSometimesSlow, &kTicking};
+    fake_start(defs, 2);
+    Sleep(80); /* the counter's rate: from the pack's start to the mission's */
+    MissionStart();
+    fake_frames(100, DT);
+    VpmComponent* slow = fake_component(0);
+    VpmComponent* quick = fake_component(1);
+    CHECK_EQ(slow->calls, 100);
+    CHECK_EQ(BucketTotal(slow), 100);
+    /* the slept tick counts; the others take nanoseconds, so only an interruption of this test's own thread adds one */
+    CHECK(slow->slow >= 1 && slow->slow <= 3);
+    CHECK(quick->slow <= 2);
+    CHECK_EQ(BucketTotal(quick), 100);
+    char expectSlow[64], expectQuick[64];
+    snprintf(expectSlow, sizeof expectSlow, "; ticks of 0.1 ms or longer: %llu of 100; slowest ", (unsigned long long)slow->slow);
+    snprintf(expectQuick, sizeof expectQuick, "; ticks of 0.1 ms or longer: %llu of 100; slowest ", (unsigned long long)quick->slow);
+    fake_log_clear();
+    MissionEnd();
+    CHECK(LineHas("[core] cost this mission: Sometimes Slow ", expectSlow));
+    CHECK(LineHas("[core] cost this mission: Ticking ", expectQuick));
+    CHECK_NO_LOG("tick times this mission:"); /* Normal mode */
+
+    /* Detailed: the histogram's buckets from 0.01 ms; the slow tick in a bucket of milliseconds */
+    VpmOption* diagnostics = PackOption("diagnostics");
+    CHECK(diagnostics != NULL && vpm_option_apply(diagnostics, 2));
+    g_slowTicks = 0;
+    MissionStart();
+    CHECK_EQ(slow->calls + slow->slow + BucketTotal(slow), 0); /* a new mission starts from nothing */
+    fake_frames(100, DT);
+    fake_log_clear();
+    MissionEnd();
+    CHECK(LineHas("[core] tick times this mission: Sometimes Slow ", " ms: 1")); /* the slept tick's bucket */
+    CHECK(LineHas("[core] tick times this mission: Ticking ", "")); /* its own line, whatever the machine did */
+
+    /* a mission straight after the pack's start: the rate is not known yet, nothing counts as slow */
+    Reset();
+    g_slowTicks = 0;
+    fake_start(defs, 2);
+    MissionStart();
+    fake_frames(100, DT);
+    CHECK_EQ(fake_component(0)->slow, 0);
+    CHECK_EQ(BucketTotal(fake_component(0)), 100);
+}
+
 static void AMissionsEndSaysWhatIsNotRunningAndItsCosts(void)
 {
     Reset();
@@ -2126,7 +2192,7 @@ static void AMissionsEndSaysWhatIsNotRunningAndItsCosts(void)
     fake_log_clear();
     MissionEnd();
     CHECK_LOG("[core] this mission: 120 frames over ");
-    CHECK(LineHas("[core] cost this mission: Ticking ", " ms per frame, peak "));
+    CHECK(LineHas("[core] cost this mission: Ticking ", " ms per frame; ticks of 0.1 ms or longer: "));
     CHECK(LineHas("[core] cost this mission: Ticking ", " ms (120 ticks over 120 frames)"));
     CHECK_LOG("[core] at the mission's end: 2 of 5 components running; faults this session: 1\n");
     CHECK_LOG("[core]   Faulting: disabled: fault 0xC0000005");
@@ -2134,10 +2200,11 @@ static void AMissionsEndSaysWhatIsNotRunningAndItsCosts(void)
     CHECK_LOG("[core]   Summarized: queue 3 deep\n");
     CHECK_NO_LOG("Default Off: off");
     CHECK_NO_LOG("  Ticking:");
-    /* item 7: the peak of single ticks, the average over the frames */
+    /* item 7: every tick in the histogram, the average over the frames */
     VpmComponent* t = fake_component(1);
     CHECK_EQ(t->calls, 120);
-    CHECK(t->peak > 0 && t->peak <= t->cycles && t->peak * t->calls >= t->cycles);
+    CHECK_EQ(BucketTotal(t), 120);
+    CHECK(t->slow <= t->calls);
 }
 
 /* ---- item 6: the settings file -------------------------------------------------------------------------------- */
@@ -2365,7 +2432,7 @@ static void IdleFramesAreTheSameInBothModesAndAllocateNothing(void)
         CHECK_EQ(counts[mode].log + counts[mode].read + counts[mode].write + counts[mode].other, 0);
         VpmComponent* t = fake_component(0);
         CHECK_EQ(t->calls, 10000);
-        CHECK(t->peak > 0 && t->peak <= t->cycles && t->peak * t->calls >= t->cycles);
+        CHECK_EQ(BucketTotal(t), 10000);
     }
     CHECK(memcmp(&counts[0], &counts[1], sizeof counts[0]) == 0);
     CHECK_EQ(ticks[0], ticks[1]);
@@ -2446,6 +2513,7 @@ int main(void)
     RUN(TheBreadcrumbNamesTheCallWhoseGameCodeCrashed);
     RUN(StatusChangesAreLoggedAtMostOncePer600Frames);
     RUN(AMissionsEndSaysWhatIsNotRunningAndItsCosts);
+    RUN(OneSlowTickIsCountedAsOne);
     RUN(ASettingsFileTooLargeIsSaidSo);
     RUN(AFullTableAndOverLongKeysAreCounted);
     RUN(SettingsThatCannotBeReadOrWrittenSayWhy);
