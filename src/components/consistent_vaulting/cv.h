@@ -230,6 +230,8 @@ typedef struct CvState
 } CvState;
 
 void cv_state_reset(CvState* st);
+/* The component, for the detailed lines (vpm_log_detail); set by start(), NULL before. */
+extern VpmComponent* cv_self;
 
 /* ---- natives (cv_native.c, cv_native.h) ------------------------------------------------------------------------- */
 

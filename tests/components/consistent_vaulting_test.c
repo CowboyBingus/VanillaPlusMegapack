@@ -374,6 +374,21 @@ static void Started(void)
     cv_test_candidate(NULL);
 }
 
+static VpmOption* PackOption(const char* id)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack() && strcmp(vpm_option_def(vpm_option_at(i))->id, id) == 0)
+            return vpm_option_at(i);
+    return NULL;
+}
+
+/* The pack's Diagnostics option: Normal (0) or Detailed (1). */
+static void Diagnostics(int detailed)
+{
+    CHECK(vpm_option_apply(PackOption("diagnostics"), detailed ? 2 : 1));
+    CHECK_EQ(vpm_detailed(), detailed);
+}
+
 /* A fresh state, as the Lua tests' state = {}. */
 static void Fresh(void) { cv_state_reset(St()); }
 
@@ -2190,9 +2205,10 @@ static uint32_t FrameReads(void)
 
 /* The idle gate: one read on 9 of 10 idle mission frames (6 on the 10th), none on 59 of 60 frames outside a mission
  * (1 on the 60th); a press arms on the frame it is seen. */
-static void FrameBudgetWithTheGate(void)
+static void FrameBudgetWithTheGateIn(int detailed)
 {
     Started();
+    Diagnostics(detailed);
     SlopeReset();
     P32(w.mode + 8, 0);
     FullCheck();
@@ -2209,7 +2225,9 @@ static void FrameBudgetWithTheGate(void)
     gated = 1;
     for (int i = 0; i < 9; i++) gated &= FrameReads() == 1;
     CHECK(gated);
+    fake_counts_reset();
     CHECK_EQ(FrameReads(), 6); /* Lua 7 */
+    CHECK_EQ(fake_counts().log, 0); /* the gate's full check of an idle avatar logs nothing in either mode */
     /* A press on a gated frame: the gate's read, the check that arms, the check replayed now that work started, and the
      * second check (after the game's update; here, without the frame hook, right after the others). */
     FullCheck();
@@ -2228,6 +2246,9 @@ static void FrameBudgetWithTheGate(void)
     CHECK(!St()->has_lease);
     CHECK(Baseline());
 }
+
+static void FrameBudgetWithTheGate(void) { FrameBudgetWithTheGateIn(0); }
+static void FrameBudgetWithTheGateDetailed(void) { FrameBudgetWithTheGateIn(1); }
 
 /* The local avatar's index changes right after a full check: the gate reads the old index until the next full check,
  * so a tap that ends before it is missed, a held press is seen there (as a held press). */
@@ -2485,9 +2506,10 @@ static void ARaisedCheckHasItsSecondAtOnce(void)
 }
 
 /* Idle frames with the frame hook are what they were: no post-update tick, the gate's reads only. */
-static void IdleFramesHaveNoPostCheck(void)
+static void IdleFramesHaveNoPostCheckIn(int detailed)
 {
     StartedEngine(1);
+    Diagnostics(detailed);
     SlopeReset();
     P32(w.mode + 8, 0);
     uint32_t hooks = (uint32_t)fake_hook_count();
@@ -2514,12 +2536,16 @@ static void IdleFramesHaveNoPostCheck(void)
         fake_counts_reset();
         fake_engine_frames(1, 1.0f / 60);
         reads += fake_counts().read;
+        CHECK_EQ(fake_counts().log, 0);
         CHECK(!vpm_post_ticking(fake_component(0)));
     }
     CHECK_EQ(reads, 9 + 6);                    /* in a mission: 1 read on 9 frames, 6 on the 10th, as before */
     CHECK_EQ(St()->counters.polls, polls + 1);
     CHECK_EQ(fake_hook_count(), (int)hooks);   /* nothing hooked or registered beyond the frame hook */
 }
+
+static void IdleFramesHaveNoPostCheck(void) { IdleFramesHaveNoPostCheckIn(0); }
+static void IdleFramesHaveNoPostCheckDetailed(void) { IdleFramesHaveNoPostCheckIn(1); }
 
 /* The per-frame counts with the frame hook: a held lease makes two checks, 78 reads (one check before: 39; the Lua
  * 2 x 44 = 88); the post-update tick goes when the lease ends, and with the component. */
@@ -2806,6 +2832,131 @@ static void RefusalAndStop(void)
     CHECK(!St()->has_lease);
 }
 
+/* ---- diagnostics: the detailed lines (the Lua's diagnostics log), the summary, the mark ------------------------- */
+
+static void MissionEnds(void)
+{
+    HfStateEvent end = {{sizeof end, HF_ON_MISSION_END}, HF_STATE_MISSION, HF_STATE_SHIP};
+    fake_emit(&end.info);
+}
+
+/* A vault press with its alternative prepared and released, an assisted climb from arming to its end, a press with no
+ * assist, and a check that raised; each in either mode. */
+static void Presses(int detailed)
+{
+    StartedEngine(1);
+    Diagnostics(detailed);
+    fake_log_clear();
+    PressWithQueriesInFlight();
+    EngineFrame(CompleteBatch);
+    EngineFrame(NULL);
+    w.input[0] = 0;
+    EngineFrame(NULL);
+    EngineFrame(NULL);
+    ArmedLease();
+    EngineFrame(StartClimb);
+    EngineFrame(NULL);
+    memset(w.flags, 0, 24);
+    P32(w.flags, 2);
+    w.input[0] = 0;
+    for (int i = 0; i < 40; i++) EngineFrame(NULL); /* flat ground for 0.35 s ends it */
+    CHECK(!St()->has_lease && St()->counters.slope_arms == 1 && St()->counters.prepared >= 1);
+    g_candidateKind = 0;
+    w.input[0] = 1;
+    for (int i = 0; i < 3; i++) EngineFrame(NULL);
+    w.input[0] = 0;
+    EngineFrame(NULL);
+    cv_test_candidate(RaisingCandidate);
+    w.input[0] = 1;
+    EngineFrame(NULL);
+    w.input[0] = 0;
+    EngineFrame(NULL);
+    CHECK(vpm_running(fake_component(0)));
+}
+
+static void DetailedModeSaysWhatTheChecksDid(void)
+{
+    Presses(1);
+    CHECK_LOG("[Consistent Vaulting] check: waiting_for_vault_query\n");
+    CHECK_LOG("[Consistent Vaulting] stage 2: alternative prepared: hit 1 of ");
+    CHECK_LOG("[Consistent Vaulting] check: local_manual_alternative_prepared\n");
+    CHECK_EQ(fake_log_count("[Consistent Vaulting] stage 2: alternative prepared"), 1); /* kept, not prepared again */
+    CHECK_LOG("[Consistent Vaulting] check: waiting_for_manual_vault\n");
+    CHECK_LOG("[Consistent Vaulting] assist candidate: no assist, none found\n");
+    CHECK_LOG("[Consistent Vaulting] slope assist armed: 3 settings cells written (avatar index ");
+    CHECK_LOG("[Consistent Vaulting] assist: attempt (slope lease, 3 cells, speed not capped, ");
+    CHECK_LOG("[Consistent Vaulting] assist: climb (slope lease, 4 cells, speed capped, ");
+    CHECK_LOG("slope_arms 1 (+1)");
+    CHECK_LOG("slope_climbs 1 (+1)");
+    CHECK_LOG("[Consistent Vaulting] assist ended: flat_ground\n");
+    CHECK_LOG("[Consistent Vaulting] check raised (0 before it in this burst; 8 stop it): candidate fixture failure; "
+              "everything restored, a fresh start\n");
+}
+
+static void NormalModeLogsNoneOfThem(void)
+{
+    Presses(0);
+    CHECK_NO_LOG("[Consistent Vaulting] check:");
+    CHECK_NO_LOG("stage 2:");
+    CHECK_NO_LOG("counters:");
+    CHECK_NO_LOG("assist");
+    CHECK_NO_LOG("check raised");
+    CHECK_LOG("[Consistent Vaulting] error: candidate fixture failure\n"); /* the burst's own line, in both modes */
+}
+
+/* The late native retry (LateRetry): the fresh casts and the retry's hit. */
+static void DetailedModeSaysTheLateRetry(void)
+{
+    Started();
+    Diagnostics(1);
+    LATE(H(2), H(1));
+    n.flags[2] = 0x100000;
+    Fresh();
+    CHECK(Is(Run(), "native_local_vault_started"));
+    CHECK_LOG("[Consistent Vaulting] stage 3: fresh casts ready (approach: ");
+    CHECK_LOG("[Consistent Vaulting] stage 3: late native retry, the native climb started: hit 1 of ");
+    LATE(H(2));
+    n.flags[2] = 0x100000;
+    n.miss = 1;
+    Fresh();
+    CHECK(Is(Run(), "native_vault_checks_retained"));
+    CHECK_EQ(fake_log_count("[Consistent Vaulting] stage 3: fresh casts ready (approach: "), 2);
+    CHECK_EQ(fake_log_count("late native retry"), 1);
+}
+
+/* Many lines in a short time: the limiter counts them and says so at the mission's end, beside the counters. */
+static void ManyLinesAreLimited(void)
+{
+    Started();
+    Diagnostics(1);
+    fake_log_clear();
+    for (int i = 0; i < 15; i++)
+    {
+        LATE(H(2), H(1));
+        n.flags[2] = 0x100000;
+        Fresh();
+        CHECK(Is(Run(), "native_local_vault_started"));
+    }
+    CHECK_EQ(fake_log_count("[Consistent Vaulting]"), 20);
+    MissionEnds();
+    CHECK_LOG("[Consistent Vaulting] 10 detailed lines suppressed (at most 20 per 600 frames)\n");
+    CHECK_LOG("[core]   Consistent Vaulting: checks ");
+    CHECK_LOG(", prepared 1, retries 1, native starts 1, slope arms 0 "); /* each Fresh() starts the counters again */
+}
+
+/* "Note a problem now": the describe line and the counters in the mark. */
+static void TheMarkCarriesItsState(void)
+{
+    StartedEngine(1);
+    ArmedLease();
+    fake_log_clear();
+    CHECK(vpm_option_apply(PackOption("note_problem"), 1));
+    CHECK_LOG("[core] MARK 1: Consistent Vaulting: ");
+    CHECK_LOG("; assist attempt, slope lease; press window closed; vault writes held 0; busy 1; post-update check "
+              "registered; errors in this burst 0; last assist end none | checks ");
+    CHECK_LOG(", slope arms 1 (climbs 0, landings 0), ledge arms 0 (climbs 0, expired 0), candidate checks 1, ");
+}
+
 int main(void)
 {
     RUN(VaultMissionModes);
@@ -2852,5 +3003,12 @@ int main(void)
     RUN(CodeChecksWaitForTheFirstPress);
     RUN(OwnErrorsBurst);
     RUN(RefusalAndStop);
+    RUN(FrameBudgetWithTheGateDetailed);
+    RUN(IdleFramesHaveNoPostCheckDetailed);
+    RUN(DetailedModeSaysWhatTheChecksDid);
+    RUN(NormalModeLogsNoneOfThem);
+    RUN(DetailedModeSaysTheLateRetry);
+    RUN(ManyLinesAreLimited);
+    RUN(TheMarkCarriesItsState);
     TEST_END();
 }
