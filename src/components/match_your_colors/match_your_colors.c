@@ -284,9 +284,8 @@ static void MycPaths(void)
 
 static void MycStop(VpmComponent* self)
 {
-    /* A fault on the worker thread: the engine's objects are the game thread's, which no longer ticks. The colors stay
-     * as they are; the textures and the pipeline are left alone (the worker's thread ends). */
-    if (myc_worker_on_thread(&g.worker) || !s.open) return;
+    /* Always on the game thread: a fault on the worker is reported from there (myc_worker_busy). */
+    if (!s.open) return;
     int ended = myc_worker_stop(&g.worker, 1000);
     g.job = g.saving = 0;
     myc_addon_restore_all();

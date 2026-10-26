@@ -12,8 +12,10 @@
  * on the engine's objects (textures, bindings) stays on the game thread. The game thread reads the worker's fields only
  * while busy is 0 (an interlocked store after the task's last write).
  *
- * A task runs under the core's crash guard (vpm_guarded, thread-local): a fault stops the component from the worker
- * thread; stop() then leaves the game's objects alone (myc_worker_on_thread) and the game keeps the colors it shows. */
+ * A task runs under the core's crash guard for a worker (vpm_guarded_off_thread, thread-local), which stops nothing:
+ * a fault ends the task, the worker takes no further task, and the game thread stops the component at its next look
+ * at the busy flag (myc_worker_busy). stop() then runs on the game thread as for any other stop: the worker is idle,
+ * the game's objects get their originals back. */
 #include <windows.h>
 #include "myc_addon.h"
 
@@ -43,13 +45,13 @@ static void MycWorkerRun(MycWorker* w)
     w->result = NULL;
     memset(&w->err, 0, sizeof w->err);
     w->save_why[0] = 0;
-    if (!vpm_guarded(w->self, MycWorkerTask, w))
+    if (!vpm_guarded_off_thread(MycWorkerTask, w, w->fault, sizeof w->fault))
     {
-        /* the core stopped the component (its stop ran on this thread); the half-made result is left as it is */
+        /* the half-made result is left as it is (never applied); the game thread reports the fault */
         w->result = NULL;
         w->ok = 0;
-        InterlockedExchange(&w->faulted, 1);
         InterlockedExchange(&w->quit, 1);
+        InterlockedExchange(&w->faulted, 1);
     }
     QueryPerformanceCounter(&ended); /* lint-ok: C4 as above */
     w->seconds = frequency.QuadPart > 0 ? (double)(ended.QuadPart - started.QuadPart) / (double)frequency.QuadPart : 0.0;
@@ -111,4 +113,11 @@ int myc_worker_stop(MycWorker* w, unsigned long timeout_ms)
     return 1;
 }
 
-int myc_worker_on_thread(const MycWorker* w) { return w->thread != NULL && GetCurrentThreadId() == w->thread_id; }
+int myc_worker_busy(MycWorker* w)
+{
+    if (w->busy) return 1;
+    if (!w->faulted) return 0;
+    w->faulted = 0;
+    vpm_fail(w->self, "fault on the worker thread: %s", w->fault); /* stop() runs here, on the game thread */
+    return 1;
+}

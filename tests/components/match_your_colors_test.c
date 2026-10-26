@@ -858,6 +858,47 @@ static void JobsRunOnTheWorkerThread(void)
     CHECK_EQ(Recolored(0x101, ARMOR_LUT), 0);
 }
 
+static volatile int* g_myc_null;
+static int CannedFault(MycPipeline** p, const wchar_t* data, const wchar_t* cache, MycRequest* r, MycResult* out, MycErr* err)
+{
+    C.jobs++;
+    C.thread = GetCurrentThreadId();
+    return *g_myc_null;
+}
+
+/* A fault in a job on the worker thread: the core's state is not touched from there. The game thread stops the
+ * component at its next look at the worker, its stop puts the originals back there, and the worker's thread ends. */
+static void AFaultOnTheWorkerStopsItOnTheGameThread(void)
+{
+    Boot(1, 1, HELMET, 1);
+    myc_g.worker.synchronous = 0;
+    Frames(4);
+    for (int i = 0; i < 2000 && Recolored(0x100, HELMET_LUT) != 1; i++)
+    {
+        Sleep(1);
+        Frames(1);
+    }
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 1);
+    myc_g.worker.job = CannedFault;
+    SetOption("mode", 3); /* a new job, which faults */
+    for (int i = 0; i < 2000 && vpm_running(fake_component(0)); i++)
+    {
+        Sleep(1);
+        Frames(1);
+    }
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK(C.thread != 0 && C.thread != GetCurrentThreadId());
+    CHECK_LOG("[Match Your Colors] disabled: fault on the worker thread: fault 0xC0000005");
+    CHECK_EQ(fake_log_count("disabled:"), 1);
+    CHECK_LOG("[Match Your Colors] Stopped (fault on the worker thread: fault 0xC0000005");
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 0); /* the originals back, from the game thread */
+    CHECK_EQ(Recolored(0x101, ARMOR_LUT), 0);
+    CHECK(myc_g.worker.thread == NULL); /* joined */
+    fake_counts_reset();
+    fake_frames(30, DT);
+    CHECK_EQ(fake_counts().read, 0);
+}
+
 static void TheReaderClosesOnTheNextCheckWithoutAJob(void)
 {
     Boot(1, 1, HELMET, 1);
@@ -1798,6 +1839,7 @@ int main(void)
     RUN(TheGamePuttingTheOriginalBackIsSeen);
     RUN(StopPutsTheOriginalsBack);
     RUN(JobsRunOnTheWorkerThread);
+    RUN(AFaultOnTheWorkerStopsItOnTheGameThread);
     RUN(TheReaderClosesOnTheNextCheckWithoutAJob);
     RUN(TheUiPreviewTakesItsOwnPlan);
     RUN(TheCacheIsSavedAfterTheDelay);

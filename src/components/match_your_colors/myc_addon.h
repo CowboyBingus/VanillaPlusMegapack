@@ -61,7 +61,8 @@ typedef struct MycWorker
     MycJobFn job;                   /* tests: a canned job (NULL: myc_job_run) */
     volatile long busy;             /* a task given and not finished: the worker's fields below are its */
     volatile long quit;
-    volatile long faulted;          /* a task faulted (the core stopped the component from the worker) */
+    volatile long faulted;          /* a task faulted: the game thread stops the component (myc_worker_busy) */
+    char fault[160];                /* the fault, as the core's guard describes it */
     int task;
     MycRequest* request;            /* the game thread's (it may set obsolete) */
     MycResult* result;
@@ -175,7 +176,8 @@ int myc_addon_still_current(const MycRequest* request, uint32_t frame, MycIdenti
 int myc_worker_give(MycWorker* w, int task, MycRequest* request);
 /* Stops the thread (waits up to timeout_ms for a task to end); 1 when it has ended, 0 when it still runs. */
 int myc_worker_stop(MycWorker* w, unsigned long timeout_ms);
-int myc_worker_on_thread(const MycWorker* w);
-static inline int myc_worker_busy(const MycWorker* w) { return w->busy != 0; }
+/* 1 while a task runs. After a task faulted: stops the component (on the game thread, where its stop runs) and
+ * answers 1, so the caller gives nothing more. One plain load while nothing faulted. */
+int myc_worker_busy(MycWorker* w);
 
 #endif
