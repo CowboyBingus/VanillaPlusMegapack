@@ -204,7 +204,8 @@ static int AddPins(const ApcSignature* signatures, int count, const char* name)
             char* pattern = g_pinText[g_pinCount];
             uint32_t bytes = Chunk(signatures[i].hex, &at, pattern);
             if (bytes == 0) break;
-            g_pins[g_pinCount] = (VpmCodePin){signatures[i].rva + offset, pattern, name, signatures[i].exe ? VPM_PIN_EXE : 0u};
+            uint32_t flags = signatures[i].exe ? VPM_PIN_EXE : 0u;
+            g_pins[g_pinCount] = (VpmCodePin){signatures[i].rva + offset, pattern, name, flags};
             g_pinCount++;
             offset += bytes;
         }
@@ -223,8 +224,8 @@ static int WaitForCode(VpmComponent* self)
     const ApcSignature* exeSignatures = apc_present_signatures(1, &exe);
     g_pinCount = 0;
     if (!AddPins(nativeSignatures, native, "Native instruction")) return 0;
-    if (s.images && (!AddPins(gameSignatures, game, "Image instruction") || !AddPins(exeSignatures, exe, "Image instruction")))
-        return 0;
+    if (s.images && !AddPins(gameSignatures, game, "Image instruction")) return 0;
+    if (s.images && !AddPins(exeSignatures, exe, "Image instruction")) return 0;
     return vpm_when_code_ready(self, g_pins, g_pinCount, CodeReady);
 }
 

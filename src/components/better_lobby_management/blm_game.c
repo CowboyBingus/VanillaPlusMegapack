@@ -55,35 +55,63 @@ uintptr_t blm_code_address(const BlmCode* table, int count, const char* name)
     return 0;
 }
 
-int blm_game_verify(const char** why)
+/* ---- the code checks, as the core's wait takes them ---------------------------------------------------------- */
+
+#define MAX_GAME_PINS 32
+#define SLOTS 4
+static VpmCodePin g_gamePins[MAX_GAME_PINS];
+static VpmCodePin g_slotPins[SLOTS];
+static char g_slotNames[SLOTS][48];
+static uintptr_t g_targets[SLOTS]; /* the slots' functions: clear_filters, continent, unload_paused, pause_unloads */
+static uintptr_t g_lobbyApi;
+
+static int AddPins(int at, const BlmCode* table, int count, uint32_t flags)
 {
-    if (!blm_game_code_ok(blm_game_code, blm_game_code_count, why)) return 0;
-    for (int i = 0; i < blm_exe_code_count; i++)
-        if (!blm_code_at(vpm_exe() + blm_exe_code[i].rva, blm_exe_code[i].pattern))
-        {
-            *why = blm_changed(blm_exe_code[i].name);
-            return 0;
-        }
-    return blm_game_code_ok(blm_game_natives, blm_game_natives_count, why);
+    for (int i = 0; i < count && at < MAX_GAME_PINS; i++)
+        g_gamePins[at++] = (VpmCodePin){table[i].rva, table[i].pattern, table[i].name, flags};
+    return at;
+}
+
+int blm_game_pins(const VpmCodePin** pins)
+{
+    int n = AddPins(0, blm_game_code, blm_game_code_count, 0);
+    n = AddPins(n, blm_exe_code, blm_exe_code_count, VPM_PIN_EXE);
+    n = AddPins(n, blm_game_natives, blm_game_natives_count, 0);
+    *pins = g_gamePins;
+    return n;
 }
 
 int blm_engine_ready(void) { return blm_global(BLM_ENGINE_API_PTR) != 0; }
 
-/* Each slot's function, checked through the pointer the API table holds; targets[i] its address. */
-static int SlotsOk(uintptr_t api, const BlmCode* slots, int count, uintptr_t* targets, const char** why)
+/* A slot's function as a pin of the core's wait, when it lies in the exe's or game.dll's image (1); else checked at
+ * once, as the Lua's check (1 matched, 0 not). */
+static int SlotPin(int* pins, uintptr_t target, const BlmCode* slot)
+{
+    snprintf(g_slotNames[*pins], sizeof g_slotNames[0], "engine %s", slot->name);
+    uint32_t flags = VPM_PIN_EXE;
+    uintptr_t base = vpm_exe();
+    size_t size = vpm_exe_size();
+    if (target < base || target - base >= size) { flags = 0; base = vpm_game(); size = vpm_game_size(); }
+    if (target == 0 || target < base || target - base >= size) return blm_code_at(target, slot->pattern);
+    g_slotPins[*pins] = (VpmCodePin){(uint32_t)(target - base), slot->pattern, g_slotNames[*pins], flags};
+    (*pins)++;
+    return 1;
+}
+
+/* Each slot's function through the pointer the API table holds (targets[i] its address), as pins. NULL, or why not. */
+static const char* SlotsOk(uintptr_t api, const BlmCode* slots, int count, uintptr_t* targets, int* pins)
 {
     for (int i = 0; i < count; i++)
     {
         targets[i] = vpm_ptr(api + slots[i].rva);
-        if (!blm_code_at(targets[i], slots[i].pattern))
+        if (targets[i] == 0 || !SlotPin(pins, targets[i], &slots[i]))
         {
             char name[64];
             snprintf(name, sizeof name, "engine %s", slots[i].name);
-            *why = blm_changed(name);
-            return 0;
+            return blm_changed(name);
         }
     }
-    return 1;
+    return NULL;
 }
 
 static void BindGameNatives(void)
@@ -99,21 +127,27 @@ static void BindGameNatives(void)
     blm_native.is_friend = (BlmIsFriend)blm_code_address(t, n, "is_friend");
 }
 
-int blm_engine_bind(const char** why)
+const char* blm_engine_resolve(const VpmCodePin** pins, int* count)
 {
-    uintptr_t tables = (uintptr_t)blm_global(BLM_ENGINE_API_PTR), lobby[2], package[2];
-    if (tables == 0) { *why = "engine API unavailable"; return 0; }
-    uintptr_t lobbyApi = vpm_ptr(tables + BLM_LOBBY_API);
-    if (lobbyApi == 0) { *why = "engine lobby API unavailable"; return 0; }
-    if (!SlotsOk(lobbyApi, blm_engine_slots, blm_engine_slots_count, lobby, why)) return 0;
+    uintptr_t tables = (uintptr_t)blm_global(BLM_ENGINE_API_PTR);
+    const char* why = NULL;
+    *count = 0;
+    *pins = g_slotPins;
+    if (tables == 0) return "engine API unavailable";
+    g_lobbyApi = vpm_ptr(tables + BLM_LOBBY_API);
+    if (g_lobbyApi == 0) return "engine lobby API unavailable";
+    if ((why = SlotsOk(g_lobbyApi, blm_engine_slots, blm_engine_slots_count, g_targets, count)) != NULL) return why;
     uintptr_t packageApi = vpm_ptr(tables + BLM_PACKAGE_API);
-    if (packageApi == 0) { *why = "engine package API unavailable"; return 0; }
-    if (!SlotsOk(packageApi, blm_package_slots, blm_package_slots_count, package, why)) return 0;
+    if (packageApi == 0) return "engine package API unavailable";
+    return SlotsOk(packageApi, blm_package_slots, blm_package_slots_count, g_targets + blm_engine_slots_count, count);
+}
+
+void blm_engine_bind(void)
+{
     BindGameNatives();
-    blm_native.clear_filters = (BlmHandleCall)lobby[0];
-    blm_native.continent = (BlmSelfCall)lobby[1];
-    blm_native.lobby_api = lobbyApi;
-    return 1;
+    blm_native.clear_filters = (BlmHandleCall)g_targets[0];
+    blm_native.continent = (BlmSelfCall)g_targets[1];
+    blm_native.lobby_api = g_lobbyApi;
 }
 
 /* ---- the session ------------------------------------------------------------------------------------------------- */

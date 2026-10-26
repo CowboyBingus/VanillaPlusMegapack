@@ -17,7 +17,13 @@
  * natives and the engine's lobby API are needed by all.
  *
  * On HellForge: HF_EVENT_GAME_LOADED runs the checks; the engine API tables may not exist yet then, so the component
- * waits for them (one plain load per frame, at most 600 s). The settings are applied on the first frame after the
+ * waits for them (one plain load per frame, at most 600 s). game.dll's code (and the exe's) is decoded in parts after
+ * that event, so the code checks wait for it (vpm_when_code_ready): the network code, the PlayFab layout and the natives
+ * from the event, the engine slots' functions once the API tables exist, each at once and then every 30 frames until
+ * they read as shipped; code that never does within 60 s stops the component ("host-left check changed (game.dll
+ * 0x10834ED)"), before anything changed. A part whose own code does not read as shipped yet is left out as before, and
+ * looked at again on every 30th frame for 60 s: it joins once its code reads as shipped (its setting applied, a log
+ * line), else it stays out for the session. The settings are applied on the first frame after the
  * checks, as the Lua's first update registered its options. The options are the core's (vpm_option, the Lua's ids,
  * kinds and defaults); texts are English (vpm_text). Game state is the Lua's own reads (the mode at +0xAC21C, the host
  * and peers in the network context), not HellForge's events. The SOS Beacon's settings are read through the stratagem
@@ -44,12 +50,16 @@
  *   1 page check [1]; a new screen: 2 reads [2]). Page checks (VirtualQuery) are made once per target where the Lua
  *   checked before every write: the scanner's field and countdown, the override table, the lobby's post countdown (the
  *   game rewriting the scanner field: 1 read, 0 page checks [Lua: 1, 1]; turning Lobby Region off: 0 [1]).
- * - Once: 73 code checks (HfApi.code_matches) and 6 reads for the engine's lobby and package slots. */
+ * - Once: 73 code checks (HfApi.code_matches) and 6 reads for the engine's lobby and package slots. While code is not
+ *   decoded yet: the waiting checks every 30 frames (at most 60 s), nothing else; a part left out: its checks on every
+ *   30th frame for 60 s. */
 #include <stdio.h>
 #include "blm.h"
 
 #define VERSION "v1.2.1"
 #define WAIT_SECONDS 600.0f
+#define PARTS_WAIT_SECONDS 60.0f /* a part's code is looked at again for this long (game.dll is decoded in parts) */
+#define PARTS_FRAMES 30
 #define OPTION_REGION 0
 #define OPTION_MESSAGES 1
 #define OPTION_SCANNER 2
@@ -74,6 +84,9 @@ static struct
     int verified, ready;
     int settingsPending;          /* the saved settings wait for the first frame */
     float waited;
+    int partsPending;             /* a part's code did not read as shipped: looked at again (RecheckParts) */
+    float partsWaited;
+    int partsFrames;
     double clock;
     int quiet;                    /* nothing pending after the last full frame */
     int menu, sos, chat, region, scanner; /* the parts that passed their checks */
@@ -142,10 +155,14 @@ static void RegisterOptions(VpmComponent* self)
     }
 }
 
+static double OptionValue(int option)
+{
+    return s.options[option] != NULL ? vpm_option_value(s.options[option]) : g_options[option].value;
+}
+
 static void ApplySettings(void)
 {
-    for (int i = 0; i < OPTIONS; i++)
-        ApplySetting(i, s.options[i] != NULL ? vpm_option_value(s.options[i]) : g_options[i].value);
+    for (int i = 0; i < OPTIONS; i++) ApplySetting(i, OptionValue(i));
 }
 
 /* ---- the offer ----------------------------------------------------------------------------------------------------- */
@@ -329,9 +346,13 @@ static void Idle(float dt)
     if (s.region) blm_region_step();
 }
 
-/* lint: per-frame. The idle gate first: while quiet, a closed escape screen (two plain loads) ends the frame idle. */
+static void RecheckParts(VpmComponent* self, float dt);
+
+/* lint: per-frame. The idle gate first: while quiet, a closed escape screen (two plain loads) ends the frame idle. (A
+ * part left out at the start is looked at again first, for at most PARTS_WAIT_SECONDS.) */
 static void Tick(VpmComponent* self, float dt)
 {
+    if (s.partsPending) RecheckParts(self, dt);
     if (s.quiet && (!s.menu || blm_menu_closed())) { Idle(dt); return; }
     Run(dt);
 }
@@ -340,15 +361,42 @@ static void Tick(VpmComponent* self, float dt)
 
 static void Keep(char* out, const char* why) { snprintf(out, WHY_SIZE, "%s", why); }
 
-static void VerifyParts(void)
+/* Every part not verified yet checked (again), in the Lua's order; 1 when all are. */
+static int VerifyParts(void)
 {
     const char* why = "";
-    if (!(s.region = blm_region_verify(&why))) Keep(s.regionWhy, why);
-    if (!(s.scanner = blm_scanner_verify(&why))) Keep(s.scannerWhy, why);
-    if (!(s.menu = blm_menu_verify(&why))) Keep(s.menuWhy, why);
-    if (!(s.sos = blm_sos_verify(&why))) Keep(s.sosWhy, why);
-    if (!(s.chat = blm_chat_verify(&why))) Keep(s.chatWhy, why);
-    blm_lobby_use(s.chat, s.menu);
+    if (!s.region && !(s.region = blm_region_verify(&why))) Keep(s.regionWhy, why);
+    if (!s.scanner && !(s.scanner = blm_scanner_verify(&why))) Keep(s.scannerWhy, why);
+    if (!s.menu && !(s.menu = blm_menu_verify(&why))) Keep(s.menuWhy, why);
+    if (!s.sos && !(s.sos = blm_sos_verify(&why))) Keep(s.sosWhy, why);
+    if (!s.chat && !(s.chat = blm_chat_verify(&why))) Keep(s.chatWhy, why);
+    return s.region && s.scanner && s.menu && s.sos && s.chat;
+}
+
+/* The parts that joined late: their settings applied (after the first frame's), and a log line each. */
+static void PartsJoined(VpmComponent* self, int region, int scanner, int menu, int sos, int chat)
+{
+    static const char* const names[5] = {"Lobby Region", "scanner", "menu", "CANCEL SOS", "squad messages"};
+    const int joined[5] = {!region && s.region, !scanner && s.scanner, !menu && s.menu, !sos && s.sos, !chat && s.chat};
+    for (int i = 0; i < 5; i++)
+        if (joined[i])
+            vpm_log(self, "%s ready after %.1f s: its game code was decoded after the others", names[i], s.partsWaited);
+    if (s.settingsPending) return; /* the first frame applies them all */
+    if (joined[0]) ApplySetting(OPTION_REGION, OptionValue(OPTION_REGION));
+    if (joined[1]) ApplySetting(OPTION_SCANNER, OptionValue(OPTION_SCANNER));
+    if (joined[2] || joined[4]) ApplySetting(OPTION_MESSAGES, OptionValue(OPTION_MESSAGES)); /* the lobby's both flags */
+}
+
+/* lint: per-frame. A part's code that did not read as shipped at the start (game.dll is decoded in parts): its checks
+ * again on every 30th frame, for PARTS_WAIT_SECONDS; then it stays out for the session, as a part whose code differs. */
+static void RecheckParts(VpmComponent* self, float dt)
+{
+    s.partsWaited += dt;
+    if (s.partsWaited >= PARTS_WAIT_SECONDS) { s.partsPending = 0; return; }
+    if (++s.partsFrames % PARTS_FRAMES != 0) return;
+    int region = s.region, scanner = s.scanner, menu = s.menu, sos = s.sos, chat = s.chat;
+    s.partsPending = !VerifyParts();
+    PartsJoined(self, region, scanner, menu, sos, chat);
 }
 
 static const char* PartText(int ok, const char* prefix, const char* why, char* out, size_t size)
@@ -368,17 +416,31 @@ static void LogReady(VpmComponent* self)
         sizeof scanner), PartText(s.sos, "unavailable", s.sosWhy, sos, sizeof sos));
 }
 
-/* The engine's lobby and package slots, then every part's own checks, the settings and the frame. */
-static void Begin(VpmComponent* self)
+/* The engine slots' functions read as shipped: they are bound, then every part's own checks, the settings and the
+ * frame. */
+static void SlotsReady(VpmComponent* self, HfEvent event)
 {
-    const char* why = "";
-    if (!blm_engine_bind(&why)) { vpm_fail(self, "%s", why); return; }
-    VerifyParts();
+    blm_engine_bind();
+    s.partsPending = !VerifyParts();
+    blm_lobby_use(s.chat, s.menu);
     LogReady(self);
     s.ready = 1;
     s.settingsPending = 1;
     if (!vpm_tick_start(self, Tick)) { vpm_fail(self, "the game thread could not be reached"); return; }
     vpm_set_status(self, "ready");
+}
+
+/* The engine's lobby and package slots resolved; their functions handed to the core's wait (SlotsReady at once when they
+ * read as shipped). */
+static void Begin(VpmComponent* self)
+{
+    const VpmCodePin* pins = NULL;
+    int count = 0;
+    const char* why = blm_engine_resolve(&pins, &count);
+    if (why != NULL) { vpm_fail(self, "%s", why); return; }
+    vpm_tick_stop(self); /* the engine wait's tick, if it ran: SlotsReady starts the frame */
+    if (count == 0) { SlotsReady(self, HF_EVENT_GAME_LOADED); return; }
+    if (!vpm_when_code_ready(self, pins, count, SlotsReady)) vpm_fail(self, "the engine slots' code checks refused");
 }
 
 /* lint: per-frame. The engine API tables do not exist yet: one plain load per frame, for at most WAIT_SECONDS. */
@@ -394,11 +456,10 @@ static void WaitEngine(VpmComponent* self, float dt)
     Begin(self);
 }
 
+/* The network code, the PlayFab layout and the natives read as shipped (the core's wait, from HF_EVENT_GAME_LOADED). */
 static void Loaded(VpmComponent* self, HfEvent event)
 {
-    const char* why = "";
     if (s.verified) return;
-    if (!blm_game_verify(&why)) { vpm_fail(self, "%s", why); return; }
     s.verified = 1;
     if (blm_engine_ready()) { Begin(self); return; }
     vpm_log(self, "Waiting for the game: the engine API is not available yet.");
@@ -434,7 +495,9 @@ static int Start(VpmComponent* self)
     blm_region_reset();
     blm_scanner_reset();
     RegisterOptions(self);
-    return vpm_on_load(self, HF_EVENT_GAME_LOADED, Loaded) ? 0 : 1;
+    const VpmCodePin* pins = NULL;
+    int count = blm_game_pins(&pins);
+    return vpm_when_code_ready(self, pins, count, Loaded) ? 0 : 1;
 }
 
 const VpmComponentDef vpm_component_better_lobby_management = {"better_lobby_management", "Better Lobby Management", "1.2.1", 0, Start, Stop};

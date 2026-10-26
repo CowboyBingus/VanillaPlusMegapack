@@ -352,7 +352,8 @@ static int MbmStart(VpmComponent* self)
     mbm_panel_reset();
     if (!vpm_tick_start(self, MbmTick)) return vpm_fail(self, "the game thread could not be reached");
     int checks = (int)(sizeof kMbmCodeChecks / sizeof kMbmCodeChecks[0]);
-    if (!vpm_when_code_ready(self, kMbmCodeChecks, checks, MbmCodeReady)) return vpm_fail(self, "game.dll's code checks refused");
+    if (!vpm_when_code_ready(self, kMbmCodeChecks, checks, MbmCodeReady))
+        return vpm_fail(self, "game.dll's code checks refused");
     vpm_log(self, "Mod Bindings Menu initialized; waiting for native input actions.");
     mbm_refresh_status();
     vpm_bindings_set_backend(self, &kMbmBackend);

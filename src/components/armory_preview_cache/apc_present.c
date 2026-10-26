@@ -43,7 +43,8 @@ static const ApcSignature kExeSignatures[] = {
 
 const ApcSignature* apc_present_signatures(int exe, int* count)
 {
-    *count = exe ? (int)(sizeof kExeSignatures / sizeof kExeSignatures[0]) : (int)(sizeof kSignatures / sizeof kSignatures[0]);
+    *count = exe ? (int)(sizeof kExeSignatures / sizeof kExeSignatures[0])
+                 : (int)(sizeof kSignatures / sizeof kSignatures[0]);
     return exe ? kExeSignatures : kSignatures;
 }
 
