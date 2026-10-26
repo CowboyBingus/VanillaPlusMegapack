@@ -44,7 +44,7 @@
  *     build hash check (the core checks the build) and the Lua's world-detection log lines; the core's crash guard
  *     covers faults.
  *
- * COST per frame (calls; "read" is HfApi.read, ReadProcessMemory; tests/components/ship_station_hotkeys_test.c pins
+ * COST per frame (calls; "read" is vpm_read, a guarded plain load; tests/components/ship_station_hotkeys_test.c pins
  * them). The game.dll statics the Lua read with ReadProcessMemory (the mission record and input owner pointers, the
  * UI state, the station globals) are plain loads here.
  *   - Before the ship: nothing; every 15 frames one game_state (HellForge: GetModuleHandleA and 2 reads). Lua: an engine

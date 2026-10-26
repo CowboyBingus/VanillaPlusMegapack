@@ -17,7 +17,7 @@
  * retires that owner until a press resolves a different one. Focus loss ends a drag; a Settings drag consumes the UI
  * select action every frame until the button is released, also after the drag ended (native.c).
  *
- * On HellForge: the tick is HellForge's game-thread callback (the Lua's guarded update step); the five game routines
+ * On HellForge: the tick is the core's game-thread tick (the Lua's guarded update step); the five game routines
  * are checked with code_matches at HF_EVENT_GAME_LOADED (the core checks the build); game.dll globals are plain loads;
  * time is the tick's dt (the Lua read GetTickCount64); the client origin comes from ScreenToClient on the cursor (the
  * core resolves no ClientToScreen). Dropped: the diagnostics (the opt-in ClickableScrollbars.log flight recorder,
@@ -26,11 +26,12 @@
  * crash guard), the shutdown log and the UI-bridge probe (log only). An owner retired and the first verified drag on
  * each route are logged once (the Lua traced them with diagnostics only), so a session's log shows each route working.
  *
- * Tick order: HellForge's tick runs before the menu sound manager's update (game.dll 0x13270B0); where that lies
- * against the UI's input handling is unverified (the Lua's step ran first in the game's Lua update). The drags do not
- * depend on it beyond a frame of latency: the solver and setters are called directly, a running scroll animation is
- * stopped before each write, and the check waits 200 ms. A Settings drag does: its consume must land before the
- * page's row and tab handlers read the select action on a frame where the pointer has crossed onto them.
+ * Tick order: the tick runs where the Lua's step ran, at the start of game.dll's frame update (0xAB5000), which the
+ * engine calls right after the game's Lua update (only the engine plugins' pre-update lies between; KB
+ * squad-join-pipeline-research section 1). Everything game.dll does in the frame, its UI pass included, comes after
+ * it, as it came after the Lua's step. So a Settings drag's consume lands where the Lua's did, before the page's row
+ * and tab handlers read the select action, and the drags see the frame as the Lua's did. Until the core's frame hook
+ * is in, the tick runs from HellForge's game-thread callback inside the same update, still before the UI pass.
  *
  * COST (per frame; the Lua's pins: tests/test_frame_budget.lua):
  * - Idle (no drag, no Settings capture, no new press: play, the ship, a menu with the pointer resting or the button

@@ -1002,6 +1002,411 @@ static void TheRevisionCountsChangesAndSaveNowWrites(void)
     CHECK(GetFileAttributesW(L"vpm-test-settings.ini") != INVALID_FILE_ATTRIBUTES);
 }
 
+/* ---- text: the Lua text module's UTF-8 (bingus_text.lua v1, its tests test_bingus_text.lua) -------------------- */
+
+/* What bingus_text.lua v1 says about each text: length(), check() for one line and for multiline (1, or -1 invalid
+ * UTF-8 / -2 a control character, at a 1-based byte) and upper(). Written by running the Lua module (LuaJIT 2.1) on
+ * these texts: first test_bingus_text.lua's own, then the edges (overlong forms, surrogates, U+10FFFF and above, cut
+ * sequences, C0 and C1 controls, line feeds, every special case of the upper-case table). */
+typedef struct TextCase
+{
+    const char* text;
+    int length, line, line_at, multiline, multiline_at;
+    const char* upper;
+} TextCase;
+
+static const TextCase kTextCases[] = {
+    {"", 0, 1, 0, 1, 0, ""},
+    {"A", 1, 1, 0, 1, 0, "A"},
+    {"abc xyz 09", 10, 1, 0, 1, 0, "ABC XYZ 09"},
+    {"FORECAST // INTEL AND RECON", 27, 1, 0, 1, 0, "FORECAST // INTEL AND RECON"},
+    {"\xE9\xA2\x84\xE6\x8A\xA5 // \xE6\x83\x85\xE6\x8A\xA5", 8, 1, 0, 1, 0,
+        "\xE9\xA2\x84\xE6\x8A\xA5 // \xE6\x83\x85\xE6\x8A\xA5"},
+    {"Semicolons; are fine now", 24, 1, 0, 1, 0, "SEMICOLONS; ARE FINE NOW"},
+    {"tab\tstop", 8, -2, 4, -2, 4, "TAB\tSTOP"},
+    {"bell\x07", 5, -2, 5, -2, 5, "BELL\x07"},
+    {"del\x7F", 4, -2, 4, -2, 4, "DEL\x7F"},
+    {"c1 \xC2\x85 next line", 14, -2, 4, -2, 4, "C1 \xC2\x85 NEXT LINE"},
+    {"\x1F", 1, -2, 1, -2, 1, "\x1F"},
+    {" ", 1, 1, 0, 1, 0, " "},
+    {"\xC2\x9F", 1, -2, 1, -2, 1, "\xC2\x9F"},
+    {"\xC2\xA0", 1, 1, 0, 1, 0, "\xC2\xA0"},
+    {"two\nlines", 9, -2, 4, 1, 0, "TWO\nLINES"},
+    {"one two\nthree\n\nfour", 19, -2, 8, 1, 0, "ONE TWO\nTHREE\n\nFOUR"},
+    {"\r\n", 2, -2, 1, -2, 1, "\r\n"},
+    {"a\n\tb", 4, -2, 2, -2, 3, "A\n\tB"},
+    {"\n", 1, -2, 1, 1, 0, "\n"},
+    {"ok \x80", 4, -1, 4, -1, 4, "OK \x80"},
+    {"ok \xBF", 4, -1, 4, -1, 4, "OK \xBF"},
+    {"ok \xC0\x80", 5, -1, 4, -1, 4, "OK \xC0\x80"},
+    {"ok \xC1\xBF", 5, -1, 4, -1, 4, "OK \xC1\xBF"},
+    {"ok \xE0\x80\x80", 6, -1, 4, -1, 4, "OK \xE0\x80\x80"},
+    {"ok \xED\xA0\x80", 6, -1, 4, -1, 4, "OK \xED\xA0\x80"},
+    {"ok \xF0\x80\x80\x80", 7, -1, 4, -1, 4, "OK \xF0\x80\x80\x80"},
+    {"ok \xF4\x90\x80\x80", 7, -1, 4, -1, 4, "OK \xF4\x90\x80\x80"},
+    {"ok \xF5\x80\x80\x80", 7, -1, 4, -1, 4, "OK \xF5\x80\x80\x80"},
+    {"ok \xFF", 4, -1, 4, -1, 4, "OK \xFF"},
+    {"ok \xE4\xB8", 5, -1, 4, -1, 4, "OK \xE4\xB8"},
+    {"ok \xE4", 4, -1, 4, -1, 4, "OK \xE4"},
+    {"ok \xC3", 4, -1, 4, -1, 4, "OK \xC3"},
+    {"\xE0\x9F\xBF", 3, -1, 1, -1, 1, "\xE0\x9F\xBF"},
+    {"\xF0\x8F\xBF\xBF", 4, -1, 1, -1, 1, "\xF0\x8F\xBF\xBF"},
+    {"\xED\xBF\xBF", 3, -1, 1, -1, 1, "\xED\xBF\xBF"},
+    {"\xED\x9F\xBF", 1, 1, 0, 1, 0, "\xED\x9F\xBF"},
+    {"\xEE\x80\x80", 1, 1, 0, 1, 0, "\xEE\x80\x80"},
+    {"\xC2\x80", 1, -2, 1, -2, 1, "\xC2\x80"},
+    {"\xE0\xA0\x80", 1, 1, 0, 1, 0, "\xE0\xA0\x80"},
+    {"\xF0\x90\x80\x80", 1, 1, 0, 1, 0, "\xF0\x90\x80\x80"},
+    {"\xF4\x8F\xBF\xBF", 1, 1, 0, 1, 0, "\xF4\x8F\xBF\xBF"},
+    {"\xF0\x9F\x98\x80x", 2, 1, 0, 1, 0, "\xF0\x9F\x98\x80X"},
+    {"\x80" "abc", 4, -1, 1, -1, 1, "\x80" "ABC"},
+    {"abc\xE4\xB8", 5, -1, 4, -1, 4, "ABC\xE4\xB8"},
+    {"abc\xF0\x9F\x98", 6, -1, 4, -1, 4, "ABC\xF0\x9F\x98"},
+    {"a\xE4" "b", 3, -1, 2, -1, 2, "A\xE4" "B"},
+    {"plong\xC3\xA9" "e \xC3\xA0 \xC3\xBF", 11, 1, 0, 1, 0, "PLONG\xC3\x89" "E \xC3\x80 \xC5\xB8"},
+    {"\xC5\xBC\xC3\xB3\xC5\x82w \xC4\x87", 6, 1, 0, 1, 0, "\xC5\xBB\xC3\x93\xC5\x81W \xC4\x86"},
+    {"\xD0\xBF\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82 \xD1\x91", 8, 1, 0, 1, 0,
+        "\xD0\x9F\xD0\xA0\xD0\x98\xD0\x92\xD0\x95\xD0\xA2 \xD0\x81"},
+    {"\xCE\xB1\xCF\x82\xCE\xAC", 3, 1, 0, 1, 0, "\xCE\x91\xCE\xA3\xCE\x86"},
+    {"\xE4\xB8\xAD" "a\xC3\x9F", 3, 1, 0, 1, 0, "\xE4\xB8\xAD" "A\xC3\x9F"},
+    {"bad \xFF x", 7, -1, 5, -1, 5, "BAD \xFF X"},
+    {"ALREADY UPPER", 13, 1, 0, 1, 0, "ALREADY UPPER"},
+    {"\xC4\xB1\xC5\xBF", 2, 1, 0, 1, 0, "IS"},
+    {"\xC3\xB7\xC3\xBE\xC2\xB5", 3, 1, 0, 1, 0, "\xC3\xB7\xC3\x9E\xC2\xB5"},
+    {"\xC4\xB0\xC4\xB8\xC5\x89\xC5\x80\xC5\xBE", 5, 1, 0, 1, 0, "\xC4\xB0\xC4\xB8\xC5\x89\xC4\xBF\xC5\xBD"},
+    {"\xCF\x82\xCE\xAC\xCE\xAD\xCF\x8C\xCF\x8D\xCF\x8E\xCF\x8B\xCE\x90", 8, 1, 0, 1, 0,
+        "\xCE\xA3\xCE\x86\xCE\x88\xCE\x8C\xCE\x8E\xCE\x8F\xCE\xAB\xCE\x90"},
+    {"\xD1\x90\xD1\x9F\xD2\x91\xD1\xA3", 4, 1, 0, 1, 0, "\xD0\x80\xD0\x8F\xD2\x90\xD1\xA3"},
+    {"multi\nline \xC3\xA9t\xC3\xA9", 14, -2, 6, 1, 0, "MULTI\nLINE \xC3\x89T\xC3\x89"},
+};
+#define TEXT_CASES (sizeof kTextCases / sizeof kTextCases[0])
+
+/* clip() at every byte count from 0 to the text's length + 1, from the Lua module: test_bingus_text.lua's mixed text,
+ * one with 4-, 2- and 1-byte characters, stray continuation bytes, ASCII. */
+typedef struct ClipCase { const char* text; int lengths[13]; } ClipCase;
+static const ClipCase kClipCases[] = {
+    {"ab\xE4\xB8\xAD" "c\xE4\xB8\xAD", {0, 1, 2, 2, 2, 5, 6, 6, 6, 9, 9}},
+    {"\xF0\x9F\x98\x80\xC3\xA9" "a\xF4\x8F\xBF\xBF", {0, 0, 0, 0, 4, 4, 6, 7, 7, 7, 7, 11, 11}},
+    {"\x80\x80x\xBF", {0, 0, 2, 2, 4, 4}},
+    {"abc", {0, 1, 2, 3, 3}},
+};
+
+/* Every code point the Lua's upper() changes, with what it becomes (all others stay): from running it over
+ * U+0000-U+10FFFF. */
+static const uint32_t kUpperPairs[][2] = {
+    {0x61, 0x41}, {0x62, 0x42}, {0x63, 0x43}, {0x64, 0x44}, {0x65, 0x45}, {0x66, 0x46}, {0x67, 0x47}, {0x68, 0x48},
+    {0x69, 0x49}, {0x6A, 0x4A}, {0x6B, 0x4B}, {0x6C, 0x4C}, {0x6D, 0x4D}, {0x6E, 0x4E}, {0x6F, 0x4F}, {0x70, 0x50},
+    {0x71, 0x51}, {0x72, 0x52}, {0x73, 0x53}, {0x74, 0x54}, {0x75, 0x55}, {0x76, 0x56}, {0x77, 0x57}, {0x78, 0x58},
+    {0x79, 0x59}, {0x7A, 0x5A}, {0xE0, 0xC0}, {0xE1, 0xC1}, {0xE2, 0xC2}, {0xE3, 0xC3}, {0xE4, 0xC4}, {0xE5, 0xC5},
+    {0xE6, 0xC6}, {0xE7, 0xC7}, {0xE8, 0xC8}, {0xE9, 0xC9}, {0xEA, 0xCA}, {0xEB, 0xCB}, {0xEC, 0xCC}, {0xED, 0xCD},
+    {0xEE, 0xCE}, {0xEF, 0xCF}, {0xF0, 0xD0}, {0xF1, 0xD1}, {0xF2, 0xD2}, {0xF3, 0xD3}, {0xF4, 0xD4}, {0xF5, 0xD5},
+    {0xF6, 0xD6}, {0xF8, 0xD8}, {0xF9, 0xD9}, {0xFA, 0xDA}, {0xFB, 0xDB}, {0xFC, 0xDC}, {0xFD, 0xDD}, {0xFE, 0xDE},
+    {0xFF, 0x178}, {0x101, 0x100}, {0x103, 0x102}, {0x105, 0x104}, {0x107, 0x106}, {0x109, 0x108}, {0x10B, 0x10A},
+    {0x10D, 0x10C}, {0x10F, 0x10E}, {0x111, 0x110}, {0x113, 0x112}, {0x115, 0x114}, {0x117, 0x116}, {0x119, 0x118},
+    {0x11B, 0x11A}, {0x11D, 0x11C}, {0x11F, 0x11E}, {0x121, 0x120}, {0x123, 0x122}, {0x125, 0x124}, {0x127, 0x126},
+    {0x129, 0x128}, {0x12B, 0x12A}, {0x12D, 0x12C}, {0x12F, 0x12E}, {0x131, 0x49}, {0x133, 0x132}, {0x135, 0x134},
+    {0x137, 0x136}, {0x13A, 0x139}, {0x13C, 0x13B}, {0x13E, 0x13D}, {0x140, 0x13F}, {0x142, 0x141}, {0x144, 0x143},
+    {0x146, 0x145}, {0x148, 0x147}, {0x14B, 0x14A}, {0x14D, 0x14C}, {0x14F, 0x14E}, {0x151, 0x150}, {0x153, 0x152},
+    {0x155, 0x154}, {0x157, 0x156}, {0x159, 0x158}, {0x15B, 0x15A}, {0x15D, 0x15C}, {0x15F, 0x15E}, {0x161, 0x160},
+    {0x163, 0x162}, {0x165, 0x164}, {0x167, 0x166}, {0x169, 0x168}, {0x16B, 0x16A}, {0x16D, 0x16C}, {0x16F, 0x16E},
+    {0x171, 0x170}, {0x173, 0x172}, {0x175, 0x174}, {0x177, 0x176}, {0x17A, 0x179}, {0x17C, 0x17B}, {0x17E, 0x17D},
+    {0x17F, 0x53}, {0x3AC, 0x386}, {0x3AD, 0x388}, {0x3AE, 0x389}, {0x3AF, 0x38A}, {0x3B1, 0x391}, {0x3B2, 0x392},
+    {0x3B3, 0x393}, {0x3B4, 0x394}, {0x3B5, 0x395}, {0x3B6, 0x396}, {0x3B7, 0x397}, {0x3B8, 0x398}, {0x3B9, 0x399},
+    {0x3BA, 0x39A}, {0x3BB, 0x39B}, {0x3BC, 0x39C}, {0x3BD, 0x39D}, {0x3BE, 0x39E}, {0x3BF, 0x39F}, {0x3C0, 0x3A0},
+    {0x3C1, 0x3A1}, {0x3C2, 0x3A3}, {0x3C3, 0x3A3}, {0x3C4, 0x3A4}, {0x3C5, 0x3A5}, {0x3C6, 0x3A6}, {0x3C7, 0x3A7},
+    {0x3C8, 0x3A8}, {0x3C9, 0x3A9}, {0x3CA, 0x3AA}, {0x3CB, 0x3AB}, {0x3CC, 0x38C}, {0x3CD, 0x38E}, {0x3CE, 0x38F},
+    {0x430, 0x410}, {0x431, 0x411}, {0x432, 0x412}, {0x433, 0x413}, {0x434, 0x414}, {0x435, 0x415}, {0x436, 0x416},
+    {0x437, 0x417}, {0x438, 0x418}, {0x439, 0x419}, {0x43A, 0x41A}, {0x43B, 0x41B}, {0x43C, 0x41C}, {0x43D, 0x41D},
+    {0x43E, 0x41E}, {0x43F, 0x41F}, {0x440, 0x420}, {0x441, 0x421}, {0x442, 0x422}, {0x443, 0x423}, {0x444, 0x424},
+    {0x445, 0x425}, {0x446, 0x426}, {0x447, 0x427}, {0x448, 0x428}, {0x449, 0x429}, {0x44A, 0x42A}, {0x44B, 0x42B},
+    {0x44C, 0x42C}, {0x44D, 0x42D}, {0x44E, 0x42E}, {0x44F, 0x42F}, {0x450, 0x400}, {0x451, 0x401}, {0x452, 0x402},
+    {0x453, 0x403}, {0x454, 0x404}, {0x455, 0x405}, {0x456, 0x406}, {0x457, 0x407}, {0x458, 0x408}, {0x459, 0x409},
+    {0x45A, 0x40A}, {0x45B, 0x40B}, {0x45C, 0x40C}, {0x45D, 0x40D}, {0x45E, 0x40E}, {0x45F, 0x40F}, {0x491, 0x490},
+};
+#define UPPER_PAIRS (sizeof kUpperPairs / sizeof kUpperPairs[0])
+
+/* The bytes of one unit of text at text[i]: a character, or one byte that is not valid UTF-8. */
+static size_t TextUnit(const char* text, size_t size, size_t i)
+{
+    uint32_t v;
+    int n = vpm_utf8_decode(text + i, size - i, &v);
+    return n > 0 ? (size_t)n : 1;
+}
+
+static void TextDecodesEveryWellFormedLength(void)
+{
+    /* test_bingus_text.lua: every well-formed length, encoded back to the same bytes */
+    static const struct { const char* bytes; uint32_t value; int length; } good[] = {
+        {"A", 0x41, 1}, {"\xC3\xA9", 0xE9, 2}, {"\xE4\xB8\xAD", 0x4E2D, 3}, {"\xF0\x9F\x98\x80", 0x1F600, 4},
+        {"\xF4\x8F\xBF\xBF", 0x10FFFF, 4}};
+    for (size_t i = 0; i < sizeof good / sizeof good[0]; i++)
+    {
+        uint32_t v = 0;
+        char out[4];
+        CHECK_EQ(vpm_utf8_decode(good[i].bytes, strlen(good[i].bytes), &v), good[i].length);
+        CHECK_EQ(v, good[i].value);
+        CHECK_EQ(vpm_utf8_encode(good[i].value, out), good[i].length);
+        CHECK(memcmp(out, good[i].bytes, (size_t)good[i].length) == 0);
+    }
+    /* and the malformed bytes RFC 3629 forbids: lone continuations, overlong forms, a surrogate, above U+10FFFF, bytes
+     * that start nothing, cut sequences; check() refuses them at their byte */
+    static const char* const bad[] = {"\x80", "\xBF", "\xC0\x80", "\xC1\xBF", "\xE0\x80\x80", "\xED\xA0\x80",
+        "\xF0\x80\x80\x80", "\xF4\x90\x80\x80", "\xF5\x80\x80\x80", "\xFF", "\xE4\xB8", "\xE4", "\xC3"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+    {
+        uint32_t v;
+        char text[16];
+        size_t at = 0;
+        CHECK_EQ(vpm_utf8_decode(bad[i], strlen(bad[i]), &v), 0);
+        snprintf(text, sizeof text, "ok %s", bad[i]);
+        CHECK_EQ(vpm_utf8_check(text, 0, &at), -1);
+        CHECK_EQ(at, 4);
+    }
+    /* nothing to decode: an empty text, a size of 0; a NUL inside the size is U+0000 */
+    uint32_t v = 7;
+    CHECK_EQ(vpm_utf8_decode("", 0, &v), 0);
+    CHECK_EQ(vpm_utf8_decode("A", 0, &v), 0);
+    CHECK(vpm_utf8_decode("\0A", 2, &v) == 1 && v == 0);
+}
+
+/* The second bytes that start a character with a lead byte (any third and fourth continuation byte): UTF-8's table. */
+static int TextSecondBytes(unsigned lead)
+{
+    if (lead < 0x80) return 256;
+    if (lead == 0xE0 || lead == 0xED) return 32; /* no overlong forms below U+0800; no surrogates */
+    if (lead == 0xF0) return 48;                 /* no overlong forms below U+10000 */
+    if (lead == 0xF4) return 16;                 /* nothing above U+10FFFF */
+    return lead >= 0xC2 && lead <= 0xF3 ? 64 : 0; /* C0, C1 only start overlong forms; F5-FF start nothing */
+}
+
+static void TextDecodesExactlyTheShortestForms(void)
+{
+    /* every code point: its shortest form decodes (a surrogate's does not), and one byte short of it nothing does,
+     * though the missing byte is there past the size */
+    int wrong = 0;
+    for (uint32_t c = 0; c <= 0x10FFFF; c++)
+    {
+        char bytes[4];
+        uint32_t v = 0;
+        int n = vpm_utf8_encode(c, bytes);
+        int length = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+        int expected = c >= 0xD800 && c <= 0xDFFF ? 0 : length;
+        if (n != length || vpm_utf8_decode(bytes, (size_t)n, &v) != expected || (expected != 0 && v != c)) wrong++;
+        if (vpm_utf8_decode(bytes, (size_t)n - 1, &v) != 0) wrong++;
+    }
+    CHECK_EQ(wrong, 0);
+    /* every lead, second and third byte (with a continuation and a non-continuation fourth): whatever decodes is the
+     * shortest form of a code point that is no surrogate, and the second bytes each lead accepts are UTF-8's */
+    int seconds[256] = {0};
+    for (unsigned b0 = 0; b0 < 256; b0++)
+        for (unsigned b1 = 0; b1 < 256; b1++)
+            for (unsigned b2 = 0; b2 < 256; b2++)
+                for (unsigned b3 = 0x80; b3 <= 0xC0; b3 += 0x40)
+                {
+                    const unsigned char t[4] = {(unsigned char)b0, (unsigned char)b1, (unsigned char)b2, (unsigned char)b3};
+                    char again[4];
+                    uint32_t v = 0;
+                    int n = vpm_utf8_decode((const char*)t, 4, &v);
+                    if (n == 0) continue;
+                    if (vpm_utf8_encode(v, again) != n || memcmp(again, t, (size_t)n) != 0) wrong++;
+                    if ((v >= 0xD800 && v <= 0xDFFF) || v > 0x10FFFF) wrong++;
+                    if (b2 == 0x80 && b3 == 0x80) seconds[b0]++;
+                }
+    CHECK_EQ(wrong, 0);
+    for (unsigned lead = 0; lead < 256; lead++)
+        if (seconds[lead] != TextSecondBytes(lead))
+        {
+            printf("  lead byte %02X starts a character with %d second bytes, expected %d\n", lead, seconds[lead],
+                TextSecondBytes(lead));
+            wrong++;
+        }
+    CHECK_EQ(wrong, 0);
+}
+
+static void TextChecksWhatAModMayShow(void)
+{
+    /* as the Lua's check(): any script, no control characters, a line feed only in multiline texts */
+    int wrong = 0;
+    for (size_t i = 0; i < TEXT_CASES; i++)
+    {
+        const TextCase* c = &kTextCases[i];
+        size_t line_at = 0, multiline_at = 0;
+        int line = vpm_utf8_check(c->text, 0, &line_at), multiline = vpm_utf8_check(c->text, 1, &multiline_at);
+        if (line != c->line || (line != 1 && line_at != (size_t)c->line_at) || multiline != c->multiline ||
+            (multiline != 1 && multiline_at != (size_t)c->multiline_at))
+        {
+            printf("  text case %u: check %d at %u, multiline %d at %u\n", (unsigned)i, line, (unsigned)line_at,
+                multiline, (unsigned)multiline_at);
+            wrong++;
+        }
+    }
+    CHECK_EQ(wrong, 0);
+    /* every C0 control and DEL between two letters (a line feed passes multiline), every C1 control (U+0080-U+009F),
+     * and the characters next to them */
+    for (unsigned c = 1; c < 0x100; c++)
+    {
+        char text[8] = {'x'};
+        int n = vpm_utf8_encode(c, text + 1);
+        text[1 + n] = 'y';
+        text[2 + n] = 0;
+        int control = c < 32 || c == 127 || (c >= 0x80 && c < 0xA0);
+        size_t at = 0;
+        if (vpm_utf8_check(text, 0, &at) != (control ? -2 : 1) || (control && at != 2)) wrong++;
+        if (vpm_utf8_check(text, 1, NULL) != (control && c != 10 ? -2 : 1)) wrong++;
+    }
+    CHECK_EQ(wrong, 0);
+    /* no place to put the byte: still the answer */
+    CHECK_EQ(vpm_utf8_check("bad\x01", 0, NULL), -2);
+    CHECK_EQ(vpm_utf8_check("bad\xFF", 0, NULL), -1);
+    /* no text at all, the Lua's check(nil): refused, at byte 0 */
+    size_t at = 9;
+    CHECK_EQ(vpm_utf8_check(NULL, 0, &at), -1);
+    CHECK_EQ(at, 0);
+    CHECK_EQ(vpm_utf8_check(NULL, 1, NULL), -1);
+    /* test_bingus_text.lua's "nul\0": a C text ends at its NUL, so the check sees "nul" */
+    CHECK_EQ(vpm_utf8_check("nul\0", 0, NULL), 1);
+}
+
+static void TextLengthCountsCharacters(void)
+{
+    int wrong = 0;
+    for (size_t i = 0; i < TEXT_CASES; i++)
+        if (vpm_utf8_length(kTextCases[i].text, strlen(kTextCases[i].text)) != (size_t)kTextCases[i].length)
+        {
+            printf("  text case %u: length %u\n", (unsigned)i, (unsigned)vpm_utf8_length(kTextCases[i].text,
+                strlen(kTextCases[i].text)));
+            wrong++;
+        }
+    CHECK_EQ(wrong, 0);
+    /* test_bingus_text.lua */
+    const char* zz = "\xE4\xB8\xAD\xE4\xB8\xAD" "a";
+    CHECK_EQ(vpm_utf8_length("abc", 3), 3);
+    CHECK_EQ(vpm_utf8_length(zz, 7), 3);
+    CHECK_EQ(vpm_utf8_length("", 0), 0);
+    /* the size bounds the count: a character it cuts counts its bytes one by one, as invalid bytes do */
+    CHECK_EQ(vpm_utf8_length(zz, 0), 0);
+    CHECK_EQ(vpm_utf8_length(zz, 3), 1);
+    CHECK_EQ(vpm_utf8_length(zz, 4), 2);
+    CHECK_EQ(vpm_utf8_length(zz, 5), 3);
+    CHECK_EQ(vpm_utf8_length(zz, 6), 2);
+    /* the size, not a NUL, ends the text */
+    CHECK_EQ(vpm_utf8_length("a\0b", 3), 3);
+}
+
+static void TextUpperCasesAsTheLua(void)
+{
+    /* every code point maps as the Lua's upper() maps it */
+    size_t next = 0;
+    int wrong = 0;
+    for (uint32_t v = 0; v <= 0x10FFFF; v++)
+    {
+        uint32_t expected = v;
+        if (next < UPPER_PAIRS && kUpperPairs[next][0] == v) expected = kUpperPairs[next++][1];
+        if (vpm_upper_char(v) != expected && wrong++ < 8) printf("  U+%04X upper case U+%04X\n", v, vpm_upper_char(v));
+    }
+    CHECK_EQ(wrong, 0);
+    CHECK_EQ(next, UPPER_PAIRS);
+    /* and in text: each changed character's bytes become its upper case's bytes */
+    for (size_t i = 0; i < UPPER_PAIRS; i++)
+    {
+        char text[8], expected[8], out[8];
+        text[vpm_utf8_encode(kUpperPairs[i][0], text)] = 0;
+        expected[vpm_utf8_encode(kUpperPairs[i][1], expected)] = 0;
+        if (vpm_upper(text, out, sizeof out) != strlen(expected) || strcmp(out, expected) != 0) wrong++;
+    }
+    CHECK_EQ(wrong, 0);
+    /* the texts: test_bingus_text.lua's (Latin-1, Polish, Cyrillic, Greek with final sigma and tonos, CJK and sharp s
+     * unchanged, invalid bytes kept, never re-encoded) and the edges */
+    for (size_t i = 0; i < TEXT_CASES; i++)
+    {
+        char out[256];
+        size_t n = vpm_upper(kTextCases[i].text, out, sizeof out);
+        if (n != strlen(kTextCases[i].upper) || strcmp(out, kTextCases[i].upper) != 0)
+        {
+            printf("  text case %u: upper case of %u bytes\n", (unsigned)i, (unsigned)n);
+            wrong++;
+        }
+    }
+    CHECK_EQ(wrong, 0);
+}
+
+/* Whether out (n bytes) is the longest start of whole that ends between units and leaves room for the terminator. */
+static int TextLongestWholeStart(const char* whole, size_t total, const char* out, size_t n, size_t size)
+{
+    if (n >= size || out[n] != 0 || memcmp(out, whole, n) != 0) return 0;
+    size_t edge = 0;
+    while (edge < n) edge += TextUnit(whole, total, edge);
+    return edge == n && (edge == total || edge + TextUnit(whole, total, edge) >= size);
+}
+
+static void TextUpperNeverCutsACharacter(void)
+{
+    /* every case at every output size: the longest start of its upper case that cuts no character (an invalid byte is
+     * one unit), terminated; nothing written at size 0 */
+    int wrong = 0;
+    for (size_t i = 0; i < TEXT_CASES; i++)
+    {
+        char whole[256];
+        size_t total = vpm_upper(kTextCases[i].text, whole, sizeof whole);
+        for (size_t size = 0; size <= total + 2; size++)
+        {
+            char out[256];
+            memset(out, '#', sizeof out);
+            size_t n = vpm_upper(kTextCases[i].text, out, size);
+            int ok = size == 0 ? n == 0 && out[0] == '#' : TextLongestWholeStart(whole, total, out, n, size);
+            if (!ok && wrong++ < 8) printf("  text case %u at %u bytes: %u bytes\n", (unsigned)i, (unsigned)size, (unsigned)n);
+        }
+    }
+    CHECK_EQ(wrong, 0);
+    /* a full buffer by hand: three 2-byte letters, a 4-byte character, a letter that shrinks, an invalid byte */
+    char out[16];
+    CHECK(vpm_upper("\xC3\xA9\xC3\xA9\xC3\xA9", out, 7) == 6 && strcmp(out, "\xC3\x89\xC3\x89\xC3\x89") == 0);
+    CHECK(vpm_upper("\xC3\xA9\xC3\xA9\xC3\xA9", out, 6) == 4 && strcmp(out, "\xC3\x89\xC3\x89") == 0);
+    CHECK(vpm_upper("\xC3\xA9\xC3\xA9\xC3\xA9", out, 5) == 4 && strcmp(out, "\xC3\x89\xC3\x89") == 0);
+    CHECK(vpm_upper("\xC3\xA9\xC3\xA9\xC3\xA9", out, 2) == 0 && out[0] == 0);
+    CHECK(vpm_upper("\xF0\x9F\x98\x80", out, 4) == 0 && out[0] == 0);
+    CHECK(vpm_upper("\xF0\x9F\x98\x80", out, 5) == 4 && strcmp(out, "\xF0\x9F\x98\x80") == 0);
+    CHECK(vpm_upper("a\xC4\xB1", out, 2) == 1 && strcmp(out, "A") == 0);
+    CHECK(vpm_upper("a\xC4\xB1", out, 3) == 2 && strcmp(out, "AI") == 0);
+    CHECK(vpm_upper("a\xFF", out, 2) == 1 && strcmp(out, "A") == 0);
+    CHECK(vpm_upper("a\xFF", out, 3) == 2 && strcmp(out, "A\xFF") == 0);
+    CHECK(vpm_upper("", out, 1) == 0 && out[0] == 0);
+}
+
+static void TextClipKeepsWholeCharacters(void)
+{
+    /* the Lua's clip() at every byte count */
+    int wrong = 0;
+    for (size_t i = 0; i < sizeof kClipCases / sizeof kClipCases[0]; i++)
+    {
+        size_t n = strlen(kClipCases[i].text);
+        for (size_t cap = 0; cap <= n + 1; cap++)
+            if (vpm_utf8_clip(kClipCases[i].text, cap) != (size_t)kClipCases[i].lengths[cap])
+            {
+                printf("  clip case %u at %u: %u\n", (unsigned)i, (unsigned)cap,
+                    (unsigned)vpm_utf8_clip(kClipCases[i].text, cap));
+                wrong++;
+            }
+    }
+    CHECK_EQ(wrong, 0);
+    /* test_bingus_text.lua: within the cap, valid, a start of the text, and every whole character that fits kept */
+    const char* mixed = "ab\xE4\xB8\xAD" "c\xE4\xB8\xAD";
+    size_t n = strlen(mixed);
+    for (size_t cap = 0; cap <= n + 2; cap++)
+    {
+        char start[16];
+        size_t clipped = vpm_utf8_clip(mixed, cap);
+        memcpy(start, mixed, clipped);
+        start[clipped] = 0;
+        CHECK(clipped <= cap && vpm_utf8_check(start, 0, NULL) == 1);
+        for (size_t edge = 0; edge <= n; edge += edge < n ? TextUnit(mixed, n, edge) : 1)
+            if (edge <= cap) CHECK(clipped >= edge);
+    }
+    CHECK_EQ(vpm_utf8_clip("", 0), 0);
+    CHECK_EQ(vpm_utf8_clip("", 4), 0);
+    CHECK_EQ(vpm_utf8_clip("abc", 3), 3);
+}
+
 static int StartPlain(VpmComponent* self) { return 0; }
 static const VpmComponentDef kFolders = {"folder_user", "Folder User", "1.0", 0, StartPlain, NULL};
 
@@ -1081,5 +1486,12 @@ int main(void)
     RUN(LookupFindsAndMisses);
     RUN(MemoryReadsAreSafe);
     RUN(ResolvesTheLocalAvatar);
+    RUN(TextDecodesEveryWellFormedLength);
+    RUN(TextDecodesExactlyTheShortestForms);
+    RUN(TextChecksWhatAModMayShow);
+    RUN(TextLengthCountsCharacters);
+    RUN(TextUpperCasesAsTheLua);
+    RUN(TextUpperNeverCutsACharacter);
+    RUN(TextClipKeepsWholeCharacters);
     TEST_END();
 }

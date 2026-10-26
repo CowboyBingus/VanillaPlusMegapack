@@ -282,10 +282,10 @@ static double Span(const char* text, size_t length, double size)
     while (i < length)
     {
         uint32_t v;
-        size_t after;
-        if (!kyc_utf8_decode(text, length, i, &v, &after)) { v = 0xFFFD; after = i + 1; }
+        int bytes = vpm_utf8_decode(text + i, length - i, &v);
+        if (bytes == 0) { v = 0xFFFD; bytes = 1; }
         n += size * (v >= 0x2E80 ? 1 : v == 'W' ? 0.9 : v == 'I' ? 0.25 : v == ' ' ? 0.3 : 0.55);
-        i = after;
+        i += (size_t)bytes;
     }
     return n;
 }
@@ -856,7 +856,7 @@ static void TextWrap(void)
     CHECK(n == 3 && lines[0].length == 3 && lines[1].length == 6 && lines[2].length == 6); /* 一 / 二、 / 三四 */
     uint16_t bounds[16];
     CHECK_EQ(kyc_text_boundaries(cjk, strlen(cjk), bounds, 16), 6);
-    CHECK_EQ(kyc_text_length(cjk, strlen(cjk)), 5);
+    CHECK_EQ(vpm_utf8_length(cjk, strlen(cjk)), 5);
     const char* marked = "e\xCC\x81x"; /* e + combining acute + x: two characters */
     CHECK_EQ(kyc_text_boundaries(marked, strlen(marked), bounds, 16), 3);
 }

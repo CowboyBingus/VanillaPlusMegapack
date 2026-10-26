@@ -151,10 +151,6 @@ const char* blm_tr(const char* key, const char* english);
 const char* blm_intern(const char* text);
 /* {name} (any one placeholder) replaced by value. */
 void blm_format(char* out, size_t size, const char* template_text, const char* placeholder, const char* value);
-/* Upper case for the scripts the game's fonts carry (bingus_text.lua upper). */
-void blm_upper(const char* in, char* out, size_t size);
-/* The longest start of text within max bytes that does not split a UTF-8 sequence (chat.lua cut): its length. */
-size_t blm_cut(const char* text, size_t max);
 
 /* ---- blm_chat.c ---------------------------------------------------------------------------------------------------- */
 
