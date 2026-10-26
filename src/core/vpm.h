@@ -75,11 +75,20 @@ typedef void (*VpmListenFn)(VpmComponent* self, const HfEventInfo* event);
 
 /* A HellForge load event (HF_EVENT_...), at once if it already happened. 1 registered, 0 not. */
 int vpm_on_load(VpmComponent* self, HfEvent event, VpmLoadFn fn);
-/* The component's game-thread tick: every game update, before the game's (HfApi.on_game_thread). One per component;
- * a second call replaces it. vpm_tick_stop ends it (from inside the tick too); vpm_tick_start may start it again. */
+/* The component's game-thread tick: once per frame, at the start of game.dll's update, where the Lua global `update`
+ * ran (the engine calls game.dll's update right after it). The core hooks that update (game.dll 0xAB5000) once its code
+ * is decoded; until then, or without the hook, the ticks run from HellForge's game-thread callback, which is inside the
+ * same update a little later (before the RPC pump, the world update and the UI pass). One per component; a second call
+ * replaces it. vpm_tick_stop ends it (from inside the tick too); vpm_tick_start may start it again. */
 int vpm_tick_start(VpmComponent* self, VpmTickFn fn);
 void vpm_tick_stop(VpmComponent* self);
 int vpm_ticking(const VpmComponent* self);
+/* A tick after game.dll's whole update in the same frame (after the world update, the mode's update and the UI pass):
+ * for work the Lua did after the game's update, or a second check in the frame. Without the core's hook of the update
+ * it runs right after the frame's ticks. One per component, as vpm_tick_start. */
+int vpm_post_tick_start(VpmComponent* self, VpmTickFn fn);
+void vpm_post_tick_stop(VpmComponent* self);
+int vpm_post_ticking(const VpmComponent* self);
 /* A game event (HF_ON_...): HfApi.subscribe with this priority. 1 registered, 0 not (the log says why). */
 int vpm_listen(VpmComponent* self, uint32_t kind, VpmListenFn fn, int32_t priority);
 
@@ -99,23 +108,30 @@ uint64_t vpm_game_u64(uint32_t rva);
 uint32_t vpm_game_u32(uint32_t rva);
 uint64_t vpm_exe_u64(uint32_t rva);
 
-/* Heap reads through HfApi.read: 1 read, 0 not (bad pointer, unmapped page). */
+/* Heap reads: 1 read, 0 not (outside the user-mode range, unmapped, no-access or guard page). Plain loads under a guard of
+ * their own: a bad pointer fails the read, never the game, and stops nothing; about 25 ns where the Lua's
+ * ReadProcessMemory cost 1-2 us in game. */
 int vpm_read(uintptr_t address, void* out, size_t size);
 int vpm_read_u8(uintptr_t address, uint8_t* out);
 int vpm_read_u16(uintptr_t address, uint16_t* out);
 int vpm_read_u32(uintptr_t address, uint32_t* out);
 int vpm_read_u64(uintptr_t address, uint64_t* out);
 int vpm_read_f32(uintptr_t address, float* out);
-/* The pointer stored at address, or 0 (unreadable, or null). */
+/* The user-mode pointer stored at address, or 0: unreadable, or not plausible (the Lua runtime's api.pointer). */
 uintptr_t vpm_ptr(uintptr_t address);
-/* A pointer that can be dereferenced: inside the user-mode range and not a small number. */
+/* A user-mode pointer as the Lua runtime's api.pointer accepts one: at least 0x10000 and below 2^47. */
 int vpm_plausible(uintptr_t pointer);
 
 /* HfApi.write (protection changed for the write, instruction cache flushed): 1 written, 0 not. Not for idle frames. */
 int vpm_write(uintptr_t address, const void* data, size_t size);
-/* Whether [address, address + size) is committed read-write memory now (one VirtualQuery per region): to validate a heap
- * target once, when it is found, before plain stores to it. Never per frame. */
+/* Whether [address, address + size) is committed private read-write memory now, the Lua runtime's api.writable_data rule:
+ * never code, read-only, guard, mapped or module image pages. One VirtualQuery per region: to validate a heap target
+ * once, when it is found, before plain stores to it. Never per frame. */
 int vpm_writable(uintptr_t address, size_t size);
+
+/* An export of a loaded module (GetModuleHandleA + GetProcAddress; the tests' harness stands in for it), or NULL: a
+ * plugin's functions (Wwise's), looked up once, never per frame. */
+void* vpm_module_export(const char* module, const char* name);
 
 /* HfApi.code_matches at game.dll + rva: 1 when the bytes as the game shipped them (before any hook) match the IDA-style
  * pattern. */
@@ -125,6 +141,22 @@ int vpm_game_code_matches(uint32_t rva, const char* pattern);
  * {u32 key, u32 index}, probed linearly from key * multiplier (at most 64 probes, a power-of-two capacity no larger than
  * limit). 1 with *index set (never 0xFFFFFFFF), 0 when the key is absent or the table unreadable. Reads: 1 + probes. */
 int vpm_lookup(uintptr_t header, uint32_t key, uint32_t limit, uint32_t* index);
+
+/* ---- hooks (detours) -------------------------------------------------------------------------------------------- *
+ * vpm_hook detours game.dll + rva (vpm_hook_exe: the exe + rva) to detour, after checking the function's bytes as the
+ * game shipped them (HfApi.code_matches: another mod's hook does not hide them) against `shipped`, an IDA-style pattern
+ * of its first instructions. *original receives what the detour calls to go on (HfApi.hook_ex: the next hook in the
+ * function's chain, or the function). 1 hooked, 0 not (the log says why). Call it from start() for the exe, from
+ * HF_EVENT_GAME_LOADED or later for game.dll. Hooks stay for the session, so:
+ *   - a detour checks vpm_running(self) first and, when the component is stopped, only calls *original;
+ *   - a detour runs on the game's stack, outside the core's guard: its own work goes in a function run with
+ *     vpm_guarded, and *original is called outside it;
+ *   - mark it `lint: per-frame` (it runs on every call of the game's function). */
+int vpm_hook(VpmComponent* self, uint32_t rva, const char* shipped, void* detour, void** original);
+int vpm_hook_exe(VpmComponent* self, uint32_t rva, const char* shipped, void* detour, void** original);
+/* Runs fn(arg) under the crash guard for the component: 1 when it ran to its end, 0 after a fault (the component is then
+ * stopped and its stop() run). For a detour's own work. */
+int vpm_guarded(VpmComponent* self, void (*fn)(void*), void* arg);
 
 /* ---- the local player (Arc Thrower Revamped v1.7.1's resolution) ------------------------------------------------- */
 
@@ -144,11 +176,15 @@ typedef struct VpmAvatar
     uintptr_t manager;   /* the avatar manager ([game + 0x3326D20]) */
     uint32_t index;      /* the avatar's index there (0 .. 7) */
     uintptr_t entity;    /* the avatar's entity pointer there (am + 0x110 + index * 8) */
+    uintptr_t record_at; /* where the entity owner keeps the avatar's record (owner + 0xF32F18 + entity index * 24) */
+    uint32_t owner_index; /* the avatar's entity index in the entity owner */
 } VpmAvatar;
 
 /* The local player's own avatar through both registries (player manager -> entity owner -> avatar manager), or 0 when
- * there is none (no mission, downed, dead, another player's). About 16 reads. */
+ * there is none (no mission, downed, dead, another player's): 12 reads. why, when not NULL, receives the step that
+ * failed ("no player manager", "not an owned Helldiver avatar", ...), a static text. */
 int vpm_local_avatar(VpmAvatar* out);
+int vpm_local_avatar_why(VpmAvatar* out, const char** why);
 /* Whether a kept resolution still holds (the manager global, the entity at the kept index and its 24-byte record): 3 reads
  * where vpm_local_avatar makes 16. A respawn, a new mission or another avatar at the index fails it. */
 int vpm_avatar_still(const VpmAvatar* avatar);
@@ -161,6 +197,15 @@ uintptr_t vpm_action_slot(const VpmAvatar* avatar, uint32_t slot);
 #define VPM_CHOICE 2u
 #define VPM_SLIDER 3u
 
+/* Limits, as Mod Options Menu's (options.lua, rows.lua); vpm_option refuses an option past them and logs why. */
+#define VPM_MAX_COMPONENTS 32      /* components in the pack */
+#define VPM_MAX_OPTIONS 256        /* options in the pack */
+#define VPM_OPTION_ROWS 32         /* options per component (one category's rows) */
+#define VPM_OPTION_LABEL 64        /* characters of a label */
+#define VPM_OPTION_DESCRIPTION 400 /* characters of a description */
+#define VPM_OPTION_CHOICES 16      /* a choice's names: 2 to 16 */
+#define VPM_OPTION_CHOICE 48       /* characters of a choice's name */
+
 typedef struct VpmOption VpmOption;
 typedef struct VpmOptionDef
 {
@@ -169,7 +214,8 @@ typedef struct VpmOptionDef
     const char* label;       /* the row's text (English) */
     const char* description; /* shown while the row is selected, or NULL */
     double value;            /* the default: a toggle 0 or 1, a choice's 1-based index, a slider's number */
-    double min, max, step;   /* a slider's range and step */
+    double min, max, step;   /* a slider's range and step (0: 1, Mod Options Menu's default); values snap to the step
+                              * and to the decimals it needs (at most 3; at least 1 when min is not whole) */
     const char* const* choices; /* a choice's texts, ending in NULL */
     int gap;                 /* 1: space above the row */
 } VpmOptionDef;
@@ -184,6 +230,8 @@ double vpm_option_value(const VpmOption* option);
 int vpm_option_set(VpmOption* option, double value);
 /* Called on the game thread when the player applies a change (Mod Options Menu). One per option. */
 void vpm_option_on_change(VpmOption* option, VpmOptionFn fn);
+/* A count that goes up whenever an option's value changes (set or applied): an open view compares it to redraw. */
+uint32_t vpm_option_revision(void);
 
 /* For Mod Options Menu: every registered option in registration order. */
 int vpm_option_count(void);
@@ -214,7 +262,8 @@ typedef struct VpmBindingDef
 
 /* Registers a binding (from start(); the definition must stay valid). NULL refused. */
 VpmBinding* vpm_binding(VpmComponent* self, const VpmBindingDef* def);
-/* 1 down, 0 up, -1 unknown (no bindings backend, or it cannot answer now): the caller then uses its fixed key. */
+/* 1 down, 0 up, -1 unknown (no bindings backend, or it cannot answer now): the caller then uses its fixed key. The
+ * backend answers under its own guard: a fault there stops the backend, and this answers -1. */
 int vpm_binding_down(const VpmBinding* binding);
 
 /* Mod Bindings Menu: the backend that answers vpm_binding_down. attach runs for every binding, registered before or
@@ -234,10 +283,15 @@ void* vpm_binding_data(const VpmBinding* binding);
 /* ---- the settings file ------------------------------------------------------------------------------------------ *
  * For what options do not cover (Mod Bindings Menu's assignments): "key = value" text in a section of the pack's
  * settings file, saved about a second after a change. Sections "components", "options" and "bindings" belong to the
- * core. Keys under 128 bytes, values under 256. */
+ * core. Keys under 128 bytes, values under 1024. */
 const char* vpm_setting(const char* section, const char* key); /* NULL when absent */
+/* The section's entries one by one, in the file's order: start *cursor at 0; 1 with *key and *value set, 0 after the
+ * last. The texts are valid until the next vpm_setting_put. */
+int vpm_setting_next(const char* section, int* cursor, const char** key, const char** value);
 void vpm_setting_put(const char* section, const char* key, const char* value); /* value NULL removes it */
 void vpm_settings_save_soon(void);
+/* Writes a waiting change now (Mod Options Menu's APPLY, as the Lua saved at once); nothing when none waits. */
+void vpm_settings_save_now(void);
 
 /* ---- Windows functions resolved at run time --------------------------------------------------------------------- *
  * user32's are found with GetProcAddress at init, so the DLL links only kernel32 (HellForge's own source build passes no
@@ -257,5 +311,23 @@ const VpmUser32* vpm_user32(void);
 
 /* A component's text in the game's language: English until translations are added. */
 const char* vpm_text(const VpmComponent* self, const char* key, const char* english);
+
+/* UTF-8, as the Lua text module (bingus_text.lua v1) every text-showing component carried (core text.c):
+ * - decode: the code point at text (at most size bytes), its length in bytes, or 0 when the bytes are not valid UTF-8
+ *   (overlong forms, surrogates and values above U+10FFFF are invalid);
+ * - encode: a code point's bytes into out (room for 4), their count;
+ * - check: 1 for text a mod may show (valid UTF-8 without control characters; a line feed only with multiline), -1
+ *   invalid UTF-8 or -2 a control character, at byte *bad (1-based, when bad is not NULL);
+ * - length: code points in the first size bytes (an invalid byte counts as one);
+ * - upper: upper case for the scripts the game's fonts carry (ASCII, Latin-1, Latin Extended-A, Greek, Cyrillic) into
+ *   out (size bytes, always terminated), its length; others, invalid bytes included, stay as they are;
+ * - clip: the longest start of text within `bytes` that cuts no character, its length. */
+int vpm_utf8_decode(const char* text, size_t size, uint32_t* value);
+int vpm_utf8_encode(uint32_t value, char* out);
+int vpm_utf8_check(const char* text, int multiline, size_t* bad);
+size_t vpm_utf8_length(const char* text, size_t size);
+uint32_t vpm_upper_char(uint32_t value);
+size_t vpm_upper(const char* text, char* out, size_t size);
+size_t vpm_utf8_clip(const char* text, size_t bytes);
 
 #endif

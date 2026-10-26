@@ -32,6 +32,14 @@ scripts/build.ps1 -Test    # and every test (tests/core_test.c, tests/components
 scripts/build.ps1 -Test -Only foliage_pass_through
 ```
 
+`scripts/package.ps1` packs the release zip (`build/release/`), after the build and every test: a source mod by
+default, as HellForge's "Zip to share" packs one (each player's HellForge builds the DLL), or with `-Prebuilt` the
+built DLL, marked for game build 25480438. `scripts/lint.ps1` runs HellForge's C lint over the pack.
+
+`scripts/check_code_pins.py <decoded game.dll image>` checks every code pin in the sources (each RVA a component
+checks, calls or hooks, with the bytes it expects there) against a dump of the running game's game.dll on build
+25480438 (the research workspace keeps one: `artifacts/game-update-25480438/game.dll.live.bin`).
+
 It uses HellForge's pinned Zig and the mod SDK of a HellForge-Open checkout (`-HellForge`, `HELLFORGE_OPEN`, or
 `../sdk-dev/HellForge-Open`), with the flags HellForge builds every mod with. HellForge's own `scripts/Build-Mod.ps1`
 builds the same DLL from this folder.
@@ -68,7 +76,9 @@ Rules for components:
 
 - A component ports its Lua release 1:1: the same addresses, checks, writes and timing. Where HellForge moves a game
   table (stratagems, projectiles, difficulty levels), rows are reached by identity (`get_live`, `set_live`).
-- `start()` sets every piece of the component's static state, so a test can start it again.
+- `start()` sets every piece of the component's static state, so a test can start it again. A test that needs to see
+  that state uses a `VPM_TEST`-only accessor declared in the component's own header (Hellpod Drop Hold's is the
+  pattern); the DLL never has it.
 - Per frame: an idle gate first; no Windows calls, no allocation and no logging on an idle frame. The file's header
   comment lists the component's calls per frame, idle and active, and its test pins them with the harness's counts.
 

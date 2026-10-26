@@ -50,7 +50,7 @@ if($Test){
     }
     foreach($case in $cases){
         $exe=Join-Path $out ($case[0]+'_test.exe')
-        & $Zig cc -std=c11 -target x86_64-windows-gnu -O1 -g -Wall -Werror -Wno-unused-parameter -DVPM_TEST -I $sdk -I (Join-Path $root 'src') -I (Join-Path $root 'tests') `
+        & $Zig cc -std=c11 -target x86_64-windows-gnu -O2 -g -Wall -Werror -Wno-unused-parameter -DVPM_TEST -I $sdk -I (Join-Path $root 'src') -I (Join-Path $root 'tests') `
             $case[1] @core @($case[2]) @harness -o $exe
         if($LASTEXITCODE){Write-Output ('{0}: did not compile' -f $case[0]);$failed++;continue}
         Push-Location $out

@@ -17,8 +17,8 @@ extern int test_checks;
 #define CHECK_NO_LOG(text) do { test_checks++; if (fake_log_has(text)) { test_failures++; \
     printf("  FAILED %s:%d: the log has \"%s\"\n", __FILE__, __LINE__, text); } } while (0)
 
-#define RUN(test) do { int before_ = test_failures; fake_setup(); test(); \
-    printf("%s %s\n", test_failures == before_ ? "ok  " : "FAIL", #test); } while (0)
+#define RUN(test) do { int before_ = test_failures; printf("run  %s\n", #test); fflush(stdout); fake_setup(); test(); \
+    printf("%s %s\n", test_failures == before_ ? "ok  " : "FAIL", #test); fflush(stdout); } while (0)
 
 /* A test file's main ends with this: the summary, and the exit code. */
 #define TEST_END() do { printf("%d checks, %d failed\n", test_checks, test_failures); return test_failures != 0; } while (0)
