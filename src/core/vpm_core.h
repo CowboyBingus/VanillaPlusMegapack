@@ -28,8 +28,44 @@ struct VpmComponent
     char status[VPM_STATUS_SIZE];
     uint64_t cycles;     /* time-stamp counter cycles spent in its tick this mission */
     uint64_t calls;      /* tick calls this mission */
+    uint64_t peak;       /* the largest single tick call's cycles this mission (pre or post) */
+    /* diagnostics (diag.c) */
+    VpmDescribeFn summary;       /* vpm_on_summary's */
+    uint64_t status_frame;       /* the frame its last status line was logged */
+    uint32_t status_unlogged;    /* changes since that line that were not logged */
+    int status_logged;           /* a status line was logged this session */
+    int status_pending;          /* a new status waits for its line (core.c vpm_core_status_lines) */
+    uint64_t detail_frame;       /* the start of its detailed lines' window */
+    uint32_t detail_lines;       /* detailed lines logged in the window */
+    uint32_t detail_suppressed;  /* detailed lines left out since the last report */
 };
 
+/* What the pack is running on a thread (guard.c keeps one per thread): the kind of call into a component, with the
+ * component and a detail (a listener's HF_ON_ kind, a load event). The guard copies it into a fault; the crash
+ * breadcrumb reads it for a fault the guard does not take (game code the component called). */
+#define VPM_CALL_NONE 0u
+#define VPM_CALL_START 1u
+#define VPM_CALL_STOP 2u
+#define VPM_CALL_TICK 3u        /* component NULL: the tick list's current one (vpm_core_tick_component) */
+#define VPM_CALL_POST_TICK 4u   /* the same */
+#define VPM_CALL_LISTENER 5u    /* detail: HF_ON_... */
+#define VPM_CALL_LOAD 6u        /* detail: HF_EVENT_... */
+#define VPM_CALL_READY 7u       /* vpm_when_code_ready's ready step */
+#define VPM_CALL_OPTION 8u      /* an option's on_change */
+#define VPM_CALL_ATTACH 9u      /* the bindings backend's attach */
+#define VPM_CALL_BINDING 10u    /* the bindings backend's down */
+#define VPM_CALL_GUARDED 11u    /* vpm_guarded: a detour's own work */
+#define VPM_CALL_WORKER 12u     /* vpm_guarded_off_thread: a component's worker thread */
+#define VPM_CALL_DESCRIBE 13u   /* a describe or summary callback */
+typedef struct VpmCall
+{
+    VpmComponent* component;
+    uint32_t kind;       /* VPM_CALL_... */
+    uint32_t detail;
+} VpmCall;
+
+#define VPM_FAULT_RETURNS 8
+#define VPM_FAULT_GP 14
 /* A fault the guard took (guard.c). */
 typedef struct VpmFault
 {
@@ -37,23 +73,88 @@ typedef struct VpmFault
     uintptr_t offset;    /* where, from the pack's image base */
     uintptr_t address;   /* an access violation's address */
     ULONG_PTR access;    /* an access violation's kind: 0 read, 1 write, 8 execute */
+    VpmCall call;        /* what the thread was running */
+    int has_context;     /* the registers and returns below were taken (not for a vpm_read probe) */
+    DWORD64 rip, rsp, rbp, gp[VPM_FAULT_GP]; /* rax rbx rcx rdx rsi rdi r8 .. r15 */
+    int returns;         /* return addresses in the pack's code found on the stack, newest first */
+    uintptr_t ret[VPM_FAULT_RETURNS]; /* offsets from the pack's image base */
 } VpmFault;
 
 /* guard.c */
 void vpm_guard_install(void);
+/* NULL when the guard is installed, else why not ("the pack's image was not found"). */
+const char* vpm_guard_problem(void);
 /* Runs fn(arg) under the guard: 0, or the code of the fault that ended it (described in *fault). */
 DWORD vpm_guard_call(void (*fn)(void*), void* arg, VpmFault* fault);
 /* Plain loads under a guard of their own (vpm_read): 1 read, 0 unreadable, -1 no guard installed. */
 int vpm_guard_copy(void* out, uintptr_t from, size_t size);
+/* "fault 0x... at vanilla_plus_megapack.dll+0x... (a read of 0x...)", then " in its <call>" when the call is known. */
 void vpm_fault_text(const VpmFault* fault, char* out, size_t size);
 uintptr_t vpm_self_base(void);
+size_t vpm_self_size(void);
+/* The thread's current call: set before a guarded call (the old one returned), put back after it. Two thread-local
+ * copies, no Windows call. */
+VpmCall vpm_call_enter(VpmComponent* component, uint32_t kind, uint32_t detail);
+void vpm_call_leave(VpmCall was);
+VpmCall vpm_call_now(void);
+/* "a read of", "a write to", "running" for an access violation or in-page error, else NULL. */
+const char* vpm_fault_access(DWORD code, ULONG_PTR access);
+/* Registers and the pack's return addresses from a fault's context (both handlers; no Windows call, no allocation). */
+void vpm_fault_context(VpmFault* fault, const CONTEXT* context);
+
+/* crash.c: the last-in-line breadcrumb for faults the guard passes on (installed with the guard) */
+void vpm_crash_install(void);
+void vpm_crash_reset(void);
+/* Tests: breadcrumb lines written since the reset. */
+int vpm_crash_notes(void);
 
 /* core.c */
 const HfApi* vpm_core_hf(void);
 /* Stops a component for the session with a reason (its stop() runs guarded when it had started). */
 void vpm_core_stop(VpmComponent* component, const char* reason);
-/* Runs fn(arg) guarded for a component: on a fault the component is stopped. 1 ran to its end, 0 faulted. */
-int vpm_core_guarded(VpmComponent* component, void (*fn)(void*), void* arg);
+/* Runs fn(arg) guarded for a component, as a call of this kind (VPM_CALL_...): on a fault the core logs it and the
+ * component is stopped. 1 ran to its end, 0 faulted. */
+int vpm_core_guarded(VpmComponent* component, uint32_t kind, uint32_t detail, void (*fn)(void*), void* arg);
+/* A core line, "[core] ..." (start-up, stops, a mission's end, a mark: never on an idle frame). */
+void vpm_core_log(const char* format, ...) __attribute__((format(printf, 1, 2)));
+/* The tick list's component now (a VPM_CALL_TICK's), or NULL. */
+VpmComponent* vpm_core_tick_component(void);
+/* The core's frame count since the session started (one increment per frame, which the core already made). */
+uint64_t vpm_core_frame(void);
+/* 1 while vpm_core_init runs the components' start() */
+int vpm_core_starting(void);
+/* The status lines that wait (vpm_set_status): at the end of a callback, a mission's end and a mark. */
+void vpm_core_status_lines(void);
+
+/* diag.c: the diagnostics (vpm.h "diagnostics") */
+void vpm_diag_reset(void);
+/* The identity block (at init, before the settings load) and the options that differ from their defaults (after the
+ * components started). */
+void vpm_diag_identity(int vanillaPlus);
+void vpm_diag_options(void);
+/* The pack's own options (after the components started, so theirs keep their indexes); the Diagnostics mode the
+ * settings file saved, read right after its load so components see it from their start(). */
+void vpm_diag_register(void);
+void vpm_diag_settings_loaded(void);
+/* A fault the core took on the game thread: its number, registers and the pack's return addresses (two lines). */
+void vpm_diag_fault(const VpmFault* fault);
+/* Counts a fault on a worker thread (any thread). */
+void vpm_diag_worker_fault(void);
+int vpm_diag_faults(void);
+/* At a mission's end, after the costs: what is not running and why, the faults, the components' summary lines. */
+void vpm_diag_mission_end(void);
+/* "<lead> registers: rip=... rsp=..." and "<lead> return addresses in the pack: ..." for a fault with its context. */
+void vpm_diag_context(const char* lead, const VpmFault* fault);
+/* An address as "game.dll+0x...", "helldivers2.exe+0x...", "vanilla_plus_megapack.dll+0x..." or "0x...". */
+void vpm_where(uintptr_t address, char* out, size_t size);
+/* A component's status changed (vpm_set_status): the rate-limited status line. */
+void vpm_diag_status(VpmComponent* component);
+/* The text of a call ("tick", "listener for HF_ON_SPAWN") into out. */
+void vpm_call_text(const VpmCall* call, char* out, size_t size);
+/* A component's display name, or "the pack" for NULL and the core's record. */
+const char* vpm_diag_name(const VpmComponent* component);
+/* Tests: the last fault the core logged (vpm_diag_fault); 0 when none. */
+int vpm_diag_last_fault(VpmFault* out);
 
 /* memory.c */
 void vpm_memory_init(void);
@@ -65,6 +166,9 @@ void vpm_settings_tick(float dt);
 void vpm_settings_flush(void);
 void vpm_options_reset(void);
 void vpm_bindings_reset(void);
+/* An option's settings key ("component.id") and its default (a slider's snapped as its value is). */
+const char* vpm_option_key(const VpmOption* option);
+double vpm_option_default(const VpmOption* option);
 
 /* Windows functions (core.c) */
 void vpm_user32_init(void);

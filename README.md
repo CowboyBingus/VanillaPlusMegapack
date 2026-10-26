@@ -21,8 +21,13 @@ match_your_colors = off
 A switch takes effect in the next session. Options (Shallow Water Diving's dive depth, Match Your Colors' choices) are
 under `[options]`; the Mod Options Menu component shows them in the game.
 
-The pack's log (`mod-cowboybingus.vanilla-plus-megapack.log` in the session's logs folder) lists each component's
-state at start-up, and at each mission's end the time each one took per frame.
+The pack's log (`mod-cowboybingus.vanilla-plus-megapack.log` in the session's logs folder) starts with the pack's
+version, commit and build date, the local time and the settings it loaded (core lines are tagged `[core]`), lists each
+component's state at start-up and each change of it after, and at each mission's end the time each one took per frame
+(average and peak), what is not running and why, and the faults so far. A fault names the callback it happened in, its
+registers and the pack's return addresses; a crash in game code a component called gets a `[core] crash?` line naming
+the component. The pack's own options (category VANILLA PLUS MEGAPACK): **Diagnostics** (Normal, or Detailed for the
+components' step-by-step lines) and **Note a problem now**, which writes a numbered `MARK` with every component's state.
 
 ## Building
 
@@ -65,7 +70,10 @@ builds the same DLL from this folder.
   bindings. `stop()` puts back what it changed. The core makes one registration of each kind with HellForge for the
   whole pack.
 - **The crash guard.** Every call into a component runs guarded: a fault in the pack's own code stops that component
-  and logs where, and the game and the other components go on. Faults in game code are left to the game.
+  and logs where (which callback, the registers, the pack's return addresses), and the game and the other components
+  go on. Faults in game code are left to the game, after a breadcrumb line saying which component's call was running.
+- **Diagnostics.** `vpm_log_detail` for lines only the Detailed mode writes (rate-limited per component),
+  `vpm_detailed`, `vpm_on_summary` for a line at each mission's end, `VpmComponentDef.describe` for a tester's mark.
 - **Memory.** `vpm_game_u64(rva)` and friends are plain loads inside game.dll's image; `vpm_read` reads the game's heap
   through HellForge (safe on a bad pointer); `vpm_write` changes code and read-only data.
 - **Options and bindings**, as Mod Options Menu and Mod Bindings Menu offered them, saved in the settings file.

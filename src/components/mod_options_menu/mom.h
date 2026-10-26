@@ -58,7 +58,8 @@ typedef struct MomCategory
 {
     const char* title;
     int sequence;               /* registration order, for categories with the same title */
-    VpmComponent* owner;        /* the component whose options these are; NULL for the switches and the page control */
+    VpmComponent* owner;        /* the component whose options these are; vpm_pack() for the pack's switches and own
+                                 * options; NULL for the page control */
     int count;
     const MomItem* items[MOM_MAX_ROWS];
     int pages;                  /* the page control's */

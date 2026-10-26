@@ -2,7 +2,8 @@
  *
  * Categories are the pack's components that registered options (vpm_option_owner), each listing its options in
  * registration order, plus one category of the pack itself, VANILLA PLUS MEGAPACK, with a switch per component
- * (vpm_component_switched_on / vpm_component_switch; a switch applies from the next session). Values are the core's:
+ * (vpm_component_switched_on / vpm_component_switch; a switch applies from the next session) and then the pack's own
+ * options (those vpm_pack() owns: Diagnostics, Note a problem now). Values are the core's:
  * the applied value is vpm_option_value, and the player's edits stay pending here until APPLY, which hands each to
  * vpm_option_apply (set, the owner's on_change) in registration order, switches after options, and the settings file
  * is written at once. A value set from code (vpm_option_set) replaces the player's pending edit of it, as the Lua's
@@ -216,10 +217,11 @@ static void AddOption(int index)
     category->items[category->count++] = item;
 }
 
-/* The pack's own category: a switch per component, which applies from the next session. */
+/* The pack's own category: a switch per component, which applies from the next session. Its owner is the core's record
+ * (vpm_pack), so the pack's own options (Diagnostics, Note a problem now) are listed in it after the switches. */
 static void AddSwitches(void)
 {
-    MomCategory* category = NewCategory(mom_text_upper(VPM_PACK_NAME), NULL);
+    MomCategory* category = NewCategory(mom_text_upper(VPM_PACK_NAME), vpm_pack());
     const uint8_t* descriptor = NULL;
     for (int i = 0; category != NULL && i < vpm_component_count() && i < MOM_MAX_SWITCHES; i++)
     {
@@ -247,8 +249,11 @@ void mom_model_update(void)
     if (revision == g_revision) return;
     g_revision = revision;
     g_categoryCount = 0;
-    for (int i = 0; i < revision && i < MOM_MAX_OPTIONS; i++) AddOption(i);
+    for (int i = 0; i < revision && i < MOM_MAX_OPTIONS; i++)
+        if (vpm_option_owner(vpm_option_at(i)) != vpm_pack()) AddOption(i);
     AddSwitches();
+    for (int i = 0; i < revision && i < MOM_MAX_OPTIONS; i++)
+        if (vpm_option_owner(vpm_option_at(i)) == vpm_pack()) AddOption(i);
 }
 
 /* Button order: alphabetical, categories with the same title in the order they were registered. */

@@ -495,7 +495,7 @@ static void RegistersTheLuaOptions(void)
     static const char* const ids[] = {"mode", "paint_scheme", "recolor_squadmates", "squadmates_colors", "hide_cape",
                                       "keep_sets", "recolor_hoods", "match_materials", "recolor_cape", "recolor_weapons"};
     static const double values[] = {2, 1, 1, 1, 1, 1, 1, 0, 0, 0};
-    CHECK_EQ(vpm_option_count(), 10);
+    CHECK_EQ(vpm_option_count(), 10 + 2); /* and the pack's own two, registered after the components */
     for (int i = 0; i < 10 && i < vpm_option_count(); i++)
     {
         const VpmOptionDef* d = vpm_option_def(vpm_option_at(i));

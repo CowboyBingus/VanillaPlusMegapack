@@ -1585,7 +1585,10 @@ static void BusyMissionLogsNothing(void)
         fake_frames(1, DT);
     }
     CHECK(Ecs.realignments > 0 && Ecs.fling_stops_verified == 1 && Ecs.retries == 3 && Is(vpm_status(self), "ready"));
-    CHECK_EQ(fake_counts().log, 0);
+    /* the component's own lines: none; the core's status line for the raised polls (the return to "ready" 9 frames
+     * later is within its 600-frame limit) */
+    CHECK_EQ(fake_counts().log, 1);
+    CHECK_LOG("[core] Enemy Collision Synchronized status: waiting");
     HfStateEvent end = {{sizeof end, HF_ON_MISSION_END}, HF_STATE_MISSION, HF_STATE_SHIP};
     fake_emit(&end.info);
     CHECK_LOG("v2.13.0 at the mission's end: polls=");

@@ -895,13 +895,15 @@ static int StatusIs(const char* expected) { return strcmp(Status(), expected) ==
 
 static int Posting(void) { return vpm_post_ticking(fake_component(0)); }
 
-/* One frame: its reads, and nothing else (no write, no log). */
+/* One frame: its reads, and nothing else (no write, no log of the component's; the core's status line, rate-limited,
+ * is the core's). */
 static uint32_t Frame(void)
 {
+    int statusLines = fake_log_count("[core] Shallow Water Diving status:");
     fake_counts_reset();
     Frames(1);
     FakeCounts c = fake_counts();
-    CHECK_EQ(c.write + c.log + c.other, 0);
+    CHECK_EQ(c.write + c.log - (uint32_t)(fake_log_count("[core] Shallow Water Diving status:") - statusLines) + c.other, 0);
     return c.read;
 }
 

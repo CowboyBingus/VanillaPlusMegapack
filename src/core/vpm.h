@@ -9,7 +9,8 @@
  * Every call into a component runs under the core's crash guard (guard.c): an access violation, illegal instruction or
  * division by zero in the pack's own code stops that component (its stop() runs, guarded too), logs where it happened
  * and lets the game and the other components go on. A fault inside game code a component called is not taken: it
- * reaches the game's own handling, as if the pack were not there. Detours a component installs with HfApi.hook run on the
+ * reaches the game's own handling, as if the pack were not there, after one breadcrumb line in the pack's log naming
+ * the component and callback that was running (crash.c). Detours a component installs with HfApi.hook run on the
  * game's own stack, outside the guard: keep them short and validate everything they read.
  *
  * Memory. Addresses inside game.dll's or the exe's image (statics: RVA globals and tables) are read with plain loads
@@ -38,6 +39,10 @@ typedef struct VpmComponent VpmComponent; /* a component's runtime record (core.
 #define VPM_OVERLAPS_VANILLA_PLUS 0x1u /* stays off while HellForge's bundled skyeshade.vanilla-plus is in the session */
 #define VPM_DEFAULT_OFF 0x2u           /* off until the player switches it on (default: on) */
 
+/* A short line of the component's key state for the log ("avatar found, phase 2, 3 hooks"): at most size bytes into out,
+ * terminated. Runs guarded on the game thread, only when the core asks (diagnostics: vpm.h "diagnostics"). */
+typedef void (*VpmDescribeFn)(VpmComponent* self, char* out, size_t size);
+
 typedef struct VpmComponentDef
 {
     const char* id;      /* "foliage_pass_through": its settings key and log prefix; never changes */
@@ -49,6 +54,8 @@ typedef struct VpmComponentDef
     int (*start)(VpmComponent* self);
     /* Optional: puts back what the component changed, when the core stops it (a fault, or vpm_fail after start). */
     void (*stop)(VpmComponent* self);
+    /* Optional (NULL: none): its key state for a tester's "Note a problem now" mark (vpm.h "diagnostics"). */
+    VpmDescribeFn describe;
 } VpmComponentDef;
 
 /* ---- HellForge and the component ------------------------------------------------------------------------------- */
@@ -66,7 +73,45 @@ int vpm_running(const VpmComponent* self);
 /* Its status as the Mods tab shows it: "running", "off", "disabled: ...". set_status replaces the running text
  * ("waiting for the projectile settings"); NULL puts back "running". */
 const char* vpm_status(const VpmComponent* self);
+/* A new text is logged by the core ("[core] <Name> status: <text>"), at most once per component per 600 frames (10 s at
+ * 60 FPS; the next logged line counts the changes left out). The same text again is no change and logs nothing. */
 void vpm_set_status(VpmComponent* self, const char* status);
+
+/* ---- diagnostics (for the alpha test: what lets a tester's log say what went wrong) ------------------------------ *
+ * The pack's own options in Mod Options Menu (category VANILLA PLUS MEGAPACK, after the switches):
+ *   - "Diagnostics: Normal | Detailed" (saved as core.diagnostics; Normal by default);
+ *   - "Note a problem now": a toggle that acts when applied and switches itself back off. It writes "MARK <n>" with the
+ *     local time, the game state, and each component's status, describe text and summary text, so a tester's report can
+ *     point at a line of the log.
+ *
+ * Detailed lines. A component's diagnostics that only matter when something is being chased (the Lua originals' debug
+ * lines, the steps of a resolution, why a check failed) go through vpm_log_detail instead of vpm_log:
+ *   - in Normal mode it returns at once: one global read, no formatting, no log call;
+ *   - in Detailed mode it logs "[Name] <text>", at most VPM_DETAIL_LINES lines per component per VPM_DETAIL_FRAMES
+ *     frames (about 20 lines per 10 s); past that it counts, and its first line after the window says
+ *     "[Name] <n> detailed lines suppressed" (also written at a mission's end and at a mark). Time is the core's frame
+ *     count: no clock call.
+ * Rules for using it:
+ *   - only on frames that act, never in an idle gate: an idle frame still makes no log call in either mode (the
+ *     components' `log == 0` idle pins hold in both), so call it where the component already decided to act or changed
+ *     state, and log on change, not every frame;
+ *   - when the line costs work to build (a resolution's steps, a table dump), test vpm_detailed() first and skip the
+ *     work in Normal mode; vpm_detailed() is one global read, fine on any frame that acts;
+ *   - from the game thread only (the limiter's counts are the game thread's).
+ * A component's own lines that every player's log should have (a stop, a found table) stay vpm_log. */
+#define VPM_DETAIL_LINES 20
+#define VPM_DETAIL_FRAMES 600
+/* 1 while the player has Diagnostics set to Detailed, else 0: one global read. */
+int vpm_detailed(void);
+/* A detailed line: logged only in Detailed mode, through the limiter above. */
+void vpm_log_detail(VpmComponent* self, const char* format, ...) __attribute__((format(printf, 2, 3)));
+/* A summary line the core asks for at each mission's end (beside the costs) and at a mark: fn writes the component's
+ * state that a status cannot carry (a worker thread's, a queue's). Called guarded, on the game thread, while the
+ * component runs. One per component; NULL removes it. */
+void vpm_on_summary(VpmComponent* self, VpmDescribeFn fn);
+/* The core's own record: the owner of the pack's options above (Mod Options Menu lists them in the pack's category). Not
+ * one of vpm_component_at's components. */
+VpmComponent* vpm_pack(void);
 
 /* ---- callbacks (register from start(); each runs guarded, only while the component runs) ----------------------- */
 
