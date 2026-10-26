@@ -1,14 +1,69 @@
 /* Mod Options Menu: game.dll's native functions the MODS tab calls, and the native labels and setting descriptor it
  * relies on, checked once per session against build 25480438 before the menu is touched (native.c; the Lua's
- * native.lua). */
+ * native.lua).
+ *
+ * Calling convention, checked offline against the decoded game.dll of 25480438 (each function's code and how the game's
+ * own callers pass its arguments; 2026-10-25): all 25 are plain Microsoft x64 functions taking what MomNative declares,
+ * and the pack's compiler (zig cc: clang for x86_64-windows-gnu) passes them the same way (checked in its assembly of
+ * rows.c, widgets.c and view.c). Integers and pointers go in rcx, rdx, r8, r9, then on the stack from +0x28 at entry; a
+ * float in the xmm register of its position (xmm1 as the second); a MomVec2 {float x, y} (8 bytes) by value in the
+ * integer register of its position, x in the low half, as the game's callers load it (one qword over two floats). No
+ * declaration needed changing. Per function (callers: direct calls in the image):
+ *   set_tab_labels 0x17AAC50     rcx bar; rdx the labels (count x 4 bytes copied to bar + 0xDFE8); r8d count (signed,
+ *                                clamped to 8, stored at bar + 0xE068). 27 callers: rdx a static label array, r8d.
+ *   select_category 0x19999C0    rcx content; edx the category (stored at +0x141E58, compared with the previous one at
+ *                                +0x141E5C). 6 callers: rcx screen + 0x2DEF98, edx a constant.
+ *   set_content_hidden 0x19984C0 rcx content; dl hidden (compared with and stored at +0x142215); r8b immediate (movzx).
+ *                                4 callers pass dl and r8b.
+ *   row_reset 0x17FF700          rcx row; rdx and r8 two rectangles, loaded with movaps (16-byte aligned). 21 callers
+ *                                pass two aligned stack rectangles.
+ *   row_release 0x17FF4B0        rcx row only. 12 callers.
+ *   row_init 0x17FE8D0           rcx row; rdx position, r8 pivot, r9 anchor, each a {float, float} (the callers' r8 and
+ *                                r9 are {0.5, 1}); stack +0x28 layer (never read: it passes 10 to its builders itself),
+ *                                +0x30 the settings pointer (passed on to 0x17FF1E0), +0x38 the descriptor (kind +8,
+ *                                setting +0, label +0x10, slider floats +0x24 to +0x38, choices +0x40), +0x40 the flag
+ *                                byte (movzx). 22 callers, the same layout.
+ *   add_child 0x144C5C0          rcx parent (children at +0xE0); rdx child (sibling at +0xE8). 3921 callers.
+ *   set_visible 0x144CFB0        rcx widget; dl (the flag 0x10 at +0). 71 callers.
+ *   set_label 0x143BF90          rcx widget; edx the label (at +0x110). 1157 callers.
+ *   set_string_arg 0x143C950     rcx widget; edx key; r8 the text, kept as a pointer ({key, 1, pointer} at +0x118 +
+ *                                24 n, the count byte at +0x268), so it must outlive the widget's use of it (text.c).
+ *                                109 callers, r8 a static string.
+ *   clear_args 0x143A0F0         leaf: rcx the widget's label record (+0x110); clears its count byte (+0x158) and
+ *                                returns al = 1 when it held arguments. Nothing in the image calls it, jumps to it or
+ *                                points at it: read from its four instructions.
+ *   set_choice 0x17FE7E0         leaf: rcx selector; edx the index (unsigned, below 16), then tail jumps. 5 callers.
+ *   set_slider 0x17FC2C0         rcx slider; xmm1 the value (less min at +0x8AC, over the range). 11 callers, xmm1.
+ *   finish_simple 0x1807060      rcx panel (count +0xB10, scroll +0x330). 1 caller: the GAMEPLAY builder, rcx the panel.
+ *   finish_access 0x1800FE0      rcx panel (count +0x5750); reached by two tail jumps of the ACCESSIBILITY builder, rcx
+ *                                the panel; it calls scroll_thumb and scroll_extent with xmm1 itself.
+ *   scroll_thumb 0x1793F60       rcx scroll; xmm1 the size (stored at +0x7A8); it passes a {float, float} in rdx to
+ *                                set_size itself. 45 callers.
+ *   scroll_extent 0x1794600      leaf: rcx scroll; xmm1 the extent (stored at +0x7B0). 24 callers.
+ *   set_opacity 0x1448AD0        rcx widget; xmm1 (compared with +0x44). 5030 callers.
+ *   scroll_reset 0x1794570       leaf: rcx scroll; tail jumps to set_position with a {float, float} in rdx. 61 callers.
+ *   options_visual 0x1998590     rcx content; xmm1 dt (kept in xmm7). 1 caller, the escape menu screen's update while
+ *                                its current tab (screen + 0xE54C) is OPTIONS: rcx screen + 0x2DEF98, xmm1 the float
+ *                                (xmm6) it hands its other contents too.
+ *   measure_text 0x144E1A0       rcx widget only. 232 callers.
+ *   set_position 0x14476A0       rcx widget; rdx {x, y} (spilled to its home slot, compared as floats with +4 and +8).
+ *                                2416 callers load the pair as one qword.
+ *   set_size 0x1447160           the same with +0xC and +0x10. 3251 callers.
+ *   hide_description 0x17FAB90   rcx box; dl hidden (+0xA70); r8b animate. 2 callers.
+ *   play_sound 0x1327F50         edx the event (kept in ebx); rcx is overwritten from a global before any use: unused.
+ *                                933 callers set only edx.
+ * Every result but clear_args's is unused (void here). */
 #ifndef MOM_NATIVE_H
 #define MOM_NATIVE_H
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../../core/vpm.h"
 
-/* Widget positions and sizes: two floats passed by value in one register. */
+/* Widget positions and sizes: two floats passed by value in one integer register (the Microsoft x64 rule for an
+ * 8-byte struct). */
 typedef struct MomVec2 { float x, y; } MomVec2;
+_Static_assert(sizeof(MomVec2) == 8, "a MomVec2 travels in one integer register only at 8 bytes");
 
 enum
 {
@@ -40,9 +95,11 @@ enum
     MOM_NATIVE_COUNT
 };
 
-/* {name, game.dll RVA, its first bytes as shipped} */
-typedef struct MomNativeEntry { const char* name; uint32_t rva; const char* code; } MomNativeEntry;
-extern const MomNativeEntry mom_native_entries[MOM_NATIVE_COUNT];
+/* Each function's game.dll RVA and first bytes as shipped, for the core's wait (vpm_when_code_ready). A pin's name is
+ * the refusal as Mod Options Menu words it ("Mod options integration unavailable: set_tab_labels"), so the core's
+ * "<name> changed (game.dll 0x<rva>)" reads as the Lua's "... set_tab_labels changed". */
+#define MOM_UNAVAILABLE "Mod options integration unavailable: "
+extern const VpmCodePin mom_native_pins[MOM_NATIVE_COUNT];
 
 /* The native labels of the escape menu's three tabs (4 bytes each) and of the OPTIONS content's nine categories (one
  * record each, the label at +8), and setting 139's descriptor. */
@@ -85,8 +142,8 @@ typedef struct MomNative
 } MomNative;
 extern MomNative mom_native;
 
-/* Checks every function's bytes, the labels and the descriptor; fills mom_native. NULL when verified, else the reason
- * ("set_tab_labels changed", written into why). */
-const char* mom_native_verify(char* why, size_t size);
+/* Once the functions read as shipped (the core's wait): checks the labels and the descriptor, and fills mom_native. NULL
+ * when verified, else the reason ("tab labels changed"). */
+const char* mom_native_verify(void);
 
 #endif

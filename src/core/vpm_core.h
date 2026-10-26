@@ -75,7 +75,10 @@ typedef struct VpmTestHooks
     void (*writable_query)(void);                                 /* called before each VirtualQuery of vpm_writable */
     void* (*module_export)(const char* module, const char* name); /* answers vpm_module_export */
     int (*read)(uintptr_t address, void* out, size_t size);       /* answers vpm_read's plausible reads: 1 read, 0 not */
+    int (*tick_refused)(int post); /* 1: vpm_tick_start (post 0) or vpm_post_tick_start (post 1) refuses */
 } VpmTestHooks;
+/* Tests: whether a tick start is refused by the test hook (memory.c; 0 in the DLL). */
+int vpm_test_tick_refused(int post);
 /* The game's whole-frame update the core hooks for its ticks (core.c): game.dll + VPM_FRAME_UPDATE, its first bytes as
  * shipped on 25480438 (read from the decoded image: mov r11, rsp; push rbp; push r14; lea rbp, [r11 - 0x6A8];
  * sub rsp, 0x798), and how long the core retries while game.dll's code is still being decoded. */

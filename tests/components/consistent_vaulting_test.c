@@ -223,6 +223,7 @@ static struct
     float speed[8];
     int exit_calls, refreshes, retries, approach_calls, overrides, detects, bad;
     int miss, reject, exit_value, detect, no_ledge, basis_zero;
+    int fault;             /* the next mover position call faults (once) */
     double root[3];
     uint8_t fresh[0x2B0];
     float ledge[8];        /* the raised search's first, last, span, width */
@@ -247,8 +248,14 @@ static uint32_t FMover(uint32_t unit, uint32_t name)
     return 456;
 }
 static void* FDimensions(uint32_t mover) { return mover == 456 ? w.shape : NULL; }
+static int* volatile g_nowhere; /* NULL: a store through it faults */
 static void FPosition(uint32_t mover, float* out)
 {
+    if (n.fault)
+    {
+        n.fault = 0;
+        *g_nowhere = 1;
+    }
     for (int i = 0; i < 3; i++) out[i] = (float)n.root[i];
 }
 /* The horizontal forward/up basis (an offline stand-in for the native one). */
@@ -2203,17 +2210,18 @@ static void FrameBudgetWithTheGate(void)
     for (int i = 0; i < 9; i++) gated &= FrameReads() == 1;
     CHECK(gated);
     CHECK_EQ(FrameReads(), 6); /* Lua 7 */
-    /* A press on a gated frame: the gate's read, the check that arms, and the check replayed now that work started. */
+    /* A press on a gated frame: the gate's read, the check that arms, the check replayed now that work started, and the
+     * second check (after the game's update; here, without the frame hook, right after the others). */
     FullCheck();
     CHECK_EQ(FrameReads(), 1);
     w.input[0] = 1;
     polls = St()->counters.polls;
     fake_counts_reset();
     fake_frames(1, 1.0f / 60);
-    CHECK_EQ(St()->counters.polls, polls + 2); /* Lua 3: and one after the game's update */
+    CHECK_EQ(St()->counters.polls, polls + 3); /* Lua 3 */
     CHECK(St()->has_lease);
     CHECK_EQ(St()->counters.slope_arms, 1);
-    CHECK_EQ(fake_counts().read, 180); /* Lua 252 over three checks */
+    CHECK_EQ(fake_counts().read, 219); /* Lua 252 over its three checks */
     w.input[0] = 0;
     St()->now += 2;
     fake_frames(3, 1.0f / 60);
@@ -2277,22 +2285,461 @@ static void GateFollowsANewIndex(void)
 
 /* ---- the tick (test_loader.lua) ------------------------------------------------------------------------------------ */
 
-/* One check per frame, idle or busy (the Lua made a second one after the game's update while busy). */
+/* One check per idle frame; two per busy frame, the second after the game's update (without the frame hook, right after
+ * the first, where the Lua made it); three on the frame work starts (the replayed one). test_loader.lua's counts. */
 static void ChecksPerFrame(void)
 {
     Started();
     SlopeReset();
     fake_frames(2, 1.0f / 60);
     uint32_t polls = St()->counters.polls;
+    CHECK(!vpm_post_ticking(fake_component(0)));
     w.input[0] = 1;
     fake_frames(1, 1.0f / 60);
-    CHECK_EQ(St()->counters.polls, polls + 2); /* the replayed check on the frame work starts */
+    CHECK_EQ(St()->counters.polls, polls + 3); /* the replayed check on the frame work starts, and the second */
+    CHECK(vpm_post_ticking(fake_component(0)));
     polls = St()->counters.polls;
     fake_frames(10, 1.0f / 60);
     CHECK(St()->has_lease);
-    CHECK_EQ(St()->counters.polls, polls + 10);
+    CHECK_EQ(St()->counters.polls, polls + 20);
+    /* Released and the attempt over: the check that ends the lease leaves nothing in progress, so it is the frame's only
+     * one and the post-update tick goes; the next frame's check arms the gate, which answers the frames after it. */
+    w.input[0] = 0;
+    St()->now += 2;
+    polls = St()->counters.polls;
+    fake_frames(1, 1.0f / 60);
+    CHECK(!St()->has_lease && St()->busy == 0);
+    CHECK_EQ(St()->counters.polls, polls + 1);
+    CHECK(!vpm_post_ticking(fake_component(0)));
+    fake_frames(9, 1.0f / 60);
+    CHECK_EQ(St()->counters.polls, polls + 2);
     CHECK_LOG("[Consistent Vaulting] waiting_for_mission");
     CHECK(Is(vpm_status(fake_component(0)), "waiting_for_vault_query"));
+    CHECK(Baseline());
+}
+
+/* ---- the second check after game.dll's update (the core's frame hook) ---------------------------------------------- */
+
+static void (*g_inUpdate)(void); /* what the game's update changes, on the next engine frame only */
+static uint32_t g_pollsInUpdate; /* the checks made when the game's update ran */
+static float g_capInUpdate;      /* the speed cap the game's update saw */
+static int g_hasPendingInUpdate;
+
+/* The game's own update (fake_after_tick's step, inside game.dll's frame update): it notes what the frame's checks
+ * before it had done, then makes the change the test put up. */
+static void GameUpdate(float dt)
+{
+    g_pollsInUpdate = St()->counters.polls;
+    g_capInUpdate = GF(Cell(CV_CAP));
+    g_hasPendingInUpdate = St()->has_pending;
+    void (*change)(void) = g_inUpdate;
+    g_inUpdate = NULL;
+    if (change != NULL) change();
+}
+
+/* hooked: game.dll's frame update decoded, so the core's frame hook goes in at the load and the post-update tick runs
+ * after the game's update; otherwise the fallback, with both ticks in HellForge's callback before it. */
+static void StartedEngine(int hooked)
+{
+    fake_frame_update(hooked);
+    Started();
+    CHECK_EQ(vpm_frame_hooked(), hooked ? 1 : 0);
+    fake_after_tick(GameUpdate);
+    g_inUpdate = NULL;
+}
+
+/* One engine frame whose game update makes this change; the checks it made. */
+static uint32_t EngineFrame(void (*change)(void))
+{
+    uint32_t polls = St()->counters.polls;
+    g_inUpdate = change;
+    fake_engine_frames(1, 1.0f / 60);
+    return St()->counters.polls - polls;
+}
+
+static void CompleteBatch(void) { P32(w.control + 4, 2); }
+static void StartClimb(void) { P32(w.flags + 12, 0x200); }
+static void FaultNext(void) { n.fault = 1; }
+
+/* A press opens the assist's search window (work in progress, no assist found) while the vault's queries are still in
+ * flight (stage 1); the batch whose first hit fails is ready. */
+static void PressWithQueriesInFlight(void)
+{
+    SlopeReset();
+    g_candidateKind = 0;
+    fake_engine_frames(2, 1.0f / 60);
+    RESET(H(2), H(1));
+    n.flags[2] = 0x100000;
+    P32(w.control + 4, 1);
+    CHECK_EQ(EngineFrame(NULL), 3); /* the press, the replay (work started), the second */
+    CHECK(St()->has_intent && St()->busy == 1 && !St()->has_pending);
+}
+
+/* The game's update completes the batch (stage 2). Hooked, the second check sees it after that update and prepares
+ * the alternative in the same frame; in the fallback it ran before the update, and the next frame's first check
+ * prepares it, also before the next update. */
+static void StageReachedInTheUpdate(void)
+{
+    for (int hooked = 1; hooked >= 0; hooked--)
+    {
+        fake_setup();
+        StartedEngine(hooked);
+        PressWithQueriesInFlight();
+        CHECK_EQ(EngineFrame(CompleteBatch), 2);
+        CHECK_EQ(St()->has_pending, hooked);
+        CHECK_EQ(Unit(0), hooked ? 0u : 444u);
+        CHECK(Is(vpm_status(fake_component(0)), hooked ? "local_manual_alternative_prepared" : "waiting_for_vault_query"));
+        CHECK_EQ(EngineFrame(NULL), 2);
+        CHECK(g_hasPendingInUpdate); /* in place when the next update consumes the batch, either way */
+        CHECK(St()->has_pending && Unit(0) == 0 && Unit(1) == 444);
+        CHECK(Is(vpm_status(fake_component(0)), "local_manual_alternative_prepared"));
+        /* Released: the first check restores and leaves nothing in progress, so the post-update tick goes at once; the
+         * gate answers the next frame. */
+        w.input[0] = 0;
+        CHECK_EQ(EngineFrame(NULL), 1);
+        CHECK(!St()->has_pending && Unit(0) == 444 && St()->busy == 0);
+        CHECK(!vpm_post_ticking(fake_component(0)));
+        CHECK_EQ(EngineFrame(NULL), 0);
+        CHECK(RemoteUnchanged());
+    }
+}
+
+/* An armed slope lease; the game's update starts the native climb. Hooked, the second check caps the speed after that
+ * update, in the same frame; in the fallback the next frame's first check caps it. Either way before the next update. */
+static void ArmedLease(void)
+{
+    SlopeReset();
+    fake_engine_frames(2, 1.0f / 60);
+    w.input[0] = 1;
+    CHECK_EQ(EngineFrame(NULL), 3);
+    CHECK(St()->has_lease && GF(Cell(CV_ENTER)) == 65 && GF(Cell(CV_CAP)) == -1);
+}
+
+static void ClimbStartedInTheUpdate(void)
+{
+    for (int hooked = 1; hooked >= 0; hooked--)
+    {
+        fake_setup();
+        StartedEngine(hooked);
+        ArmedLease();
+        CHECK_EQ(EngineFrame(StartClimb), 2);
+        CHECK(g_capInUpdate == -1);
+        CHECK(GF(Cell(CV_CAP)) == (hooked ? 2 : -1));
+        CHECK_EQ(St()->counters.slope_climbs, (uint32_t)hooked);
+        CHECK_EQ(EngineFrame(NULL), 2);
+        CHECK(g_capInUpdate == 2);
+        CHECK(GF(Cell(CV_CAP)) == 2 && St()->counters.slope_climbs == 1 && Is(St()->slope_status, "climb"));
+        vpm_core_stop(fake_component(0), "test");
+        CHECK(Baseline());
+    }
+}
+
+/* The frame's own native retry starts the climb under the armed lease: the speed is capped by a second check at once,
+ * before the game's update (where the Lua's second check capped it), and the post-update check still follows. */
+static void ClimbFromTheChecksOwnRetry(void)
+{
+    StartedEngine(1);
+    ArmedLease();
+    LATE(H(2), H(1));
+    n.flags[2] = 0x100000;
+    CHECK_EQ(EngineFrame(NULL), 3);
+    CHECK_EQ(St()->counters.native_starts, 1);
+    CHECK(g_capInUpdate == 2);       /* capped before the game's update */
+    CHECK_EQ(g_pollsInUpdate, St()->counters.polls - 1);
+    CHECK(GF(Cell(CV_CAP)) == 2 && Is(St()->slope_status, "climb"));
+    CHECK_EQ(EngineFrame(NULL), 2);  /* the climb held: two checks */
+    /* A retry that starts no climb (rejected) is no reason for a check at once. */
+    fake_setup();
+    StartedEngine(1);
+    ArmedLease();
+    LATE(H(2), H(1));
+    n.flags[2] = 0x100000;
+    n.reject = 1;
+    CHECK_EQ(EngineFrame(NULL), 2);
+    CHECK_EQ(St()->counters.native_starts, 0);
+    CHECK(GF(Cell(CV_CAP)) == -1);
+    vpm_core_stop(fake_component(0), "test");
+    CHECK(Baseline());
+}
+
+/* A check that raised restores and starts fresh; the frame's second check runs at once from that fresh start, before
+ * the game's update, as the Lua's did, and that frame has no post-update check: two checks, as the Lua's. */
+static void ARaisedCheckHasItsSecondAtOnce(void)
+{
+    StartedEngine(1);
+    SlopeReset();
+    g_candidateKind = 0;
+    fake_engine_frames(2, 1.0f / 60);
+    w.input[0] = 1;
+    CHECK_EQ(EngineFrame(NULL), 3);
+    CHECK(St()->has_intent && vpm_post_ticking(fake_component(0)));
+    cv_test_candidate(RaisingCandidate);
+    St()->now += 0.2; /* the search window's next candidate check is due */
+    uint32_t polls = St()->counters.polls;
+    CHECK_EQ(EngineFrame(NULL), 2);
+    CHECK_EQ(g_pollsInUpdate, polls + 2); /* both before the game's update */
+    CHECK_LOG("[Consistent Vaulting] error: candidate fixture failure");
+    CHECK(vpm_running(fake_component(0)) && !vpm_post_ticking(fake_component(0)));
+    CHECK(!St()->has_intent && St()->busy == 0 && Baseline());
+    CHECK_EQ(EngineFrame(NULL), 1); /* nothing in progress: one check */
+}
+
+/* Idle frames with the frame hook are what they were: no post-update tick, the gate's reads only. */
+static void IdleFramesHaveNoPostCheck(void)
+{
+    StartedEngine(1);
+    SlopeReset();
+    P32(w.mode + 8, 0);
+    uint32_t hooks = (uint32_t)fake_hook_count();
+    for (int i = 0; i < 3; i++) EngineFrame(NULL);
+    int gated = 1, frames = 0;
+    uint32_t polls = St()->counters.polls;
+    for (int i = 0; i < 120; i++)
+    {
+        fake_counts_reset();
+        fake_engine_frames(1, 1.0f / 60);
+        uint32_t calls = fake_counts().read + fake_counts().log + fake_counts().code_matches + fake_counts().hook;
+        frames += calls == 0;
+        gated &= calls <= 1 && !vpm_post_ticking(fake_component(0));
+    }
+    CHECK(gated);
+    CHECK_EQ(frames, 118);                     /* outside a mission: one frame in 60 reads the mission */
+    CHECK_EQ(St()->counters.polls, polls + 2);
+    P32(w.mode + 8, 1);
+    for (int i = 0; i < 60; i++) EngineFrame(NULL);
+    polls = St()->counters.polls;
+    uint32_t reads = 0;
+    for (int i = 0; i < 10; i++)
+    {
+        fake_counts_reset();
+        fake_engine_frames(1, 1.0f / 60);
+        reads += fake_counts().read;
+        CHECK(!vpm_post_ticking(fake_component(0)));
+    }
+    CHECK_EQ(reads, 9 + 6);                    /* in a mission: 1 read on 9 frames, 6 on the 10th, as before */
+    CHECK_EQ(St()->counters.polls, polls + 1);
+    CHECK_EQ(fake_hook_count(), (int)hooks);   /* nothing hooked or registered beyond the frame hook */
+}
+
+/* The per-frame counts with the frame hook: a held lease makes two checks, 78 reads (one check before: 39; the Lua
+ * 2 x 44 = 88); the post-update tick goes when the lease ends, and with the component. */
+static void PostCheckCountsAndStops(void)
+{
+    StartedEngine(1);
+    ArmedLease();
+    fake_counts_reset();
+    CHECK_EQ(EngineFrame(NULL), 2);
+    CHECK_EQ(fake_counts().read, 78);
+    CHECK_EQ(fake_counts().write + fake_counts().log, 0);
+    CHECK(vpm_post_ticking(fake_component(0)));
+    /* The attempt ends (timeout): that frame's first check ends the lease and leaves nothing in progress. */
+    w.input[0] = 0;
+    St()->now += 2;
+    CHECK_EQ(EngineFrame(NULL), 1);
+    CHECK(!St()->has_lease && Baseline() && !vpm_post_ticking(fake_component(0)));
+    CHECK(Is(St()->slope_last_release, "attempt_timeout"));
+    /* Stopped while busy: the post-update tick goes with the tick, and no check runs any more. */
+    fake_setup();
+    StartedEngine(1);
+    ArmedLease();
+    vpm_core_stop(fake_component(0), "test");
+    CHECK(!vpm_post_ticking(fake_component(0)) && Baseline());
+    CHECK_EQ(EngineFrame(StartClimb), 0);
+    CHECK(GF(Cell(CV_CAP)) == -1);
+}
+
+/* A fault in the post-update check (a game function it calls) stops the component; its stop puts the lease back. The
+ * frame's first check, before the update, ran clean. */
+static void AFaultInThePostCheck(void)
+{
+    StartedEngine(1);
+    ArmedLease();
+    CHECK_EQ(EngineFrame(FaultNext), 2);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Consistent Vaulting] disabled: fault 0xC0000005");
+    CHECK_NO_LOG("its stop did not finish");
+    CHECK(!St()->has_lease && Baseline());
+    CHECK_EQ(EngineFrame(StartClimb), 0);
+    CHECK(SharedUnchanged());
+}
+
+/* ---- the post-update tick refused (vpm_post_tick_start answers 0) -------------------------------------------------- */
+
+/* One engine frame whose second check, if any, must have run before the game's update: its checks. */
+static uint32_t FrameAllBeforeTheUpdate(void (*change)(void))
+{
+    uint32_t polls = St()->counters.polls;
+    uint32_t made = EngineFrame(change);
+    CHECK_EQ(g_pollsInUpdate, polls + made);
+    CHECK(!vpm_post_ticking(fake_component(0)));
+    return made;
+}
+
+/* Refused from the start: the frame's second check runs at once, before the game's update, where the Lua made it, and
+ * a busy frame makes the Lua's checks (two; three on the frame work starts), with the same reads. A climb the update
+ * starts is capped at the next frame's first check, as in the Lua. Lifted later, the post-update tick is used again. */
+static void ARefusedPostTickChecksAtOnce(void)
+{
+    StartedEngine(1);
+    fake_refuse_ticks(0, 1);
+    SlopeReset();
+    for (int i = 0; i < 2; i++) CHECK(FrameAllBeforeTheUpdate(NULL) <= 1);
+    w.input[0] = 1;
+    fake_counts_reset();
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 3);
+    CHECK_EQ(fake_counts().read, 219); /* as with the post-update tick, and the Lua's three checks */
+    CHECK(St()->has_lease);
+    fake_counts_reset();
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+    CHECK_EQ(fake_counts().read, 78);
+    CHECK_EQ(FrameAllBeforeTheUpdate(StartClimb), 2);
+    CHECK(GF(Cell(CV_CAP)) == -1);
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+    CHECK(g_capInUpdate == 2 && GF(Cell(CV_CAP)) == 2);
+    /* Lifted: the next busy frame registers it, and its second check runs after the update. */
+    fake_refuse_ticks(0, 0);
+    uint32_t polls = St()->counters.polls;
+    CHECK_EQ(EngineFrame(NULL), 2);
+    CHECK_EQ(g_pollsInUpdate, polls + 1);
+    CHECK(vpm_post_ticking(fake_component(0)));
+    vpm_core_stop(fake_component(0), "test");
+    CHECK(Baseline());
+}
+
+/* Refused after a registration worked. A busy period with the post-update tick ends (removed); the core then refuses;
+ * idle frames make no extra check; the next busy period's second checks run at once. Within a busy period: a check
+ * that raises removes the tick (its second check runs at once, from the fresh start, which prepares the alternative
+ * again), and with the refusal in place the frames after it check at once too. */
+static void ARefusalAfterARegistrationWorked(void)
+{
+    StartedEngine(1);
+    ArmedLease();
+    uint32_t polls = St()->counters.polls;
+    CHECK_EQ(EngineFrame(NULL), 2);
+    CHECK_EQ(g_pollsInUpdate, polls + 1);
+    w.input[0] = 0;
+    St()->now += 2;
+    CHECK_EQ(EngineFrame(NULL), 1); /* the attempt timed out: nothing in progress */
+    CHECK(!vpm_post_ticking(fake_component(0)) && Baseline());
+    fake_refuse_ticks(0, 1);
+    int idle = 1;
+    for (int i = 0; i < 30; i++) idle &= FrameAllBeforeTheUpdate(NULL) <= 1;
+    CHECK(idle);
+    w.input[0] = 1;
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 3);
+    CHECK(St()->has_lease);
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+    vpm_core_stop(fake_component(0), "test");
+    CHECK(Baseline());
+    /* Mid-way: a held alternative (work in progress) with the post-update tick, then the refusal and a raise. */
+    fake_setup();
+    StartedEngine(1);
+    SlopeReset();
+    g_candidateKind = 0;
+    fake_engine_frames(2, 1.0f / 60);
+    RESET(H(2), H(1));
+    n.flags[2] = 0x100000;
+    CHECK_EQ(EngineFrame(NULL), 3);
+    CHECK(St()->has_pending && vpm_post_ticking(fake_component(0)));
+    fake_refuse_ticks(0, 1);
+    polls = St()->counters.polls;
+    CHECK_EQ(EngineFrame(NULL), 2);
+    CHECK_EQ(g_pollsInUpdate, polls + 1); /* registered before the refusal: it keeps running */
+    cv_test_candidate(RaisingCandidate);
+    St()->now += 0.2; /* the search window's next candidate check is due */
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+    CHECK_LOG("[Consistent Vaulting] error: candidate fixture failure");
+    CHECK(St()->has_pending && St()->busy == 1 && Unit(0) == 0);
+    for (int i = 0; i < 5; i++) CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+    CHECK(Is(vpm_status(fake_component(0)), "local_manual_alternative_prepared"));
+    fake_refuse_ticks(0, 0);
+    polls = St()->counters.polls;
+    CHECK_EQ(EngineFrame(NULL), 2);
+    CHECK_EQ(g_pollsInUpdate, polls + 1);
+    w.input[0] = 0;
+    CHECK_EQ(EngineFrame(NULL), 1);
+    CHECK(!St()->has_pending && Unit(0) == 444 && !vpm_post_ticking(fake_component(0)));
+}
+
+/* OwnErrorsBurst with the post-update tick refused: 7 errors, then `busy` frames of a held alternative (each on the
+ * refused branch, two checks at once), a release and a press that raises again. With the release that makes 3599
+ * clean frames after the 7th error the 8th stops the component; with 3600 the burst has ended. 1 running. */
+static int RefusedBurst(int busy)
+{
+    fake_setup();
+    StartedEngine(1);
+    fake_refuse_ticks(0, 1);
+    SlopeReset();
+    cv_test_candidate(RaisingCandidate);
+    fake_engine_frames(2, 1.0f / 60);
+    for (int i = 0; i < 7; i++)
+    {
+        w.input[0] = 1;
+        CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+        w.input[0] = 0;
+        fake_engine_frames(1, 1.0f / 60);
+    }
+    CHECK_EQ(fake_log_count("error: candidate fixture failure"), 1);
+    g_candidateKind = 0;
+    cv_test_candidate(StubCandidate);
+    RESET(H(2), H(1));
+    n.flags[2] = 0x100000;
+    for (int i = 0; i < busy; i++)
+    {
+        if (i < 3 || i == busy - 1) CHECK_EQ(FrameAllBeforeTheUpdate(NULL), i == 0 ? 3u : 2u);
+        else fake_engine_frames(1, 1.0f / 60);
+    }
+    CHECK(St()->has_pending && vpm_running(fake_component(0)));
+    cv_test_candidate(RaisingCandidate);
+    w.input[0] = 0;
+    fake_engine_frames(1, 1.0f / 60);
+    w.input[0] = 1;
+    fake_engine_frames(1, 1.0f / 60);
+    return vpm_running(fake_component(0));
+}
+
+static void ErrorBurstsOnTheRefusedBranch(void)
+{
+    CHECK(!RefusedBurst(3597)); /* 1 + 3597 + 1 = 3599 clean frames: still the same burst */
+    CHECK_LOG("disabled: stopped after 8 errors: candidate fixture failure");
+    CHECK(RefusedBurst(3598)); /* 3600: the burst ended, the error starts a new one */
+    CHECK_EQ(fake_log_count("error: candidate fixture failure"), 2);
+}
+
+/* The code checks (the native binding's three routines) run at the first check that calls a game function: a climb
+ * press in a mission, never at HF_EVENT_GAME_LOADED or on idle frames. Still encoded there, they answer a waiting
+ * status, not a stop, and a later check binds once the code reads as shipped. */
+static void CodeChecksWaitForTheFirstPress(void)
+{
+    static const uint8_t kDriver[] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0xD0};
+    MakeWorld();
+    memset(w.game + 0xA9A0C0u, 0xCC, sizeof kDriver); /* the vault driver: still encoded */
+    ResetNatives();
+    cv_native_test(&kFakes);
+    fake_counts_reset();
+    fake_start(kDefs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    cv_test_candidate(NULL);
+    SlopeReset();
+    fake_frames(120, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 0); /* the load, the first ticks, idle frames: no code check */
+    w.input[0] = 1;
+    fake_frames(1, 1.0f / 60);
+    CHECK(fake_counts().code_matches > 0);
+    CHECK(vpm_running(fake_component(0)) && !St()->has_lease && Stores() == 0 && Baseline());
+    CHECK(Is(St()->slope_status, "waiting_for_slope_data"));
+    CHECK_NO_LOG("disabled");
+    memcpy(w.game + 0xA9A0C0u, kDriver, sizeof kDriver); /* decoded */
+    w.input[0] = 0;
+    fake_frames(2, 1.0f / 60);
+    w.input[0] = 1;
+    fake_frames(1, 1.0f / 60);
+    CHECK(St()->has_lease && vpm_running(fake_component(0)));
+    fake_counts_reset();
+    fake_frames(5, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 0); /* bound once */
+    vpm_core_stop(fake_component(0), "test");
+    CHECK(Baseline());
 }
 
 /* The check's own errors restore and start fresh, one log line per burst; 8 in a burst stop the component, and a
@@ -2305,14 +2752,19 @@ static void OwnErrorsBurst(void)
     fake_frames(2, 1.0f / 60);
     for (int i = 0; i < 7; i++)
     {
+        /* The check raises and starts fresh (state.busy unset), so the second check runs, from that fresh start, as the
+         * Lua's after the update did: the held input is no fresh press there, and nothing is in progress after it. */
         w.input[0] = 1;
+        uint32_t polls = St()->counters.polls;
         fake_frames(1, 1.0f / 60);
-        CHECK_EQ(St()->busy, CV_UNSET); /* a fresh start */
+        CHECK_EQ(St()->counters.polls, polls + 2);
+        CHECK_EQ(St()->busy, 0);
+        CHECK(!St()->has_lease && !St()->has_intent);
         w.input[0] = 0;
         fake_frames(1, 1.0f / 60);
     }
     CHECK(vpm_running(fake_component(0)));
-    CHECK_LOG("[Consistent Vaulting] error: candidate fixture failure");
+    CHECK_EQ(fake_log_count("error: candidate fixture failure"), 1); /* one line per burst */
     fake_frames(3600, 1.0f / 60);
     for (int i = 0; i < 7; i++)
     {
@@ -2387,6 +2839,17 @@ int main(void)
     RUN(FrameBudgetWithTheGate);
     RUN(GateFollowsANewIndex);
     RUN(ChecksPerFrame);
+    RUN(StageReachedInTheUpdate);
+    RUN(ClimbStartedInTheUpdate);
+    RUN(ClimbFromTheChecksOwnRetry);
+    RUN(ARaisedCheckHasItsSecondAtOnce);
+    RUN(IdleFramesHaveNoPostCheck);
+    RUN(PostCheckCountsAndStops);
+    RUN(AFaultInThePostCheck);
+    RUN(ARefusedPostTickChecksAtOnce);
+    RUN(ARefusalAfterARegistrationWorked);
+    RUN(ErrorBurstsOnTheRefusedBranch);
+    RUN(CodeChecksWaitForTheFirstPress);
     RUN(OwnErrorsBurst);
     RUN(RefusalAndStop);
     TEST_END();

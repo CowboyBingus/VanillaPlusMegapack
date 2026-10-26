@@ -201,23 +201,52 @@ static void MakeWorld(int both)
     Reset();
 }
 
-static void Started(void)
+/* ---- frames: the engine's, through the core's hook of game.dll's update ----------------------------------------- *
+ * A frame is the tick, the game's update (InsideTheUpdate: it notes the tick's status and reads, then runs a test's
+ * step inside the update), then the post-update check. A session started without the hook (the core's fallback:
+ * game.dll's code not decoded) runs both checks inside HellForge's callback, before the update's step. */
+
+static int g_hooked;            /* the session has the core's hook of game.dll's update */
+static void (*g_inside)(void);  /* a step inside the next frame's game update, between the two checks */
+static char g_tickStatus[64];   /* the status and the reads right after the frame's tick */
+static uint32_t g_tickReads;
+
+static void InsideTheUpdate(float dt)
+{
+    snprintf(g_tickStatus, sizeof g_tickStatus, "%s", vpm_status(fake_component(0)));
+    g_tickReads = fake_counts().read;
+    void (*step)(void) = g_inside;
+    g_inside = NULL;
+    if (step != NULL) step();
+}
+
+static void Frames(int n) { fake_engine_frames(n, 1.0f / 60); }
+
+static void StartedOn(int hooked)
 {
     memset(&g_change, 0, sizeof g_change);
     g_unreadableSize = 0;
+    g_hooked = hooked;
+    g_inside = NULL;
+    if (hooked) fake_frame_update(1);
+    fake_after_tick(InsideTheUpdate);
     g_api = *fake_api();
     g_api.read = WrappedRead;
     CHECK_EQ(vpm_core_init(&g_api, fake_mod(), kDefs, 1), 0);
     fake_fire(HF_EVENT_GAME_LOADED);
 }
 
+static void Started(void) { StartedOn(1); }
+
 /* A fresh game, fixture and component: the Lua tests' reset() with a new state. */
-static void Fresh(void)
+static void FreshOn(int hooked)
 {
     fake_setup();
     MakeWorld(0);
-    Started();
+    StartedOn(hooked);
 }
+
+static void Fresh(void) { FreshOn(1); }
 
 static const char* g_reason;
 static int g_active;
@@ -864,92 +893,106 @@ static void UnassistedDiveBudget(void)
 static const char* Status(void) { return vpm_status(fake_component(0)); }
 static int StatusIs(const char* expected) { return strcmp(Status(), expected) == 0; }
 
+static int Posting(void) { return vpm_post_ticking(fake_component(0)); }
+
 /* One frame: its reads, and nothing else (no write, no log). */
 static uint32_t Frame(void)
 {
     fake_counts_reset();
-    fake_frames(1, 1.0f / 60);
+    Frames(1);
     FakeCounts c = fake_counts();
     CHECK_EQ(c.write + c.log + c.other, 0);
     return c.read;
 }
 
-static void FrameBudget(void)
+/* One frame's reads: the tick's (the 1:1 port's one check) and the post-update check's. Without the hook the two run
+ * back to back and only their sum is seen. */
+#define PIN(tick, post) do { uint32_t total_ = Frame(); \
+    if (g_hooked) { CHECK_EQ(g_tickReads, tick); CHECK_EQ(total_ - g_tickReads, post); } \
+    else CHECK_EQ(total_, (tick) + (post)); } while (0)
+
+/* The calls per frame, tick + post (the Lua's whole update in brackets: its step and its after-update check). */
+static void FrameBudgetOn(int hooked)
 {
-    fake_setup();
     MakeWorld(0);
     Put32(w.mission + 8, 0);
     fake_counts_reset();
-    fake_frames(5, 1.0f / 60);
+    Frames(5);
     CHECK_EQ(fake_counts().read, 0); /* nothing ticks before game.dll is loaded */
-    Started();
+    StartedOn(hooked);
     CHECK_EQ(fake_counts().read + fake_counts().write, 0); /* start and the load event: the option, the tick */
-    CHECK(vpm_ticking(fake_component(0)));
+    CHECK(vpm_ticking(fake_component(0)) && !Posting());
     CHECK_LOG("[Shallow Water Diving] waiting_for_mission (max dive water depth 0.20; depth option registered)");
     /* Outside a mission (the ship, loading screens) every 30th frame checks (1 read [2]); the frames between make no
-     * call. */
-    CHECK_EQ(Frame(), 1);
-    CHECK(StatusIs("waiting_for_mission"));
-    for (int i = 0; i < 29; i++) CHECK_EQ(Frame(), 0);
-    CHECK_EQ(Frame(), 1);
+     * call; no post check (no local avatar). */
+    PIN(1, 0);
+    CHECK(StatusIs("waiting_for_mission") && !Posting());
+    for (int i = 0; i < 29; i++) PIN(0, 0);
+    PIN(1, 0);
     /* A mission is seen at the next poll. */
     Put32(w.mission + 8, 1);
     Dive(0);
-    for (int i = 0; i < 29; i++) CHECK_EQ(Frame(), 0);
-    CHECK(StatusIs("waiting_for_mission"));
-    /* Idle in a mission: a full check (10 reads [15]) on every 120th frame, the gate (1 [2]) on the others. */
+    for (int i = 0; i < 29; i++) PIN(0, 0);
+    CHECK(StatusIs("waiting_for_mission") && !Posting());
+    /* Idle in a mission: a full check (10 reads) on every 120th frame, the gate (1) on the others, then the gate after
+     * the update (1) [15 and 2]. */
     int full = 0;
     for (int i = 1; i <= 240; i++)
     {
         uint32_t reads = Frame();
-        CHECK(reads == 1 || reads == 10);
-        if (reads == 10) { full++; CHECK_EQ(i % 120, 1); }
-        CHECK(StatusIs("dive_ended"));
+        CHECK(reads == 2 || reads == 11);
+        if (g_hooked) CHECK_EQ(reads - g_tickReads, 1);
+        if (reads == 11) { full++; CHECK_EQ(i % 120, 1); }
+        CHECK(StatusIs("dive_ended") && Posting());
     }
     CHECK_EQ(full, 2);
     /* A dive start (the 240 idle frames used up the gate, so the frame starts with the full check): the session's first
-     * dive, one page check [129 reads, 1 page check, 2 writes]; held [62]; its end [50, 1 write]. */
+     * dive, one page check, then the held check [129 reads, 1 page check, 2 writes]; held [62]; its end, then the gate
+     * [50, 1 write]. */
     Dive(1);
-    fake_counts_reset();
-    fake_frames(1, 1.0f / 60);
-    CHECK_EQ(fake_counts().read, 75);
+    PIN(75, 24);
     CHECK_EQ(swd.queries, 1);
     CHECK_EQ(swd.writes, 2);
     CHECK(StatusIs("airborne_reference"));
-    CHECK_EQ(Frame(), 24);
+    PIN(24, 24);
     Dive(0);
-    CHECK_EQ(Frame(), 37);
+    PIN(37, 1);
     CHECK_EQ(swd.writes, 3);
     CHECK(StatusIs("dive_ended"));
-    CHECK_EQ(Frame(), 1);
-    /* A dead local player (no unit): the gate keeps answering for the old controller until the next full check (at most
-     * 120 frames), which waits; then every 30th frame checks (3 reads [5]) until a unit exists again. */
+    PIN(1, 1);
+    /* A dead local player (no unit): both gates keep answering for the old controller until the next full check (at
+     * most 120 frames), which waits and stops the post check; then every 30th frame checks (3 reads [5]) until a unit
+     * exists again. */
     Put32(w.players + 0x3A8, 0x7FFF);
     int dead = 0;
-    while (StatusIs("dive_ended") && dead <= 120) { dead++; fake_frames(1, 1.0f / 60); }
+    while (StatusIs("dive_ended") && dead <= 120) { dead++; Frames(1); }
     CHECK(dead <= 120);
-    CHECK(StatusIs("waiting_for_local_avatar"));
-    for (int i = 0; i < 29; i++) CHECK_EQ(Frame(), 0);
-    CHECK_EQ(Frame(), 3);
+    CHECK(StatusIs("waiting_for_local_avatar") && !Posting());
+    for (int i = 0; i < 29; i++) PIN(0, 0);
+    PIN(3, 0);
     Put32(w.players + 0x3A8, 9);
-    for (int i = 0; i < 29; i++) CHECK_EQ(Frame(), 0);
+    for (int i = 0; i < 29; i++) PIN(0, 0);
     CHECK(StatusIs("waiting_for_local_avatar"));
-    CHECK_EQ(Frame(), 10); /* respawned [15] */
-    CHECK(StatusIs("dive_ended"));
-    CHECK_EQ(Frame(), 1);
-    /* A dive held: a check every frame. */
+    PIN(10, 1); /* respawned [15] */
+    CHECK(StatusIs("dive_ended") && Posting());
+    PIN(1, 1);
+    /* A dive held: two checks every frame. */
     PutF(w.water + 16, 0.011f);
     Dive(1);
-    fake_frames(1, 1.0f / 60);
+    Frames(1);
     CHECK(StatusIs("airborne_reference") && swd.pending.valid);
-    for (int i = 0; i < 10; i++) CHECK_EQ(Frame(), 24);
+    for (int i = 0; i < 10; i++) PIN(24, 24);
     Dive(0);
-    fake_frames(1, 1.0f / 60);
+    Frames(1);
     CHECK(StatusIs("dive_ended") && !swd.pending.valid);
     CHECK(Near(GetF(w.water + 8), -0.4));
 }
 
-/* ---- test_idle_equivalence.lua's script, on one check point per frame ----------------------------------------- */
+static void FrameBudget(void) { FrameBudgetOn(1); }
+/* Without the core's hook the post check runs right after the tick: the same calls, both before the game's update. */
+static void FrameBudgetWithoutTheHook(void) { FrameBudgetOn(0); }
+
+/* ---- test_idle_equivalence.lua's script, on both check points of a frame --------------------------------------- */
 
 static int g_slot = 1;
 static int g_diving;
@@ -1011,19 +1054,28 @@ static int g_changes[CHANGES];
 static char g_changed[CHANGES][64];
 static int g_changeCount;
 
-/* A frame's tick (the check point), then the game's update (the dive timer runs while diving). */
-static void ScriptTick(void)
+/* The game's update: the frame's step (the Lua's "during"), then the dive timer runs while diving. */
+static void (*g_scriptStep)(void);
+static void ScriptUpdate(void)
+{
+    void (*step)(void) = g_scriptStep;
+    g_scriptStep = NULL;
+    if (step != NULL) step();
+    if (g_diving) PutF(Controller() + 0xB84 + 8, GetF(Controller() + 0xB84 + 8) + 1.0f / 60);
+}
+
+/* A frame: the tick, the game's update, the check after it; the status it leaves is recorded when it changed. */
+static void ScriptFrame(void)
 {
     g_frame++;
-    fake_frames(1, 1.0f / 60);
+    g_inside = ScriptUpdate;
+    Frames(1);
     if (strcmp(g_last, Status()) == 0) return;
     snprintf(g_last, sizeof g_last, "%s", Status());
     if (g_changeCount >= CHANGES) return;
     g_changes[g_changeCount] = g_frame;
     snprintf(g_changed[g_changeCount++], sizeof g_changed[0], "%s", g_last);
 }
-static void ScriptUpdate(void) { if (g_diving) PutF(Controller() + 0xB84 + 8, GetF(Controller() + 0xB84 + 8) + 1.0f / 60); }
-static void ScriptFrame(void) { ScriptTick(); ScriptUpdate(); }
 
 /* The first frame at or after from at which the status became status, or -1. */
 static int SeenAt(const char* status, int from)
@@ -1037,20 +1089,24 @@ static void Landing(void) { PutF(Controller() + 0xB84 + 12, 0.5f); }
 
 /* Runs the frames before frame t: a change made next happens before frame t's tick (the Lua's "before" step). */
 static void Until(int t) { while (g_frame < t - 1) ScriptFrame(); }
-/* Frame t's tick, then a change inside its game update (the Lua's "during" step), then the rest of the update. */
+/* Frame t's tick, then a change inside its game update (the Lua's "during" step), then the rest of the update and the
+ * check after it. */
 static void During(int t, void (*step)(void))
 {
     Until(t);
-    ScriptTick();
-    step();
-    ScriptUpdate();
+    g_scriptStep = step;
+    ScriptFrame();
 }
 
-static void FrameScript(void)
+/* test_idle_equivalence.lua's script. With the core's hook, a change inside the game's update (450, 600) is seen by the
+ * check after it, in the same frame, as the Lua's after-update boundary saw its "during" steps; without the hook both
+ * checks run before the update, so it is seen at the next frame's tick, as in the 1:1 port. Everything else is the same
+ * either way. */
+static void PlayScript(int hooked)
 {
-    fake_setup();
+    int late = !hooked;
     ScriptWorld();
-    Started();
+    StartedOn(hooked);
     g_frame = 0;
     g_last[0] = 0;
     g_changeCount = 0;
@@ -1085,7 +1141,7 @@ static void FrameScript(void)
     Until(1550); DiveOver();
     Until(1551);
     CHECK(Near(GetF(WaterOf() + 8), -0.4));
-    Until(1650); PutF(Controller() + 0xB84 + 8, NAN);          /* a non-finite dive timer: two errors */
+    Until(1650); PutF(Controller() + 0xB84 + 8, NAN);          /* a non-finite dive timer: four errors */
     Until(1652); PutF(Controller() + 0xB84 + 8, 0);
     Until(1700); DiveStart();
     Until(1720); DiveOver();
@@ -1110,8 +1166,8 @@ static void FrameScript(void)
     CHECK_EQ(SeenAt("dive_ended", 2), 151);                    /* the mission seen at the poll after 125 */
     CHECK_EQ(SeenAt("waiting_for_local_avatar_read", 1100), 1100);
     CHECK_EQ(SeenAt("dive_ended", 1101), 1190);
-    CHECK_EQ(SeenAt("airborne_reference", 600), 601);          /* the next frame's tick */
-    CHECK_EQ(SeenAt("landing", 450), 451);
+    CHECK_EQ(SeenAt("airborne_reference", 600), 600 + late);   /* after the update, or the next frame's tick */
+    CHECK_EQ(SeenAt("landing", 450), 450 + late);
     CHECK_EQ(SeenAt("deep_water", 700), 760);
     CHECK_EQ(SeenAt("water_too_deep", 800), 830);
     CHECK_EQ(SeenAt("not_in_shallow_water", 850), 900);
@@ -1123,7 +1179,11 @@ static void FrameScript(void)
     CHECK_LOG("[Shallow Water Diving] error: Invalid movement or water value");
     CHECK_LOG("[Shallow Water Diving] disabled: stopped after 8 errors: Invalid movement or water value");
     CHECK_LOG("[Shallow Water Diving] stopped: ");
+    CHECK(!Posting());
 }
+
+static void FrameScript(void) { PlayScript(1); }
+static void FrameScriptWithoutTheHook(void) { PlayScript(0); }
 
 /* ---- test_loader.lua: the depth slider ------------------------------------------------------------------------ */
 
@@ -1189,7 +1249,7 @@ static void SettingsTableCopy(void)
 static void StopRestores(void)
 {
     Fresh();
-    fake_frames(1, 1.0f / 60);
+    Frames(1);
     CHECK(StatusIs("airborne_reference") && swd.pending.valid);
     fake_counts_reset();
     vpm_core_stop(fake_component(0), "test");
@@ -1199,56 +1259,291 @@ static void StopRestores(void)
     CHECK_EQ(swd.queries, 2);
     CHECK_LOG("[Shallow Water Diving] stopped: airborne_reference; observed=1 protected=1 restored=0 startup_clears=1 "
         "short_ends=0 table_moves=0 protection_queries=2");
+    /* The post-update check stops with it: later frames read nothing. */
+    CHECK(!Posting() && !vpm_ticking(fake_component(0)));
+    fake_counts_reset();
+    Frames(3);
+    CHECK_EQ(fake_counts().read, 0);
     /* A refusal stops it at once and restores: a write that did not hold. */
     Fresh();
     ChangeAfter(w.water + 8, 0, TearOffset);
-    fake_frames(1, 1.0f / 60);
+    Frames(1);
     CHECK(!vpm_running(fake_component(0)));
     CHECK_LOG("[Shallow Water Diving] disabled: reference_write_failed");
     CHECK(Near(GetF(w.water + 8), -0.4));
 }
 
-/* Errors are counted per burst: two never stop it, and 3600 clean frames clear the count; the 8th of a burst stops it
- * (with the lease put back), with one log line per burst. */
+/* Errors are counted per burst: a few never stop it, and 3600 clean frames clear the count; the 8th of a burst stops it
+ * (with the lease put back), with one log line per burst. Both checks of a frame count, as the Lua's guard counted its
+ * step and its after-update check: an error that stays makes two per frame. */
 static void ErrorsInABurst(void)
 {
     Fresh();
     Dive(0);
-    fake_frames(1, 1.0f / 60);
+    Frames(1);
     PutF(w.ctl + 0xB84 + 8, NAN);
     fake_counts_reset();
-    fake_frames(2, 1.0f / 60);
+    Frames(2);
     CHECK_EQ(fake_counts().log, 1);
     CHECK_LOG("[Shallow Water Diving] error: Invalid movement or water value");
     PutF(w.ctl + 0xB84 + 8, 0);
-    fake_frames(3600, 1.0f / 60);
+    Frames(3600);
     CHECK(vpm_running(fake_component(0)) && StatusIs("dive_ended"));
     fake_log_clear();
     PutF(w.ctl + 0xB84 + 8, NAN);
-    fake_frames(7, 1.0f / 60);
+    Frames(3);
     CHECK(vpm_running(fake_component(0)));
     CHECK_LOG("[Shallow Water Diving] error: Invalid movement or water value"); /* a new burst */
-    fake_frames(1, 1.0f / 60);
+    Frames(1);
     CHECK(!vpm_running(fake_component(0)));
     CHECK_LOG("disabled: stopped after 8 errors: Invalid movement or water value");
     /* With a lease held. */
     Fresh();
-    fake_frames(1, 1.0f / 60);
+    Frames(1);
     CHECK(swd.pending.valid);
     Put32(w.players + 0x84, 5);
-    fake_frames(8, 1.0f / 60);
+    Frames(8);
     CHECK(!vpm_running(fake_component(0)));
     CHECK_LOG("disabled: stopped after 8 errors: Unsupported player count");
     CHECK(Near(GetF(w.water + 8), -0.4));
+}
+
+/* ---- the check after the game's update (the core's post-update tick) ------------------------------------------- */
+
+static void DiveInTheUpdate(void) { Dive(1); }
+static void TimerNanInTheUpdate(void) { PutF(w.ctl + 0xB84 + 8, NAN); }
+
+/* A dive the game's update starts (the avatar idle at the tick) gets its lease from the check after that update, in the
+ * same frame: before the next frame's update, where swimming would consume the prone reference. The Lua saw it at the
+ * next frame's first check at the earliest; the 1:1 port at the next frame's tick. */
+static void DiveStartingInsideTheUpdate(void)
+{
+    Fresh();
+    Dive(0);
+    Frames(1);
+    CHECK(StatusIs("dive_ended") && Posting());
+    g_inside = DiveInTheUpdate;
+    uint32_t reads = Frame();
+    CHECK(strcmp(g_tickStatus, "dive_ended") == 0); /* the tick saw the avatar idle */
+    CHECK(StatusIs("airborne_reference") && swd.pending.valid);
+    CHECK(Near(GetF(w.water + 8), -1.3) && Near(GetF(w.water + 16), 0));
+    CHECK(!NativeWaterUpdate()); /* the next update's water test no longer finds the launch submerged */
+    CHECK_EQ(g_tickReads, 1);         /* the gate */
+    CHECK_EQ(reads - g_tickReads, 76); /* the gate, then the full check that takes the lease */
+    CHECK_EQ(swd.protected, 1);
+    CHECK_EQ(swd.startup_clears, 1);
+    PIN(24, 24);
+    Dive(0);
+    PIN(37, 1);
+    CHECK(Near(GetF(w.water + 8), -0.4) && !swd.pending.valid);
+}
+
+/* Without the core's hook both checks run before the game's update: the dive it starts is seen at the next frame's
+ * tick, as in the 1:1 port (still inside the 0.05 s the acquisition allows). */
+static void DiveStartingInsideTheUpdateWithoutTheHook(void)
+{
+    FreshOn(0);
+    Dive(0);
+    Frames(1);
+    CHECK(StatusIs("dive_ended") && Posting()); /* it runs, right after the tick */
+    g_inside = DiveInTheUpdate;
+    CHECK_EQ(Frame(), 1 + 1);
+    CHECK(StatusIs("dive_ended") && !swd.pending.valid);
+    CHECK_EQ(Frame(), 76 + 24); /* the tick takes the lease, the check after it holds it */
+    CHECK(StatusIs("airborne_reference") && Near(GetF(w.water + 8), -1.3));
+}
+
+/* An error the check after the update finds counts as one of the burst, and its frame is not clean: the frame is
+ * counted at its end, after both checks, as the Lua's guard counted it. Errors met only there stop the component at the
+ * 8th. */
+static void ErrorsAfterTheUpdate(void)
+{
+    Fresh();
+    Dive(0);
+    Frames(1);
+    g_inside = TimerNanInTheUpdate;
+    Frames(1);
+    PutF(w.ctl + 0xB84 + 8, 0); /* gone before the next frame's tick */
+    CHECK_EQ(fake_log_count("[Shallow Water Diving] error: "), 1);
+    Frames(3599);
+    /* The 3600th frame since the error ends in an error after the update: still the same burst (no new line). */
+    g_inside = TimerNanInTheUpdate;
+    Frames(1);
+    PutF(w.ctl + 0xB84 + 8, 0);
+    CHECK_EQ(fake_log_count("[Shallow Water Diving] error: "), 1);
+    for (int i = 3; i <= 8; i++)
+    {
+        CHECK(vpm_running(fake_component(0)) && StatusIs("dive_ended"));
+        g_inside = TimerNanInTheUpdate;
+        Frames(1);
+        PutF(w.ctl + 0xB84 + 8, 0);
+    }
+    CHECK(!vpm_running(fake_component(0)) && !Posting());
+    CHECK_LOG("[Shallow Water Diving] disabled: stopped after 8 errors: Invalid movement or water value");
+    CHECK_EQ(fake_log_count("[Shallow Water Diving] error: "), 1);
+}
+
+/* The water records' page made read-only inside the update, after the first dive's page check was kept: the lease's
+ * store in the check after the update faults. The core's guard stops the component there; its stop finds the record as
+ * it was (the store never happened) and leaves it; the game goes on and nothing of the component runs again. */
+static void PageReadOnly(void)
+{
+    Dive(1);
+    DWORD old;
+    VirtualProtect(w.waters, 4096, PAGE_READONLY, &old); /* lint-ok: C1,C3 the test makes the record table read-only */
+}
+
+static void FaultAfterTheUpdate(void)
+{
+    Fresh();
+    Frames(1);
+    Dive(0);
+    Frames(1);
+    CHECK(StatusIs("dive_ended") && swd.write_check.valid && swd.queries == 1);
+    PutF(w.water + 16, 0.011f);
+    g_inside = PageReadOnly;
+    Frames(1);
+    DWORD old;
+    VirtualProtect(w.waters, 4096, PAGE_READWRITE, &old); /* lint-ok: C1,C3 and writable again */
+    CHECK(!vpm_running(fake_component(0)) && !Posting() && !vpm_ticking(fake_component(0)));
+    CHECK_LOG("[Shallow Water Diving] disabled: ");
+    CHECK_LOG("[Shallow Water Diving] stopped: ");
+    CHECK(Near(GetF(w.water + 8), -0.4) && !swd.pending.valid);
+    CHECK_EQ(swd.queries, 1); /* the kept check: no page check before the store */
+    fake_counts_reset();
+    Frames(3);
+    CHECK_EQ(fake_counts().read, 0);
+}
+
+/* ---- a refused post-update tick: one check per frame for the session ----------------------------------------------- */
+
+static const char kRefused[] =
+    "[Shallow Water Diving] no check after the game's update (its tick was refused): one check per frame";
+static void TimerNan(void) { PutF(w.ctl + 0xB84 + 8, NAN); }
+static void TimerFinite(void) { PutF(w.ctl + 0xB84 + 8, 0); }
+/* One frame whose check meets a non-finite dive timer (an error), the timer finite again before the next one. */
+static void ErrorFrame(void) { TimerNan(); Frames(1); TimerFinite(); }
+
+/* Refused at the first start (Reset's dive, at once): one log line, and from then on the 1:1 port's one check per frame,
+ * also once the refusal is lifted. Idle frames make the tick's reads alone; a dive the update starts waits for the
+ * next frame's tick. */
+static void RefusedPostTick(void)
+{
+    Fresh();
+    fake_refuse_ticks(0, 1);
+    fake_counts_reset();
+    Frames(1);
+    CHECK_EQ(fake_counts().read, 75); /* the lease, and no check after the update */
+    CHECK(StatusIs("airborne_reference") && !Posting());
+    CHECK_EQ(fake_log_count(kRefused), 1);
+    fake_refuse_ticks(0, 0);
+    PIN(24, 0);
+    Dive(0);
+    PIN(37, 0);
+    for (int i = 0; i < 5; i++) PIN(1, 0); /* idle in a mission: the gate once */
+    PutF(w.water + 16, 0.011f);
+    g_inside = DiveInTheUpdate;
+    PIN(1, 0);
+    CHECK(StatusIs("dive_ended"));
+    PIN(76, 0);
+    CHECK(StatusIs("airborne_reference") && !Posting());
+    CHECK_EQ(fake_log_count(kRefused), 1);
+}
+
+/* On that branch a frame is counted where its one check runs: an error, 3599 clean frames and another error are one
+ * burst; 3600 clean frames end it, and the 8th error of a burst stops the component. */
+static void RefusedPostTickCountsErrors(void)
+{
+    Fresh();
+    Dive(0);
+    fake_refuse_ticks(0, 1);
+    Frames(1);
+    fake_refuse_ticks(0, 0);
+    CHECK(StatusIs("dive_ended") && !Posting());
+    ErrorFrame();
+    Frames(3599);
+    ErrorFrame();
+    CHECK_EQ(fake_log_count("[Shallow Water Diving] error: "), 1);
+    Frames(3600);
+    ErrorFrame();
+    CHECK_EQ(fake_log_count("[Shallow Water Diving] error: "), 2); /* a new burst */
+    for (int i = 2; i <= 7; i++) ErrorFrame();
+    CHECK(vpm_running(fake_component(0)) && !Posting());
+    ErrorFrame();
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Shallow Water Diving] disabled: stopped after 8 errors: Invalid movement or water value");
+}
+
+/* A start refused later, after an earlier one worked and was stopped (the mission ended): logged once, one check per
+ * frame from then on. */
+static void RefusedPostTickLater(void)
+{
+    Fresh();
+    Dive(0);
+    Frames(1);
+    PIN(1, 1);
+    Put32(w.mission + 8, 0);
+    for (int i = 0; i <= 120 && Posting(); i++) Frames(1);
+    CHECK(StatusIs("waiting_for_mission") && !Posting());
+    fake_refuse_ticks(0, 1);
+    Put32(w.mission + 8, 1);
+    for (int i = 0; i <= 30 && !StatusIs("dive_ended"); i++) Frames(1);
+    CHECK(StatusIs("dive_ended") && !Posting());
+    CHECK_EQ(fake_log_count(kRefused), 1);
+    fake_refuse_ticks(0, 0);
+    PIN(1, 0);
+    Dive(1);
+    PIN(76, 0);
+    CHECK(StatusIs("airborne_reference") && !Posting());
+    CHECK_EQ(fake_log_count(kRefused), 1);
+}
+
+/* ---- game.dll's decoding --------------------------------------------------------------------------------------------
+ * No code bytes are checked, and the game.dll read-only constants are read on the first dive of a session in a mission
+ * only: wrong (still encoded) at HF_EVENT_GAME_LOADED and for more than the core's 60 s wait, outside a mission and idle
+ * in one, they stop nothing; right by the first dive, it is assisted. */
+static void Constants(int decoded)
+{
+    if (!decoded)
+    {
+        memset(w.game + 0x23C6CCC, 0xCC, 4);
+        memset(w.game + 0x23C69F8, 0xCC, 4);
+        memset(w.constants, 0xCC, 0xA0);
+        return;
+    }
+    memset(w.constants, 0, 0xA0);
+    PutF(w.game + 0x23C6CCC, 0.9f);
+    PutF(w.game + 0x23C69F8, 0.4f);
+    PutF(w.constants + 0x90, 2);
+    PutF(w.constants + 0x80, 1.5f);
+}
+
+static void ConstantsWaitForTheFirstDive(void)
+{
+    MakeWorld(0);
+    Put32(w.mission + 8, 0);
+    Constants(0);
+    Started();
+    Frames(1800);
+    Put32(w.mission + 8, 1);
+    Dive(0);
+    Frames(1900);
+    CHECK(vpm_running(fake_component(0)) && StatusIs("dive_ended"));
+    CHECK_EQ(fake_log_count("[Shallow Water Diving] error: "), 0);
+    Constants(1);
+    Dive(1);
+    Frames(1);
+    CHECK(StatusIs("airborne_reference") && swd.constants_verified && swd.protected == 1);
+    CHECK_EQ(fake_counts().code_matches + fake_counts().find_pattern, 0);
 }
 
 /* The session's counters at each mission's end (the Lua wrote them to its log file). */
 static void MissionEndCounters(void)
 {
     Fresh();
-    fake_frames(1, 1.0f / 60);
+    Frames(1);
     Dive(0);
-    fake_frames(1, 1.0f / 60);
+    Frames(1);
     HfStateEvent end;
     memset(&end, 0, sizeof end);
     end.info.size = sizeof end;
@@ -1280,11 +1575,21 @@ int main(void)
     RUN(PageChecksFollowTheTable);
     RUN(UnassistedDiveBudget);
     RUN(FrameBudget);
+    RUN(FrameBudgetWithoutTheHook);
     RUN(FrameScript);
+    RUN(FrameScriptWithoutTheHook);
     RUN(DepthOption_);
     RUN(SettingsTableCopy);
     RUN(StopRestores);
     RUN(ErrorsInABurst);
+    RUN(DiveStartingInsideTheUpdate);
+    RUN(DiveStartingInsideTheUpdateWithoutTheHook);
+    RUN(ErrorsAfterTheUpdate);
+    RUN(FaultAfterTheUpdate);
+    RUN(RefusedPostTick);
+    RUN(RefusedPostTickCountsErrors);
+    RUN(RefusedPostTickLater);
+    RUN(ConstantsWaitForTheFirstDive);
     RUN(MissionEndCounters);
     TEST_END();
 }

@@ -8,6 +8,7 @@ static size_t g_gameSize, g_exeSize;
 /* The tests' stand-ins (vpm_core_test_hooks): none in the pack's DLL. */
 static VpmTestHooks g_hooks;
 void vpm_core_test_hooks(const VpmTestHooks* hooks) { g_hooks = hooks != NULL ? *hooks : (VpmTestHooks){0}; }
+int vpm_test_tick_refused(int post) { return g_hooks.tick_refused != NULL && g_hooks.tick_refused(post); }
 
 uintptr_t vpm_game(void) { return g_game; }
 size_t vpm_game_size(void) { return g_gameSize; }

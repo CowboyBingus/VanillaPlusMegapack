@@ -1,11 +1,13 @@
 /* Mod Options Menu: the Lua tests' scenarios on the fake game (components/ModOptionsMenu/tests/test_options_tab.lua,
  * and test_categories.lua and test_slider_numbers.lua where they concern the MODS tab rather than the Lua API), plus
- * the pack's switches, the options the tab cannot show, and stop() handing the view back. The Lua's values file
- * (test_values.lua) is the core's settings file; its translation, update-guard and LuaJIT tests have no C counterpart.
+ * the pack's switches, the options the tab cannot show, values set from code, and stop() handing the view back. The
+ * Lua's values file (test_values.lua) is the core's settings file, written at once on APPLY as the Lua wrote its file;
+ * its translation, update-guard and LuaJIT tests have no C counterpart.
  *
- * game.dll's functions are stand-ins: the fake image holds each function's first bytes as reviewed, so the component's
- * code checks pass at its first tick, and after them a jump to the stand-in (an absolute jmp [rip] over those bytes, its
- * page made executable), so the component calls game.dll + RVA as it does in the game. The stand-ins do what the Lua
+ * game.dll's functions are stand-ins: the fake image holds each function's first bytes as reviewed, so the core's wait
+ * for them (vpm_when_code_ready) passes at HF_EVENT_GAME_LOADED, and after it a jump to the stand-in (an absolute jmp
+ * [rip] over those bytes, its page made executable), so the component calls game.dll + RVA as it does in the game. The
+ * code still encoded at the event (int3 bytes) and never decoded have tests of their own. The stand-ins do what the Lua
  * test's emulated natives did: rows, text widgets, the category selection and the OPTIONS visual pass. */
 #include <math.h>
 #include <stdio.h>
@@ -406,7 +408,7 @@ static void InstallStubs(void)
     static const uint8_t jump[6] = {0xFF, 0x25, 0, 0, 0, 0};
     for (int i = 0; i < MOM_NATIVE_COUNT; i++)
     {
-        uint8_t* at = (uint8_t*)fake_game() + mom_native_entries[i].rva;
+        uint8_t* at = (uint8_t*)fake_game() + mom_native_pins[i].rva;
         uint64_t target = (uint64_t)(uintptr_t)StandIn(i);
         memcpy(at, jump, sizeof jump);
         memcpy(at + 6, &target, 8);
@@ -507,15 +509,17 @@ static void MakeWorld(void)
     P32(game + 0x32ECC60, 139);
     P32(game + 0x32ECC60 + 4, 10);
     P32(game + 0x32ECC60 + 12, 0);
-    for (int i = 0; i < MOM_NATIVE_COUNT; i++) WriteCode((uint8_t*)game + mom_native_entries[i].rva, mom_native_entries[i].code);
+    for (int i = 0; i < MOM_NATIVE_COUNT; i++) WriteCode((uint8_t*)game + mom_native_pins[i].rva, mom_native_pins[i].pattern);
     w.layoutDirty = 1;
 }
 
-/* Started, the first tick (the code checks) run with the menu closed, then the stand-ins in place. */
+/* Started with game.dll's code decoded at HF_EVENT_GAME_LOADED (the code checks pass there, and MOM's ready step runs),
+ * a first frame with the menu closed, then the stand-ins in place. */
 static void Ready(const VpmComponentDef* const* defs, int count)
 {
     MakeWorld();
     CHECK_EQ(fake_start(defs, count), 0);
+    fake_fire(HF_EVENT_GAME_LOADED);
     fake_frames(1, DT);
     InstallStubs();
 }
@@ -574,6 +578,17 @@ static int LogCount(const char* text)
 
 static int Near(double a, double b) { return fabs(a - b) < 1e-6; }
 
+/* Whether the settings file on disk holds this text now. */
+static int SettingsFileHas(const char* text)
+{
+    char buffer[4096] = "";
+    FILE* file = fopen("vpm-test-settings.ini", "r");
+    if (file == NULL) return 0;
+    buffer[fread(buffer, 1, sizeof buffer - 1, file)] = 0;
+    fclose(file);
+    return strstr(buffer, text) != NULL;
+}
+
 #define UNAPPLIED (w.content + 1319449)
 #define DESCRIBED (w.content + 1318500)
 #define SHOWN (w.content + 1318476)
@@ -598,24 +613,107 @@ static int CodeBytes(const char* code)
     return n / 2;
 }
 
-/* The Lua's table (native.lua), checked at the first tick: 25 code checks, then an idle frame makes one read. */
+#define VERIFIED "[Mod Options Menu] Native options layout verified for current game build."
+
+/* The Lua's table (native.lua). Decoded at HF_EVENT_GAME_LOADED: the 25 code checks there, MOM ready at once; then an
+ * idle frame makes one read, as before. */
 static void VerifiesTheGameOnce(void)
 {
     CHECK_EQ(MOM_NATIVE_COUNT, 25);
-    CHECK(mom_native_entries[MOM_SET_TAB_LABELS].rva == 0x17AAC50u && mom_native_entries[MOM_ROW_INIT].rva == 0x17FE8D0u);
-    CHECK(mom_native_entries[MOM_OPTIONS_VISUAL].rva == 0x1998590u && mom_native_entries[MOM_PLAY_SOUND].rva == 0x1327F50u);
-    CHECK(strncmp(mom_native_entries[MOM_SET_TAB_LABELS].code, "48 89 54 24 10 53 56 48 83 EC 68", 32) == 0);
+    CHECK(mom_native_pins[MOM_SET_TAB_LABELS].rva == 0x17AAC50u && mom_native_pins[MOM_ROW_INIT].rva == 0x17FE8D0u);
+    CHECK(mom_native_pins[MOM_OPTIONS_VISUAL].rva == 0x1998590u && mom_native_pins[MOM_PLAY_SOUND].rva == 0x1327F50u);
+    CHECK(strncmp(mom_native_pins[MOM_SET_TAB_LABELS].pattern, "48 89 54 24 10 53 56 48 83 EC 68", 32) == 0);
+    CHECK(strcmp(mom_native_pins[MOM_PLAY_SOUND].name, "Mod options integration unavailable: play_sound") == 0);
     for (int i = 0; i < MOM_NATIVE_COUNT; i++)
-        CHECK_EQ(CodeBytes(mom_native_entries[i].code), i == MOM_SET_POSITION || i == MOM_SET_SIZE ? 28 : 16);
+    {
+        CHECK_EQ(CodeBytes(mom_native_pins[i].pattern), i == MOM_SET_POSITION || i == MOM_SET_SIZE ? 28 : 16);
+        CHECK_EQ(mom_native_pins[i].flags, 0);
+    }
     MakeWorld();
     CHECK_EQ(fake_start(kDefs, 4), 0);
+    VpmComponent* self = fake_component(MOM_INDEX);
+    CHECK(!vpm_ticking(self));
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(fake_counts().code_matches, 25);
+    CHECK_EQ(fake_counts().read, 0);
+    CHECK_LOG(VERIFIED);
+    CHECK(vpm_ticking(self));
     fake_counts_reset();
     Frame();
-    CHECK_EQ(fake_counts().code_matches, 25);
-    CHECK_EQ(fake_counts().read, 1); /* the idle gate, on that frame too */
-    CHECK_LOG("[Mod Options Menu] Native options layout verified for current game build.");
+    CHECK_EQ(fake_counts().code_matches, 0);
+    CHECK_EQ(fake_counts().read, 1); /* the idle gate */
     CHECK_EQ(Reads(100), 100);
-    CHECK(vpm_running(fake_component(MOM_INDEX)));
+    CHECK(vpm_running(self));
+}
+
+/* game.dll's functions still encoded (int3 bytes, as the harness's undecoded frame update), and decoded. */
+static void Encode(int index)
+{
+    memset((uint8_t*)fake_game() + mom_native_pins[index].rva, 0xCC, (size_t)CodeBytes(mom_native_pins[index].pattern));
+}
+static void Decode(int index) { WriteCode((uint8_t*)fake_game() + mom_native_pins[index].rva, mom_native_pins[index].pattern); }
+static int MomLines(void) { return fake_log_count("[Mod Options Menu]"); }
+
+/* The code still encoded at HF_EVENT_GAME_LOADED and decoded seconds later. Meanwhile nothing of MOM runs, with the
+ * escape menu open on OPTIONS: no tick, no read, no write, no log line, the tab bar untouched; the core looks every 30
+ * frames, up to the first function that does not match yet. Once the last one is decoded, the next look runs MOM's
+ * ready step (the labels, the binding, the tick) and the MODS tab comes as when decoded at the event. */
+static void StartsOnceTheCodeIsDecoded(void)
+{
+    MakeWorld();
+    for (int i = 0; i < MOM_NATIVE_COUNT; i++) Encode(i);
+    CHECK_EQ(fake_start(kDefs, 4), 0);
+    VpmComponent* self = fake_component(MOM_INDEX);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK(vpm_running(self) && !vpm_ticking(self));
+    MenuOnOptions();
+    int lines = MomLines();
+    fake_counts_reset();
+    fake_frames(180, DT); /* about 3 s: six looks */
+    FakeCounts c = fake_counts();
+    CHECK(c.code_matches == 6 && c.read == 0 && c.write == 0);
+    CHECK(MomLines() == lines && !vpm_ticking(self) && G32(w.bar + 57448) == 3);
+    for (int i = 0; i < MOM_NATIVE_COUNT - 1; i++) Decode(i); /* all but play_sound */
+    fake_counts_reset();
+    fake_frames(60, DT);
+    CHECK(fake_counts().code_matches == 50 && fake_counts().read == 0);
+    CHECK(!vpm_ticking(self) && MomLines() == lines && G32(w.bar + 57448) == 3);
+    SetStack(0, 0, 0);
+    Decode(MOM_PLAY_SOUND);
+    int frames = 0;
+    while (frames < 30 && !vpm_ticking(self)) { Frame(); frames++; }
+    CHECK(vpm_ticking(self) && vpm_running(self) && frames == 30);
+    CHECK_LOG(VERIFIED);
+    InstallStubs();
+    CHECK_EQ(Reads(10), 10); /* the idle gate: one read per frame */
+    MenuOnOptions();
+    Frame();
+    CHECK(G32(w.bar + 57448) == 4 && Shows(w.bar + 8296 + 3400 * 3, "MODS"));
+}
+
+/* Never decoded (one function): MOM is stopped once 60 s of game time have passed, naming that function in the Lua's
+ * wording; it never ticked, read or wrote, and the open escape menu was left alone. */
+static void StoppedWhenTheCodeIsNeverDecoded(void)
+{
+    MakeWorld();
+    Encode(MOM_OPTIONS_VISUAL);
+    CHECK_EQ(fake_start(kDefs, 4), 0);
+    VpmComponent* self = fake_component(MOM_INDEX);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    MenuOnOptions();
+    fake_counts_reset();
+    fake_frames(3700, DT); /* 59.2 s */
+    CHECK(vpm_running(self) && !vpm_ticking(self));
+    fake_frames(100, DT);
+    CHECK(!vpm_running(self));
+    static const char kWhy[] = "disabled: Mod options integration unavailable: options_visual changed (game.dll 0x1998590)";
+    CHECK(strcmp(vpm_status(self), kWhy) == 0);
+    CHECK_LOG(kWhy);
+    CHECK_NO_LOG(VERIFIED);
+    CHECK(fake_counts().read == 0 && fake_counts().write == 0);
+    CHECK(G32(w.bar + 57448) == 3 && G32(w.content + 1318488) == 7 && G32(Row(0) + 31428) == 700);
+    CHECK_EQ(Reads(100), 0);
 }
 
 static void RefusesAChangedGame(void)
@@ -632,7 +730,8 @@ static void RefusesAChangedGame(void)
         if (c == 2) P32(game + 0x32EC990 + 48 * 5 + 8, 1);
         if (c == 3) P32(game + 0x32ECC60 + 4, 11);
         CHECK_EQ(fake_start(kDefs, 4), 0);
-        Frame();
+        fake_fire(HF_EVENT_GAME_LOADED); /* a changed function: refused once the wait is over; changed data: at once */
+        if (c == 0) fake_frames(3800, DT);
         CHECK(!vpm_running(fake_component(MOM_INDEX)));
         CHECK_LOG("disabled: Mod options integration unavailable: ");
         CHECK_LOG(texts[c]);
@@ -700,9 +799,12 @@ static void AppliesEdits(void)
     CHECK(vpm_option_value(g_alpha[0]) == 1 && vpm_option_value(g_alpha[1]) == 2 && vpm_option_value(g_alpha[3]) == 0.5);
     CHECK(g_changeCount == 0 && Shows(Row(1) + 16832, "AUTO") && G8(UNAPPLIED) == 1);
     CHECK(w.visuals == 3 && w.boxes == 3); /* same selection: no description work */
+    CHECK(!SettingsFileHas("alpha.hints"));
     Press(APPLY);
     Frame();
     ReleaseKeys();
+    /* Written at once, as the Lua wrote its values file on apply (the core alone saves a second later). */
+    CHECK(SettingsFileHas("alpha.hints = 0") && SettingsFileHas("alpha.mode = 3") && SettingsFileHas("alpha.volume = 0.75"));
     CHECK(vpm_option_value(g_alpha[0]) == 0 && vpm_option_value(g_alpha[1]) == 3 && Near(vpm_option_value(g_alpha[3]), 0.75));
     CHECK(g_changeCount == 3 && g_changes[0].option == g_alpha[0] && g_changes[1].option == g_alpha[1]);
     CHECK(g_changes[2].option == g_alpha[3] && Near(g_changes[2].value, 0.75));
@@ -1032,8 +1134,8 @@ static int DivingStart(VpmComponent* self) { return (g_depth = vpm_option(self, 
 static const VpmComponentDef kDiving = {"shallow_water_diving", "Shallow Water Diving", "3.10.1", 0, DivingStart, NULL};
 static const VpmComponentDef* const kDivingDefs[] = {&kDiving, &vpm_component_mod_options_menu};
 
-/* Two decimals (0.05 steps from 0.20), shown as a float slider; a value the core keeps snapped without the shown
- * decimals still withdraws an edit back to it. */
+/* Two decimals (0.05 steps from 0.20), shown as a float slider; the core keeps the value rounded to those decimals,
+ * so an edit back to it, as the row holds it, withdraws. */
 static void SlidersAsShallowWaterDivingRegistersThem(void)
 {
     Ready(kDivingDefs, 2);
@@ -1260,6 +1362,7 @@ static void ThePacksSwitches(void)
     ReleaseKeys();
     CHECK(G8(UNAPPLIED) == 0 && !vpm_component_switched_on(fake_component(1)) && vpm_component_switched_on(fake_component(2)));
     CHECK_LOG("Applied 2 option changes.");
+    CHECK(SettingsFileHas("beta = off") && SettingsFileHas("zulu = on")); /* written at once */
     const char* beta = vpm_setting("components", "beta");
     const char* zulu = vpm_setting("components", "zulu");
     CHECK(beta != NULL && strcmp(beta, "off") == 0 && zulu != NULL && strcmp(zulu, "on") == 0);
@@ -1270,13 +1373,90 @@ static void ThePacksSwitches(void)
     P32(Row(1) + 29068, 0);
     Frame();
     CHECK(G8(UNAPPLIED) == 0);
-    /* The core writes the settings file about a second later. */
     fake_frames(70, DT);
-    char text[512] = "";
-    file = fopen("vpm-test-settings.ini", "r");
-    CHECK(file != NULL);
-    if (file != NULL) { text[fread(text, 1, sizeof text - 1, file)] = 0; fclose(file); }
-    CHECK(strstr(text, "beta = off") != NULL && strstr(text, "zulu = on") != NULL);
+    CHECK(SettingsFileHas("beta = off") && SettingsFileHas("zulu = on"));
+}
+
+/* ---- values set from code (test_options_tab.lua's set()) ---------------------------------------------------------- */
+
+static VpmOption* OptionOf(const VpmOptionDef* def)
+{
+    for (int i = 0; i < vpm_option_count(); i++)
+        if (vpm_option_def(vpm_option_at(i)) == def) return vpm_option_at(i);
+    return NULL;
+}
+
+/* An on_change that sets another option from code, as a mod keeping two options in step would. */
+static void SetsCount(VpmComponent* self, VpmOption* option, double value) { (void)vpm_option_set(g_alpha[4], 5); }
+
+static void OpenTheModsTab(void)
+{
+    MenuOnOptions();
+    Frame();
+    SelectMods();
+    Frame();
+}
+
+/* A value set from code replaces the player's unapplied edit of that option and shows on its row from the next step,
+ * without on_change; the set writes no row itself, nor does an option on another page. That frame keeps the MODS budget
+ * (two reads), and the frames after it write nothing; neither do the frames after the player's own apply. A value an
+ * on_change sets shows the same way. With the escape menu closed nothing is written; the reopened page shows it. */
+static void ValuesSetFromCodeShowOnTheOpenRows(void)
+{
+    Ready(kDefs, 4);
+    OpenTheModsTab();
+    CHECK(mom.hasView && GF(Row(4) + 31408) == 3);
+    PF(Row(4) + 31408, 9);
+    Frame();
+    CHECK(G8(UNAPPLIED) == 1 && mom.pendingCount == 1);
+    int sliders = w.sliders, choices = w.choices;
+    VpmOption* zulu = OptionOf(&kZuluDefs[0]);
+    CHECK(zulu != NULL && vpm_option_set(g_alpha[4], 7.4) && vpm_option_set(zulu, 1));
+    CHECK(vpm_option_value(g_alpha[4]) == 7 && GF(Row(4) + 31408) == 9 && w.sliders == sliders);
+    CHECK_EQ(Reads(1), 2);
+    CHECK(w.sliders == sliders + 1 && w.choices == choices && GF(Row(4) + 31408) == 7);
+    CHECK(G8(UNAPPLIED) == 0 && mom.pendingCount == 0 && g_changeCount == 0);
+    CHECK_EQ(Reads(200), 400);
+    CHECK(w.sliders == sliders + 1 && w.choices == choices);
+    /* A toggle and a choice on the page; the same value again counts as no change and writes nothing. */
+    CHECK(vpm_option_set(g_alpha[0], 0) && vpm_option_set(g_alpha[1], 3));
+    Frame();
+    CHECK(G32(Row(0) + 29068) == 0 && G32(Row(1) + 29068) == 2 && Shows(Row(1) + 16832, "AUTO"));
+    choices = w.choices;
+    CHECK(vpm_option_set(g_alpha[0], 0));
+    Frame();
+    CHECK(w.choices == choices && g_changeCount == 0);
+    /* The player's apply: its rows already show the applied values. Its on_change setting Count from code: that row
+     * shows 5 from the next step. */
+    vpm_option_on_change(g_alpha[0], SetsCount);
+    P32(Row(0) + 29068, 1);
+    Frame();
+    Press(APPLY);
+    Frame();
+    ReleaseKeys();
+    CHECK(vpm_option_value(g_alpha[0]) == 1 && vpm_option_value(g_alpha[4]) == 5 && GF(Row(4) + 31408) == 7);
+    sliders = w.sliders;
+    choices = w.choices;
+    Frame();
+    CHECK(w.sliders == sliders + 1 && w.choices == choices && GF(Row(4) + 31408) == 5 && G8(UNAPPLIED) == 0);
+    Frame();
+    CHECK(w.sliders == sliders + 1 && w.choices == choices);
+    vpm_option_on_change(g_alpha[0], Changed);
+    /* Set while the tab is open, saved at once when the player leaves it (as the Lua's leave_view). */
+    CHECK(vpm_option_set(g_alpha[2], 2));
+    CHECK(!SettingsFileHas("alpha.level = 2"));
+    P32(w.bar + 57452, 2);
+    Frame();
+    CHECK(!mom.hasView && SettingsFileHas("alpha.level = 2"));
+    /* The escape menu closed: a set writes no row; the reopened page shows it. */
+    SetStack(0, 0, 0);
+    Frame();
+    sliders = w.sliders;
+    CHECK(vpm_option_set(g_alpha[4], 2));
+    Frame();
+    CHECK(w.sliders == sliders);
+    OpenTheModsTab();
+    CHECK(mom.hasView && mom.view.page.index == 0 && GF(Row(4) + 31408) == 2 && G32(Row(2) + 29068) == 1);
 }
 
 /* ---- new on HellForge: options the core accepts that the tab cannot show -------------------------------------------- */
@@ -1424,11 +1604,14 @@ int main(void)
 {
     RUN(VerifiesTheGameOnce);
     RUN(RefusesAChangedGame);
+    RUN(StartsOnceTheCodeIsDecoded);
+    RUN(StoppedWhenTheCodeIsNeverDecoded);
     RUN(TheModsTab);
     RUN(CategoriesStayInPlace);
     RUN(SlidersAsShallowWaterDivingRegistersThem);
     RUN(PagesOfCategories);
     RUN(ThePacksSwitches);
+    RUN(ValuesSetFromCodeShowOnTheOpenRows);
     RUN(OptionsTheTabCannotShow);
     RUN(StopHandsTheViewBack);
     RUN(UpperCaseInEveryScript);

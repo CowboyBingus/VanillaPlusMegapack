@@ -861,6 +861,57 @@ static void TicksNeedAWayToRun(void)
     CHECK_EQ(g_pre, 2);
 }
 
+static int g_lateAnswer = -1;
+static void AsksForAPostTick(VpmComponent* self, float dt) { g_pre++; g_lateAnswer = vpm_post_tick_start(self, PostTick); }
+static int StartAsking(VpmComponent* self) { vpm_tick_start(self, AsksForAPostTick); return 0; }
+static const VpmComponentDef kAsking = {"asking", "Asking", "1.0", 0, StartAsking, NULL};
+
+/* A refused start answers 0 and registers nothing; ticks already registered keep running, and a start asked for from
+ * inside a running tick is refused the same way. */
+static void ARefusedTickStartRegistersNothing(void)
+{
+    FrameReset();
+    fake_frame_update(1);
+    fake_refuse_ticks(0, 1);
+    const VpmComponentDef* defs[] = {&kBoth, &kAsking};
+    fake_start(defs, 2);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK(vpm_ticking(fake_component(0)) && !vpm_post_ticking(fake_component(0)));
+    fake_engine_frames(3, 0.02f);
+    CHECK_EQ(g_pre, 3 + 3);
+    CHECK_EQ(g_post, 0);
+    CHECK_EQ(g_lateAnswer, 0);
+    CHECK(!vpm_post_ticking(fake_component(1)));
+    fake_refuse_ticks(1, 0); /* registered ticks go on; a new start of either list follows its own setting */
+    fake_engine_frames(2, 0.02f);
+    CHECK_EQ(g_pre, 6 + 4);
+    CHECK_EQ(g_lateAnswer, 1);
+    CHECK_EQ(g_post, 2); /* registered in frame 4's tick, it ran after frame 4's update and 5's */
+    CHECK_EQ(vpm_tick_start(fake_component(0), PreTick), 0);
+    CHECK(vpm_ticking(fake_component(0))); /* a refused start leaves the tick it has */
+    fake_refuse_ticks(0, 0);
+    CHECK_EQ(vpm_tick_start(fake_component(0), PreTick), 1);
+    CHECK(vpm_running(fake_component(0)) && vpm_running(fake_component(1)));
+}
+
+/* A game event HellForge refuses: vpm_listen answers 0, the log says which and why, the component runs on and hears
+ * nothing; other kinds still subscribe. */
+static void ARefusedGameEventIsLogged(void)
+{
+    Reset();
+    fake_refuse_subscribe(HF_ON_SPAWN);
+    const VpmComponentDef* defs[] = {&kListening};
+    fake_start(defs, 1);
+    char line[64];
+    snprintf(line, sizeof line, "core: game event %u refused", (unsigned)HF_ON_SPAWN);
+    CHECK_LOG(line);
+    HfSpawnEvent spawn = {{sizeof spawn, HF_ON_SPAWN, 1}, 1, 2, 3, 1};
+    fake_emit(&spawn.info);
+    CHECK_EQ(g_events, 0);
+    CHECK(vpm_running(fake_component(0)));
+    CHECK_EQ(vpm_listen(fake_component(0), HF_ON_KILL, CountEvent, 0), 1);
+}
+
 static int g_saves;
 static void SaveTick(VpmComponent* self, float dt) { if (++g_saves == 1) vpm_option_set(g_flag, 0); }
 static int StartSaving(VpmComponent* self) { g_flag = vpm_option(self, &kFlag); vpm_tick_start(self, SaveTick); return 0; }
@@ -1638,6 +1689,8 @@ int main(void)
     RUN(TicksSurviveARefusedFrameHook);
     RUN(AFaultingPostTickStopsOnlyItsComponent);
     RUN(TicksNeedAWayToRun);
+    RUN(ARefusedTickStartRegistersNothing);
+    RUN(ARefusedGameEventIsLogged);
     RUN(SettingsSaveOncePerFrameUnderTheHook);
     RUN(GuardedReadsReadAndRefuse);
     RUN(GuardedReadsSurviveGuardPages);
