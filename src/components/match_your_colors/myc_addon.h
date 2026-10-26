@@ -49,6 +49,8 @@ typedef struct MycUi
 #define MYC_TASK_JOB 1
 #define MYC_TASK_SAVE 2
 #define MYC_TASK_CLOSE 3
+typedef int (*MycJobFn)(MycPipeline** p, const wchar_t* data_folder, const wchar_t* cache_path, MycRequest* request,
+    MycResult* out, MycErr* err);
 typedef struct MycWorker
 {
     VpmComponent* self;
@@ -56,6 +58,7 @@ typedef struct MycWorker
     void* wake;
     unsigned long thread_id;
     int synchronous;                /* tests: a task runs inside myc_worker_give (no thread) */
+    MycJobFn job;                   /* tests: a canned job (NULL: myc_job_run) */
     volatile long busy;             /* a task given and not finished: the worker's fields below are its */
     volatile long quit;
     volatile long faulted;          /* a task faulted (the core stopped the component from the worker) */
@@ -89,6 +92,7 @@ typedef struct MycAddon
     MycOptions options;
     char sync_text[MYC_SYNC_TEXT_MAX + 1];
     MycCatalogue* kits;             /* the pipeline's catalogue, taken from the worker after a job (records_same) */
+    const char* (*signature)(MycCatalogue* kits, uint32_t id); /* tests: the records' signatures (NULL: the catalogue's) */
     /* jobs */
     int job;                        /* a job is with the worker */
     int saving;                     /* the cache save is with the worker */

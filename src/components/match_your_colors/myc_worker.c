@@ -22,7 +22,8 @@ static void MycWorkerJob(MycWorker* w)
     MycResult* result = myc_result_new();
     w->result = result;
     if (result == NULL) { myc_fail(&w->err, "out of memory (result)"); return; }
-    w->ok = myc_job_run(&w->pipeline, w->data_folder, w->has_cache ? w->cache_path : NULL, w->request, result, &w->err);
+    MycJobFn job = w->job != NULL ? w->job : myc_job_run;
+    w->ok = job(&w->pipeline, w->data_folder, w->has_cache ? w->cache_path : NULL, w->request, result, &w->err);
 }
 
 static void MycWorkerTask(void* arg)

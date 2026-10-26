@@ -71,7 +71,7 @@ static int MycAdRecordSame(const MycResult* result, uint32_t id)
     for (int i = 0; i < result->nsignatures; i++)
     {
         if (result->signatures[i].id != id) continue;
-        const char* now = myc_catalogue_signature(g.kits, id);
+        const char* now = g.signature != NULL ? g.signature(g.kits, id) : myc_catalogue_signature(g.kits, id);
         return now != NULL && result->signatures[i].signature != NULL && strcmp(result->signatures[i].signature, now) == 0;
     }
     return 0;
