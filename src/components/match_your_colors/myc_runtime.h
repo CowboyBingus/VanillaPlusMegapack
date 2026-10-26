@@ -243,6 +243,11 @@ void myc_controller_prune(MycController* c);
 int myc_controller_apply(MycController* c, MycResult* result, const MycApplyTo* to, uint32_t frame, char* why, size_t size);
 /* settle: the pending units and slots bound once ready; bindings made, *outcome 0 done, 1 pending, 2 expired; -1 why. */
 int myc_controller_settle(MycController* c, uint32_t frame, int* outcome, char* why, size_t size);
+/* Diagnostics (an apply's detailed line, describe): the controller's bindings by unit, each unit's material instances,
+ * and how many slots read back the texture bound there now (one binding read each, plus alive once per unit): "8
+ * bindings on 1 unit, 8 read back: unit 100 alive, 8 slots on materials 1fc3206b810 (2 of 2 ok), ...". How many read
+ * back. Game thread, never on an idle frame. */
+int myc_controller_report(const MycController* c, char* out, size_t size);
 
 /* ---- the local player (avatar.lua) and the UI preview (preview.lua) ---------------------------------------------- */
 

@@ -293,6 +293,7 @@ static int MycPipeAfter(MycPipeline* p, MycAnalysis* made, MycErr* err)
 
 static MycAnalysis* MycPipeNew(MycPipeline* p, MycKit* kit, int body, MycErr* err)
 {
+    if (p->make != NULL) return p->make(p, kit, body, err);
     p->stage = "opening the game data";
     if (!myc_pipeline_open(p, err)) return NULL;
     static char stage[48];
@@ -348,6 +349,39 @@ static MycAnalysis* MycPipeCached(MycPipeline* p, const char* key)
     return NULL;
 }
 
+/* A weapon's piece with its overrides and their text in the session's arena; 0 out of memory. */
+static int MycPipeOwnPiece(MycArena* arena, MycPiece* piece)
+{
+    if (piece->overrides != NULL && piece->noverrides > 0)
+    {
+        MycOverride* rows = myc_alloc(arena, sizeof(MycOverride) * (size_t)piece->noverrides);
+        if (rows == NULL) return 0;
+        memcpy(rows, piece->overrides, sizeof(MycOverride) * (size_t)piece->noverrides);
+        piece->overrides = rows;
+    }
+    if (piece->overrides_text != NULL && (piece->overrides_text = myc_strdup(arena, piece->overrides_text)) == NULL) return 0;
+    return 1;
+}
+
+/* A copy of a weapon's kit in the session's arena, or NULL out of memory. A weapon's kit is made in its job's arena
+ * (myc_job_weapons.c Weapons.kit), which the job frees at its end, while the analysis made of it is kept for the session
+ * and read by later jobs and the cache save (its kit's type, id, archive, pieces): the Lua's analysis kept its kit
+ * table alive; here the analysis takes the session's copy. Catalogue kits (armor, helmet, cape) and the cache's live for
+ * the session already. */
+static MycKit* MycPipeOwnKit(MycPipeline* p, const MycKit* kit)
+{
+    MycKit* own = myc_alloc(&p->arena, sizeof(MycKit));
+    if (own == NULL) return NULL;
+    *own = *kit;
+    own->pieces = myc_alloc(&p->arena, sizeof(MycPiece) * (size_t)(kit->npieces > 0 ? kit->npieces : 1));
+    if (own->pieces == NULL) return NULL;
+    if (kit->npieces > 0) memcpy(own->pieces, kit->pieces, sizeof(MycPiece) * (size_t)kit->npieces);
+    for (int i = 0; i < own->npieces; i++)
+        if (!MycPipeOwnPiece(&p->arena, &own->pieces[i])) return NULL;
+    if (kit->signature != NULL && (own->signature = myc_strdup(&p->arena, kit->signature)) == NULL) return NULL;
+    return own;
+}
+
 /* The analysis of a key not known this session yet: the cache's while it holds, else a new one (one that cannot be
  * made: MYC_MISSING, kept as that); NULL after myc_fail. */
 static void* MycPipeLearn(MycPipeline* p, MycKit* kit, int body, const char* key, MycErr* err)
@@ -357,6 +391,11 @@ static void* MycPipeLearn(MycPipeline* p, MycKit* kit, int body, const char* key
     if (err->failed) return NULL;
     if (made == NULL)
     {
+        if (kit->type == MYC_WEAPON && (kit = MycPipeOwnKit(p, kit)) == NULL)
+        {
+            myc_fail(err, "out of memory (weapon kit)");
+            return NULL;
+        }
         made = MycPipeNew(p, kit, body, err);
         if (err->failed) return NULL;
         if (made != NULL && kit->type != MYC_WEAPON) p->dirty = 1;

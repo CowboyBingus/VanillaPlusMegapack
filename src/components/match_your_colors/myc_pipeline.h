@@ -57,9 +57,14 @@ typedef struct MycMade
     MycFits fits;
 } MycMade;
 
-typedef struct MycPipeline
+typedef struct MycPipeline MycPipeline;
+/* Makes a new analysis of kit for body (NULL: none could be made, or after myc_fail). */
+typedef MycAnalysis* (*MycAnalyseFn)(MycPipeline* p, MycKit* kit, int body, MycErr* err);
+
+struct MycPipeline
 {
-    MycArena arena;                 /* the session's: analyses, decoded textures, kit stubs, scheme LUTs */
+    MycArena arena;                 /* the session's: analyses, decoded textures, kit stubs, weapon kits, scheme LUTs */
+    MycAnalyseFn make;              /* tests only: makes new analyses (NULL: from the game data, kits.lua / capes.lua) */
     MycCatalogue* kits;
     wchar_t data_folder[1024];
     /* the game-data reader, open from a job's first read to close */
@@ -105,7 +110,7 @@ typedef struct MycPipeline
     double longest;
     uint32_t longest_size;
     const char* stage;
-} MycPipeline;
+};
 
 /* The pipeline of the session's first job: the data signature, the cache read. NULL after myc_fail. */
 MycPipeline* myc_pipeline_new(const wchar_t* data_folder, const wchar_t* cache_path, MycErr* err);
