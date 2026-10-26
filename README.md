@@ -7,6 +7,17 @@ Hellpod Steering Unlocked and Reinforcement Beacons Fixed stay off, since both w
 
 Status: being ported from the Lua Megapack v42. Components not ported yet say so in the log and stay off.
 
+## Requirements
+
+- HellForge with mod SDK 15 or newer, on game build 25480438.
+- **Bingus Shared Loader**, only for Know Your Constellation's forecast panel on the war table and the briefing. The
+  panel's drawing is a small Lua part shipped in the pack (`data/`), and that loader is what starts it: HellForge does
+  not. Without the loader every component still runs, the forecasts are still computed and logged, and the log says
+  `panel off: the pack's Lua part has not started`. HellForge's Mods page shows the pack as needing the loader because
+  of that Lua part.
+- Don't run the Lua Vanilla Plus Megapack alongside this pack: both would change the same things, and Know Your
+  Constellation would draw two panels.
+
 ## Switching components
 
 Every component starts switched on. The pack keeps its settings in
@@ -24,7 +35,7 @@ under `[options]`; the Mod Options Menu component shows them in the game.
 The pack's log (`mod-cowboybingus.vanilla-plus-megapack.log` in the session's logs folder) starts with the pack's
 version, commit and build date, the local time and the settings it loaded (core lines are tagged `[core]`), lists each
 component's state at start-up and each change of it after, and at each mission's end the time each one took per frame
-(average and peak), what is not running and why, and the faults so far. A fault names the callback it happened in, its
+(the average, and how many single ticks took 0.1 ms or longer), what is not running and why, and the faults so far. A fault names the callback it happened in, its
 registers and the pack's return addresses; a crash in game code a component called gets a `[core] crash?` line naming
 the component. The pack's own options (category VANILLA PLUS MEGAPACK): **Diagnostics** (Normal, or Detailed for the
 components' step-by-step lines) and **Note a problem now**, which writes a numbered `MARK` with every component's state.
