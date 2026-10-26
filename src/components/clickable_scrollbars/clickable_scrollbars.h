@@ -111,8 +111,10 @@ int cs_moved(const CsModel* before, const CsModel* after);
 int cs_value_at_grab(const CsModel* model, const CsTrack* track, double press_y, double cursor_y, double* out);
 
 /* native.c */
-/* The five game routines as reviewed (native_api's check); 1 matched, and their addresses are kept. */
-int cs_routines_check(void);
+/* The five game routines as reviewed (native_api's check), for vpm_when_code_ready; their addresses are bound once they
+ * all match. */
+const VpmCodePin* cs_routine_pins(int* count);
+void cs_routines_bind(void);
 /* native_apply: moves the list to value through the game's own setters. 1 with *written; 0 with *reason. */
 int cs_apply(const CsBridge* bridge, const CsModel* model, double value, double* written, const char** reason);
 /* native_settings_input: consumes the UI select action through the game's input routine. 1 consumed. */

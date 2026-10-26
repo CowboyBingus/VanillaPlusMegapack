@@ -32,14 +32,19 @@
  *   data), and the Lua's live log saw PAGE_READWRITE pages ("pages 0x04, 0x04"). So plain stores do what the Lua's
  *   WriteProcessMemory did; vpm_write, which changes protection, is not needed, and pages that fail the check refuse as
  *   in the Lua.
- * - When: the attempt runs at HF_EVENT_GAME_LOADED (the Lua's install). While the game has not loaded its stratagem
- *   settings (the Reinforce row's pointer is unset), a tick waits, as the Lua's self-removing update hook did.
+ * - When: the attempt runs at HF_EVENT_GAME_LOADED (the Lua's install), once the reader's code reads as shipped:
+ *   game.dll's code is decoded in parts after that event, so the reader is checked with vpm_when_code_ready, at the
+ *   event and then every 30 frames until it matches; the core stops the component if it never does within 60 s
+ *   ("the stratagem list's reader changed (game.dll 0x17EF922)"), with nothing written. While the game has not loaded
+ *   its stratagem settings (the Reinforce row's pointer is unset), a tick waits, as the Lua's self-removing update hook
+ *   did.
  * - Dropped: the shutdown report (no shutdown event), the build hash check (the core checks the build), the Lua
  *   loader's checks and its update-chain handling (the core's tick replaces them).
  *
  * Cost (the Lua's frame_budget pins in brackets):
  * - Once, at HF_EVENT_GAME_LOADED: one check of the reader's code bytes (HfApi.code_matches, which reads them with one
- *   ReadProcessMemory) [the Lua: the build check instead].
+ *   ReadProcessMemory) [the Lua: the build check instead]; while game.dll's code there is not decoded yet, the same
+ *   check every 30 frames (at most 60 s), and the attempt on the frame it matches.
  * - The applying attempt, once: the probe slot and the list (1,200 bytes) as plain loads, 108 row reads (vpm_read, 192
  *   bytes each), the tables (1,328 bytes) as a plain load, 2 VirtualQuery (one per table), 2 stores of 612 and 640
  *   bytes, the read back as a plain load: 108 reads, 2 page queries [112 reads, 2 page queries, 2 WriteProcessMemory].
@@ -350,15 +355,14 @@ static void Wait(VpmComponent* self, float dt)
         vpm_fail(self, "gave up after %.0f s: waiting: the stratagem settings are not loaded yet", WAIT_SECONDS);
 }
 
-static void GameLoaded(VpmComponent* self, HfEvent event)
+/* The reader's code, as vpm_when_code_ready checks it before the attempt. */
+static const VpmCodePin kPins[] = {{LIST_SITE, LIST_SITE_CODE, "the stratagem list's reader", 0}};
+
+/* The reader's bytes read as shipped (at HF_EVENT_GAME_LOADED, or on the frame they first do): the attempt. */
+static void CodeReady(VpmComponent* self, HfEvent event)
 {
     if (s.done || vpm_ticking(self)) return;
     if (vpm_game() == 0) { vpm_fail(self, "game.dll not loaded"); return; }
-    if (!vpm_game_code_matches(LIST_SITE, LIST_SITE_CODE))
-    {
-        vpm_fail(self, "the stratagem list's reader at game.dll 0x%X is not the reviewed one", LIST_SITE);
-        return;
-    }
     int result = Attempt(self);
     if (result == ATTEMPT_DONE) { Done(self, "at load"); return; }
     if (result == ATTEMPT_FAILED) return;
@@ -386,7 +390,7 @@ static int Start(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
     EncodeAll();
-    return vpm_on_load(self, HF_EVENT_GAME_LOADED, GameLoaded) ? 0 : 1;
+    return vpm_when_code_ready(self, kPins, 1, CodeReady) ? 0 : 1;
 }
 
 const VpmComponentDef vpm_component_stratagem_hero_expanded = {"stratagem_hero_expanded", "Stratagem Hero Expanded", "1.0", 0, Start, Stop};

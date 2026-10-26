@@ -97,6 +97,8 @@ static void AppliesWhenTheProjectilesAreReady(void)
     /* Reads: the list, 99 rows and 99 read-backs (the Lua: 200 with the buffer pointer, which is a plain load here). */
     CHECK_EQ(fake_counts().read, 199);
     CHECK_EQ(fake_counts().write, 0);
+    CHECK_EQ(fake_counts().writable, 1);
+    CHECK_EQ(fake_counts().code_matches, 0); /* the reader's code was checked at HF_EVENT_GAME_LOADED */
     CHECK(!vpm_ticking(fake_component(0)));
     fake_counts_reset();
     fake_frames(10, 1.0f / 60);
@@ -182,14 +184,115 @@ static void RefusesUnexpectedRows(void)
     CHECK_EQ(Count(2), 0);
 }
 
+/* Another reader reads as code not decoded yet: the core waits for it, then stops the component, nothing changed. */
 static void RefusesAnotherReader(void)
 {
     MakeWorld(VANILLA_LIST, 0, 1);
     ((uint8_t*)fake_game())[LIST_SITE] = 0x90;
     Started();
     fake_fire(HF_EVENT_PROJECTILES_READY);
-    CHECK_LOG("the projectile list's reader at game.dll 0x75A391 is not the reviewed one");
     CHECK_EQ(Count(2), 0);
+    fake_frames(60, 1.0f);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Foliage Pass-Through] disabled: the projectile list's reader changed (game.dll 0x75A391)");
+    CHECK_EQ(Count(2), 0);
+}
+
+/* ---- game.dll's code decoded in parts after HF_EVENT_GAME_LOADED (vpm_when_code_ready) ------------------------- */
+
+/* The reader as the game holds it before its part of game.dll is decoded, and once it is. */
+static void Encode(void) { memset((uint8_t*)fake_game() + LIST_SITE, 0xCC, 8); }
+static void Decode(void)
+{
+    static const uint8_t site[] = {0x48, 0x8B, 0x84, 0xC1};
+    memcpy((uint8_t*)fake_game() + LIST_SITE, site, 4);
+    Put32((uint8_t*)fake_game() + LIST_SITE + 4, w.list);
+}
+
+/* Decoded at the event: the one code check there, and HF_EVENT_PROJECTILES_READY's work as before. */
+static void TheReaderDecodedAtTheEventIsCheckedThere(void)
+{
+    MakeWorld(VANILLA_LIST, 0, 1);
+    fake_start(kDefs, 1);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    FakeCounts loaded = fake_counts();
+    CHECK_EQ(loaded.code_matches, 1);
+    CHECK_EQ(loaded.read + loaded.write + loaded.writable + loaded.log, 0);
+    fake_counts_reset();
+    fake_frames(60, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches + fake_counts().read, 0);
+    fake_fire(HF_EVENT_PROJECTILES_READY);
+    CHECK_EQ(fake_counts().read, 199);
+    CHECK_EQ(Count(2), 99);
+}
+
+/* Still encoded at both events, decoded two seconds later: nothing is read or changed before, the change on the next
+ * look (every 30 frames), then nothing. */
+static void TheReaderDecodedLaterAppliesThen(void)
+{
+    MakeWorld(VANILLA_LIST, 0, 1);
+    Encode();
+    Started();
+    fake_counts_reset();
+    fake_fire(HF_EVENT_PROJECTILES_READY);
+    CHECK_EQ(fake_counts().read + fake_counts().writable + fake_counts().code_matches + fake_counts().log, 0);
+    fake_frames(120, 1.0f / 60);
+    FakeCounts waiting = fake_counts();
+    CHECK_EQ(waiting.code_matches, 4); /* one look every 30 frames */
+    CHECK_EQ(waiting.read + waiting.writable + waiting.log, 0);
+    CHECK_EQ(Count(2), 0);
+    CHECK(vpm_running(fake_component(0)));
+    Decode();
+    fake_counts_reset();
+    fake_frames(30, 1.0f / 60);
+    CHECK_EQ(Count(2), 99);
+    CHECK_EQ(Template(OTHER_TYPE), 0);
+    CHECK_LOG("applied: 99 projectile types use the no-foliage query (99 changed now, 0 already changed)");
+    CHECK_EQ(fake_counts().code_matches, 1);
+    CHECK_EQ(fake_counts().read, 199);
+    CHECK_EQ(fake_counts().writable, 1);
+    fake_counts_reset();
+    fake_frames(300, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches + fake_counts().read + fake_counts().log, 0);
+}
+
+/* Decoded after HF_EVENT_GAME_LOADED but before the projectile settings load: the wait for them as before. */
+static void TheReaderDecodedBeforeTheSettingsWaitsForThem(void)
+{
+    MakeWorld(VANILLA_LIST, 0, 0);
+    Encode();
+    Started();
+    fake_fire(HF_EVENT_PROJECTILES_READY);
+    CHECK(!vpm_ticking(fake_component(0)));
+    Decode();
+    fake_frames(30, 1.0f / 60);
+    CHECK(vpm_ticking(fake_component(0)));
+    CHECK_LOG("Waiting for the game: the projectile settings are not loaded yet.");
+    Load();
+    fake_frames(1, 1.0f / 60);
+    CHECK_EQ(Count(2), 99);
+    CHECK(!vpm_ticking(fake_component(0)));
+}
+
+/* Never decoded: stopped after 60 s naming the reader, nothing read, nothing changed. */
+static void TheReaderNeverDecodedStopsItAfterAMinute(void)
+{
+    MakeWorld(VANILLA_LIST, 0, 1);
+    Encode();
+    Started();
+    fake_fire(HF_EVENT_PROJECTILES_READY);
+    fake_counts_reset();
+    fake_frames(59, 1.0f);
+    CHECK(vpm_running(fake_component(0)));
+    fake_frames(1, 1.0f);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Foliage Pass-Through] disabled: the projectile list's reader changed (game.dll 0x75A391)");
+    CHECK_EQ(fake_counts().read + fake_counts().writable + fake_counts().write, 0);
+    CHECK_EQ(Count(0), 99);
+    fake_counts_reset();
+    fake_frames(60, 1.0f);
+    CHECK_EQ(fake_counts().code_matches + fake_counts().read, 0);
 }
 
 /* Settings memory that is not writable: refused before any store. */
@@ -230,5 +333,9 @@ int main(void)
     RUN(RefusesAnotherReader);
     RUN(RefusesReadOnlySettings);
     RUN(StopPutsTheRowsBack);
+    RUN(TheReaderDecodedAtTheEventIsCheckedThere);
+    RUN(TheReaderDecodedLaterAppliesThen);
+    RUN(TheReaderDecodedBeforeTheSettingsWaitsForThem);
+    RUN(TheReaderNeverDecodedStopsItAfterAMinute);
     TEST_END();
 }

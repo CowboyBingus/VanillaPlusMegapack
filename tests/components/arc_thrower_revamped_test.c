@@ -391,13 +391,16 @@ static void AlreadySetWritesNothing(void)
     CHECK_EQ(w.record[AUTO_FIRE], 1);
 }
 
+/* Another setter reads as code not decoded yet: the core waits for it, then stops the component, nothing changed. */
 static void RefusesAnotherBuild(void)
 {
     Build();
     ((uint8_t*)fake_game())[RVA_SETTER + 14] = 0x28;
     Started();
+    CHECK(vpm_running(fake_component(0)) && !vpm_ticking(fake_component(0)));
+    fake_frames(60, 1.0f);
     CHECK(!vpm_running(fake_component(0)));
-    CHECK_LOG("disabled: Unsupported game build: the fire-mode setter at game.dll 0x755F90 is not the reviewed one");
+    CHECK_LOG("disabled: the fire-mode setter changed (game.dll 0x755F90)");
     CHECK_EQ(fake_counts().set_live + fake_counts().read, 0);
     CHECK_EQ(w.record[AUTO_FIRE], 0);
 }
@@ -474,6 +477,89 @@ static void StopPutsTheRecordBack(void)
     w.k.arc = w.k.down = 1;
     Ticks(20);
     CHECK_EQ(w.writes, 0);
+}
+
+/* ---- game.dll's code decoded in parts after HF_EVENT_GAME_LOADED (vpm_when_code_ready) ------------------------- */
+
+static void Encode(void) { memset((uint8_t*)fake_game() + RVA_SETTER, 0xCC, sizeof kSetter); }
+static void Decode(void) { memcpy((uint8_t*)fake_game() + RVA_SETTER, kSetter, sizeof kSetter); }
+
+/* Decoded at load: the one code check at HF_EVENT_GAME_LOADED and nothing else there; HF_EVENT_ENTITIES_READY's work as
+ * before. */
+static void TheSetterIsCheckedAtLoad(void)
+{
+    Build();
+    g_api = *fake_api();
+    g_api.read = TestRead;
+    g_api.component_record = TestComponentRecord;
+    fake_live_put(ARC, COMPONENT, AUTO_FIRE, (HfValue)HF_U8(0));
+    CHECK_EQ(vpm_core_init(&g_api, fake_mod(), kDefs, 1), 0);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    FakeCounts loaded = fake_counts();
+    CHECK_EQ(loaded.code_matches, 1);
+    CHECK_EQ(loaded.read + loaded.set_live + loaded.get_live + loaded.log, 0);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    Mirror();
+    FakeCounts ready = fake_counts();
+    CHECK_EQ(ready.code_matches, 0);
+    CHECK_EQ(ready.read, 1);
+    CHECK_EQ(ready.set_live, 1);
+    CHECK_EQ(ready.get_live, 1);
+    CHECK_EQ(w.record[AUTO_FIRE], 1);
+    CHECK(vpm_ticking(fake_component(0)));
+}
+
+/* Still encoded at both events, decoded two seconds later: nothing looked up, written or ticked before; the record and
+ * the tick on the frame of the core's next look, as at load. */
+static void TheSetterDecodedLaterStartsItThen(void)
+{
+    Build();
+    Encode();
+    Started();
+    /* set_live stores at once, as HellForge's does (Mirror runs only after a whole frame, and the record's set-up now
+     * comes inside one, before the first tick's poll reads the record) */
+    fake_live_bind(ARC, COMPONENT, AUTO_FIRE, (uintptr_t)(w.record + AUTO_FIRE));
+    CHECK_EQ(fake_counts().read + fake_counts().set_live, 0);
+    CHECK(vpm_running(fake_component(0)) && !vpm_ticking(fake_component(0)));
+    fake_counts_reset();
+    w.k.arc = w.k.down = 1;
+    Ticks(120);
+    CHECK_EQ(fake_counts().code_matches, 4); /* one look every 30 frames */
+    CHECK_EQ(fake_counts().read + fake_counts().set_live + fake_counts().log, 0);
+    CHECK_EQ(w.writes, 0);
+    CHECK_EQ(w.record[AUTO_FIRE], 0);
+    Decode();
+    fake_counts_reset();
+    Ticks(30);
+    Mirror();
+    CHECK_EQ(fake_counts().code_matches, 1);
+    CHECK_EQ(fake_counts().set_live, 1);
+    CHECK_EQ(w.record[AUTO_FIRE], 1);
+    CHECK_LOG("[Arc Thrower Revamped] Charge record ready.");
+    CHECK(vpm_ticking(fake_component(0)));
+    Ticks(60);
+    CHECK(w.writes > 0); /* Fire held with the Arc Thrower: the hold is followed now */
+}
+
+/* Never decoded: stopped after 60 s naming the setter; no record looked up, nothing written. */
+static void TheSetterNeverDecodedStopsItAfterAMinute(void)
+{
+    Build();
+    Encode();
+    Started();
+    fake_frames(59, 1.0f);
+    CHECK(vpm_running(fake_component(0)));
+    fake_frames(1, 1.0f);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Arc Thrower Revamped] disabled: the fire-mode setter changed (game.dll 0x755F90)");
+    CHECK_EQ(fake_counts().read + fake_counts().set_live + fake_counts().get_live, 0);
+    CHECK_EQ(w.record[AUTO_FIRE], 0);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_ENTITIES_READY); /* a reload after the stop: nothing */
+    fake_frames(60, 1.0f);
+    CHECK_EQ(fake_counts().read + fake_counts().code_matches + fake_counts().set_live, 0);
 }
 
 /* ---- the pinned calls per frame (the Lua's budget mode, its labels) ---------------------------------------------- */
@@ -920,6 +1006,9 @@ int main(void)
     RUN(RecordWriteRefused);
     RUN(FollowsReloadedEntityData);
     RUN(StopPutsTheRecordBack);
+    RUN(TheSetterIsCheckedAtLoad);
+    RUN(TheSetterDecodedLaterStartsItThen);
+    RUN(TheSetterNeverDecodedStopsItAfterAMinute);
     RUN(PinnedCallsPerFrame);
     RUN(FiresAndFollows);
     RUN(InputGap);

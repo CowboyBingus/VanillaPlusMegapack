@@ -18,7 +18,10 @@
  * select action every frame until the button is released, also after the drag ended (native.c).
  *
  * On HellForge: the tick is the core's game-thread tick (the Lua's guarded update step); the five game routines
- * are checked with code_matches at HF_EVENT_GAME_LOADED (the core checks the build); game.dll globals are plain loads;
+ * are checked with code_matches from HF_EVENT_GAME_LOADED (the core checks the build) through vpm_when_code_ready:
+ * game.dll's code is decoded in parts after that event, so they are checked again every 30 frames until they read as
+ * shipped, and the component starts then (it is stopped, naming the routine, if they do not within 60 s, before
+ * anything ran); game.dll globals are plain loads;
  * time is the tick's dt (the Lua read GetTickCount64); the client origin comes from ScreenToClient on the cursor (the
  * core resolves no ClientToScreen). Dropped: the diagnostics (the opt-in ClickableScrollbars.log flight recorder,
  * trace, frame-interval and capture-budget bookkeeping, display scale), the optional ini (its native-route keys only
@@ -49,7 +52,8 @@
  *   Once per gesture, 200 ms after the press: + one model read (4, 4, 2, 1, 1).
  * - A release: 3 Windows calls, no read (Settings: + 1 consume; the Lua 3, and 5 and a read on Settings).
  * - A track press: a press, then a held frame's repeat, model and write.
- * Once, at game load: 5 code checks and GetCurrentProcessId; 1 log line. */
+ * Once, at game load: 5 code checks and GetCurrentProcessId; 1 log line. While game.dll's code there is not decoded yet:
+ * the 5 code checks every 30 frames (at most 60 s), no tick. */
 #include <string.h>
 #include <windows.h>
 #include "clickable_scrollbars.h"
@@ -397,15 +401,23 @@ static const char* MissingUser32(const VpmUser32* u)
     return NULL;
 }
 
+/* The five routines read as shipped (at game load, or on the frame they first do): bound, and the tick starts. */
+static void RoutinesReady(VpmComponent* self, HfEvent event)
+{
+    cs_routines_bind();
+    s.process = GetCurrentProcessId();
+    if (!vpm_tick_start(self, Tick)) { vpm_fail(self, "the game thread is not reachable"); return; }
+    vpm_log(self, "running: drags the equipment, Career, Controls and Settings scrollbars (game routines checked)");
+}
+
 static void GameLoaded(VpmComponent* self, HfEvent event)
 {
     if (vpm_ticking(self)) return;
     const char* missing = MissingUser32(s.user32);
     if (missing != NULL) { vpm_fail(self, "user32.%s unavailable", missing); return; }
-    if (!cs_routines_check()) { vpm_fail(self, "unsupported native scroll routine"); return; }
-    s.process = GetCurrentProcessId();
-    if (!vpm_tick_start(self, Tick)) { vpm_fail(self, "the game thread is not reachable"); return; }
-    vpm_log(self, "running: drags the equipment, Career, Controls and Settings scrollbars (game routines checked)");
+    int count = 0;
+    const VpmCodePin* pins = cs_routine_pins(&count);
+    if (!vpm_when_code_ready(self, pins, count, RoutinesReady)) vpm_fail(self, "unsupported native scroll routine");
 }
 
 void cs_counts(CsCounts* out)
