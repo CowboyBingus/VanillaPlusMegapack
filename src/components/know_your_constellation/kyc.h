@@ -7,6 +7,8 @@
  *   kyc_model.c         model.lua         the panel's texts (locales/en.lua)
  *   kyc_text.c          bingus_text.lua   UTF-8 checks, character boundaries, line wrapping
  *   kyc_panel.c         panel.lua         the forecast panel, drawn through kyc_gui.h
+ *   kyc_lua.c           (new)             the bridge to the pack's Lua part, lua/forecast_panel.lua, which makes the
+ *                                         panel's engine Gui calls on HellForge
  *
  * Errors. The Lua raised two kinds: expected transient states ({pending = reason}: memory being rebuilt, no mission
  * highlighted, the font not loaded yet), which hide the forecast and retry on the next frame without counting, and

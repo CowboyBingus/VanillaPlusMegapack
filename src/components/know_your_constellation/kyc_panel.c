@@ -1,9 +1,10 @@
 /* Know Your Constellation's forecast panel (panel.lua): one screen GUI in the first non-main world (the only UI world
  * drawn on the war table), inked like the native normal font, with retained primitives: nothing is measured or drawn
  * again unless the report, the geometry or the font changes, except one text update per frame while a long headline
- * scrolls. Every frame it is up, the world list and the window size are checked again (a replaced or removed world
- * moves or hides the panel on that frame). Drawn through kyc_gui.h; with no route (kyc_gui.c) it draws nothing and
- * says so. Plans are cached per report, width, height limit, scale and mode (8 entries), as in the Lua. */
+ * scrolls. Each show while it is up checks the world list and the window size again (a replaced or removed world
+ * moves or hides the panel then). Drawn through kyc_gui.h: on HellForge the pack's Lua part (kyc_lua.c),
+ * which calls show only on frames with a change, a scroll or a periodic check; with no route (kyc_gui.c) it draws
+ * nothing and says so. Plans are cached per report, width, height limit, scale and mode (8 entries), as in the Lua. */
 #include <math.h>
 #include <string.h>
 #include "kyc_panel.h"

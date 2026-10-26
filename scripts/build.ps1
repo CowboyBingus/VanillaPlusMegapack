@@ -97,5 +97,26 @@ if($Test){
         Write-Output ('{0}: {1}' -f $case[0],$(if($code){'FAILED'}else{'passed'}))
         if($code){$failed++}
     }
+    # Know Your Constellation's Lua part (tests/lua): its test on LuaJIT's ffi against a probe DLL built from the
+    # component's kyc_lua.c and kyc_gui.c (tests/lua/kyc_lua_probe.c). HellForge-Open's tools/ has no Lua interpreter, so
+    # it runs with HD2_LUAJIT, else the workspace's LuaJIT (tools/src/LuaJIT/src/luajit.exe beside the HellForge folder),
+    # and is skipped, saying so, without one.
+    if(-not $Only -or $Only -eq 'know_your_constellation'){
+        $luajit=$env:HD2_LUAJIT
+        if(-not $luajit){$luajit=Join-Path (Split-Path -Parent $workspace) 'tools/src/LuaJIT/src/luajit.exe'}
+        if(Test-Path -LiteralPath $luajit){
+            $kyc=Join-Path $root 'src/components/know_your_constellation'
+            $probe=Join-Path $out 'kyc_lua_probe.dll'
+            & $Zig cc -std=c11 -target x86_64-windows-gnu -shared -O2 -Wall -Werror -Wno-unused-parameter -I $sdk -I (Join-Path $root 'src') `
+                (Join-Path $root 'tests/lua/kyc_lua_probe.c') (Join-Path $kyc 'kyc_lua.c') (Join-Path $kyc 'kyc_gui.c') -o $probe
+            if($LASTEXITCODE){Write-Output 'know_your_constellation (Lua part): the probe did not compile';$failed++}
+            else{
+                Get-ChildItem -LiteralPath $out -File -Filter 'kyc_lua_probe.lib'|Remove-Item
+                & $luajit (Join-Path $root 'tests/lua/know_your_constellation_test.lua') $root $probe|ForEach-Object {"  $_"};$code=$LASTEXITCODE
+                Write-Output ('know_your_constellation (Lua part): {0}' -f $(if($code){'FAILED'}else{'passed'}))
+                if($code){$failed++}
+            }
+        }else{Write-Output 'know_your_constellation (Lua part): skipped, no LuaJIT (set HD2_LUAJIT to a luajit.exe)'}
+    }
     if($failed){throw ('{0} test file(s) failed.' -f $failed)}
 }

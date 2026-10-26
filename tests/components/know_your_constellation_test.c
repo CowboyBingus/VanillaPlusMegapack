@@ -10,6 +10,7 @@
 #include "harness/test.h"
 #include "components.h"
 #include "components/know_your_constellation/kyc.h"
+#include "components/know_your_constellation/kyc_lua.h"
 #include "components/know_your_constellation/kyc_mission.h"
 #include "components/know_your_constellation/kyc_panel.h"
 
@@ -1915,20 +1916,24 @@ static void GenuineErrorStops(void)
     kyc_gui_use(NULL);
 }
 
-/* No Gui route (kyc_gui.c's none): the panel stays off, every forecast is computed and logged, nothing is drawn. */
+/* No Gui route (kyc_gui.c's none: the Lua part never attached): the panel stays off, every forecast is computed and
+ * logged, nothing is drawn; the first forecast logs why the panel is off, once. */
 static void PanelOff(void)
 {
     kyc_gui_use(NULL);
     Session(0);
     Started();
-    CHECK_LOG("[Know Your Constellation] panel off: no engine Gui route on HellForge yet");
     CHECK_LOG("[Know Your Constellation] ready");
+    CHECK_NO_LOG("panel off:");
     ShowScreen(15);
     Frames(3, .11f);
     char status[160], line[200];
+    CHECK_LOG("[Know Your Constellation] panel off: the pack's Lua part has not started (Bingus Shared Loader starts it; "
+        "HellForge does not ship that loader); forecasts are computed and logged");
+    CHECK_EQ(fake_log_count("panel off: the pack's Lua part"), 1);
     snprintf(status, sizeof status, "panel off: map %s composition rules resolved", F.key);
     CHECK(strcmp(State()->status, status) == 0);
-    CHECK(strncmp(vpm_status(fake_component(0)), "panel off (no engine Gui route yet); ", 37) == 0);
+    CHECK(strncmp(vpm_status(fake_component(0)), "panel off (no Lua part); ", 25) == 0);
     snprintf(line, sizeof line, "[Know Your Constellation] forecast map %s: BALANCED TERMINIDS; large:", F.key);
     CHECK_LOG(line);
     snprintf(line, sizeof line, "[Know Your Constellation] forecast map %s small: ", F.key);
@@ -2451,6 +2456,210 @@ static void StartsAndStops(void)
     kyc_gui_use(NULL);
 }
 
+/* ---- the Lua part (kyc_lua.c): its dispatcher played by the fake Gui, its update by the step after each tick ------ */
+
+static struct
+{
+    int applies;   /* the Lua part's update called vpm_kyc_lua_apply */
+    int raise_op;  /* this op raises "boom" */
+} lua;
+
+static uint64_t Hash16(const char* hex) { return strtoull(hex, NULL, 16); }
+
+static int FakeWorlds(KycLuaCall* c)
+{
+    KycRef list[KYC_LUA_WORLDS];
+    int n = FgWorlds(list, c->capacity);
+    for (int i = 0; i < n; i++) c->refs[i] = (double)list[i];
+    return n;
+}
+
+static int Made(double* into, KycRef ref)
+{
+    *into = (double)ref;
+    return ref != 0;
+}
+
+/* The Lua part's dispatcher (lua/forecast_panel.lua's handlers), over the fake Gui's functions. */
+static int FakeDispatch(KycLuaCall* c)
+{
+    if (c->op == lua.raise_op)
+    {
+        snprintf(c->error, sizeof c->error, "boom");
+        return KYC_LUA_RAISED;
+    }
+    KycBox box = {c->x, c->y, c->z, c->w, c->h};
+    KycColour colour = {c->a, c->r, c->g, c->b};
+    KycLabel label = {c->text, c->length, Hash16(c->id[0]), Hash16(c->id[1]), c->size, c->x, c->y, c->z, colour};
+    KycRef gui = (KycRef)c->gui, item = (KycRef)c->item;
+    switch (c->op)
+    {
+    case KYC_LUA_MAIN_WORLD: return Made(&c->world, FgMain());
+    case KYC_LUA_WORLDS_OP: return FakeWorlds(c);
+    case KYC_LUA_CREATE_GUI: return Made(&c->gui, FgCreate((KycRef)c->world));
+    case KYC_LUA_DESTROY_GUI: FgDestroy((KycRef)c->world, gui); return 1;
+    case KYC_LUA_MATERIAL: return Made(&c->item, FgMaterial(gui, Hash16(c->id[0])));
+    case KYC_LUA_SET_SCALAR: FgScalar(item, Hash16(c->id[0]), c->value); return 1;
+    case KYC_LUA_SET_VECTOR2: FgVector2(item, Hash16(c->id[0]), c->x, c->y); return 1;
+    case KYC_LUA_SET_VECTOR4: FgVector4(item, Hash16(c->id[0]), colour); return 1;
+    case KYC_LUA_SET_TEXTURE: FgTexture(item, Hash16(c->id[0]), Hash16(c->id[1])); return 1;
+    case KYC_LUA_RESOLUTION: return FgResolution(&c->w, &c->h);
+    case KYC_LUA_TEXT_EXTENTS: return FgExtents(gui, c->text, c->length, Hash16(c->id[0]), c->size, c->out);
+    case KYC_LUA_RECT: return Made(&c->item, FgRect(gui, &box, colour));
+    case KYC_LUA_UPDATE_RECT: FgUpdateRect(gui, item, &box, colour); return 1;
+    case KYC_LUA_TEXT: return Made(&c->item, FgText_(gui, &label));
+    case KYC_LUA_UPDATE_TEXT: FgUpdateText(gui, item, &label); return 1;
+    default: return 0;
+    }
+}
+
+/* The Lua part's update: one apply when the bridge has work. */
+static void LuaUpdate(float dt)
+{
+    if (kyc_lua_bridge()->work == 0) return;
+    lua.applies++;
+    vpm_kyc_lua_apply();
+}
+
+/* A session whose panel draws through the Lua part: the fake Gui's engine, the none route until the frame adopts it. */
+static void LuaSession(void)
+{
+    memset(&lua, 0, sizeof lua);
+    Session(0);
+    SessionGui();
+    kyc_gui_use(NULL);
+    CHECK(vpm_kyc_lua_attach(KYC_LUA_VERSION, sizeof(KycLuaCall), FakeDispatch) == kyc_lua_bridge());
+    fake_after_tick(LuaUpdate);
+    Started();
+}
+
+static void LuaLeave(void)
+{
+    kyc_lua_reset();
+    kyc_gui_use(NULL);
+}
+
+/* Engine calls and applies over n frames. */
+static int LuaFrames(int n, float dt, int* applies)
+{
+    ResetCalls();
+    int before = lua.applies, total = 0;
+    Frames(n, dt);
+    for (int i = 0; i < C_COUNT; i++) total += fg.calls[i];
+    *applies = lua.applies - before;
+    return total;
+}
+
+/* The war table through the Lua part: adopted on the first frame, drawn on the Lua part's next update, then still
+ * frames make no engine call (every 30th checks the worlds and window), a scrolling headline updates every frame, and
+ * hiding destroys the GUI once and leaves the Lua part idle. */
+static void LuaPanel(void)
+{
+    LuaSession();
+    CHECK(StatusIs("ready") && strncmp(vpm_status(fake_component(0)), "panel off (no Lua part); ", 25) == 0);
+    ShowScreen(15);
+    Frames(4, .11f);
+    CHECK_LOG("[Know Your Constellation] panel: drawn through the pack's Lua part (the engine's Gui)");
+    CHECK_NO_LOG("panel off:");
+    CHECK(kyc_lua_route() && ShownKey(F.key) && StatusIs("visible map"));
+    CHECK(fg.ink_wrong == 0 && fg.uninked == 0 && fg.outside == 0 && fg.wrong_world == 0 && fg.created == 1);
+    CHECK(View()->place.x == 512 && fabs(View()->place.w - 533 * 4.0 / 3.0) < .01); /* as the direct route drew it */
+    CHECK_EQ(fake_log_count("[Know Your Constellation] visible map"), 1); /* one status line per forecast, as the Lua mod */
+    /* still: 60 frames, 2 applies of 3 engine calls each, the map's 9 reads per frame as before */
+    int applies;
+    for (int i = 0, was = lua.applies; i < 60 && lua.applies == was; i++) Frames(1, .01f); /* to a check frame */
+    uint32_t reads = Reads();
+    CHECK_EQ(LuaFrames(60, .01f, &applies), 6);
+    CHECK_EQ(applies, 2);
+    CHECK(OnlyCalls((const int[]){C_MAIN, 2, C_WORLDS, 2, C_RESOLUTION, 2, -1}));
+    CHECK_EQ(Reads() - reads, 59 * 9 + 43); /* one re-sample in 0.6 s */
+    /* a re-sample of the same mission changes nothing */
+    CHECK_EQ(LuaFrames(1, .5f, &applies) <= 3, 1);
+    /* a headline wider than the box scrolls: an apply every frame, a text update while it moves */
+    LongHeadline(1);
+    Frames(2, .5f);
+    CHECK(View()->has_scroll && View()->scroll->travel > 0);
+    for (int guard = 0; View()->scroll->offset == 0 && guard < 5000; guard++) Frames(1, .016f);
+    CHECK_EQ(LuaFrames(10, .016f, &applies), 40);
+    CHECK_EQ(applies, 10);
+    CHECK(OnlyCalls((const int[]){C_MAIN, 10, C_WORLDS, 10, C_RESOLUTION, 10, C_UPDATE_TEXT, 10, -1}));
+    LongHeadline(0);
+    Frames(2, .5f);
+    CHECK(!View()->has_scroll && Shown());
+    /* the ship: hidden on the Lua part's next update, then nothing at all */
+    int destroyed = fg.destroyed;
+    ShowScreen(0);
+    Frames(2, .01f);
+    CHECK(!Up() && fg.destroyed == destroyed + 1 && StatusIs("hidden"));
+    reads = Reads();
+    CHECK_EQ(LuaFrames(300, .01f, &applies), 0);
+    CHECK_EQ(applies, 0);
+    CHECK(Reads() - reads <= 300 + 20); /* the idle gate's reads, as before */
+    CHECK(kyc_lua_bridge()->work == 0 && State()->failures == 0);
+    LuaLeave();
+}
+
+/* The Lua part's draws wait and fail as the direct route's did: a missing material is a wait (hidden with its
+ * reason, never counted, back once it clears); an engine call that raises is a genuine error naming the engine's. */
+static void LuaPanelErrors(void)
+{
+    LuaSession();
+    ShowScreen(15);
+    Frames(4, .11f);
+    CHECK(Shown());
+    fg.no_material = 1;
+    P64(Game(0x3772268), FONT + 1); /* another font: the panel makes a new GUI, whose material is missing */
+    Frames(10, .016f);
+    CHECK(StatusIs("hidden: Font material unavailable") && State()->failures == 0 && !Up());
+    CHECK(State()->pending >= 8); /* retried every frame, as the Lua mod's frame did */
+    CHECK_EQ(fake_log_count("[Know Your Constellation] hidden: Font material unavailable"), 1); /* no flapping */
+    CHECK_EQ(fake_log_count("[Know Your Constellation] visible map"), 1);
+    fg.no_material = 0;
+    P64(Game(0x3772268), FONT);
+    Frames(6, .11f);
+    CHECK(Shown() && StatusIs("visible map"));
+    lua.raise_op = KYC_LUA_RESOLUTION; /* raised by the next check of the window size (within 30 frames) */
+    for (int i = 0; i < 40 && State()->failures == 0; i++) Frames(1, .016f);
+    CHECK(State()->failures == 1 && strstr(State()->status, "engine Gui: boom") != NULL && !Up());
+    Frames(1, .016f);
+    CHECK(State()->failures == 2 && State()->burst_errors == 2); /* retried and counted every frame, as the Lua's */
+    CHECK_LOG("[Know Your Constellation] error: engine Gui: boom");
+    lua.raise_op = 0;
+    Frames(6, .11f);
+    CHECK(Shown());
+    LuaLeave();
+}
+
+/* The component stopping removes the panel on the Lua part's next update; a Lua part of another version is refused
+ * and logged, and the panel stays off with that reason. */
+static void LuaStopAndRefusal(void)
+{
+    LuaSession();
+    ShowScreen(15);
+    Frames(4, .11f);
+    CHECK(Shown());
+    int destroyed = fg.destroyed;
+    CHECK(vpm_fail(fake_component(0), "test stop") == 1);
+    CHECK(Up()); /* drawn by the Lua part's next update */
+    Frames(1, .01f);
+    CHECK(!Up() && fg.destroyed == destroyed + 1 && kyc_lua_bridge()->work == 0);
+    LuaLeave();
+    fake_setup();
+    Session(0);
+    kyc_gui_use(NULL);
+    CHECK(vpm_kyc_lua_attach(KYC_LUA_VERSION + 1, sizeof(KycLuaCall), FakeDispatch) == NULL);
+    CHECK(vpm_kyc_lua_attach(KYC_LUA_VERSION, sizeof(KycLuaCall) + 8, FakeDispatch) == NULL);
+    Started();
+    ShowScreen(15);
+    Frames(4, .11f);
+    char line[200];
+    snprintf(line, sizeof line, "[Know Your Constellation] panel off: the pack's Lua part is version %d with a %u-byte call",
+        KYC_LUA_VERSION, (unsigned)sizeof(KycLuaCall) + 8);
+    CHECK_LOG(line);
+    CHECK(!kyc_lua_route() && !Up() && StatusIs("panel off: map"));
+    LuaLeave();
+}
+
 int main(void)
 {
     RUN(RosterIntegrity);
@@ -2489,5 +2698,8 @@ int main(void)
     RUN(PanelWaits);
     RUN(ErrorBursts);
     RUN(WaitsNeverCount);
+    RUN(LuaPanel);
+    RUN(LuaPanelErrors);
+    RUN(LuaStopAndRefusal);
     TEST_END();
 }
