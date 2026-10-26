@@ -262,7 +262,8 @@ typedef struct VpmBindingDef
 
 /* Registers a binding (from start(); the definition must stay valid). NULL refused. */
 VpmBinding* vpm_binding(VpmComponent* self, const VpmBindingDef* def);
-/* 1 down, 0 up, -1 unknown (no bindings backend, or it cannot answer now): the caller then uses its fixed key. */
+/* 1 down, 0 up, -1 unknown (no bindings backend, or it cannot answer now): the caller then uses its fixed key. The
+ * backend answers under its own guard: a fault there stops the backend, and this answers -1. */
 int vpm_binding_down(const VpmBinding* binding);
 
 /* Mod Bindings Menu: the backend that answers vpm_binding_down. attach runs for every binding, registered before or
@@ -282,8 +283,11 @@ void* vpm_binding_data(const VpmBinding* binding);
 /* ---- the settings file ------------------------------------------------------------------------------------------ *
  * For what options do not cover (Mod Bindings Menu's assignments): "key = value" text in a section of the pack's
  * settings file, saved about a second after a change. Sections "components", "options" and "bindings" belong to the
- * core. Keys under 128 bytes, values under 256. */
+ * core. Keys under 128 bytes, values under 1024. */
 const char* vpm_setting(const char* section, const char* key); /* NULL when absent */
+/* The section's entries one by one, in the file's order: start *cursor at 0; 1 with *key and *value set, 0 after the
+ * last. The texts are valid until the next vpm_setting_put. */
+int vpm_setting_next(const char* section, int* cursor, const char** key, const char** value);
 void vpm_setting_put(const char* section, const char* key, const char* value); /* value NULL removes it */
 void vpm_settings_save_soon(void);
 /* Writes a waiting change now (Mod Options Menu's APPLY, as the Lua saved at once); nothing when none waits. */

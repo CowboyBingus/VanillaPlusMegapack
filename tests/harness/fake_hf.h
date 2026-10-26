@@ -28,6 +28,10 @@ typedef struct FakeCounts
 void fake_setup(void);
 const HfApi* fake_api(void);
 HfMod* fake_mod(void);
+/* A new session in the same game: HellForge's registrations, events fired, hooks, counts and the log are gone and the core
+ * is reset, while the fake memory (images, heap, holes, live fields, rows) and the settings file stay. The settings are
+ * written first by the test (vpm_settings_save_now) if it wants them kept. fake_start then starts the components again. */
+void fake_next_session(void);
 /* vpm_core_init with the fake API and these components. */
 int fake_start(const VpmComponentDef* const* defs, int count);
 /* The component started from defs[index] by fake_start. */

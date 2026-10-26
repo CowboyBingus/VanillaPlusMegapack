@@ -744,6 +744,19 @@ void fake_setup(void)
     vpm_settings_path_override(L"vpm-test-settings.ini");
 }
 
+void fake_next_session(void)
+{
+    g_loadCount = g_listenerCount = g_hookCount = 0;
+    g_tick = NULL;
+    g_tickUser = NULL;
+    g_afterTick = NULL;
+    memset(g_fired, 0, sizeof g_fired);
+    memset(&g_counts, 0, sizeof g_counts);
+    fake_log_clear();
+    vpm_core_reset();
+    vpm_settings_path_override(L"vpm-test-settings.ini");
+}
+
 int fake_start(const VpmComponentDef* const* defs, int count)
 {
     return vpm_core_init(&g_api, fake_mod(), defs, count);

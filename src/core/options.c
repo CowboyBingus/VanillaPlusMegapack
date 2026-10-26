@@ -17,7 +17,7 @@
 #define MAX_SETTINGS 512
 #define SECTION_SIZE 32
 #define KEY_SIZE 128
-#define VALUE_SIZE 256
+#define VALUE_SIZE 1024
 #define FILE_LIMIT (256 * 1024)
 #define SAVE_DELAY 1.0f
 
@@ -61,6 +61,20 @@ const char* vpm_setting(const char* section, const char* key)
 {
     const Setting* s = Find(section, key);
     return s != NULL ? s->value : NULL;
+}
+
+int vpm_setting_next(const char* section, int* cursor, const char** key, const char** value)
+{
+    for (int i = *cursor < 0 ? 0 : *cursor; i < g_settingCount; i++)
+        if (strcmp(g_settings[i].section, section) == 0)
+        {
+            *cursor = i + 1;
+            *key = g_settings[i].key;
+            *value = g_settings[i].value;
+            return 1;
+        }
+    *cursor = g_settingCount;
+    return 0;
 }
 
 void vpm_setting_put(const char* section, const char* key, const char* value)
@@ -478,10 +492,20 @@ VpmBinding* vpm_binding(VpmComponent* self, const VpmBindingDef* def)
     return binding;
 }
 
+typedef struct DownCall { const VpmBinding* binding; int result; } DownCall;
+static void RunDown(void* arg)
+{
+    DownCall* call = arg;
+    call->result = g_backend->down(call->binding, call->binding->data);
+}
+
+/* Under the backend owner's guard: a fault in its answer stops the bindings backend, not the component asking. */
 int vpm_binding_down(const VpmBinding* binding)
 {
     if (binding == NULL || g_backend == NULL || g_backend->down == NULL || !vpm_running(g_backendOwner)) return -1;
-    return g_backend->down(binding, binding->data);
+    DownCall call = {binding, -1};
+    if (!vpm_core_guarded(g_backendOwner, RunDown, &call)) return -1;
+    return call.result;
 }
 
 void vpm_bindings_set_backend(VpmComponent* owner, const VpmBindingBackend* backend)
