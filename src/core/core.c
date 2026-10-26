@@ -107,6 +107,14 @@ int vpm_fail(VpmComponent* self, const char* format, ...)
 
 int vpm_guarded(VpmComponent* self, void (*fn)(void*), void* arg) { return vpm_core_guarded(self, fn, arg); }
 
+int vpm_guarded_off_thread(void (*fn)(void*), void* arg, char* fault, size_t size)
+{
+    VpmFault caught;
+    if (vpm_guard_call(fn, arg, &caught) == 0) return 1;
+    if (fault != NULL && size > 0) vpm_fault_text(&caught, fault, size);
+    return 0;
+}
+
 int vpm_core_guarded(VpmComponent* component, void (*fn)(void*), void* arg)
 {
     VpmFault fault;

@@ -173,8 +173,12 @@ int vpm_lookup(uintptr_t header, uint32_t key, uint32_t limit, uint32_t* index);
 int vpm_hook(VpmComponent* self, uint32_t rva, const char* shipped, void* detour, void** original);
 int vpm_hook_exe(VpmComponent* self, uint32_t rva, const char* shipped, void* detour, void** original);
 /* Runs fn(arg) under the crash guard for the component: 1 when it ran to its end, 0 after a fault (the component is then
- * stopped and its stop() run). For a detour's own work. */
+ * stopped and its stop() run). For a detour's own work, on the game thread. */
 int vpm_guarded(VpmComponent* self, void (*fn)(void*), void* arg);
+/* The same guard on a thread of the component's own (a worker): 1 when fn ran to its end, 0 after a fault, described in
+ * fault (up to size bytes, as the core's "fault 0x... at ..." text). It stops nothing and logs nothing: the core's state
+ * is the game thread's, so the component reports the fault from there (vpm_fail), where its stop() then runs. */
+int vpm_guarded_off_thread(void (*fn)(void*), void* arg, char* fault, size_t size);
 
 /* ---- the local player (Arc Thrower Revamped v1.7.1's resolution) ------------------------------------------------- */
 
