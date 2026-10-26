@@ -1,7 +1,9 @@
 # Packs the Vanilla Plus Megapack for players: build/release/Vanilla-Plus-Megapack-HellForge-<version>.zip, the manifest at
 # its root. By default a source mod, as HellForge's own "Zip to share" packs one (docs/modding/tools.md "Releasing a
 # mod"): the manifest, icon, README, LICENSE and src/, and every player's HellForge builds the DLL. With -Prebuilt it
-# ships the DLL instead, its manifest marked "prebuilt": true for game build 25480438. Builds and tests first.
+# ships the DLL instead, its manifest marked "prebuilt": true for game build 25480438. Builds and tests first. Beside
+# it, <zip name>-symbols-<commit>.zip holds the unstripped DLL and PDB of that build for scripts/symbolize.py: they
+# match the prebuilt DLL; a player's own build of the source mod is a different build.
 # Usage: scripts/package.ps1 [-Prebuilt] [-HellForge <HellForge-Open checkout>]
 param([switch]$Prebuilt,[string]$HellForge=$env:HELLFORGE_OPEN)
 $ErrorActionPreference='Stop'
@@ -33,3 +35,12 @@ $zip=Join-Path $root ('build/release/Vanilla-Plus-Megapack-HellForge-{0}{1}.zip'
 if(Test-Path -LiteralPath $zip){Remove-Item -Force -LiteralPath $zip}
 Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zip
 Write-Output ('Packed {0} ({1:N0} KB)' -f $zip,((Get-Item -LiteralPath $zip).Length/1KB))
+# The symbols of the DLL this build made, for scripts/symbolize.py; not for players. They hold the build machine's
+# source paths.
+$identity=Get-Content -Raw -LiteralPath (Join-Path $root 'build/identity.json')|ConvertFrom-Json
+$symbolFiles=@($identity.symbols,[IO.Path]::ChangeExtension($identity.symbols,'.pdb'))
+foreach($file in $symbolFiles){if(-not(Test-Path -LiteralPath $file)){throw "The build left no $file."}}
+$symbolsZip=[IO.Path]::ChangeExtension($zip,$null).TrimEnd('.')+('-symbols-{0}.zip' -f $(if($identity.commit){$identity.commit}else{'unknown'}))
+if(Test-Path -LiteralPath $symbolsZip){Remove-Item -Force -LiteralPath $symbolsZip}
+Compress-Archive -LiteralPath $symbolFiles -DestinationPath $symbolsZip
+Write-Output ('Packed {0} ({1:N0} KB)' -f $symbolsZip,((Get-Item -LiteralPath $symbolsZip).Length/1KB))

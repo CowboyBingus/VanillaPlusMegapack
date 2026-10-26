@@ -24,6 +24,9 @@ under `[options]`; the Mod Options Menu component shows them in the game.
 The pack's log (`mod-cowboybingus.vanilla-plus-megapack.log` in the session's logs folder) lists each component's
 state at start-up, and at each mission's end the time each one took per frame.
 
+Alpha testers: [docs/ALPHA_TESTING.md](docs/ALPHA_TESTING.md) says what to switch on and what to send when something
+goes wrong.
+
 ## Building
 
 ```powershell
@@ -35,6 +38,12 @@ scripts/build.ps1 -Test -Only foliage_pass_through
 `scripts/package.ps1` packs the release zip (`build/release/`), after the build and every test: a source mod by
 default, as HellForge's "Zip to share" packs one (each player's HellForge builds the DLL), or with `-Prebuilt` the
 built DLL, marked for game build 25480438. `scripts/lint.ps1` runs HellForge's C lint over the pack.
+
+Symbols: each build also writes `build/symbols/vanilla_plus_megapack-<commit>.dll` and its `.pdb` (the same code with
+line tables), and `package.ps1` zips them beside the release as `...-symbols-<commit>.zip`. Keep that zip with the
+release. `python scripts/symbolize.py <log>` turns each `vanilla_plus_megapack.dll+0x...` in a tester's log into a
+function and source line, with the symbols of the commit the log's identity line names (`--symbols <dll>` to pick
+them). They match the DLL this build made (the prebuilt release), not a DLL HellForge built from the source zip.
 
 `scripts/check_code_pins.py <decoded game.dll image>` checks every code pin in the sources (each RVA a component
 checks, calls or hooks, with the bytes it expects there) against a dump of the running game's game.dll on build
