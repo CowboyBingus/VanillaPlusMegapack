@@ -108,6 +108,8 @@ void fake_set_record(const char* table, uint64_t id, uintptr_t row, uint32_t str
  * concrete bytes, at least 14 of them: the function as the game shipped it), while the image holds a jump to fn, so a
  * component that checked the bytes and then calls game.dll + rva calls fn. The page is made executable. */
 void fake_stand_in(uint32_t rva, const char* shipped, void* fn);
+/* The same in the fake helldivers2.exe image. */
+void fake_stand_in_exe(uint32_t rva, const char* shipped, void* fn);
 /* What vpm_module_export answers for a module's export (NULL: absent, the default for every name). */
 void fake_export(const char* module, const char* name, void* fn);
 /* After the nth API read (1: the next) that touches address, fn(user) runs, right after that read. One at a time. */

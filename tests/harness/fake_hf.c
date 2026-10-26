@@ -235,13 +235,18 @@ static int FakeReadCode(uintptr_t address, void* buffer, size_t size)
     return 0;
 }
 
-void fake_stand_in(uint32_t rva, const char* shipped, void* fn)
+static void StandInAt(uint8_t* image, uint32_t rva, const char* shipped, void* fn);
+
+void fake_stand_in(uint32_t rva, const char* shipped, void* fn) { StandInAt(g_game, rva, shipped, fn); }
+void fake_stand_in_exe(uint32_t rva, const char* shipped, void* fn) { StandInAt(g_exe, rva, shipped, fn); }
+
+static void StandInAt(uint8_t* image, uint32_t rva, const char* shipped, void* fn)
 {
     uint8_t bytes[64], mask[64];
     int n = ParsePattern(shipped, bytes, mask, 64);
     if (n < 14 || g_standInCount >= MAX_STAND_INS) { fprintf(stderr, "fake_stand_in: %d bytes (14 to 64)\n", n); exit(2); }
     StandIn* s = &g_standIns[g_standInCount++];
-    s->at = (uintptr_t)g_game + rva;
+    s->at = (uintptr_t)image + rva;
     s->size = n;
     memcpy(s->shipped, bytes, (size_t)n);
     uint8_t jump[14] = {0xFF, 0x25, 0, 0, 0, 0};

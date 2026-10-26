@@ -136,6 +136,8 @@ void* vpm_module_export(const char* module, const char* name);
 /* HfApi.code_matches at game.dll + rva: 1 when the bytes as the game shipped them (before any hook) match the IDA-style
  * pattern. */
 int vpm_game_code_matches(uint32_t rva, const char* pattern);
+/* The same at helldivers2.exe + rva. */
+int vpm_exe_code_matches(uint32_t rva, const char* pattern);
 
 /* The game's hash lookup: a 20-byte header {u64 rows, u32 capacity, u32 empty key, u32 multiplier} whose rows are
  * {u32 key, u32 index}, probed linearly from key * multiplier (at most 64 probes, a power-of-two capacity no larger than
@@ -292,6 +294,12 @@ void vpm_setting_put(const char* section, const char* key, const char* value); /
 void vpm_settings_save_soon(void);
 /* Writes a waiting change now (Mod Options Menu's APPLY, as the Lua saved at once); nothing when none waits. */
 void vpm_settings_save_now(void);
+
+/* The component's own folder for files it keeps between sessions (caches, profiles):
+ * %LOCALAPPDATA%\CowboyBingus\VanillaPlusMegapack\<component id>, as the game sees it (HellForge points the game's
+ * LOCALAPPDATA at the installation's user data and copies a sandboxed session's back). Made when missing. 1 with the
+ * path in out (UTF-16, terminated), 0 when it cannot be made. File work only off idle frames. */
+int vpm_data_folder(const VpmComponent* self, wchar_t* out, size_t size);
 
 /* ---- Windows functions resolved at run time --------------------------------------------------------------------- *
  * user32's are found with GetProcAddress at init, so the DLL links only kernel32 (HellForge's own source build passes no
