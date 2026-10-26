@@ -3,10 +3,9 @@
  * The world: a synthetic Armory (the Lua tests replayed a capture of build 25327279's UI; this builds the same shapes):
  * the thumbnail manager with two cards (12 visible tiles in card 0, 6 offscreen requests in card 1), the Armory
  * controller's grid (records, 3 rows of 4 widgets), the UI, state stack and dispatch, the package lease table, the kit
- * catalogue the requests resolve through, the preview queue and the dependency catalogue. The game.dll functions are the
- * harness's stand-ins (fake_stand_in: the code checks see the shipped bytes); the exe's get jump stubs once the
- * component has checked their bytes on the ship. As the Lua tests' test_calls: the lease functions change the fake lease
- * table, the engine's texture calls are recorded. */
+ * catalogue the requests resolve through, the preview queue and the dependency catalogue. The game's and the engine's
+ * functions are the harness's stand-ins (fake_stand_in, fake_stand_in_exe: the code checks see the shipped bytes), as the
+ * Lua tests' test_calls: the lease functions change the fake lease table, the engine's texture calls are recorded. */
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -112,11 +111,11 @@ static void PutHex(uint8_t* at, const char* hex)
     }
 }
 
-/* The pattern the component checks at a game.dll function. */
-static const char* Shipped(uint32_t rva)
+/* The pattern the component checks at a game.dll (exe 0) or exe (1) function. */
+static const char* Shipped(int exe, uint32_t rva)
 {
     for (size_t i = 0; i < sizeof kSigs / sizeof kSigs[0]; i++)
-        if (!kSigs[i].exe && kSigs[i].rva == rva) return kSigs[i].hex;
+        if (kSigs[i].exe == exe && kSigs[i].rva == rva) return kSigs[i].hex;
     return "";
 }
 
@@ -242,36 +241,31 @@ static int FakeMemory(uint64_t* free, uint64_t* commit)
     return 1;
 }
 
-/* mov rax, target; jmp rax: the fake image's code at a native entry point, once the component has checked its bytes. */
-static void Stub(uint8_t* at, void* target)
-{
-    DWORD old;
-    uint8_t code[12] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0};
-    uint64_t t = (uint64_t)(uintptr_t)target;
-    memcpy(code + 2, &t, 8);
-    VirtualProtect(at, sizeof code, PAGE_EXECUTE_READWRITE, &old); /* lint-ok: C1,C3 the test makes the fake game code executable */
-    memcpy(at, code, sizeof code);
-}
-
-/* game.dll's functions: the harness's stand-ins (code_matches sees the shipped bytes), in place from the start. */
+/* The game's and the exe's functions: the harness's stand-ins (code_matches sees the shipped bytes), from the start. */
 static void StandIns(void)
 {
-    static const struct { uint32_t rva; void* fn; } kGame[] = {
-        {APC_RVA_ACQUIRE, (void*)FakeAcquire}, {APC_RVA_RELEASE, (void*)FakeRelease},
-        {APC_RVA_SET_TEXTURE, (void*)FakeSetTexture}, {APC_RVA_SET_UV, (void*)FakeSetUv},
-        {APC_RVA_SET_SIZE, (void*)FakeSetSize}, {APC_RVA_SET_ALPHA, (void*)FakeSetAlpha},
-        {APC_RVA_MATERIAL, (void*)FakeMaterial}, {APC_RVA_REGISTER_IMAGE, (void*)FakeRegisterImage},
+    static const struct { int exe; uint32_t rva; void* fn; } kCalls[] = {
+        {0, APC_RVA_ACQUIRE, (void*)FakeAcquire}, {0, APC_RVA_RELEASE, (void*)FakeRelease},
+        {0, APC_RVA_SET_TEXTURE, (void*)FakeSetTexture}, {0, APC_RVA_SET_UV, (void*)FakeSetUv},
+        {0, APC_RVA_SET_SIZE, (void*)FakeSetSize}, {0, APC_RVA_SET_ALPHA, (void*)FakeSetAlpha},
+        {0, APC_RVA_MATERIAL, (void*)FakeMaterial}, {0, APC_RVA_REGISTER_IMAGE, (void*)FakeRegisterImage},
+        {1, APC_EXE_CREATE, (void*)FakeCreate}, {1, APC_EXE_DESTROY, (void*)FakeDestroy},
+        {1, APC_EXE_REGISTER, (void*)FakeRegister},
     };
-    for (size_t i = 0; i < sizeof kGame / sizeof kGame[0]; i++) fake_stand_in(kGame[i].rva, Shipped(kGame[i].rva), kGame[i].fn);
+    for (size_t i = 0; i < sizeof kCalls / sizeof kCalls[0]; i++)
+    {
+        if (kCalls[i].exe) fake_stand_in_exe(kCalls[i].rva, Shipped(1, kCalls[i].rva), kCalls[i].fn);
+        else fake_stand_in(kCalls[i].rva, Shipped(0, kCalls[i].rva), kCalls[i].fn);
+    }
 }
 
-/* The exe's functions: the harness has no stand-in for them, so their jumps go in once the component has checked the
- * bytes (its first tick). */
-static void ExeStubs(void)
+/* An exe function whose shipped bytes are not the reviewed ones: a later stand-in with one byte changed. */
+static void BreakExe(uint32_t rva, void* fn)
 {
-    Stub(Exe(APC_EXE_CREATE), (void*)FakeCreate);
-    Stub(Exe(APC_EXE_DESTROY), (void*)FakeDestroy);
-    Stub(Exe(APC_EXE_REGISTER), (void*)FakeRegister);
+    char broken[256];
+    snprintf(broken, sizeof broken, "%s", Shipped(1, rva));
+    broken[0] = broken[0] == '4' ? '5' : '4';
+    fake_stand_in_exe(rva, broken, fn);
 }
 
 /* ---- the world ------------------------------------------------------------------------------------------------- */
@@ -464,12 +458,10 @@ static void BuildGlobals(void)
     Put64(Game(APC_RVA_DATABASE), P(w.database));
 }
 
-/* The profile folder: LOCALAPPDATA points the component at a folder of the test's own. */
-static wchar_t g_local[MAX_PATH];
-
+/* The profile in the component's data folder: in the tests, the core's vpm-test-data\armory_preview_cache. */
 static void ProfileFile(wchar_t* out, const wchar_t* suffix)
 {
-    _snwprintf(out, MAX_PATH, L"%ls\\CowboyBingus\\VanillaPlusMegapack\\armory_preview_cache\\ArmoryPreviewCache.profile%ls", g_local, suffix);
+    _snwprintf(out, MAX_PATH, L"vpm-test-data\\armory_preview_cache\\ArmoryPreviewCache.profile%ls", suffix);
 }
 
 static void ForgetProfile(void)
@@ -498,13 +490,9 @@ static size_t ReadProfileFile(const wchar_t* suffix, char* text, size_t size)
 
 static void WriteProfileFile(const wchar_t* suffix, const char* text)
 {
-    wchar_t path[MAX_PATH], folder[MAX_PATH];
-    _snwprintf(folder, MAX_PATH, L"%ls\\CowboyBingus", g_local);
-    (void)CreateDirectoryW(folder, NULL);
-    _snwprintf(folder, MAX_PATH, L"%ls\\CowboyBingus\\VanillaPlusMegapack", g_local);
-    (void)CreateDirectoryW(folder, NULL);
-    _snwprintf(folder, MAX_PATH, L"%ls\\CowboyBingus\\VanillaPlusMegapack\\armory_preview_cache", g_local);
-    (void)CreateDirectoryW(folder, NULL);
+    wchar_t path[MAX_PATH];
+    (void)CreateDirectoryW(L"vpm-test-data", NULL);
+    (void)CreateDirectoryW(L"vpm-test-data\\armory_preview_cache", NULL);
     ProfileFile(path, suffix);
     HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     DWORD wrote = 0;
@@ -539,13 +527,12 @@ static void BuildWorld(void)
 
 static VpmComponent* C(void) { return fake_component(0); }
 
-/* The component started on the ship; its first tick initializes (the code bytes checked), then the exe's stubs go in. */
+/* The component started on the ship; its first tick initializes (the code bytes checked). */
 static void Boot(void)
 {
     fake_start(kDefs, 1);
     fake_fire(HF_EVENT_GAME_LOADED);
     fake_frames(2, DT);
-    ExeStubs();
 }
 
 static void Frames(int n) { fake_frames(n, DT); }
@@ -632,7 +619,7 @@ static void RefusesWhatIsNotAsReviewed(void)
         fake_setup();
         BuildWorld();
         if (c == 0) Game(0x12FE361u + 300)[0] ^= 1; /* past the first 256 bytes: the long signature is checked whole */
-        if (c == 1) Exe(0x31E030u)[3] ^= 1;
+        if (c == 1) BreakExe(APC_EXE_REGISTER, (void*)FakeRegister);
         if (c == 2) Put64(Game(APC_RVA_ROOT_API), P(Exe(APC_EXE_ROOT_API)) + 8);
         if (c == 3) Put64(w.app + 768, P(Exe(APC_EXE_PACKAGE_A)));
         if (c == 4) Put64(w.app + 400, P(Exe(APC_EXE_CREATE)));
@@ -649,7 +636,7 @@ static void ImagesOffLeasesOnly(void)
 {
     BuildWorld();
     WriteSettings("[armory_preview_cache]\nimages = 0\n");
-    Exe(0x31E030u)[3] ^= 1; /* an image function's bytes: not checked with images off */
+    BreakExe(APC_EXE_REGISTER, (void*)FakeRegister); /* an image function's bytes: not checked with images off */
     Boot();
     CHECK(vpm_running(C()));
     CHECK_LOG("rendered-image retention off");
@@ -1391,7 +1378,6 @@ static void OnceOnlyCosts(void)
     CHECK_EQ(c.code_matches, 20);
     CHECK_EQ(c.read, 9);
     CHECK_EQ(c.log, 1);
-    ExeStubs();
     CHECK_EQ(Frame().read, 2);
     /* The first policy step: the refresh (2) and the asset snapshot on the ship (5: the lease table's owner 2, the
      * stack, the UI world and its busy flag), one memory poll. Then idle: 1 read. */
@@ -1691,11 +1677,6 @@ static void DependenciesBesideOverBound(void)
 
 int main(void)
 {
-    wchar_t cwd[MAX_PATH];
-    GetCurrentDirectoryW(MAX_PATH, cwd);
-    _snwprintf(g_local, MAX_PATH, L"%ls\\apc-localappdata", cwd);
-    (void)CreateDirectoryW(g_local, NULL);
-    SetEnvironmentVariableW(L"LOCALAPPDATA", g_local);
     RUN(IdlesOnTheShip);
     RUN(WaitsForTheEngineApi);
     RUN(RefusesWhatIsNotAsReviewed);
