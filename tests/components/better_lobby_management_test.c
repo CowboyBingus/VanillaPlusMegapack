@@ -1269,9 +1269,9 @@ static void AnEngineSlotDecodedLaterStartsItThen(void)
 {
     NewWorld(1);
     StartedEncoded(Exe(EXE_CONTINENT));
-    /* the network code, the PlayFab layout, the natives; then 2 slots, twice: the core's look at the event also takes
-     * the wait registered during it */
-    CHECK_EQ(fake_counts().code_matches, 18 + 2 + 2);
+    /* the network code, the PlayFab layout, the natives; then the 2 slots, once: the wait registered during the core's
+     * look at the event is looked at by its registration only */
+    CHECK_EQ(fake_counts().code_matches, 18 + 2);
     CHECK_EQ(Reads(), 6);
     CHECK(vpm_running(Self()) && !vpm_ticking(Self()));
     Frames(60);
