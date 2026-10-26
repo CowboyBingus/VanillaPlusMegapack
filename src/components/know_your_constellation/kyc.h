@@ -212,11 +212,9 @@ void kyc_model_pending(const KycModel* drawn, KycModel* out);
 
 /* ---- text (bingus_text.lua) --------------------------------------------------------------------------------- */
 
-/* The code point at text[at] and the byte after it, or 0 when the bytes there are not valid UTF-8. */
-int kyc_utf8_decode(const char* text, size_t length, size_t at, uint32_t* value, size_t* after);
-/* Valid UTF-8 without control characters: 1, or 0 with *bad the 1-based byte and *why ("invalid UTF-8"...). */
+/* The first length bytes of text are valid UTF-8 without control characters: 1, or 0 with *bad the 1-based byte and
+ * *why ("invalid UTF-8"...). Code points and lengths in characters: the core's vpm_utf8_decode and vpm_utf8_length. */
 int kyc_text_check(const char* text, size_t length, size_t* bad, const char** why);
-size_t kyc_text_length(const char* text, size_t length); /* code points */
 /* Byte offsets (0-based) where each character starts, then length: their count (characters + 1), or -1 when there is
  * no room for them in out. */
 int kyc_text_boundaries(const char* text, size_t length, uint16_t* out, int capacity);

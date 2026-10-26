@@ -71,7 +71,7 @@ int blm_chat_send(const char* text, uint32_t* sent, const char** why)
     if ((enabled & 0xFFu) == 0) { *why = "text chat is off"; return 0; }
     uint32_t n = Others(ctx);
     if (n == 0) { *why = "nobody else in the session"; return 0; }
-    size_t length = blm_cut(text, MAX_TEXT);
+    size_t length = vpm_utf8_clip(text, MAX_TEXT); /* chat.lua cut: no character split */
     memcpy(g_line, text, length);
     g_line[length] = 0;
     s.send(ctx + CHAT, 0, (uint64_t)(uintptr_t)g_line);

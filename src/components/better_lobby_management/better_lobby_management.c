@@ -206,7 +206,7 @@ static void OfferShip(uint64_t target)
         blm_format(unknown, sizeof unknown, blm_tr("player.unknown", "player {id}"), "{id}", hex);
         name = unknown;
     }
-    blm_upper(name, upper, sizeof upper); /* upper case for every script the game's fonts carry */
+    vpm_upper(name, upper, sizeof upper); /* upper case for every script the game's fonts carry */
     s.offer.order[0] = BLM_DISBAND;
     s.offer.order[1] = BLM_PROMOTE;
     s.offer.count = 2;

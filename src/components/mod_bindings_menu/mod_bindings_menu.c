@@ -14,8 +14,8 @@
  *
  * Files: this one (the frame, the build check, the backend); mbm_maps.c (binding maps, the native answer, the mission
  * check); mbm_sweep.c (the sweep and the keyboard defaults); mbm_assign.c (registration and reservations); mbm_tab.c
- * (the native tabs, the label pool, the MODS title); mbm_text.c (UTF-8 upper case); mbm_extended.c (extended bindings
- * and their store); mbm_capture.c (key capture); mbm_panel.c and mbm_draw.c (the MORE MODS panel).
+ * (the native tabs, the label pool, the MODS title); mbm_text.c (the rows' texts); mbm_extended.c (extended bindings
+ * and their store); mbm_capture.c (key capture); mbm_panel.c (the MORE MODS panel).
  *
  * On HellForge, what differs from the Lua:
  *   - The registry is the core's (vpm.h "bindings"): the component is its backend (vpm_bindings_set_backend). attach
@@ -36,7 +36,8 @@
  *     Before its first store into a binding page's screen object (tab buttons, the row request) and into a binding map,
  *     each is checked writable once, which the Lua did not do.
  *   - Texts: English (vpm_text), so the Lua's language observation and per-page refresh have nothing to do. The UTF-8
- *     checks, limits and upper case of every script the game's fonts carry are kept (mbm_text.c).
+ *     checks, limits and upper case of every script the game's fonts carry are kept (mbm_text.c, over the core's one
+ *     copy of the Lua text module).
  *   - Extended bindings and the MORE MODS page need the engine's input and Gui, which a C mod cannot reach yet
  *     (mbm_engine.h). Their logic is ported behind that interface; without a backend an extended binding answers -1 (the
  *     caller's fixed key; the Lua said false until engine input existed) and the MORE MODS tab is not offered (status).
