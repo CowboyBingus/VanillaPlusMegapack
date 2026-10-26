@@ -32,6 +32,10 @@ scripts/build.ps1 -Test    # and every test (tests/core_test.c, tests/components
 scripts/build.ps1 -Test -Only foliage_pass_through
 ```
 
+`scripts/package.ps1` packs the release zip (`build/release/`), after the build and every test: a source mod by
+default, as HellForge's "Zip to share" packs one (each player's HellForge builds the DLL), or with `-Prebuilt` the
+built DLL, marked for game build 25480438. `scripts/lint.ps1` runs HellForge's C lint over the pack.
+
 It uses HellForge's pinned Zig and the mod SDK of a HellForge-Open checkout (`-HellForge`, `HELLFORGE_OPEN`, or
 `../sdk-dev/HellForge-Open`), with the flags HellForge builds every mod with. HellForge's own `scripts/Build-Mod.ps1`
 builds the same DLL from this folder.
