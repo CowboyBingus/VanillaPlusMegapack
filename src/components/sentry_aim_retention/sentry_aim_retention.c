@@ -30,7 +30,14 @@
  *   - A check that failed starts fresh with nothing engaged, as in the Lua: no second check that frame.
  *   The post-update tick is registered while a sentry is engaged and removed when none is: a frame with nothing engaged
  *   has none. Without the core's frame hook it runs right after the tick, back to back, where the Lua made its second
- *   check.
+ *   check. When the core refuses the post-update tick, the second check runs at once, there too, and the next engaged
+ *   frame asks again.
+ * - The seven code checks (the four game.dll setters, the exe's pose getter and terrain query routines) run once, at the
+ *   first check that finds a sentry this machine controls, as the Lua's: in a mission, never at HF_EVENT_GAME_LOADED,
+ *   the first tick or on the ship (no such sentry then). That is far past HellForge's decoding of game.dll in parts
+ *   after that event (its own later pins get 20 s), so they stay there rather than on vpm_when_code_ready. Bytes that
+ *   did not match would be an own error of that check (everything restored, a fresh start, the next check tries again;
+ *   8 in a burst stop it), as in the Lua.
  * - Reads inside game.dll's and the exe's images (the managers' roots, the clock root, the mission record pointer, the
  *   unit table, actor pools) are plain loads, not ReadProcessMemory.
  * - Memory protection (vpm_writable) is checked once per range, before its first write, and the result kept until the

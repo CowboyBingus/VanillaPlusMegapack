@@ -794,7 +794,7 @@ static void FollowsMovedArrays(void)
 /* ---- the second check after game.dll's update (the core's frame hook) ---------------------------------------------- */
 
 static void (*g_inUpdate)(void); /* what the game's update changes, on the next engine frame only */
-static uint32_t g_holdingInUpdate, g_pausedInUpdate;
+static uint32_t g_holdingInUpdate, g_pausedInUpdate, g_pollsInUpdate;
 static int g_recordInUpdate;     /* the sentry's aim was recorded when the game's update ran */
 
 /* The game's own update (fake_after_tick's step, inside game.dll's frame update): it notes what the frame's checks
@@ -802,6 +802,7 @@ static int g_recordInUpdate;     /* the sentry's aim was recorded when the game'
 static void GameUpdate(float dt)
 {
     const SarAimRecord* r = sar_aim_record(SENTRY);
+    g_pollsInUpdate = sar_state.polls;
     g_holdingInUpdate = sar_state.holding;
     g_pausedInUpdate = sar_state.fire_paused;
     g_recordInUpdate = r != NULL && r->has_raw;
@@ -986,6 +987,140 @@ static void AFaultInThePostCheck(void)
     CHECK(Untouched());
     c = EngineFrame(NULL);
     CHECK_EQ(c.polls + c.read + c.natives, 0);
+}
+
+/* ---- the post-update tick refused (vpm_post_tick_start answers 0) -------------------------------------------------- */
+
+/* One engine frame whose checks must all have run before the game's update, and its calls. */
+static Counts FrameAllBeforeTheUpdate(void (*change)(void))
+{
+    uint32_t polls = sar_state.polls;
+    Counts c = EngineFrame(change);
+    CHECK_EQ(g_pollsInUpdate, polls + c.polls);
+    CHECK(!vpm_post_ticking(Self()));
+    return c;
+}
+
+/* Refused from the start: while a sentry is engaged the second check runs at once, before the game's update, where the
+ * Lua made it: two checks per frame with the Lua's counts; a loss inside the update is answered by the next frame's
+ * first check, as in the Lua. Lifted later, the post-update tick is used again. */
+static void ARefusedPostTickChecksAtOnce(void)
+{
+    StartedEngine(1);
+    fake_refuse_ticks(0, 1);
+    FrameAllBeforeTheUpdate(NULL); /* located; the functions bound */
+    Counts c = FrameAllBeforeTheUpdate(NULL);
+    CHECK(c.polls == 2 && c.read == 62 && c.natives == 2 && c.queries == 0);
+    c = FrameAllBeforeTheUpdate(LoseTarget);
+    CHECK(c.polls == 2 && sar_state.holding == 0 && Get32(w.modes) == 1);
+    c = FrameAllBeforeTheUpdate(NULL);
+    CHECK(c.polls == 2 && c.read == 137 && c.queries == 5 && c.natives == 4);
+    CHECK(g_holdingInUpdate == 1 && g_pausedInUpdate == 1 && StatusIs("firing_paused"));
+    /* Reacquired: the release, the record at once, the second at once: all before the update. */
+    Target(TARGET, 3);
+    c = FrameAllBeforeTheUpdate(NULL);
+    CHECK(c.polls == 3 && c.read == 168 && g_recordInUpdate);
+    fake_refuse_ticks(0, 0);
+    uint32_t polls = sar_state.polls;
+    c = EngineFrame(NULL);
+    CHECK(c.polls == 2 && g_pollsInUpdate == polls + 1 && vpm_post_ticking(Self()));
+    vpm_core_stop(Self(), "test");
+    CHECK(Untouched());
+}
+
+/* Refused after a registration worked: an engaged period with the post-update tick ends (the sentry removed: nothing
+ * engaged, the tick removed); the core then refuses; the waiting frames make no check; the sentry back (found at the
+ * next 30th check) engages again, and its second checks run at once. */
+static void ARefusalAfterARegistrationWorked(void)
+{
+    StartedEngine(1);
+    EngineFrame(NULL);
+    uint32_t polls = sar_state.polls;
+    Counts c = EngineFrame(NULL);
+    CHECK(c.polls == 2 && g_pollsInUpdate == polls + 1 && vpm_post_ticking(Self()));
+    Put32(w.tm + 324, 0);
+    c = EngineFrame(NULL);
+    CHECK(c.polls == 1 && !vpm_post_ticking(Self()) && StatusIs("waiting_for_sentries"));
+    fake_refuse_ticks(0, 1);
+    Put32(w.tm + 324, 1);
+    int waiting = 0;
+    while (sar_cache.exists && sar_cache.idle && (sar_cache.checks + 1) % SAR_RESCAN != 0 && waiting < 40)
+    {
+        c = FrameAllBeforeTheUpdate(NULL);
+        CHECK_EQ(c.polls + c.read + c.natives + c.queries, 0);
+        waiting++;
+    }
+    CHECK(waiting > 0 && waiting < 30);
+    c = FrameAllBeforeTheUpdate(NULL); /* found, tracking: engaged */
+    CHECK(c.polls == 2 && StatusIs("observing"));
+    for (int i = 0; i < 5; i++)
+    {
+        c = FrameAllBeforeTheUpdate(NULL);
+        CHECK(c.polls == 2 && c.read == 62);
+    }
+    vpm_core_stop(Self(), "test");
+    CHECK(Untouched());
+}
+
+/* StopsAfterEightErrorsInABurst with the post-update tick refused: 7 errors (each leaves nothing engaged: one check),
+ * then `engaged` clean frames on the refused branch (tracking: two checks at once), then the 8th error. 3599 clean
+ * frames keep the burst (stopped), 3600 end it. 1 running. */
+static int RefusedBurst(int engaged)
+{
+    fake_setup();
+    StartedEngine(1);
+    fake_refuse_ticks(0, 1);
+    EngineFrame(NULL);
+    Put32(w.behavior, 999);
+    for (int i = 0; i < 7; i++) CHECK_EQ(FrameAllBeforeTheUpdate(NULL).polls, 1);
+    CHECK(vpm_running(Self()) && fake_log_count("error: Unsupported sentry behavior") == 1);
+    Put32(w.behavior, 213);
+    for (int i = 0; i < engaged; i++)
+    {
+        if (i < 3 || i == engaged - 1) CHECK_EQ(FrameAllBeforeTheUpdate(NULL).polls, 2);
+        else fake_engine_frames(1, DT);
+    }
+    CHECK(StatusIs("observing"));
+    Put32(w.behavior, 999);
+    EngineFrame(NULL);
+    return vpm_running(Self());
+}
+
+static void ErrorBurstsOnTheRefusedBranch(void)
+{
+    CHECK(!RefusedBurst(3599));
+    CHECK_LOG("disabled: stopped after 8 errors: Unsupported sentry behavior");
+    CHECK(RefusedBurst(3600));
+    CHECK_EQ(fake_log_count("error: Unsupported sentry behavior"), 2);
+    CHECK(Untouched());
+}
+
+/* The seven code checks run once, at the first check that finds a sentry this machine controls (in a mission), never
+ * at HF_EVENT_GAME_LOADED or while waiting. Still encoded there, the check fails as an own error (restored, started
+ * fresh, still running) and the next check binds once the code reads as shipped. */
+static void CodeChecksWaitForTheFirstSentry(void)
+{
+    MakeWorld();
+    Ptr(Game(0x3326D30), NULL); /* no targeting registry yet */
+    memset(Game(0x6BF390), 0xCC, 24); /* the retention setter: still encoded */
+    fake_counts_reset();
+    Started();
+    fake_frames(120, DT);
+    CHECK_EQ(fake_counts().code_matches, 0); /* the load, the first check, the waiting frames: no code check */
+    Ptr(Game(0x3326D30), w.tm); /* the mission's registry with this machine's sentry */
+    fake_counts_reset();
+    for (int i = 0; i < 30 && sar_state.observed == 0 && fake_counts().code_matches == 0; i++) fake_frames(1, DT);
+    CHECK(fake_counts().code_matches > 0 && fake_counts().code_matches < 7);
+    CHECK(vpm_running(Self()) && StatusIs("Unsupported native sentry setter") && !sar_natives_bound());
+    CHECK(Untouched());
+    PutCodes(); /* decoded */
+    fake_counts_reset();
+    fake_frames(1, DT);
+    CHECK_EQ(fake_counts().code_matches, 7);
+    CHECK(sar_natives_bound() && StatusIs("observing"));
+    fake_counts_reset();
+    fake_frames(5, DT);
+    CHECK_EQ(fake_counts().code_matches, 0);
 }
 
 /* ---- test_loader.lua: own errors --------------------------------------------------------------------------------- */
@@ -2362,6 +2497,10 @@ int main(void)
     RUN(IdleFramesHaveNoPostCheck);
     RUN(PostCheckStops);
     RUN(AFaultInThePostCheck);
+    RUN(ARefusedPostTickChecksAtOnce);
+    RUN(ARefusalAfterARegistrationWorked);
+    RUN(ErrorBurstsOnTheRefusedBranch);
+    RUN(CodeChecksWaitForTheFirstSentry);
     RUN(StopsAfterEightErrorsInABurst);
     RUN(StopsAtOnceWhenARestoreFails);
     RUN(LossHoldsAimAndScanReleases);
