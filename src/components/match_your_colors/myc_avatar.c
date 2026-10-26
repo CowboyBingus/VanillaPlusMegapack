@@ -266,6 +266,19 @@ int myc_avatar_others_desired(MycDesired* out)
     return count;
 }
 
+/* One player's part of players_text: its length as snprintf counts it. */
+static size_t MycAvEntryText(uintptr_t players, const MycAvEntry* e, int first, char* out, size_t size)
+{
+    uint8_t peer[8] = {0};
+    uint32_t unit = 0, slot = 0;
+    int has_peer = MycAvRead(players + P_PEERS + 56 * e->index, peer, 8);
+    if (!MycAvWord(players + P_UNITS + 32 * e->index, &unit)) unit = 0;
+    int has_slot = MycAvWord(players + P_UI_SLOT + 32 * e->index, &slot);
+    uint32_t high = has_peer ? MycAvLe32(peer + 4) : 0, low = has_peer ? MycAvLe32(peer) : 0;
+    return (size_t)snprintf(out, size, "%sindex %u peer %08x%08x unit %x slot %d%s", first ? "" : ", ", e->index, high, low,
+        unit, has_slot ? (int)slot : -1, e->is_local ? " (this machine's)" : "");
+}
+
 void myc_avatar_players_text(char* out, size_t size)
 {
     uintptr_t players = MycAvPointer(vpm_game() + PLAYERS);
@@ -274,17 +287,7 @@ void myc_avatar_players_text(char* out, size_t size)
     int n = MycAvEntries(players, entries);
     size_t at = 0;
     out[0] = 0;
-    for (int i = 0; i < n && at < size; i++)
-    {
-        uint8_t peer[8] = {0};
-        uint32_t unit = 0, slot = 0;
-        int has_peer = MycAvRead(players + P_PEERS + 56 * entries[i].index, peer, 8);
-        if (!MycAvWord(players + P_UNITS + 32 * entries[i].index, &unit)) unit = 0;
-        int has_slot = MycAvWord(players + P_UI_SLOT + 32 * entries[i].index, &slot);
-        at += (size_t)snprintf(out + at, size - at, "%sindex %u peer %08x%08x unit %x slot %d%s", i ? ", " : "", entries[i].index,
-            has_peer ? MycAvLe32(peer + 4) : 0, has_peer ? MycAvLe32(peer) : 0, unit, has_slot ? (int)slot : -1,
-            entries[i].is_local ? " (this machine's)" : "");
-    }
+    for (int i = 0; i < n && at < size; i++) at += MycAvEntryText(players, &entries[i], i == 0, out + at, size - at);
     if (n == 0) snprintf(out, size, "no players");
 }
 

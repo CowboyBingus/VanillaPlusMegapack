@@ -220,11 +220,11 @@ static void MycItemBorrow(MycRow* rows, int n, const MycLook* look)
 }
 
 /* The item's own copies of the analysis rows, with the model color and texture area kept. */
-static MycRow* MycItemCopy(MycArena* arena, const MycRow* rows, int n, const MycLook* look, int keep_hoods)
+static MycRow* MycItemCopy(MycArena* arena, const MycRow* rows, int n, const MycLook* look)
 {
     MycRow* out = myc_alloc(arena, sizeof(MycRow) * (size_t)(n > 0 ? n : 1));
     if (out == NULL) return NULL;
-    int hoods = keep_hoods && look != NULL && look->has_hoods;
+    int hoods = look != NULL && look->keep_hoods && look->has_hoods;
     for (int i = 0; i < n; i++)
     {
         MycRow* row = &out[i];
@@ -258,41 +258,51 @@ static int MycItemPaint(MycArena* arena, MycItem* item, const MycAppKit* kit)
     return 1;
 }
 
-/* The item's patterns: perceived (a measured one's look through its gain), area and share. */
+/* A measured pattern's look through its gain. */
+static void MycItemPatternGain(MycGroup* e, const MycPatternIn* p, const MycAppPattern* measured)
+{
+    memcpy(e->gain, measured->gain, sizeof e->gain);
+    e->has_gain = 1;
+    MycLab look = myc_linear_to_lab(myc_max(e->gain[0] * myc_srgb_to_linear(p->r), 0),
+        myc_max(e->gain[1] * myc_srgb_to_linear(p->g), 0), myc_max(e->gain[2] * myc_srgb_to_linear(p->b), 0));
+    e->L = look.L;
+    e->a = look.a;
+    e->b = look.b;
+}
+
+/* One pattern of the item: perceived (a measured one's look through its gain), area and share; NULL out of memory. */
+static MycGroup* MycItemPattern(MycArena* arena, const MycItem* item, const MycPatternIn* p, const MycAppKit* kit)
+{
+    MycGroup* e = myc_alloc(arena, sizeof *e);
+    if (e == NULL) return NULL;
+    MycLab m = myc_srgb_to_lab(p->r, p->g, p->b);
+    e->kind = MYC_PATTERN;
+    e->pattern = p->pattern;
+    if (p->emblem) snprintf(e->rep_key, MYC_KEY, "pattern:emblem:%d:%d", p->erow, p->elayer);
+    else snprintf(e->rep_key, MYC_KEY, "pattern:%016llx", (unsigned long long)p->pattern);
+    e->area = p->area;
+    e->L = e->mL = m.L;
+    e->a = e->ma = m.a;
+    e->b = e->mb = m.b;
+    e->texel[0] = p->r;
+    e->texel[1] = p->g;
+    e->texel[2] = p->b;
+    const MycAppPattern* measured = kit != NULL ? myc_app_kit_pattern(kit, p->pattern) : NULL;
+    if (kit != NULL) e->area = measured != NULL ? measured->px : 0;
+    if (measured != NULL && measured->has_gain) MycItemPatternGain(e, p, measured);
+    e->share = e->area / item->paint_area;
+    return e;
+}
+
+/* The item's patterns (MycItemPattern each). */
 static int MycItemPatterns(MycArena* arena, MycItem* item, const MycPatternIn* patterns, int n, const MycAppKit* kit)
 {
     item->patterns = myc_alloc(arena, sizeof(MycGroup*) * (size_t)(n + 1));
     if (item->patterns == NULL) return 0;
     for (int i = 0; i < n; i++)
     {
-        const MycPatternIn* p = &patterns[i];
-        MycGroup* e = myc_alloc(arena, sizeof *e);
+        MycGroup* e = MycItemPattern(arena, item, &patterns[i], kit);
         if (e == NULL) return 0;
-        MycLab m = myc_srgb_to_lab(p->r, p->g, p->b);
-        e->kind = MYC_PATTERN;
-        e->pattern = p->pattern;
-        if (p->emblem) snprintf(e->rep_key, MYC_KEY, "pattern:emblem:%d:%d", p->erow, p->elayer);
-        else snprintf(e->rep_key, MYC_KEY, "pattern:%016llx", (unsigned long long)p->pattern);
-        e->area = p->area;
-        e->L = e->mL = m.L;
-        e->a = e->ma = m.a;
-        e->b = e->mb = m.b;
-        e->texel[0] = p->r;
-        e->texel[1] = p->g;
-        e->texel[2] = p->b;
-        const MycAppPattern* measured = kit != NULL ? myc_app_kit_pattern(kit, p->pattern) : NULL;
-        if (kit != NULL) e->area = measured != NULL ? measured->px : 0;
-        if (measured != NULL && measured->has_gain)
-        {
-            memcpy(e->gain, measured->gain, sizeof e->gain);
-            e->has_gain = 1;
-            MycLab look = myc_linear_to_lab(myc_max(e->gain[0] * myc_srgb_to_linear(p->r), 0),
-                myc_max(e->gain[1] * myc_srgb_to_linear(p->g), 0), myc_max(e->gain[2] * myc_srgb_to_linear(p->b), 0));
-            e->L = look.L;
-            e->a = look.a;
-            e->b = look.b;
-        }
-        e->share = e->area / item->paint_area;
         item->patterns[item->npatterns++] = e;
     }
     return 1;
@@ -324,12 +334,12 @@ static void MycItemLooks(MycItem* item, const MycLook* look)
 }
 
 MycItem* myc_item(MycArena* arena, const MycRow* rows, int nrows, int armor, const MycPatternIn* patterns, int npatterns,
-    const MycLook* look, int keep_hoods)
+    const MycLook* look)
 {
     const MycAppKit* kit = look != NULL ? look->kit : NULL;
     MycItem* item = myc_alloc(arena, sizeof *item);
     if (item == NULL) return NULL;
-    item->rows = MycItemCopy(arena, rows, nrows, look, keep_hoods);
+    item->rows = MycItemCopy(arena, rows, nrows, look);
     if (item->rows == NULL) return NULL;
     item->nrows = nrows;
     item->armor = armor;

@@ -37,8 +37,8 @@ static void MycWorkerTask(void* arg)
 static void MycWorkerRun(MycWorker* w)
 {
     LARGE_INTEGER frequency, started, ended;
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&started);
+    QueryPerformanceFrequency(&frequency); /* lint-ok: C4 the worker thread's clock (inline only in the tests' synchronous mode) */
+    QueryPerformanceCounter(&started); /* lint-ok: C4 as above */
     w->ok = 0;
     w->result = NULL;
     memset(&w->err, 0, sizeof w->err);
@@ -51,7 +51,7 @@ static void MycWorkerRun(MycWorker* w)
         InterlockedExchange(&w->faulted, 1);
         InterlockedExchange(&w->quit, 1);
     }
-    QueryPerformanceCounter(&ended);
+    QueryPerformanceCounter(&ended); /* lint-ok: C4 as above */
     w->seconds = frequency.QuadPart > 0 ? (double)(ended.QuadPart - started.QuadPart) / (double)frequency.QuadPart : 0.0;
 }
 
@@ -74,7 +74,7 @@ static int MycWorkerStart(MycWorker* w)
     if (w->wake == NULL) return 0;
     w->thread = CreateThread(NULL, 0, MycWorkerMain, w, 0, &w->thread_id); /* lint-ok: C6 the jobs' worker (header) */
     if (w->thread != NULL) return 1;
-    CloseHandle(w->wake);
+    CloseHandle(w->wake); /* lint-ok: C4 once, if the first task's thread cannot be made */
     w->wake = NULL;
     return 0;
 }

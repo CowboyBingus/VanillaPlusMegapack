@@ -17,6 +17,24 @@ static const MycWdText* MycWdUnit(uint64_t unit)
     return NULL;
 }
 
+/* The 'row=share,...' part of an entry from p to stop into shares (rows 0-7; the others 0). */
+static void MycWdShares(const char* p, const char* stop, double shares[8])
+{
+    char* end = NULL;
+    for (int r = 0; r < 8; r++) shares[r] = 0;
+    while (p < stop)
+    {
+        long r = strtol(p, &end, 10);
+        if (end == p || *end != '=') return;
+        p = end + 1;
+        double s = strtod(p, &end);
+        if (end == p) return;
+        if (r >= 0 && r < 8) shares[r] = s;
+        p = end;
+        if (*p == ',') p++;
+    }
+}
+
 /* One 'material:triangles:row=share,...' entry from p (to '|' or the end) for material; 1 when it is that material. */
 static int MycWdEntry(const char* p, const char* stop, uint64_t material, double* triangles, double shares[8])
 {
@@ -26,19 +44,7 @@ static int MycWdEntry(const char* p, const char* stop, uint64_t material, double
     p = end + 1;
     double t = strtod(p, &end);
     if (end == p || *end != ':') return 0;
-    p = end + 1;
-    for (int r = 0; r < 8; r++) shares[r] = 0;
-    while (p < stop)
-    {
-        long r = strtol(p, &end, 10);
-        if (end == p || *end != '=') break;
-        p = end + 1;
-        double s = strtod(p, &end);
-        if (end == p) break;
-        if (r >= 0 && r < 8) shares[r] = s;
-        p = end;
-        if (*p == ',') p++;
-    }
+    MycWdShares(end + 1, stop, shares);
     *triangles = t;
     return 1;
 }

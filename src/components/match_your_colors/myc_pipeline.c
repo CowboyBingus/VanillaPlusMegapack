@@ -62,9 +62,12 @@ static int MycPipeCache(MycPipeline* p, MycErr* err)
     if (!myc_cache_read(p->cache_path, &text, &size)) { snprintf(p->cache_status, sizeof p->cache_status, "none yet"); return 1; }
     p->stage = "decoding the analysis cache";
     char why[128];
-    int n;
-    if (myc_cache_decode(text, size, p->header, &p->arena, &p->cached, &n, &p->samples, &p->has_samples, why, sizeof why))
+    MycCacheDecoded decoded = {NULL, 0, &p->samples, 0};
+    if (myc_cache_decode(text, size, p->header, &p->arena, &decoded, why, sizeof why))
     {
+        int n = decoded.n;
+        p->cached = decoded.entries;
+        p->has_samples = decoded.has_samples;
         p->ncached = n;
         p->order = malloc(sizeof *p->order * (size_t)(n + 16));
         p->order_capacity = p->order != NULL ? n + 16 : 0;
@@ -345,30 +348,35 @@ static MycAnalysis* MycPipeCached(MycPipeline* p, const char* key)
     return NULL;
 }
 
+/* The analysis of a key not known this session yet: the cache's while it holds, else a new one (one that cannot be
+ * made: MYC_MISSING, kept as that); NULL after myc_fail. */
+static void* MycPipeLearn(MycPipeline* p, MycKit* kit, int body, const char* key, MycErr* err)
+{
+    MycAnalysis* cached = kit->type != MYC_WEAPON ? MycPipeCached(p, key) : NULL;
+    MycAnalysis* made = cached != NULL && MycPipeCurrent(p, key, cached, err) ? cached : NULL;
+    if (err->failed) return NULL;
+    if (made == NULL)
+    {
+        made = MycPipeNew(p, kit, body, err);
+        if (err->failed) return NULL;
+        if (made != NULL && kit->type != MYC_WEAPON) p->dirty = 1;
+    }
+    void* known = made != NULL ? (void*)made : MYC_MISSING;
+    if (!myc_smap_put(&p->arena, &p->analyses, key, known))
+    {
+        myc_fail(err, "out of memory (analyses)");
+        return NULL;
+    }
+    return known;
+}
+
 MycAnalysis* myc_pipeline_analysis(MycPipeline* p, MycKit* kit, int body, MycErr* err)
 {
     char key[MYC_ENTRY_KEY];
     myc_cache_key(kit, body, key, sizeof key);
     void* known = myc_smap_get(&p->analyses, key);
-    if (known == NULL)
-    {
-        MycAnalysis* cached = kit->type != MYC_WEAPON ? MycPipeCached(p, key) : NULL;
-        MycAnalysis* made = cached != NULL && MycPipeCurrent(p, key, cached, err) ? cached : NULL;
-        if (err->failed) return NULL;
-        if (made == NULL)
-        {
-            made = MycPipeNew(p, kit, body, err);
-            if (err->failed) return NULL;
-            if (made != NULL && kit->type != MYC_WEAPON) p->dirty = 1;
-        }
-        if (!myc_smap_put(&p->arena, &p->analyses, key, made != NULL ? (void*)made : MYC_MISSING))
-        {
-            myc_fail(err, "out of memory (analyses)");
-            return NULL;
-        }
-        known = made != NULL ? (void*)made : MYC_MISSING;
-    }
-    if (known == MYC_MISSING) return NULL;
+    if (known == NULL) known = MycPipeLearn(p, kit, body, key, err);
+    if (known == NULL || known == MYC_MISSING) return NULL;
     MycPipeTouch(p, key);
     return known;
 }

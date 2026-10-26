@@ -92,7 +92,7 @@ MycItem* myc_scheme_item(MycArena* arena, MycModel* model, const MycScheme* sche
         row->copy = info.camo;
         row->finish_changed = -1;
     }
-    return myc_item(arena, rows, n, 1, NULL, 0, NULL, 0);
+    return myc_item(arena, rows, n, 1, NULL, 0, NULL);
 }
 
 /* ---- material roles ----------------------------------------------------------------------------------------------- */
@@ -162,27 +162,33 @@ static int MycSchemeLead(MycArena* arena, const MycItem* t, const uint64_t* ligh
     return 1;
 }
 
+/* What a scheme's roles count: light hard plates, light clothing and the clothing's LUTs. */
+typedef struct MycSchemeCount { double plates, cloth; uint64_t* light; int nlight; } MycSchemeCount;
+
+/* One group's rows counted (a hood's and an accent's are not). */
+static void MycSchemeCountGroup(const MycItem* t, const MycGroup* g, MycSchemeCount* n)
+{
+    if (g->hood || MycSchemeAccent(g)) return;
+    int is_dark = MycSchemeDark(g);
+    for (int r = 0; r < g->nrows; r++)
+    {
+        const MycRow* row = g->rows[r];
+        double share = row->area / t->paint_area;
+        if (!is_dark && MycSchemeHard(row)) n->plates = n->plates + share;
+        if (!MycSchemeClothing(row) || is_dark) continue;
+        n->cloth = n->cloth + share;
+        n->light[n->nlight++] = row->lut;
+    }
+}
+
 static int MycSchemeInventory(MycArena* arena, const MycItem* t, MycHas* has)
 {
-    double plates = 0, cloth = 0;
-    uint64_t* light = myc_alloc(arena, sizeof(uint64_t) * (size_t)(t->nrows + 1));
-    if (light == NULL) return 0;
-    int nlight = 0;
-    for (int i = 0; i < t->ngroups; i++)
-    {
-        const MycGroup* g = t->groups[i];
-        if (g->hood || MycSchemeAccent(g)) continue;
-        int is_dark = MycSchemeDark(g);
-        for (int r = 0; r < g->nrows; r++)
-        {
-            const MycRow* row = g->rows[r];
-            double share = row->area / t->paint_area;
-            if (!is_dark && MycSchemeHard(row)) plates = plates + share;
-            if (!MycSchemeClothing(row) || is_dark) continue;
-            cloth = cloth + share;
-            light[nlight++] = row->lut;
-        }
-    }
+    MycSchemeCount n = {0, 0, myc_alloc(arena, sizeof(uint64_t) * (size_t)(t->nrows + 1)), 0};
+    if (n.light == NULL) return 0;
+    for (int i = 0; i < t->ngroups; i++) MycSchemeCountGroup(t, t->groups[i], &n);
+    double plates = n.plates, cloth = n.cloth;
+    uint64_t* light = n.light;
+    int nlight = n.nlight;
     memset(has, 0, sizeof *has);
     has->plates = plates >= ROLE_PLATES;
     has->cloth = cloth >= ROLE_CLOTH;
@@ -256,31 +262,51 @@ static MycGroup* MycSchemeRoleColor(MycGroup* const* roles, int role, int is_har
     return roles[role];
 }
 
-/* Group g's rows by role and material (first seen first), each bucket mapped as a part of g. */
-static int MycSchemeMapGroup(MycPlan* mapping, const MycGroup* g, MycGroup* const* roles, const MycHas* has)
+/* A row's bucket: its role and whether it is hard (role * 2 + hard). */
+static int MycSchemeRowKey(const MycGroup* g, const MycRow* row, const MycHas* has)
 {
-    int keys[8], nkeys = 0;
-    MycRow** bucket = myc_alloc(mapping->arena, sizeof(MycRow*) * (size_t)(g->nrows + 1));
-    if (bucket == NULL) return 0;
+    return MycSchemeRowRole(g, row, has) * 2 + (MycSchemeHard(row) ? 1 : 0);
+}
+
+/* Group g's buckets in first-seen order (at most 8): how many. */
+static int MycSchemeKeys(const MycGroup* g, const MycHas* has, int keys[8])
+{
+    int nkeys = 0;
     for (int i = 0; i < g->nrows; i++)
     {
-        int k = MycSchemeRowRole(g, g->rows[i], has) * 2 + (MycSchemeHard(g->rows[i]) ? 1 : 0), known = 0;
+        int k = MycSchemeRowKey(g, g->rows[i], has), known = 0;
         for (int j = 0; j < nkeys; j++) known |= keys[j] == k;
         if (!known && nkeys < 8) keys[nkeys++] = k;
     }
+    return nkeys;
+}
+
+/* The rows of group g in bucket key, mapped as a part of g to its role's color; 0 out of memory. */
+static int MycSchemeMapBucket(MycPlan* mapping, const MycGroup* g, int key, MycRow** bucket, MycGroup* const* roles,
+    const MycHas* has)
+{
+    int role = key / 2, is_hard = key % 2 == 1, n = 0;
+    for (int i = 0; i < g->nrows; i++)
+        if (MycSchemeRowKey(g, g->rows[i], has) == key) bucket[n++] = g->rows[i];
+    MycGroup* color = MycSchemeRoleColor(roles, role, is_hard, has);
+    if (color == NULL) return 1;
+    MycGroup part = *g;
+    part.rows = bucket;
+    part.nrows = n;
+    if (!myc_map_group(mapping, &part, MYC_KIND_PAIR, color, is_hard && has->materials, has->armor, 0)) return 0;
+    MycSchemeFlat(mapping, &part, color, role, has->cape);
+    return 1;
+}
+
+/* Group g's rows by role and material (first seen first), each bucket mapped as a part of g. */
+static int MycSchemeMapGroup(MycPlan* mapping, const MycGroup* g, MycGroup* const* roles, const MycHas* has)
+{
+    int keys[8];
+    MycRow** bucket = myc_alloc(mapping->arena, sizeof(MycRow*) * (size_t)(g->nrows + 1));
+    if (bucket == NULL) return 0;
+    int nkeys = MycSchemeKeys(g, has, keys);
     for (int j = 0; j < nkeys; j++)
-    {
-        int role = keys[j] / 2, is_hard = keys[j] % 2 == 1, n = 0;
-        for (int i = 0; i < g->nrows; i++)
-            if (MycSchemeRowRole(g, g->rows[i], has) * 2 + (MycSchemeHard(g->rows[i]) ? 1 : 0) == keys[j]) bucket[n++] = g->rows[i];
-        MycGroup* color = MycSchemeRoleColor(roles, role, is_hard, has);
-        if (color == NULL) continue;
-        MycGroup part = *g;
-        part.rows = bucket;
-        part.nrows = n;
-        if (!myc_map_group(mapping, &part, MYC_KIND_PAIR, color, is_hard && has->materials, has->armor, 0)) return 0;
-        MycSchemeFlat(mapping, &part, color, role, has->cape);
-    }
+        if (!MycSchemeMapBucket(mapping, g, keys[j], bucket, roles, has)) return 0;
     return 1;
 }
 

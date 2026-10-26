@@ -460,12 +460,24 @@ static int MycCacheDecodeSamples(MycCacheText* t, MycSamples* s)
     return 1;
 }
 
-int myc_cache_decode(const uint8_t* text, size_t size, const char* header, MycArena* arena, MycCacheEntry** entries,
-    int* n, MycSamples* samples, int* has_samples, char* why, size_t why_size)
+/* Room for one more entry (the list doubled in the arena when full); 0 out of memory. */
+static int MycCacheRoom(MycCacheText* t, MycCacheDecoded* out, int* capacity)
+{
+    if (out->n < *capacity) return 1;
+    MycCacheEntry* grown = myc_alloc(t->arena, sizeof(MycCacheEntry) * (size_t)*capacity * 2);
+    if (grown == NULL) return MycCacheBad(t, "out of memory");
+    memcpy(grown, out->entries, sizeof(MycCacheEntry) * (size_t)*capacity);
+    out->entries = grown;
+    *capacity *= 2;
+    return 1;
+}
+
+int myc_cache_decode(const uint8_t* text, size_t size, const char* header, MycArena* arena, MycCacheDecoded* out,
+    char* why, size_t why_size)
 {
     size_t h = strlen(header);
-    *n = 0;
-    *has_samples = 0;
+    out->n = 0;
+    out->has_samples = 0;
     if (size < h + 1 || memcmp(text, header, h) != 0 || text[h] != '\n')
     {
         snprintf(why, why_size, "built for another version, game build or data");
@@ -473,26 +485,18 @@ int myc_cache_decode(const uint8_t* text, size_t size, const char* header, MycAr
     }
     MycCacheText t = {text, size, h + 1, arena, ""};
     int capacity = 16;
-    *entries = myc_alloc(arena, sizeof(MycCacheEntry) * (size_t)capacity);
-    int ok = *entries != NULL;
-    if (ok && t.at + 1 < size && text[t.at] == 'S' && text[t.at + 1] == ' ') ok = *has_samples = MycCacheDecodeSamples(&t, samples);
+    out->entries = myc_alloc(arena, sizeof(MycCacheEntry) * (size_t)capacity);
+    int ok = out->entries != NULL;
+    if (ok && t.at + 1 < size && text[t.at] == 'S' && text[t.at + 1] == ' ') ok = out->has_samples = MycCacheDecodeSamples(&t, out->samples);
     while (ok && t.at < size)
     {
-        if (*n >= capacity)
-        {
-            MycCacheEntry* grown = myc_alloc(arena, sizeof(MycCacheEntry) * (size_t)capacity * 2);
-            if (grown == NULL) { ok = MycCacheBad(&t, "out of memory"); break; }
-            memcpy(grown, *entries, sizeof(MycCacheEntry) * (size_t)capacity);
-            *entries = grown;
-            capacity *= 2;
-        }
-        ok = MycCacheDecodeEntry(&t, &(*entries)[*n]);
-        if (ok) (*n)++;
+        ok = MycCacheRoom(&t, out, &capacity) && MycCacheDecodeEntry(&t, &out->entries[out->n]);
+        if (ok) out->n++;
     }
     if (ok) return 1;
     snprintf(why, why_size, "%s", t.why);
-    if (*has_samples) { free(samples->encoded); samples->encoded = NULL; *has_samples = 0; }
-    *n = 0;
+    if (out->has_samples) { free(out->samples->encoded); out->samples->encoded = NULL; out->has_samples = 0; }
+    out->n = 0;
     return 0;
 }
 

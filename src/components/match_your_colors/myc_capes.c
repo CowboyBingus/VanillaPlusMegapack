@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "myc_capes.h"
+#include "myc_recolor.h"
 
 #define DARK_PART_L 30.0
 #define LIGHT_COLOR_L 60.0
@@ -60,11 +61,11 @@ static int MycCapesEmblemLayers(const MycLut* tint, const double areas[5], const
     return count;
 }
 
-/* One analysis row: row r of values (width columns) under key with area. */
-static void MycCapesRowEntry(MycModel* model, MycRow* row, uint64_t lut_name, const float* values, int width, int r,
-    double area, double emissive)
+/* One analysis row: row r of a LUT's values under key with area. */
+static void MycCapesRowEntry(MycModel* model, MycRow* row, uint64_t lut_name, const MycLut* values, int r, double area,
+    double emissive)
 {
-    MycRowInfo info = myc_row_info(model, values, width, r);
+    MycRowInfo info = myc_row_info(model, values->values, values->width, r);
     memset(row, 0, sizeof *row);
     row->lut = lut_name;
     row->row = r;
@@ -90,7 +91,7 @@ static void MycCapesMaterialRows(MycKitDeps* deps, const MycPiece* piece, const 
     {
         if (!(areas[r] > 1e-6)) continue;
         MycRow* row = &a->rows[a->nrows++];
-        MycCapesRowEntry(deps->model, row, piece->lut, lut->values, lut->width, r, areas[r], myc_kits_emissive(lut, r));
+        MycCapesRowEntry(deps->model, row, piece->lut, lut, r, areas[r], myc_kits_emissive(lut, r));
         myc_row_key(row->key, piece->lut, r);
     }
 }
@@ -110,7 +111,8 @@ static int MycCapesTintRows(MycKitDeps* deps, const MycPiece* piece, const MycLu
         copy[1] = tint->values[t + 1];
         copy[2] = tint->values[t + 2];
         MycRow* row = &a->rows[a->nrows++];
-        MycCapesRowEntry(deps->model, row, piece->cape_lut, copy, lut->width, 0, tints[r], myc_kits_emissive(lut, r));
+        const MycLut view = {copy, lut->width, 1};
+        MycCapesRowEntry(deps->model, row, piece->cape_lut, &view, 0, tints[r], myc_kits_emissive(lut, r));
         row->row = r;
         myc_row_key(row->key, piece->cape_lut, r);
         any = 1;
@@ -153,27 +155,26 @@ static int MycCapesFields(MycKitDeps* deps, const MycPiece* piece, MycErr* err)
 }
 
 /* What follows the rows: tint, zones, emblems and their counts (Capes.analyse's second half). */
-static int MycCapesParts(MycKitDeps* deps, const MycPiece* piece, MycLut* lut, MycLut* tint, const uint8_t* grad,
-    const double areas[5], const double tints[5], MycAnalysis* a, MycErr* err)
+static int MycCapesParts(MycKitDeps* deps, const MycPiece* piece, const MycCapeInputs* in, MycAnalysis* a, MycErr* err)
 {
-    if (!myc_analysis_add_lut(deps->arena, a, piece->lut, lut)) return myc_fail(err, "out of memory (cape LUTs)");
-    if (tint != NULL && grad != NULL && MycCapesTintRows(deps, piece, lut, tint, tints, a))
+    if (!myc_analysis_add_lut(deps->arena, a, piece->lut, in->lut)) return myc_fail(err, "out of memory (cape LUTs)");
+    if (in->tint != NULL && in->grad != NULL && MycCapesTintRows(deps, piece, in->lut, in->tint, in->tints, a))
     {
-        if (!myc_analysis_add_lut(deps->arena, a, piece->cape_lut, tint)) return myc_fail(err, "out of memory (cape LUTs)");
+        if (!myc_analysis_add_lut(deps->arena, a, piece->cape_lut, in->tint)) return myc_fail(err, "out of memory (cape LUTs)");
         a->has_tint = 1;
         a->tint_cape = piece->cape_lut;
         a->tint_material = piece->lut;
     }
     MycZones zones;
-    if (myc_cape_zones_of(myc_capes_cells_buffer, lut->height, tint, grad, &zones))
+    if (myc_cape_zones_of(myc_capes_cells_buffer, in->lut->height, in->tint, in->grad, &zones))
     {
         a->zones = myc_alloc(deps->arena, sizeof(MycZones));
         if (a->zones == NULL) return myc_fail(err, "out of memory (cape zones)");
         *a->zones = zones;
     }
-    if (tint == NULL) return 1;
-    if (!myc_cape_emblems_of(deps->find, piece, tint, grad, lut->height, deps->arena, a, err)) return 0;
-    a->emblem_layers = MycCapesEmblemLayers(tint, areas, tints);
+    if (in->tint == NULL) return 1;
+    if (!myc_cape_emblems_of(deps->find, piece, in, deps->arena, a, err)) return 0;
+    a->emblem_layers = MycCapesEmblemLayers(in->tint, in->areas, in->tints);
     return 1;
 }
 
@@ -185,24 +186,25 @@ MycAnalysis* myc_capes_analyse(MycKit* kit, int body, MycKitDeps* deps, char* wh
     if (err->failed) return NULL;
     if (lut == NULL) { snprintf(why, why_size, "cape LUT %016llx not found", (unsigned long long)piece->lut); return NULL; }
     if (!MycCapesFields(deps, piece, err)) return NULL;
-    MycLut* tint;
-    const uint8_t* grad;
+    MycCapeInputs in;
+    memset(&in, 0, sizeof in);
+    in.lut = lut;
     MycAnalysis* a = myc_alloc(deps->arena, sizeof(MycAnalysis));
     if (a == NULL) { myc_fail(err, "out of memory (cape analysis)"); return NULL; }
-    MycCapesTintInputs(piece, deps, &tint, &grad, a->tint_note, sizeof a->tint_note);
-    double areas[5], tints[5], total;
-    myc_cape_areas(myc_capes_cells_buffer, lut->height, tint, grad, areas, tints, &total);
+    MycCapesTintInputs(piece, deps, &in.tint, &in.grad, a->tint_note, sizeof a->tint_note);
+    double total;
+    myc_cape_areas(myc_capes_cells_buffer, lut->height, in.tint, in.grad, in.areas, in.tints, &total);
     a->kit = kit;
     a->body = body;
     a->weight = total;
     a->rows = myc_alloc(deps->arena, sizeof(MycRow) * 10);
     if (a->rows == NULL || !MycCapesPiece(deps->arena, piece, a)) { myc_fail(err, "out of memory (cape rows)"); return NULL; }
-    MycCapesMaterialRows(deps, piece, lut, areas, a);
-    return MycCapesParts(deps, piece, lut, tint, grad, areas, tints, a, err) ? a : NULL;
+    MycCapesMaterialRows(deps, piece, lut, in.areas, a);
+    return MycCapesParts(deps, piece, &in, a, err) ? a : NULL;
 }
 
 void myc_capes_report(const MycAnalysis* c, const MycZoneOutcome* zones, const MycZoneOutcome* emblems,
-    const char* sheet_note, int fits_rows, double fits_err, char* out, size_t size)
+    const char* sheet_note, const struct MycFits* fits, char* out, size_t size)
 {
     double tint = 0;
     for (int i = 0; i < c->nrows; i++)
@@ -216,7 +218,7 @@ void myc_capes_report(const MycAnalysis* c, const MycZoneOutcome* zones, const M
     snprintf(out, size, "Cape %08x: tint %.0f%% of it%s; design zones: %d recolored to stay readable, %d kept their "
         "colors, %d unreadable; emblems: %d recolored to stay readable%s, %d unreadable, %d in their own colors; %d "
         "rows fitted (largest error dE %.1f).", c->kit->id, tint * 100, note, z->picked, z->kept, z->lost, e->picked,
-        sheet, e->lost, c->nemblems - e->picked - e->lost, fits_rows, fits_err);
+        sheet, e->lost, c->nemblems - e->picked - e->lost, fits->rows, fits->err);
 }
 
 /* ---- a cape as the source ----------------------------------------------------------------------------------------- */
@@ -251,25 +253,34 @@ static void MycCapesOutside(MycRow* row)
     row->cape = 1;
 }
 
-int myc_capes_source_rows(const MycAnalysis* cape, MycRow* out)
+static int MycCapesRowIn(const MycRow* row) { return row->row >= 0 && row->row < 5; }
+
+/* The material rows, each blended with the tint row of its row when there is one (taken from tints). */
+static int MycCapesBlendedRows(const MycAnalysis* cape, const MycRow* tints[5], MycRow* out)
 {
-    const MycRow* tints[5] = {NULL, NULL, NULL, NULL, NULL};
     int n = 0;
-    for (int i = 0; i < cape->nrows; i++)
-        if (MycCapesIsTint(cape, &cape->rows[i]) && cape->rows[i].row >= 0 && cape->rows[i].row < 5) tints[cape->rows[i].row] = &cape->rows[i];
     for (int i = 0; i < cape->nrows; i++)
     {
         const MycRow* row = &cape->rows[i];
         if (MycCapesIsTint(cape, row)) continue;
-        const MycRow* tint = row->row >= 0 && row->row < 5 ? tints[row->row] : NULL;
+        const MycRow* tint = MycCapesRowIn(row) ? tints[row->row] : NULL;
         out[n] = tint != NULL ? MycCapesBlend(row, tint) : *row;
         MycCapesOutside(&out[n++]);
-        if (row->row >= 0 && row->row < 5) tints[row->row] = NULL;
+        if (MycCapesRowIn(row)) tints[row->row] = NULL;
     }
+    return n;
+}
+
+int myc_capes_source_rows(const MycAnalysis* cape, MycRow* out)
+{
+    const MycRow* tints[5] = {NULL, NULL, NULL, NULL, NULL};
+    for (int i = 0; i < cape->nrows; i++)
+        if (MycCapesIsTint(cape, &cape->rows[i]) && MycCapesRowIn(&cape->rows[i])) tints[cape->rows[i].row] = &cape->rows[i];
+    int n = MycCapesBlendedRows(cape, tints, out);
     for (int i = 0; i < cape->nrows; i++)
     {
         const MycRow* row = &cape->rows[i];
-        if (row->row < 0 || row->row >= 5 || tints[row->row] != row) continue;
+        if (!MycCapesRowIn(row) || tints[row->row] != row) continue;
         out[n] = *row;
         MycCapesOutside(&out[n++]);
     }

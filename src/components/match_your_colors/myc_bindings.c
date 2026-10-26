@@ -37,11 +37,11 @@ void myc_controller_init(MycController* c, const MycNative* native, MycPool* poo
 
 void myc_controller_free(MycController* c)
 {
-    free(c->bindings);
-    free(c->textures);
-    free(c->retired);
-    free(c->probe_list);
-    free(c->waiting);
+    free(c->bindings); /* lint-ok: C5 a squadmate's or card's controller freed once its textures retired */
+    free(c->textures); /* lint-ok: C5 as above */
+    free(c->retired); /* lint-ok: C5 as above */
+    free(c->probe_list); /* lint-ok: C5 as above */
+    free(c->waiting); /* lint-ok: C5 as above */
     myc_result_drop(c->result);
     memset(c, 0, sizeof *c);
 }
@@ -51,7 +51,7 @@ static int MycCtlGrow(void** items, int* capacity, int need, size_t size)
     if (need <= *capacity) return 1;
     int grown = *capacity < 16 ? 16 : *capacity * 2;
     while (grown < need) grown *= 2;
-    void* p = realloc(*items, size * (size_t)grown);
+    void* p = realloc(*items, size * (size_t)grown); /* lint-ok: C5 an apply's or restore's lists, on the frame a plan is applied or put back */
     if (p == NULL) return 0;
     *items = p;
     *capacity = grown;
@@ -89,7 +89,7 @@ static void MycCtlMesh(MycMeshes* m, uint64_t mesh)
 static void MycCtlCommit(MycController* c, MycMeshes* m)
 {
     for (int i = 0; i < m->n; i++) c->native->commit(m->list[i]);
-    free(m->list);
+    free(m->list); /* lint-ok: C5 an apply's or restore's meshes, on that frame */
     memset(m, 0, sizeof *m);
 }
 
@@ -135,7 +135,7 @@ void myc_controller_restore(MycController* c, uint32_t frame)
     int n;
     MycBinding* old = MycCtlRetire(c, frame, &n);
     MycCtlPutBack(c, old, n);
-    free(old);
+    free(old); /* lint-ok: C5 a restore's bindings, on the frame it puts them back */
 }
 
 int myc_controller_collect(MycController* c, uint32_t frame)
@@ -146,7 +146,7 @@ int myc_controller_collect(MycController* c, uint32_t frame)
         MycTexture* t = c->retired[i];
         if (frame - t->retired_at >= MYC_RETIRE_FRAMES)
         {
-            if (t->direct) free(t);
+            if (t->direct) free(t); /* lint-ok: C5 a retired direct texture, RETIRE_FRAMES after its plan changed */
             else myc_pool_give(c->pool, t);
             c->released++;
         }
@@ -159,7 +159,7 @@ int myc_controller_collect(MycController* c, uint32_t frame)
 void myc_controller_prune(MycController* c)
 {
     int dead = 0, keep = 0;
-    uint32_t* units = calloc((size_t)c->nbindings + 1, sizeof(uint32_t) * 2);
+    uint32_t* units = calloc((size_t)c->nbindings + 1, sizeof(uint32_t) * 2); /* lint-ok: C5 a prune after new units (a chain check that saw a change), never on an idle frame */
     int nunits = 0;
     if (units == NULL) return;
     for (int i = 0; i < c->nbindings; i++)
@@ -180,7 +180,7 @@ void myc_controller_prune(MycController* c)
         while (units[2 * k] != c->bindings[i].unit) k++;
         if (units[2 * k + 1]) c->bindings[keep++] = c->bindings[i];
     }
-    free(units);
+    free(units); /* lint-ok: C5 as above */
     if (!dead) return;
     c->nbindings = keep;
     MycCtlProbes(c);
@@ -224,7 +224,7 @@ static MycTexture* MycCtlTexture(MycController* c, int patterns, int index, char
     {
         uint64_t object = myc_texture_object(c->native, e->spec->name);
         if (object == 0) return NULL;
-        t = calloc(1, sizeof *t);
+        t = calloc(1, sizeof *t); /* lint-ok: C5 an apply's direct texture (a weapon scheme's decal sheet), on the frame it binds */
         if (t == NULL) { snprintf(why, size, "out of memory"); return NULL; }
         t->object = object;
         t->direct = 1;
@@ -341,17 +341,17 @@ static int MycCtlBindUnit(MycBindCtx* x, const MycUnitRef* u, int* materials)
 
 static void MycCtlVanillaFree(MycPlanObjects* v)
 {
-    free(v->luts.items);
-    free(v->attached.items);
-    free(v->patterns.items);
+    free(v->luts.items); /* lint-ok: C5 an apply's plan objects, on that frame */
+    free(v->attached.items); /* lint-ok: C5 as above */
+    free(v->patterns.items); /* lint-ok: C5 as above */
 }
 
 static int MycCtlVanillaOf(const MycController* c, const MycResult* r, MycPlanObjects* v)
 {
     memset(v, 0, sizeof *v);
-    v->luts.items = calloc((size_t)r->luts.n + 1, sizeof(MycVanillaEntry));
-    v->attached.items = calloc((size_t)r->luts.n + 1, sizeof(MycVanillaEntry));
-    v->patterns.items = calloc((size_t)r->patterns.n + 1, sizeof(MycVanillaEntry));
+    v->luts.items = calloc((size_t)r->luts.n + 1, sizeof(MycVanillaEntry)); /* lint-ok: C5 as above */
+    v->attached.items = calloc((size_t)r->luts.n + 1, sizeof(MycVanillaEntry)); /* lint-ok: C5 as above */
+    v->patterns.items = calloc((size_t)r->patterns.n + 1, sizeof(MycVanillaEntry)); /* lint-ok: C5 as above */
     if (v->luts.items == NULL || v->attached.items == NULL || v->patterns.items == NULL) return 0;
     for (int i = 0; i < r->luts.n; i++)
     {
@@ -374,28 +374,27 @@ static int MycCtlVanillaOf(const MycController* c, const MycResult* r, MycPlanOb
     return 1;
 }
 
+/* Whether the controller holds a texture for a plan entry already. */
+static int MycCtlHeld(const MycController* c, const MycNamedSpec* e)
+{
+    for (int k = 0; k < c->ntextures; k++)
+        if (c->textures[k].name == e->name && c->textures[k].attachment == e->attachment) return 1;
+    return 0;
+}
+
 /* Room in the pool for the textures this apply can take, per size (reserve). */
 static void MycCtlReserve(MycController* c, const MycResult* r, const MycPlanObjects* v)
 {
     const MycVanillaMap* maps[3] = {&v->luts, &v->patterns, &v->attached};
-    static MycSpec* specs[256];
-    static char keys[256][64];
-    int counts[256], n = 0;
+    static MycSizes sizes;
+    sizes.n = 0;
     for (int m = 0; m < 3; m++)
         for (int i = 0; i < maps[m]->n; i++)
         {
             const MycNamedSpec* e = &(m == 1 ? &r->patterns : &r->luts)->items[maps[m]->items[i].index];
-            int held = 0;
-            for (int k = 0; k < c->ntextures; k++) held |= c->textures[k].name == e->name && c->textures[k].attachment == e->attachment;
-            if (held || e->spec->kind == MYC_SPEC_DIRECT) continue;
-            char key[64];
-            myc_pool_key(e->spec, key, sizeof key);
-            int k = 0;
-            while (k < n && strcmp(keys[k], key) != 0) k++;
-            if (k == n && n < 256) { specs[n] = e->spec; memcpy(keys[n], key, sizeof key); counts[n++] = 0; }
-            if (k < n) counts[k]++;
+            if (!MycCtlHeld(c, e) && e->spec->kind != MYC_SPEC_DIRECT) myc_sizes_add(&sizes, e->spec);
         }
-    for (int k = 0; k < n; k++) myc_pool_reserve(c->pool, specs[k], counts[k]);
+    for (int k = 0; k < sizes.n; k++) myc_pool_reserve(c->pool, sizes.specs[k], sizes.counts[k]);
 }
 
 /* ---- apply ----------------------------------------------------------------------------------------------------------- */
@@ -457,7 +456,7 @@ static int MycCtlBindUnits(MycBindCtx* x, const MycApplyTo* to, const uint32_t* 
 static void MycCtlPending(MycController* c, const MycApplyTo* to, uint32_t frame, const uint32_t* pending, int npending,
     MycWaiting* waiting, int nwaiting)
 {
-    free(c->waiting);
+    free(c->waiting); /* lint-ok: C5 an apply's waiting slots, on that frame */
     c->waiting = waiting;
     c->nwaiting = c->waiting_capacity = nwaiting;
     memcpy(c->pending_units, pending, sizeof(uint32_t) * (size_t)npending);
@@ -492,8 +491,8 @@ int myc_controller_apply(MycController* c, MycResult* result, const MycApplyTo* 
     int count = MycCtlVanillaOf(c, result, &v) ? MycCtlBindUnits(&x, to, NULL, 0, pending, &npending) : -1;
     if (count < 0 && why[0] == 0) snprintf(why, size, "out of memory");
     MycCtlVanillaFree(&v);
-    if (replaced) { MycCtlPutBack(c, before.list, before.n); free(before.list); }
-    if (count < 0) { free(x.waiting); return -1; }
+    if (replaced) { MycCtlPutBack(c, before.list, before.n); free(before.list); } /* lint-ok: C5 an apply, on that frame */
+    if (count < 0) { free(x.waiting); return -1; } /* lint-ok: C5 as above */
     MycCtlPending(c, to, frame, pending, npending, x.waiting, x.nwaiting);
     myc_controller_prune(c);
     MycCtlProbes(c);
@@ -540,18 +539,9 @@ static int MycCtlRetrySlots(MycBindCtx* x, const MycWaiting* old, int nold)
     return count;
 }
 
-int myc_controller_settle(MycController* c, uint32_t frame, int* outcome, char* why, size_t size)
+/* The pending units and the waiting slots tried again now (settle's turn): bindings made, or -1 with why. */
+static int MycCtlSettleTurn(MycController* c, int* outcome, char* why, size_t size)
 {
-    why[0] = 0;
-    uint32_t age = frame - c->pending_since;
-    *outcome = 1;
-    if (age % MYC_PENDING_EVERY != 0) return 0;
-    if (age > MYC_PENDING_FRAMES || c->result == NULL)
-    {
-        *outcome = c->npending_units > 0 ? 2 : 0;
-        c->has_pending = 0;
-        return 0;
-    }
     MycPlanObjects v;
     MycBindCtx x;
     memset(&x, 0, sizeof x);
@@ -568,7 +558,7 @@ int myc_controller_settle(MycController* c, uint32_t frame, int* outcome, char* 
     int nold = c->nwaiting;
     if (count >= 0) count += MycCtlRetrySlots(&x, old, nold);
     MycCtlVanillaFree(&v);
-    free(old);
+    free(old); /* lint-ok: C5 a settle's retried slots, every 4th frame while units are pending after an apply */
     c->waiting = x.waiting;
     c->nwaiting = x.nwaiting;
     c->waiting_capacity = x.waiting_capacity;
@@ -579,4 +569,19 @@ int myc_controller_settle(MycController* c, uint32_t frame, int* outcome, char* 
     if (count > 0) { MycCtlProbes(c); c->applied += count; }
     *outcome = c->has_pending ? 1 : 0;
     return count;
+}
+
+int myc_controller_settle(MycController* c, uint32_t frame, int* outcome, char* why, size_t size)
+{
+    why[0] = 0;
+    uint32_t age = frame - c->pending_since;
+    *outcome = 1;
+    if (age % MYC_PENDING_EVERY != 0) return 0;
+    if (age > MYC_PENDING_FRAMES || c->result == NULL)
+    {
+        *outcome = c->npending_units > 0 ? 2 : 0;
+        c->has_pending = 0;
+        return 0;
+    }
+    return MycCtlSettleTurn(c, outcome, why, size);
 }

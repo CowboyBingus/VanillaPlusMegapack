@@ -44,37 +44,50 @@ static int MycAppIndex(uint64_t lut)
     return i != NULL ? (int)((intptr_t)i - 1) : -1;
 }
 
+/* One 'row s0 s1 s2 g0 g1 g2' entry of a LUT's text at *at, up to and past its '|': how many numbers it holds. */
+static int MycAppCalEntry(const char** at, double v[7])
+{
+    const char* p = *at;
+    int n = 0;
+    while (*p && *p != '|' && n < 7)
+    {
+        char* end = NULL;
+        v[n] = strtod(p, &end);
+        if (end == p) break;
+        n++;
+        p = end;
+        while (*p == ' ') p++;
+    }
+    while (*p && *p != '|') p++;
+    if (*p == '|') p++;
+    *at = p;
+    return n;
+}
+
+/* LUT index i's measured rows, parsed once. */
+static MycAppRows* MycAppRowsOf(int i)
+{
+    if (g_app.rows[i] != NULL) return g_app.rows[i];
+    MycAppRows* rows = myc_alloc(&g_app.arena, sizeof *rows);
+    if (rows == NULL) return NULL;
+    for (const char* p = myc_app_rows[i]; *p && rows->count < MAX_ROWS;)
+    {
+        double v[7];
+        if (MycAppCalEntry(&p, v) < 7) continue;
+        rows->rows[rows->count] = (int)v[0];
+        memcpy(rows->cal[rows->count], v + 1, sizeof(double) * 6);
+        rows->count++;
+    }
+    g_app.rows[i] = rows;
+    return rows;
+}
+
 const double* myc_app_row(uint64_t lut, int r)
 {
     int i = MycAppIndex(lut);
     if (i < 0 || myc_app_rows[i] == NULL) return NULL;
-    MycAppRows* rows = g_app.rows[i];
-    if (rows == NULL)
-    {
-        rows = myc_alloc(&g_app.arena, sizeof *rows);
-        if (rows == NULL) return NULL;
-        for (const char* p = myc_app_rows[i]; *p && rows->count < MAX_ROWS;)
-        {
-            double v[7];
-            int n = 0;
-            while (*p && *p != '|' && n < 7)
-            {
-                char* end = NULL;
-                v[n] = strtod(p, &end);
-                if (end == p) break;
-                n++;
-                p = end;
-                while (*p == ' ') p++;
-            }
-            while (*p && *p != '|') p++;
-            if (*p == '|') p++;
-            if (n < 7) continue;
-            rows->rows[rows->count] = (int)v[0];
-            memcpy(rows->cal[rows->count], v + 1, sizeof(double) * 6);
-            rows->count++;
-        }
-        g_app.rows[i] = rows;
-    }
+    MycAppRows* rows = MycAppRowsOf(i);
+    if (rows == NULL) return NULL;
     /* a row listed twice keeps its last values (rows[v[1]] = ... in the Lua) */
     for (int k = rows->count - 1; k >= 0; k--)
         if (rows->rows[k] == r) return rows->cal[k];
@@ -117,54 +130,101 @@ static int MycAppNumber(const char** p, double* out)
     return 1;
 }
 
+/* A rows entry after its index: '.row=px,light' at *at (on its '.'): 1 with v[1..3], else 0 (*at past what was read). */
+static int MycAppRowTail(const char** at, double v[4])
+{
+    const char* p = *at + 1;
+    int ok = 0;
+    if (MycAppInt(&p, &v[1]) && *p == '=')
+    {
+        p++;
+        if (MycAppInt(&p, &v[2]) && *p == ',')
+        {
+            p++;
+            ok = MycAppInt(&p, &v[3]);
+        }
+    }
+    *at = p;
+    return ok;
+}
+
+/* One 'index.row=px,light' entry from *at (non-digits skipped first): 1 with its four numbers, else 0. */
+static int MycAppRowEntry(const char** at, const char* stop, double v[4])
+{
+    const char* p = *at;
+    while (p < stop && (*p < '0' || *p > '9')) p++;
+    int ok = 0;
+    if (p >= stop || !MycAppInt(&p, &v[0]) || *p != '.')
+        while (p < stop && *p != ' ') p++;
+    else ok = MycAppRowTail(&p, v);
+    *at = p;
+    return ok;
+}
+
 /* The rows part: 'index.row=px,light ...'. */
 static void MycAppParseRows(const char* p, const char* stop, MycAppKit* kit, MycVec* rows)
 {
     while (p < stop)
     {
-        while (p < stop && (*p < '0' || *p > '9')) p++;
-        double i, r, px, light;
-        if (p >= stop || !MycAppInt(&p, &i) || *p != '.') { while (p < stop && *p != ' ') p++; continue; }
-        p++;
-        if (!MycAppInt(&p, &r) || *p != '=') continue;
-        p++;
-        if (!MycAppInt(&p, &px) || *p != ',') continue;
-        p++;
-        if (!MycAppInt(&p, &light)) continue;
+        double v[4];
+        if (!MycAppRowEntry(&p, stop, v)) continue;
         MycAppRow* row = myc_vec_push(&g_app.arena, rows, sizeof(MycAppRow));
         if (row == NULL) return;
-        row->lut = (int)i >= 1 && (int)i <= myc_app_lut_count ? myc_app_luts[(int)i - 1] : 0;
-        row->row = (int)r;
-        row->px = px;
-        row->light = light;
+        int i = (int)v[0];
+        row->lut = i >= 1 && i <= myc_app_lut_count ? myc_app_luts[i - 1] : 0;
+        row->row = (int)v[1];
+        row->px = v[2];
+        row->light = v[3];
     }
 }
 
 /* The patterns part: '<hex>=px,gr,gg,gb ...' (the gain only when measured). */
+/* Up to max comma-separated numbers at *p: how many. */
+static int MycAppNumbers(const char** p, double* v, int max)
+{
+    int n = 0;
+    while (n < max && MycAppNumber(p, &v[n]))
+    {
+        n++;
+        if (**p != ',') break;
+        (*p)++;
+    }
+    return n;
+}
+
+/* One '<hex>=px[,gr,gg,gb]' entry at *at into out: 1 when it names a pattern and its pixels, else 0 (*at past it). */
+static int MycAppPatternEntry(const char** at, MycAppPattern* out)
+{
+    const char* p = *at;
+    char* end = NULL;
+    unsigned long long name = strtoull(p, &end, 16);
+    int n = 0;
+    double v[4];
+    if (end != p && *end == '=')
+    {
+        p = end + 1;
+        n = MycAppNumbers(&p, v, 4);
+    }
+    while (*p && *p != ' ') p++;
+    *at = p;
+    if (n < 1) return 0;
+    memset(out, 0, sizeof *out);
+    out->pattern = name;
+    out->px = v[0];
+    if (n >= 4) { out->gain[0] = v[1]; out->gain[1] = v[2]; out->gain[2] = v[3]; out->has_gain = 1; }
+    return 1;
+}
+
 static void MycAppParsePatterns(const char* p, MycVec* out)
 {
     while (*p)
     {
         while (*p == ' ') p++;
         if (*p == 0) break;
-        char* end = NULL;
-        unsigned long long name = strtoull(p, &end, 16);
-        if (end == p || *end != '=') { while (*p && *p != ' ') p++; continue; }
-        p = end + 1;
-        double v[4];
-        int n = 0;
-        while (n < 4 && MycAppNumber(&p, &v[n]))
-        {
-            n++;
-            if (*p != ',') break;
-            p++;
-        }
-        while (*p && *p != ' ') p++;
+        MycAppPattern entry;
+        if (!MycAppPatternEntry(&p, &entry)) continue;
         MycAppPattern* pattern = myc_vec_push(&g_app.arena, out, sizeof(MycAppPattern));
-        if (pattern == NULL || n < 1) continue;
-        pattern->pattern = name;
-        pattern->px = v[0];
-        if (n >= 4) { pattern->gain[0] = v[1]; pattern->gain[1] = v[2]; pattern->gain[2] = v[3]; pattern->has_gain = 1; }
+        if (pattern != NULL) *pattern = entry;
     }
 }
 
@@ -243,31 +303,39 @@ static void MycAppKey(const uint64_t* luts, int count, char* out, size_t size)
     free(order);
 }
 
+/* A kit's LUT list as a set (the list may repeat a LUT): how many. */
+static int MycAppUniqueLuts(const MycAppKit* kit, uint64_t* unique, int max)
+{
+    int n = 0;
+    for (int i = 0; i < kit->nluts && n < max; i++)
+    {
+        int seen = 0;
+        for (int j = 0; j < n; j++) seen |= unique[j] == kit->luts[i];
+        if (!seen) unique[n++] = kit->luts[i];
+    }
+    return n;
+}
+
+/* Every kit by its sorted LUT set, once (two kits with one set: MYC_MISSING). */
+static void MycAppByLuts(char* key, size_t size)
+{
+    for (int k = 0; k < myc_app_kit_count; k++)
+    {
+        MycAppKit* kit = MycAppParseKit(k);
+        if (kit == NULL) continue;
+        uint64_t unique[256];
+        MycAppKey(unique, MycAppUniqueLuts(kit, unique, 256), key, size);
+        void* known = myc_smap_get(&g_app.by_luts, key);
+        (void)myc_smap_put(&g_app.arena, &g_app.by_luts, key, known == NULL ? (void*)(intptr_t)(k + 1) : MYC_MISSING);
+    }
+    g_app.by_luts_made = 1;
+}
+
 const MycAppKit* myc_app_kit_for(const uint64_t* luts, int count)
 {
     static char key[16384];
     if (MycAppIndex(0) < -1) return NULL;
-    if (!g_app.by_luts_made)
-    {
-        for (int k = 0; k < myc_app_kit_count; k++)
-        {
-            MycAppKit* kit = MycAppParseKit(k);
-            if (kit == NULL) continue;
-            /* the kit's own LUT list may repeat a LUT: as a set */
-            uint64_t unique[256];
-            int n = 0;
-            for (int i = 0; i < kit->nluts && n < 256; i++)
-            {
-                int seen = 0;
-                for (int j = 0; j < n; j++) seen |= unique[j] == kit->luts[i];
-                if (!seen) unique[n++] = kit->luts[i];
-            }
-            MycAppKey(unique, n, key, sizeof key);
-            void* known = myc_smap_get(&g_app.by_luts, key);
-            (void)myc_smap_put(&g_app.arena, &g_app.by_luts, key, known == NULL ? (void*)(intptr_t)(k + 1) : MYC_MISSING);
-        }
-        g_app.by_luts_made = 1;
-    }
+    if (!g_app.by_luts_made) MycAppByLuts(key, sizeof key);
     MycAppKey(luts, count, key, sizeof key);
     void* found = myc_smap_get(&g_app.by_luts, key);
     if (found == NULL || found == MYC_MISSING) return NULL;

@@ -215,6 +215,17 @@ static void MycColourShade(const double* c, double md0, double md1, double mix, 
 
 /* A detail layer's distinct samples: first[i], the first sample whose controls (z, w) are sample i's; firsts, those
  * first samples in order (a NaN control is no key: its sample stands alone). */
+/* The first of the n first samples whose controls are (z, w), or -1. */
+static int MycColourFirstWith(const MycModel* m, int layer, const double* d, int n, double z, double w)
+{
+    for (int k = 0; k < n; k++)
+    {
+        int f = m->firsts[layer][k];
+        if (d[f * 4 + 2] == z && d[f * 4 + 3] == w) return f;
+    }
+    return -1;
+}
+
 static void MycColourDistinct(MycModel* m, int layer)
 {
     if (m->distinct_made[layer]) return;
@@ -223,13 +234,7 @@ static void MycColourDistinct(MycModel* m, int layer)
     for (int i = 0; i < MYC_SAMPLES; i++)
     {
         double z = d[i * 4 + 2], w = d[i * 4 + 3];
-        int j = -1;
-        if (z == z && w == w)
-            for (int k = 0; k < n && j < 0; k++)
-            {
-                int f = m->firsts[layer][k];
-                if (d[f * 4 + 2] == z && d[f * 4 + 3] == w) j = f;
-            }
+        int j = z == z && w == w ? MycColourFirstWith(m, layer, d, n, z, w) : -1;
         if (j < 0)
         {
             j = i;

@@ -97,6 +97,10 @@ typedef struct MycPool
 void myc_pool_init(MycPool* pool, const MycNative* native);
 /* The free list a spec's texture belongs to (Engine.pool_key). */
 void myc_pool_key(const MycSpec* spec, char* out, size_t size);
+/* Specs counted by the free list they belong to (the stock's and an apply's demand per size). */
+#define MYC_SIZES 256
+typedef struct MycSizes { MycSpec* specs[MYC_SIZES]; char keys[MYC_SIZES][64]; int counts[MYC_SIZES], n; } MycSizes;
+void myc_sizes_add(MycSizes* sizes, MycSpec* spec);
 /* A free texture of the spec's size refilled with its data, else a new one (and spares); NULL with why. */
 MycTexture* myc_pool_take(MycPool* pool, MycSpec* spec, const char** why);
 void myc_pool_reserve(MycPool* pool, MycSpec* spec, int count);

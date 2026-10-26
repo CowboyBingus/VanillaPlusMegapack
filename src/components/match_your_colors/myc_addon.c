@@ -405,23 +405,28 @@ static void MycAdSyncStep(uint32_t frame)
 
 /* ---- the step ----------------------------------------------------------------------------------------------------- */
 
+/* Without a local Helldiver: the work ahead first (a resolve due now waits for the frame after its job), else a resolve
+ * every RESOLVE_FRAMES frames. */
+/* lint: per-frame */
+static int MycAdNoHelldiverStep(uint32_t frame)
+{
+    if (g.has_warm)
+    {
+        if (myc_worker_busy(&g.worker)) return 1; /* a save or a close still on the worker: the next frame */
+        g.has_warm = 0;
+        myc_addon_start_job(frame, MYC_TARGET_PREPARE, &g.warm);
+        return 1;
+    }
+    if (frame < g.next_resolve) return 0;
+    MycAdResolve(frame);
+    return 1;
+}
+
 /* The local Helldiver's checks and jobs: 1 when this frame resolved it, ran a job or a save (local_step). */
 /* lint: per-frame */
 static int MycAdLocalStep(uint32_t frame)
 {
-    if (!g.has_identity)
-    {
-        if (g.has_warm) /* work ahead first; a resolve due now waits for the frame after the job */
-        {
-            if (myc_worker_busy(&g.worker)) return 1; /* a save or a close still on the worker: the next frame */
-            g.has_warm = 0;
-            myc_addon_start_job(frame, MYC_TARGET_PREPARE, &g.warm);
-            return 1;
-        }
-        if (frame < g.next_resolve) return 0;
-        MycAdResolve(frame);
-        return 1;
-    }
+    if (!g.has_identity) return MycAdNoHelldiverStep(frame);
     int changed = myc_watch_changed(&g.watch, g.active && frame % 2 == 1);
     int verified = changed || frame >= g.next_verify;
     if (verified)
@@ -525,35 +530,32 @@ void myc_addon_init_sync_text(void)
 }
 
 /* An option's new value (set_option): name as the Lua's, value a toggle's 0/1 or a choice's. */
-void myc_addon_set_option(const char* name, int value, int toggle)
+/* The instance's field of an option name (the Lua's state.options keys), or NULL. */
+static int* MycAdField(const char* name)
 {
     MycOptions* o = &g.options;
-    int* field = strcmp(name, "mode") == 0 ? &o->mode : strcmp(name, "scheme") == 0 ? &o->scheme
-        : strcmp(name, "keep_sets") == 0 ? &o->keep_sets : strcmp(name, "recolor_hoods") == 0 ? &o->recolor_hoods
-        : strcmp(name, "match_materials") == 0 ? &o->match_materials : strcmp(name, "recolor_cape") == 0 ? &o->recolor_cape
-        : strcmp(name, "recolor_weapons") == 0 ? &o->recolor_weapons : strcmp(name, "squad") == 0 ? &o->squad
-        : strcmp(name, "squad_colors") == 0 ? &o->squad_colors : strcmp(name, "hide_cape") == 0 ? &o->hide_cape : NULL;
-    if (field == NULL || *field == value) return;
-    *field = value;
-    if (toggle) myc_notef("Option %s = %s.", name, value ? "true" : "false");
-    else myc_notef("Option %s = %d.", name, value);
-    if (strcmp(name, "hide_cape") == 0)
-    {
-        o->cape_hidden = o->hide_cape != MYC_HIDE_OFF;
-        if (g.syncing) MycAdSyncText();
-        if (g.has_identity) myc_addon_cloak_local();
-        g.cloak_due = g.has_cloak && g.syncing;
-        return;
-    }
-    MycAdSquadSettings();
-    if (strcmp(name, "squad") == 0 || o->squad != MYC_SQUAD_OFF) g.next_sync = g.frame + 1;
-    if (strcmp(name, "squad") == 0 || strcmp(name, "squad_colors") == 0) return;
+    const struct { const char* name; int* field; } fields[] = {
+        {"mode", &o->mode}, {"scheme", &o->scheme}, {"keep_sets", &o->keep_sets}, {"recolor_hoods", &o->recolor_hoods},
+        {"match_materials", &o->match_materials}, {"recolor_cape", &o->recolor_cape}, {"recolor_weapons", &o->recolor_weapons},
+        {"squad", &o->squad}, {"squad_colors", &o->squad_colors}, {"hide_cape", &o->hide_cape}};
+    for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++)
+        if (strcmp(fields[i].name, name) == 0) return fields[i].field;
+    return NULL;
+}
+
+/* Hide Cape changed: the shared flag, this player's cape now, the other players' at the next frame (hide_option). */
+static void MycAdHideOption(void)
+{
+    MycOptions* o = &g.options;
+    o->cape_hidden = o->hide_cape != MYC_HIDE_OFF;
     if (g.syncing) MycAdSyncText();
-    int was_active = g.active;
-    g.active = o->mode != MYC_OFF || o->scheme != 0;
-    MycAdWeaponsOption(strcmp(name, "recolor_hoods") == 0);
-    if (strcmp(name, "recolor_weapons") == 0) return;
-    g.dirty = 1;
+    if (g.has_identity) myc_addon_cloak_local();
+    g.cloak_due = g.has_cloak && g.syncing;
+}
+
+/* Turning local recoloring back on makes the preview, unwatched meanwhile, count as newly shown. */
+static void MycAdUiAfterOption(int was_active)
+{
     if (!g.has_ui) return;
     if (g.active && !was_active)
     {
@@ -561,6 +563,27 @@ void myc_addon_set_option(const char* name, int value, int toggle)
         g.ui.shown = g.ui.dirty = g.ui.has_kits = 0;
     }
     else if (g.ui.shown) g.ui.dirty = 1;
+}
+
+void myc_addon_set_option(const char* name, int value, int toggle)
+{
+    int* field = MycAdField(name);
+    if (field == NULL || *field == value) return;
+    *field = value;
+    if (toggle) myc_notef("Option %s = %s.", name, value ? "true" : "false");
+    else myc_notef("Option %s = %d.", name, value);
+    if (strcmp(name, "hide_cape") == 0) { MycAdHideOption(); return; }
+    MycAdSquadSettings();
+    int squad = strcmp(name, "squad") == 0;
+    if (squad || g.options.squad != MYC_SQUAD_OFF) g.next_sync = g.frame + 1;
+    if (squad || strcmp(name, "squad_colors") == 0) return;
+    if (g.syncing) MycAdSyncText();
+    int was_active = g.active;
+    g.active = g.options.mode != MYC_OFF || g.options.scheme != 0;
+    MycAdWeaponsOption(strcmp(name, "recolor_hoods") == 0);
+    if (strcmp(name, "recolor_weapons") == 0) return;
+    g.dirty = 1;
+    MycAdUiAfterOption(was_active);
 }
 
 /* Every recolor put back: the local Helldiver's, the preview's, the other players', the weapons', the capes'. */

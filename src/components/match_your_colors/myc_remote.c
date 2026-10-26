@@ -29,8 +29,7 @@ static MycRemoteEntry* MycRemFind(MycRemote* r, const char* key)
     return NULL;
 }
 
-void myc_remote_request_of(int target, const char* key, const MycSettings* s, uint32_t helmet, uint32_t armor, uint32_t body,
-    uint32_t cape, MycRequest* out)
+void myc_remote_request_of(int target, const char* key, const MycSettings* s, const MycWorn* worn, MycRequest* out)
 {
     memset(out, 0, sizeof *out);
     out->target = target;
@@ -42,10 +41,10 @@ void myc_remote_request_of(int target, const char* key, const MycSettings* s, ui
     out->scheme = s->scheme;
     out->capes = s->recolor_cape;
     out->has_kits = 1;
-    out->helmet = helmet;
-    out->armor = armor;
-    out->body = body;
-    out->cape = s->source_cape != 0 ? s->source_cape : cape;
+    out->helmet = worn->helmet;
+    out->armor = worn->armor;
+    out->body = worn->body;
+    out->cape = s->source_cape != 0 ? s->source_cape : worn->cape;
     out->source_kit = s->source_kit;
     out->source_cape = s->source_cape;
 }
@@ -53,9 +52,9 @@ void myc_remote_request_of(int target, const char* key, const MycSettings* s, ui
 static MycRemoteEntry* MycRemAdd(MycRemote* r, const char* key)
 {
     if (r->nentries >= MYC_REMOTE_ENTRIES) return NULL;
-    MycRemoteEntry* e = calloc(1, sizeof *e);
-    MycController* c = calloc(1, sizeof *c);
-    if (e == NULL || c == NULL) { free(e); free(c); return NULL; }
+    MycRemoteEntry* e = calloc(1, sizeof *e); /* lint-ok: C5 a squadmate's entry, made after a lobby poll */
+    MycController* c = calloc(1, sizeof *c); /* lint-ok: C5 as above */
+    if (e == NULL || c == NULL) { free(e); free(c); return NULL; } /* lint-ok: C5 as above */
     snprintf(e->key, sizeof e->key, "%s", key);
     myc_controller_init(c, r->native, r->pool);
     e->controller = c;
@@ -66,7 +65,7 @@ static MycRemoteEntry* MycRemAdd(MycRemote* r, const char* key)
 static void MycRemRetire(MycRemote* r, void* block, MycController* a, MycController* b)
 {
     if (r->nretiring < 64) r->retiring[r->nretiring++] = (MycRetiring){block, a, b};
-    else { myc_controller_free(a); if (b != NULL) myc_controller_free(b); free(block); }
+    else { myc_controller_free(a); if (b != NULL) myc_controller_free(b); free(block); } /* lint-ok: C5 a squadmate's controllers freed once their textures retired */
 }
 
 static void MycRemDropLoadout(MycRemote* r, MycRemoteEntry* e, uint32_t frame)
@@ -85,7 +84,7 @@ static void MycRemWeapons(MycRemote* r, MycRemoteEntry* e, uint32_t frame)
     {
         char follow[64];
         snprintf(follow, sizeof follow, "Sync: %s", e->key);
-        e->loadout = malloc(sizeof(MycLoadout));
+        e->loadout = malloc(sizeof(MycLoadout)); /* lint-ok: C5 a squadmate's weapons target, made once with its first job */
         if (e->loadout == NULL) return;
         myc_loadout_init(e->loadout, r->native, r->pool, r->note, follow);
     }
@@ -102,7 +101,7 @@ static void MycRemDrop(MycRemote* r, const char* key, uint32_t frame)
     char line[256];
     myc_controller_restore(e->controller, frame);
     if (e->controller->nretired > 0) MycRemRetire(r, e->controller, e->controller, NULL);
-    else { myc_controller_free(e->controller); free(e->controller); }
+    else { myc_controller_free(e->controller); free(e->controller); } /* lint-ok: C5 a squadmate's entry dropped after a lobby poll */
     if (e->loadout != NULL)
     {
         const MycLoadout* l = e->loadout;
@@ -116,7 +115,7 @@ static void MycRemDrop(MycRemote* r, const char* key, uint32_t frame)
     while (r->entries[at] != e) at++;
     memmove(&r->entries[at], &r->entries[at + 1], sizeof r->entries[0] * (size_t)(r->nentries - at - 1));
     r->nentries--;
-    free(e);
+    free(e); /* lint-ok: C5 as above */
     r->note(line);
 }
 
@@ -279,6 +278,42 @@ static void MycRemSeen(MycRemPoll* poll, const char* key)
     if (poll->nseen < (int)(sizeof poll->seen / sizeof poll->seen[0])) snprintf(poll->seen[poll->nseen++], MYC_PEER_KEY, "%s", key);
 }
 
+/* The member's settings into the poll's wanted list (a failed read keeps the last poll's) (want). */
+static void MycRemWant(MycRemote* r, MycRemPoll* poll, const MycMember* m, const char* key, const MycSettings* mine,
+    int everyone)
+{
+    MycSettings s;
+    int is_mine, kept_wanted = 0;
+    int has = MycRemSettingsFor(m, mine, everyone, &s, &is_mine);
+    const MycSettings* old = m->failed ? myc_remote_wanted(r, key, &kept_wanted) : NULL;
+    if (old != NULL) { s = *old; has = 1; is_mine = kept_wanted; }
+    if (!has || poll->nspare >= MYC_SYNC_MAX_MEMBERS) return;
+    MycWanted* w = &poll->spare[poll->nspare++];
+    snprintf(w->key, sizeof w->key, "%s", key);
+    w->settings = s;
+    w->is_mine = is_mine;
+}
+
+/* The player a member names (by peer; the local player only for the local member), or NULL. */
+static const MycPlayer* MycRemPlayerOf(MycRemPoll* poll, const MycMember* m)
+{
+    MycRemPlayers(poll);
+    for (int i = 0; i < poll->nplayers; i++)
+    {
+        const MycPlayer* p = &poll->players[i];
+        if (p->peer_low == m->peer_low && p->peer_high == m->peer_high && (!p->is_local || m->is_local)) return p;
+    }
+    return NULL;
+}
+
+/* A member with settings whose player is not here (yet): its entry marked absent, or the miss noted. */
+static void MycRemAbsent(MycRemote* r, MycRemPoll* poll, const char* key, int is_mine)
+{
+    MycRemoteEntry* e = MycRemFind(r, key);
+    if (e != NULL) { e->absent = 1; MycRemSeen(poll, key); }
+    else MycRemNotFound(r, key, poll->nplayers, is_mine);
+}
+
 /* One member into wanted (want) and its entry (visit/take). */
 static void MycRemMember(MycRemote* r, MycRemPoll* poll, const MycMember* m, const MycSettings* mine, int everyone, uint32_t frame)
 {
@@ -288,17 +323,7 @@ static void MycRemMember(MycRemote* r, MycRemPoll* poll, const MycMember* m, con
     MycSettings own, s;
     int is_mine;
     poll->sharing |= !m->is_local && (m->failed || (m->has_text && myc_sync_decode(m->text, &own)));
-    int has = MycRemSettingsFor(m, mine, everyone, &s, &is_mine);
-    int kept_wanted = 0;
-    const MycSettings* old = m->failed ? myc_remote_wanted(r, key, &kept_wanted) : NULL;
-    if (old != NULL) { s = *old; has = 1; is_mine = kept_wanted; }
-    if (has && poll->nspare < MYC_SYNC_MAX_MEMBERS)
-    {
-        MycWanted* w = &poll->spare[poll->nspare++];
-        snprintf(w->key, sizeof w->key, "%s", key);
-        w->settings = s;
-        w->is_mine = is_mine;
-    }
+    MycRemWant(r, poll, m, key, mine, everyone);
     MycRemoteEntry* kept = m->failed ? MycRemFind(r, key) : NULL;
     if (kept != NULL)
     {
@@ -307,18 +332,8 @@ static void MycRemMember(MycRemote* r, MycRemPoll* poll, const MycMember* m, con
         return;
     }
     if (!MycRemSettingsFor(m, mine, everyone, &s, &is_mine)) return;
-    MycRemPlayers(poll);
-    const MycPlayer* player = NULL;
-    for (int i = 0; i < poll->nplayers && player == NULL; i++)
-        if (poll->players[i].peer_low == m->peer_low && poll->players[i].peer_high == m->peer_high && (!poll->players[i].is_local || m->is_local))
-            player = &poll->players[i];
-    MycRemoteEntry* e = MycRemFind(r, key);
-    if (player == NULL)
-    {
-        if (e != NULL) { e->absent = 1; MycRemSeen(poll, key); }
-        else MycRemNotFound(r, key, poll->nplayers, is_mine);
-        return;
-    }
+    const MycPlayer* player = MycRemPlayerOf(poll, m);
+    if (player == NULL) { MycRemAbsent(r, poll, key, is_mine); return; }
     MycRemForget(r, key);
     if (poll->nmatched < MYC_MAX_PLAYERS) poll->matched[poll->nmatched++] = player->player;
     MycRemKeep(r, key, player, &s, frame, is_mine);
@@ -392,8 +407,8 @@ int myc_remote_request(MycRemote* r, MycRequest* out)
             myc_watch_changed(&e->watch, 0);
             MycRemWeapons(r, e, r->frame);
             r->served = i + 1;
-            myc_remote_request_of(MYC_TARGET_REMOTE, e->key, &e->settings, e->identity.helmet, e->identity.armor, e->identity.body,
-                e->identity.cape, out);
+            MycWorn worn = {e->identity.helmet, e->identity.armor, e->identity.body, e->identity.cape};
+            myc_remote_request_of(MYC_TARGET_REMOTE, e->key, &e->settings, &worn, out);
             return 1;
         }
         e->failures++;
@@ -410,8 +425,8 @@ int myc_remote_request(MycRemote* r, MycRequest* out)
         memset(&w, 0, sizeof w);
         if (!myc_loadout_request(e->loadout, &w)) continue;
         r->served = i + 1;
-        myc_remote_request_of(MYC_TARGET_REMOTE, e->key, &e->settings, e->identity.helmet, e->identity.armor, e->identity.body,
-            e->identity.cape, out);
+        MycWorn worn = {e->identity.helmet, e->identity.armor, e->identity.body, e->identity.cape};
+        myc_remote_request_of(MYC_TARGET_REMOTE, e->key, &e->settings, &worn, out);
         memcpy(out->weapons, w.weapons, sizeof w.weapons);
         out->nweapons = w.nweapons;
         snprintf(out->sig, sizeof out->sig, "%s", w.sig);
@@ -493,7 +508,7 @@ void myc_remote_step(MycRemote* r, uint32_t frame)
         if (left > 0) { r->retiring[keep++] = *t; continue; }
         myc_controller_free(t->a);
         if (t->b != NULL) myc_controller_free(t->b);
-        free(t->block);
+        free(t->block); /* lint-ok: C5 retired controllers freed once their textures retired */
     }
     r->nretiring = keep;
     if (r->nentries == 0) return;

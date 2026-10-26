@@ -24,22 +24,25 @@ void myc_loadout_free(MycLoadout* l)
     myc_controller_free(&l->shown);
 }
 
+/* One weapon's part of the signature (after a '|' unless first): its length as snprintf counts it. */
+static size_t MycLoWeaponSignature(int slot, const MycWeapon* w, int first, char* out, size_t size)
+{
+    size_t at = (size_t)snprintf(out, size, "%s%d:%016llx:", first ? "" : "|", slot, (unsigned long long)w->name);
+    for (int role = 0; role <= 4 && at < size; role++)
+    {
+        char name[17] = "";
+        if (w->attachments[role] != 0) snprintf(name, sizeof name, "%016llx", (unsigned long long)w->attachments[role]);
+        at += (size_t)snprintf(out + at, size - at, "%s%s=%s", role ? ";" : "", name, w->overrides[role].has ? w->overrides[role].text : "");
+    }
+    return at;
+}
+
 void myc_loadout_signature(const MycResolved* resolved, char* out, size_t size)
 {
     size_t at = 0;
     out[0] = 0;
     for (int slot = 1; resolved != NULL && slot <= 3 && at < size; slot++)
-    {
-        if (!resolved->has[slot]) continue;
-        const MycWeapon* w = &resolved->list[slot];
-        at += (size_t)snprintf(out + at, size - at, "%s%d:%016llx:", at > 0 ? "|" : "", slot, (unsigned long long)w->name);
-        for (int role = 0; role <= 4 && at < size; role++)
-        {
-            char name[17] = "";
-            if (w->attachments[role] != 0) snprintf(name, sizeof name, "%016llx", (unsigned long long)w->attachments[role]);
-            at += (size_t)snprintf(out + at, size - at, "%s%s=%s", role ? ";" : "", name, w->overrides[role].has ? w->overrides[role].text : "");
-        }
-    }
+        if (resolved->has[slot]) at += MycLoWeaponSignature(slot, &resolved->list[slot], at == 0, out + at, size - at);
 }
 
 /* The resolved weapons as a controller's fixed units. */

@@ -193,37 +193,48 @@ static void MycPlanGoalSource(MycGoal* goal, int kind, const MycGroup* src)
     goal->kind = kind;
 }
 
+/* A copied source row's goal: its color, and its finish too when the part takes the paint. */
+static void MycPlanCopyGoal(MycGoal* goal, const MycGroup* src, int painted)
+{
+    goal->L = src->L;
+    goal->a = src->a;
+    goal->b = src->b;
+    memcpy(goal->copy, src->rep->key, MYC_KEY);
+    if (painted) memcpy(goal->finish, src->rep->key, MYC_KEY);
+}
+
+/* A part that takes the source's paint: its goal look (the seen one when there is one), calibration and finish. */
+static void MycPlanPaintGoal(MycGoal* goal, const MycGroup* src)
+{
+    const MycRow* rep = src->rep;
+    goal->L = src->has_g ? src->gL : src->L;
+    goal->a = src->has_g ? src->ga : src->a;
+    goal->b = src->has_g ? src->gb : src->b;
+    goal->has_cal = rep->has_cal;
+    memcpy(goal->cal, rep->cal, sizeof goal->cal);
+    memcpy(goal->finish, rep->key, MYC_KEY);
+}
+
+/* A painted part that takes the source's bare metal: the metal's model color, its finish, a coat. */
+static void MycPlanCoatGoal(MycGoal* goal, const MycGroup* src)
+{
+    const MycRow* rep = src->rep;
+    goal->L = rep->mL;
+    goal->a = rep->ma;
+    goal->b = rep->mb;
+    memcpy(goal->finish, rep->key, MYC_KEY);
+    goal->coat = 1;
+}
+
 /* One row's goal (map_group's branches). */
 static void MycPlanRow(MycGoal* goal, const MycRow* row, const MycGroup* t, int kind, const MycGroup* src,
     const MycPlanMap* map)
 {
     const MycRow* rep = src->rep;
     MycPlanGoalSource(goal, kind, src);
-    if (rep != NULL && rep->copy)
-    {
-        goal->L = src->L;
-        goal->a = src->a;
-        goal->b = src->b;
-        memcpy(goal->copy, rep->key, MYC_KEY);
-        if (map->materials && MycPlanPainted(t, kind, src, row)) memcpy(goal->finish, rep->key, MYC_KEY);
-    }
-    else if (map->materials && MycPlanPainted(t, kind, src, row))
-    {
-        goal->L = src->has_g ? src->gL : src->L;
-        goal->a = src->has_g ? src->ga : src->a;
-        goal->b = src->has_g ? src->gb : src->b;
-        goal->has_cal = rep->has_cal;
-        memcpy(goal->cal, rep->cal, sizeof goal->cal);
-        memcpy(goal->finish, rep->key, MYC_KEY);
-    }
-    else if (map->materials && MycPlanMetallized(t, src, row, map->tone))
-    {
-        goal->L = rep->mL;
-        goal->a = rep->ma;
-        goal->b = rep->mb;
-        memcpy(goal->finish, rep->key, MYC_KEY);
-        goal->coat = 1;
-    }
+    if (rep != NULL && rep->copy) MycPlanCopyGoal(goal, src, map->materials && MycPlanPainted(t, kind, src, row));
+    else if (map->materials && MycPlanPainted(t, kind, src, row)) MycPlanPaintGoal(goal, src);
+    else if (map->materials && MycPlanMetallized(t, src, row, map->tone)) MycPlanCoatGoal(goal, src);
     else
     {
         MycPlanPairGoal(row, src, &map->d, map->source_armor, map->tone, goal);
@@ -318,6 +329,22 @@ static int MycPlanChoices(MycArena* arena, const MycPairs* pairs, const MycPlanW
     return n;
 }
 
+static int MycPlanMapChoices(MycPlan* mapping, const MycChoice* choices, int n, const MycItem* source, int materials)
+{
+    for (int i = 0; i < n; i++)
+        if (!myc_map_group(mapping, choices[i].t, choices[i].kind, choices[i].src, materials, source->armor, choices[i].tone))
+            return 0;
+    return 1;
+}
+
+/* The small accents' colors: the source's accent, else its second accent, else (a cape source) its identity color. */
+static int MycPlanSmall(MycPlan* mapping, MycItem* target, MycItem* source, const MycPlanWho* w, int materials)
+{
+    MycGroup* small = w->accent != NULL ? w->accent : w->second;
+    if (small == NULL && source->cape_source && w->anchor != NULL) small = myc_identity(source);
+    return small == NULL || MycPlanSmallAccents(mapping, target, source, small, materials);
+}
+
 int myc_plan(MycPlan* mapping, MycItem* target, MycItem* source, int materials, int cape)
 {
     MycPairs pairs;
@@ -330,14 +357,10 @@ int myc_plan(MycPlan* mapping, MycItem* target, MycItem* source, int materials, 
     int n = MycPlanChoices(mapping->arena, &pairs, &w, materials, &choices);
     if (n < 0) return 0;
     if (!cape) MycPlanTones(choices, n, anchor);
-    for (int i = 0; i < n; i++)
-        if (!myc_map_group(mapping, choices[i].t, choices[i].kind, choices[i].src, materials, source->armor, choices[i].tone))
-            return 0;
+    if (!MycPlanMapChoices(mapping, choices, n, source, materials)) return 0;
     if (!myc_tint_bands(mapping, choices, n, source, w.accent, target->armor || target->weapon)) return 0;
     if (!myc_cloth_off_metal(mapping, choices, n, source, materials)) return 0;
-    MycGroup* small = w.accent != NULL ? w.accent : w.second;
-    if (small == NULL && source->cape_source && anchor != NULL) small = myc_identity(source);
-    if (small != NULL && !MycPlanSmallAccents(mapping, target, source, small, materials)) return 0;
+    if (!MycPlanSmall(mapping, target, source, &w, materials)) return 0;
     if (target->armor && !cape) return myc_balance(mapping, target, source);
     return 1;
 }

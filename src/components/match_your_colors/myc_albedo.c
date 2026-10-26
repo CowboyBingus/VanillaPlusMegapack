@@ -312,28 +312,29 @@ static int MycAlbedoCluster(const MycPoint* pts, int n, MycAlbedo* out, MycErr* 
     return 1;
 }
 
-MycAlbedo* myc_albedo_read(MycFind* find, const MycAlbedoEntry* entry, MycArena* arena, char* why, size_t size,
-    MycErr* err)
+/* The read mip's color blocks binned into g_bins (with the material's metalness when its MRA is there); 0 on an
+ * error (after myc_fail). */
+static int MycAlbedoBinMip(MycFind* find, const MycAlbedoEntry* entry, MycPixels* p, MycErr* err)
 {
-    MycAlbedoTables();
-    MycPixels p;
-    int got = myc_tex_open(find, entry->albedo, &p, err);
-    if (got < 0) return NULL;
-    if (got == 0) { snprintf(why, size, "albedo not found"); return NULL; }
-    MycTexInfo info = p.info;
+    MycTexInfo info = p->info;
     uint32_t m = MycAlbedoReadMip(&info), w = MycAlbedoSide(info.width, m), h = MycAlbedoSide(info.height, m);
     uint32_t step = MycAlbedoBlockBytes(info.format), blocks = ((w + 3) >> 2) * ((h + 3) >> 2);
     uint8_t* data = malloc((size_t)blocks * step);
-    if (data == NULL) { myc_fail(err, "out of memory"); return NULL; }
-    if (!myc_pixels_read(&p, info.mip_offsets[m], blocks * step, data, err)) { free(data); return NULL; }
+    if (data == NULL) return myc_fail(err, "out of memory");
+    if (!myc_pixels_read(p, info.mip_offsets[m], blocks * step, data, err)) { free(data); return 0; }
     uint8_t* mra = MycAlbedoMra(find, entry, w, h, err);
-    if (err->failed) { free(data); return NULL; }
+    if (err->failed) { free(data); return 0; }
     memset(g_bins, 0, sizeof g_bins);
     for (uint32_t i = 0; i < blocks; i++)
         MycAlbedoBinBlock(data + (size_t)i * step + (step == 16 ? 8 : 0), MycAlbedoBc1(info.format), mra != NULL ? mra + (size_t)i * 16 : NULL);
     free(data);
     free(mra);
-    static MycPoint pts[BINS];
+    return 1;
+}
+
+/* The bins that hold texels as points (their mean color and metalness): how many. */
+static int MycAlbedoPoints(MycPoint* pts)
+{
     int n = 0;
     for (int k = 0; k < BINS; k++)
     {
@@ -348,6 +349,21 @@ MycAlbedo* myc_albedo_read(MycFind* find, const MycAlbedoEntry* entry, MycArena*
         pt->lab[2] = lab.b;
         pt->metal = g_bins[5 * k + 4] / count;
     }
+    return n;
+}
+
+MycAlbedo* myc_albedo_read(MycFind* find, const MycAlbedoEntry* entry, MycArena* arena, char* why, size_t size,
+    MycErr* err)
+{
+    MycAlbedoTables();
+    MycPixels p;
+    int got = myc_tex_open(find, entry->albedo, &p, err);
+    if (got < 0) return NULL;
+    if (got == 0) { snprintf(why, size, "albedo not found"); return NULL; }
+    MycTexInfo info = p.info;
+    if (!MycAlbedoBinMip(find, entry, &p, err)) return NULL;
+    static MycPoint pts[BINS];
+    int n = MycAlbedoPoints(pts);
     if (n == 0) { snprintf(why, size, "no opaque texel"); return NULL; }
     MycAlbedo* albedo = myc_alloc(arena, sizeof *albedo);
     if (albedo == NULL) { myc_fail(err, "out of memory"); return NULL; }

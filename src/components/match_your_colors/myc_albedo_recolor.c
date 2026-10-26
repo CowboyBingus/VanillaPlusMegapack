@@ -174,50 +174,79 @@ static void MycRecolorSpec(uint64_t name, const MycAlbedo* albedo, const MycGoal
 
 static int MycRecolorLineLess(const void* x, const void* y) { return strcmp(*(const char* const*)x, *(const char* const*)y); }
 
-/* One albedo's goals, count and the log's shares; then its recolored copy into out. */
-static int MycRecolorAlbedo(MycArena* arena, const MycAnalysis* target, uint64_t name, const MycAlbedo* albedo,
-    const MycPlan* plan, MycSpecs* out, MycAlbedoChain chain, void* ctx, char** line, MycErr* err)
+/* What plan_specs works with: the plan of a target, the specs it adds to, the chain read and its errors. */
+typedef struct MycAlbedoJob
 {
+    MycArena* arena;
+    const MycAnalysis* target;
+    const MycPlan* plan;
+    MycSpecs* out;
+    const MycAlbedoSource* source;
+    MycErr* err;
+} MycAlbedoJob;
+
+/* An albedo's recolored copy into the specs (the chain read again: it must be the texture analysed). */
+static int MycRecolorAlbedoCopy(const MycAlbedoJob* job, const MycNamedAlbedo* a, const MycGoal* const* goals)
+{
+    MycTexInfo info;
+    MycErr* err = job->err;
+    MycSpec* spec = job->source->chain(job->source->ctx, a->name, job->target->kit->archive, &info, err);
+    if (spec == NULL && err->failed) return 0;
+    if (spec == NULL || info.format != a->albedo->format || info.layer_bytes != a->albedo->total)
+    {
+        myc_spec_drop(spec);
+        return myc_fail(err, "mod texture %016llx is not the texture analysed", (unsigned long long)a->name);
+    }
+    MycRecolorSpec(a->name, a->albedo, goals, spec);
+    return myc_specs_put(job->arena, job->out, a->name, spec) || myc_fail(err, "out of memory (albedo)");
+}
+
+/* One albedo's goals, count and the log's shares; then its recolored copy into the specs. */
+static int MycRecolorAlbedo(const MycAlbedoJob* job, const MycNamedAlbedo* a, char** line)
+{
+    const MycAlbedo* albedo = a->albedo;
     const MycGoal* goals[8];
     char shares[8 * 24] = "", key[MYC_KEY];
     int count = 0;
     size_t at = 0;
     for (int k = 0; k < albedo->nclusters; k++)
     {
-        myc_row_key(key, name, k);
-        goals[k] = myc_plan_get(plan, key);
+        myc_row_key(key, a->name, k);
+        goals[k] = myc_plan_get(job->plan, key);
         count += goals[k] != NULL;
         const MycCluster* c = &albedo->clusters[k];
         at += (size_t)snprintf(shares + at, sizeof shares - at, "%s%.0f%%%s", k ? ", " : "", 100 * c->share,
             c->metal > 0.5 ? " metal" : "");
     }
-    if (count > 0)
-    {
-        MycTexInfo info;
-        MycSpec* spec = chain(ctx, name, target->kit->archive, &info, err);
-        if (spec == NULL && err->failed) return 0;
-        if (spec == NULL || info.format != albedo->format || info.layer_bytes != albedo->total)
-        {
-            myc_spec_drop(spec);
-            return myc_fail(err, "mod texture %016llx is not the texture analysed", (unsigned long long)name);
-        }
-        MycRecolorSpec(name, albedo, goals, spec);
-        if (!myc_specs_put(arena, out, name, spec)) return myc_fail(err, "out of memory (albedo)");
-    }
+    if (count > 0 && !MycRecolorAlbedoCopy(job, a, goals)) return 0;
     char text[512];
     snprintf(text, sizeof text, "Mod texture %016llx (a material without a color table): %d colors read (%s); %d recolored.",
-        (unsigned long long)name, albedo->nclusters, shares, count);
-    *line = myc_strdup(arena, text);
-    return *line != NULL || myc_fail(err, "out of memory");
+        (unsigned long long)a->name, albedo->nclusters, shares, count);
+    *line = myc_strdup(job->arena, text);
+    return *line != NULL || myc_fail(job->err, "out of memory");
+}
+
+/* The lines sorted and joined into the report (in the arena), or NULL when there are none. */
+static int MycAlbedoReport(MycArena* arena, char** lines, int n, char** report, MycErr* err)
+{
+    static char text[2048];
+    *report = NULL;
+    if (n == 0) return 1;
+    qsort(lines, (size_t)n, sizeof lines[0], MycRecolorLineLess);
+    size_t at = 0;
+    text[0] = 0;
+    for (int i = 0; i < n && at < sizeof text; i++) at += (size_t)snprintf(text + at, sizeof text - at, "%s%s", i ? " " : "", lines[i]);
+    *report = myc_strdup(arena, text);
+    return *report != NULL || myc_fail(err, "out of memory");
 }
 
 int myc_albedo_plan_specs(MycArena* arena, const MycAnalysis* target, const MycPlan* plan, MycSpecs* out,
-    MycAlbedoChain chain, void* ctx, char* report, size_t size, MycErr* err)
+    const MycAlbedoSource* source, char** report, MycErr* err)
 {
     char** lines = myc_alloc(arena, sizeof(char*) * (size_t)(target->nunread + target->nalbedos + 1));
     if (lines == NULL) return myc_fail(err, "out of memory");
     int n = 0;
-    report[0] = 0;
+    *report = NULL;
     for (int i = 0; i < target->nunread; i++)
     {
         const MycUnread* u = &target->unread[i];
@@ -226,14 +255,8 @@ int myc_albedo_plan_specs(MycArena* arena, const MycAnalysis* target, const MycP
             (unsigned long long)u->material, u->file[0] ? u->file : "nil", u->why);
         if ((lines[n++] = myc_strdup(arena, text)) == NULL) return myc_fail(err, "out of memory");
     }
+    MycAlbedoJob job = {arena, target, plan, out, source, err};
     for (int i = 0; i < target->nalbedos; i++)
-    {
-        const MycNamedAlbedo* a = &target->albedos[i];
-        if (a->albedo == NULL) continue;
-        if (!MycRecolorAlbedo(arena, target, a->name, a->albedo, plan, out, chain, ctx, &lines[n++], err)) return 0;
-    }
-    qsort(lines, (size_t)n, sizeof lines[0], MycRecolorLineLess);
-    size_t at = 0;
-    for (int i = 0; i < n && at < size; i++) at += (size_t)snprintf(report + at, size - at, "%s%s", i ? " " : "", lines[i]);
-    return 1;
+        if (target->albedos[i].albedo != NULL && !MycRecolorAlbedo(&job, &target->albedos[i], &lines[n++])) return 0;
+    return MycAlbedoReport(arena, lines, n, report, err);
 }

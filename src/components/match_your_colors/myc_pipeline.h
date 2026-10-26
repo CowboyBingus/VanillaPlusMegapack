@@ -25,9 +25,12 @@ void myc_cache_key(MycKit* kit, int body, char* out, size_t size);
 void myc_cache_header(const char* data, char* out, size_t size);
 /* Cache.encode: the whole file (entries most recently used first; at most MAX_ENTRIES written). */
 int myc_cache_encode(MycBuf* out, const char* header, const MycCacheEntry* entries, int n, MycSamples* samples);
-/* Cache.decode: 1 with the entries (in arena) and the samples (*has_samples), or 0 with why. */
-int myc_cache_decode(const uint8_t* text, size_t size, const char* header, MycArena* arena, MycCacheEntry** entries,
-    int* n, MycSamples* samples, int* has_samples, char* why, size_t why_size);
+/* What Cache.decode gives: the entries (in arena), and the samples when the file holds them (has_samples; samples:
+ * the caller's to fill). */
+typedef struct MycCacheDecoded { MycCacheEntry* entries; int n; MycSamples* samples; int has_samples; } MycCacheDecoded;
+/* Cache.decode: 1 with out filled, or 0 with why. */
+int myc_cache_decode(const uint8_t* text, size_t size, const char* header, MycArena* arena, MycCacheDecoded* out,
+    char* why, size_t why_size);
 /* The file's bytes (malloc'd), or 0 when there is none. */
 int myc_cache_read(const wchar_t* path, uint8_t** text, size_t* size);
 /* Writes through <path>.tmp and a rename: 1, or 0 with why (the previous file stays). */

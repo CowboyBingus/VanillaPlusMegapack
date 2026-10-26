@@ -81,24 +81,46 @@ void myc_row_key(char out[MYC_KEY], uint64_t lut, int row)
     snprintf(out, MYC_KEY, "%016llx:%d", (unsigned long long)lut, row);
 }
 
-int myc_split_key(const char* key, uint64_t* lut, int* row)
+static int MycHexDigit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+/* The hex number before a key's ':' (at most 16 digits): its length, or -1. */
+static int MycKeyHex(const char* key, uint64_t* out)
 {
     uint64_t value = 0;
     int i = 0;
     for (; key[i] != 0 && key[i] != ':'; i++)
     {
-        char c = key[i];
-        int digit = c >= '0' && c <= '9' ? c - '0' : (c >= 'a' && c <= 'f' ? c - 'a' + 10 : (c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1));
-        if (digit < 0 || i >= 16) return 0;
+        int digit = MycHexDigit(key[i]);
+        if (digit < 0 || i >= 16) return -1;
         value = value * 16 + (uint64_t)digit;
     }
-    if (i == 0 || key[i] != ':' || key[i + 1] == 0) return 0;
+    *out = value;
+    return i;
+}
+
+/* The decimal row after a key's ':': 1, or 0 when it is not one. */
+static int MycKeyRow(const char* p, int* out)
+{
     int r = 0;
-    for (const char* p = key + i + 1; *p; p++)
+    for (; *p; p++)
     {
         if (*p < '0' || *p > '9' || r > 100000000) return 0;
         r = r * 10 + (*p - '0');
     }
+    *out = r;
+    return 1;
+}
+
+int myc_split_key(const char* key, uint64_t* lut, int* row)
+{
+    uint64_t value = 0;
+    int r = 0, i = MycKeyHex(key, &value);
+    if (i <= 0 || key[i] != ':' || key[i + 1] == 0 || !MycKeyRow(key + i + 1, &r)) return 0;
     *lut = value;
     *row = r;
     return 1;
@@ -133,7 +155,7 @@ void* myc_alloc(MycArena* arena, size_t size)
     if (block == NULL || block->size - block->used < size)
     {
         size_t want = size + header > MYC_BLOCK ? size + header : MYC_BLOCK;
-        block = malloc(want);
+        block = malloc(want); /* lint-ok: C5 arena growth: the worker's jobs; on the game thread a record's signature, on a frame that rebinds */
         if (block == NULL) return NULL;
         block->next = arena->head;
         block->used = header;
@@ -161,7 +183,7 @@ void myc_arena_free(MycArena* arena)
     while (block != NULL)
     {
         MycArenaBlock* next = block->next;
-        free(block);
+        free(block); /* lint-ok: C5 a result let go on the frame its job ends or its plan is replaced */
         block = next;
     }
     arena->head = NULL;
@@ -364,10 +386,10 @@ void myc_lua_sort(void** items, int count, MycLess less, void* ctx)
 
 MycSpec* myc_spec_new(int kind, int width, int height, size_t size)
 {
-    MycSpec* spec = calloc(1, sizeof *spec);
+    MycSpec* spec = calloc(1, sizeof *spec); /* lint-ok: C5 a spec of zeros for the pool's stock, on the frame a job made ahead ends */
     if (spec == NULL) return NULL;
-    spec->data = size > 0 ? calloc(1, size) : NULL;
-    if (size > 0 && spec->data == NULL) { free(spec); return NULL; }
+    spec->data = size > 0 ? calloc(1, size) : NULL; /* lint-ok: C5 as above */
+    if (size > 0 && spec->data == NULL) { free(spec); return NULL; } /* lint-ok: C5 as above */
     spec->refs = 1;
     spec->kind = kind;
     spec->width = width;
@@ -386,8 +408,8 @@ MycSpec* myc_spec_hold(MycSpec* spec)
 void myc_spec_drop(MycSpec* spec)
 {
     if (spec == NULL || InterlockedDecrement(&spec->refs) != 0) return;
-    free(spec->data);
-    free(spec);
+    free(spec->data); /* lint-ok: C5 a texture's old data let go when it goes back to the pool, RETIRE_FRAMES after its plan changed */
+    free(spec); /* lint-ok: C5 as above */
 }
 
 /* ---- buffers ------------------------------------------------------------------------------------------------------ */

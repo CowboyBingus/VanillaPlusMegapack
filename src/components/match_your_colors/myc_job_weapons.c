@@ -39,6 +39,15 @@ static int MycWjFind(const MycOverride* out, int n, uint32_t slot)
     return -1;
 }
 
+/* The LUT a weapon's own paint binds on slot (the last row of it), or 0. */
+static uint64_t MycWjOwnLut(const MycWeaponPaint* rows, uint32_t slot)
+{
+    uint64_t own = 0;
+    for (int r = 0; rows != NULL && rows->has && r < rows->nrows; r++)
+        if (rows->rows[r].slot == slot) own = rows->rows[r].lut;
+    return own;
+}
+
 /* The template's classes of prefix p into out, for slots not taken yet (take_classes). */
 static int MycWjTake(MycOverride* out, int n, uint8_t* taken, const MycWeaponPaint* rows, const char* scheme, char p)
 {
@@ -49,9 +58,7 @@ static int MycWjTake(MycOverride* out, int n, uint8_t* taken, const MycWeaponPai
         uint32_t slot = (uint32_t)strtoul(c->key + 1, NULL, 16);
         int k = MycWjFind(out, n, slot);
         if (k >= 0 && taken[k]) continue;
-        uint64_t own = 0;
-        for (int r = 0; rows != NULL && rows->has && r < rows->nrows; r++)
-            if (rows->rows[r].slot == slot) own = rows->rows[r].lut;
+        uint64_t own = MycWjOwnLut(rows, slot);
         if (k < 0) k = n++;
         out[k] = (MycOverride){slot, c->lut, 0, own, MycWjDecal(scheme, c->key), 1};
         taken[k] = 1;
@@ -255,24 +262,28 @@ static MycSpec* MycWjCopy(const MycLut* lut)
     return spec;
 }
 
+/* One material's LUT into luts: the plan's, else (a template binds another) a copy of its own; then its scheme decal
+ * sheet as it is. 0 out of memory. */
+static int MycWjMaterialLuts(MycResult* out, const MycAnalysis* a, const MycMaterial* m, const MycMade* made, int attachment)
+{
+    MycSpec* spec = made != NULL ? myc_spec_hold(myc_specs_get(&made->luts, m->lut)) : NULL;
+    const MycLut* own = myc_analysis_lut(a, m->lut);
+    if (spec == NULL && m->has_bound && own != NULL) spec = MycWjCopy(own);
+    if (spec != NULL && m->lut != 0 && !myc_specs_set(&out->arena, &out->luts, m->has_bound ? m->bound : m->lut, attachment, spec)) return 0;
+    if (spec != NULL && m->lut == 0) myc_spec_drop(spec);
+    if (!m->has_decal) return 1;
+    MycSpec* direct = myc_spec_new(MYC_SPEC_DIRECT, 0, 0, 0);
+    if (direct == NULL) return 0;
+    direct->name = m->decal_to;
+    return myc_specs_set(&out->arena, &out->luts, m->decal_from, attachment, direct);
+}
+
 /* One piece's materials into luts (piece_luts). */
 static int MycWjPieceLuts(MycResult* out, const MycAnalysis* a, const MycAPiece* entry, const MycMade* made)
 {
     int attachment = entry->piece.slot != 0;
     for (int i = 0; i < entry->nmaterials; i++)
-    {
-        const MycMaterial* m = &entry->materials[i];
-        MycSpec* spec = made != NULL ? myc_spec_hold(myc_specs_get(&made->luts, m->lut)) : NULL;
-        const MycLut* own = myc_analysis_lut(a, m->lut);
-        if (spec == NULL && m->has_bound && own != NULL) spec = MycWjCopy(own);
-        if (spec != NULL && m->lut != 0 && !myc_specs_set(&out->arena, &out->luts, m->has_bound ? m->bound : m->lut, attachment, spec)) return 0;
-        if (spec != NULL && m->lut == 0) myc_spec_drop(spec);
-        if (!m->has_decal) continue;
-        MycSpec* direct = myc_spec_new(MYC_SPEC_DIRECT, 0, 0, 0);
-        if (direct == NULL) return 0;
-        direct->name = m->decal_to;
-        if (!myc_specs_set(&out->arena, &out->luts, m->decal_from, attachment, direct)) return 0;
-    }
+        if (!MycWjMaterialLuts(out, a, &entry->materials[i], made, attachment)) return 0;
     return 1;
 }
 
@@ -300,9 +311,28 @@ static MycAnalysis* MycWjPlan(MycJob* j, MycWeapon* w, const char* source, const
     return a;
 }
 
-int myc_weapons_job(MycJob* j, MycResult* out)
+/* Every weapon of the request planned into out (the key: each weapon's name and records); 0 after myc_fail. */
+static int MycWjPlanAll(MycJob* j, const char* source, const MycTemplate* template, MycResult* out)
 {
     MycRequest* r = j->request;
+    size_t at = (size_t)snprintf(out->key, sizeof out->key, "weapons:%s:", source);
+    int keys = 0;
+    for (int i = 0; i < r->nweapons && !myc_job_obsolete(j); i++)
+    {
+        MycKit* kit = NULL;
+        MycAnalysis* a = MycWjPlan(j, &r->weapons[i], source, template, out, &kit);
+        if (j->err->failed) return 0;
+        if (a == NULL) continue;
+        if (out->ntargets < MYC_MAX_TARGETS) out->targets[out->ntargets++] = a;
+        char sum[9];
+        myc_records_sum(&kit, 1, sum);
+        at += (size_t)snprintf(out->key + at, sizeof out->key - at, "%s%016llx/%s", keys++ ? "," : "", (unsigned long long)r->weapons[i].name, sum);
+    }
+    return 1;
+}
+
+int myc_weapons_job(MycJob* j, MycResult* out)
+{
     j->p->stage = "kit catalogue";
     char source[128];
     const char* why = NULL;
@@ -312,19 +342,7 @@ int myc_weapons_job(MycJob* j, MycResult* out)
     if (!myc_job_source_item(j)) return 0;
     MycTemplate template;
     int has_template = MycWjTemplate(j, &template);
-    size_t at = (size_t)snprintf(out->key, sizeof out->key, "weapons:%s:", source);
-    int keys = 0;
-    for (int i = 0; i < r->nweapons && !myc_job_obsolete(j); i++)
-    {
-        MycKit* kit = NULL;
-        MycAnalysis* a = MycWjPlan(j, &r->weapons[i], source, has_template ? &template : NULL, out, &kit);
-        if (j->err->failed) return 0;
-        if (a == NULL) continue;
-        if (out->ntargets < MYC_MAX_TARGETS) out->targets[out->ntargets++] = a;
-        char sum[9];
-        myc_records_sum(&kit, 1, sum);
-        at += (size_t)snprintf(out->key + at, sizeof out->key - at, "%s%016llx/%s", keys++ ? "," : "", (unsigned long long)r->weapons[i].name, sum);
-    }
+    if (!MycWjPlanAll(j, source, has_template ? &template : NULL, out)) return 0;
     if (myc_job_obsolete(j)) { out->action = MYC_OBSOLETE; return 1; }
     if (out->ntargets == 0) { myc_result_restore(out, j, "no weapon analysed"); return 1; }
     out->action = MYC_APPLY;

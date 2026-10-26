@@ -56,6 +56,23 @@ static MycKnown* MycCatKnown(MycCatalogue* c, uint32_t id)
     return NULL;
 }
 
+/* A new known kit for id (the list grown when full); NULL after myc_fail. */
+static MycKnown* MycCatAdd(MycCatalogue* c, uint32_t id, MycErr* err)
+{
+    if (c->count >= c->capacity)
+    {
+        int capacity = c->capacity < 64 ? 64 : c->capacity * 2;
+        MycKnown* grown = realloc(c->known, sizeof(MycKnown) * (size_t)capacity);
+        if (grown == NULL) { myc_fail(err, "out of memory for the kit catalogue"); return NULL; }
+        c->known = grown;
+        c->capacity = capacity;
+    }
+    MycKnown* k = &c->known[c->count++];
+    memset(k, 0, sizeof *k);
+    k->id = id;
+    return k;
+}
+
 /* Every kit's id and address (one read each); a miss reads them again once. */
 static int MycCatScan(MycCatalogue* c, MycErr* err)
 {
@@ -74,20 +91,8 @@ static int MycCatScan(MycCatalogue* c, MycErr* err)
         uint32_t id;
         if (!vpm_read_u32(address, &id)) continue;
         MycKnown* k = MycCatKnown(c, id);
-        if (k == NULL)
-        {
-            if (c->count >= c->capacity)
-            {
-                int capacity = c->capacity < 64 ? 64 : c->capacity * 2;
-                MycKnown* grown = realloc(c->known, sizeof(MycKnown) * (size_t)capacity);
-                if (grown == NULL) return myc_fail(err, "out of memory for the kit catalogue");
-                c->known = grown;
-                c->capacity = capacity;
-            }
-            k = &c->known[c->count++];
-            memset(k, 0, sizeof *k);
-            k->id = id;
-        }
+        if (k == NULL) k = MycCatAdd(c, id, err);
+        if (k == NULL) return 0;
         k->address = address;
     }
     c->scanned = 1;
@@ -201,7 +206,7 @@ static MycKit* MycCatCurrent(MycCatalogue* c, MycKnown* k, const char** why)
     MycKit* kit = MycCatKitOf(c, c->record);
     if (kit == NULL) { *why = "out of memory for a kit"; return NULL; }
     if (!(k->kit != NULL && strcmp(myc_kits_signature(&c->arena, k->kit), myc_kits_signature(&c->arena, kit)) == 0)) k->kit = kit;
-    uint8_t* bytes = realloc(k->bytes, size);
+    uint8_t* bytes = realloc(k->bytes, size); /* lint-ok: C5 a record read again for its signature, on a frame that rebinds */
     if (bytes != NULL) { memcpy(bytes, c->record, size); k->bytes = bytes; k->size = size; }
     return k->kit;
 }

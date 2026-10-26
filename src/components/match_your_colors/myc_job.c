@@ -24,7 +24,7 @@ void myc_result_drop(MycResult* r)
     myc_specs_drop(&r->luts);
     myc_specs_drop(&r->patterns);
     myc_arena_free(&r->arena);
-    free(r);
+    free(r); /* lint-ok: C5 a result freed on the frame its job ends or its plan is replaced */
 }
 
 int myc_job_obsolete(const MycJob* j) { return j->request->obsolete != 0; }
@@ -102,42 +102,52 @@ MycAnalysis* myc_job_analysis(MycJob* j, MycKit* kit)
 
 /* ---- the source item and one target's plan ------------------------------------------------------------------------ */
 
+/* A paint scheme as the source item (its LUT with the metallic bias cleared). */
+static int MycJobSourceScheme(MycJob* j)
+{
+    const MycLut* lut = myc_pipeline_scheme_lut(j->p, j->scheme, j->err);
+    if (lut == NULL) return 0;
+    j->s = myc_scheme_item(&j->arena, j->p->model, j->scheme, lut);
+    j->source_luts = (MycSourceLuts){NULL, lut, j->scheme->lut, 0};
+    return 1;
+}
+
+/* The worn cape as the source item (Helmet and Armor Match Cape): its blended rows and its emblems. */
+static int MycJobSourceCape(MycJob* j)
+{
+    const MycAnalysis* cape = j->cape_source;
+    MycRow* rows = myc_alloc(&j->arena, sizeof(MycRow) * (size_t)(cape->nrows + 1));
+    MycPatternIn* emblems = myc_alloc(&j->arena, sizeof(MycPatternIn) * (size_t)(cape->nemblems + 1));
+    if (rows == NULL || emblems == NULL) return myc_fail(j->err, "out of memory (cape source)");
+    MycLook look;
+    int has = myc_analysis_look(cape, 1, &look);
+    j->s = myc_item(&j->arena, rows, myc_capes_source_rows(cape, rows), 0, emblems, myc_capes_emblem_patterns(cape, emblems),
+        has ? &look : NULL);
+    if (j->s != NULL) { j->s->part_guard = 1; j->s->cape_source = 1; }
+    j->source_luts = (MycSourceLuts){cape, NULL, 0, 1};
+    return 1;
+}
+
+/* The other kit (or Your Colors' source kit) as the source item. */
+static int MycJobSourceKit(MycJob* j)
+{
+    const MycAnalysis* source = j->source;
+    MycPatternIn* patterns = myc_alloc(&j->arena, sizeof(MycPatternIn) * (size_t)(source->npatterns + 1));
+    if (patterns == NULL) return myc_fail(j->err, "out of memory (source)");
+    MycLook look;
+    int has = myc_analysis_look(source, 0, &look);
+    j->s = myc_item(&j->arena, source->rows, source->nrows, source->kit->type == MYC_ARMOR, patterns,
+        myc_patterns_of(source, patterns), has ? &look : NULL);
+    j->source_luts = (MycSourceLuts){source, NULL, 0, 0};
+    return 1;
+}
+
 int myc_job_source_item(MycJob* j)
 {
     if (j->s != NULL) return 1;
-    MycPipeline* p = j->p;
-    if (!myc_pipeline_model(p, j->err)) return 0;
-    if (j->scheme != NULL)
-    {
-        const MycLut* lut = myc_pipeline_scheme_lut(p, j->scheme, j->err);
-        if (lut == NULL) return 0;
-        j->s = myc_scheme_item(&j->arena, p->model, j->scheme, lut);
-        j->source_luts = (MycSourceLuts){NULL, lut, j->scheme->lut, 0};
-    }
-    else if (j->cape_source != NULL)
-    {
-        const MycAnalysis* cape = j->cape_source;
-        MycRow* rows = myc_alloc(&j->arena, sizeof(MycRow) * (size_t)(cape->nrows + 1));
-        MycPatternIn* emblems = myc_alloc(&j->arena, sizeof(MycPatternIn) * (size_t)(cape->nemblems + 1));
-        if (rows == NULL || emblems == NULL) return myc_fail(j->err, "out of memory (cape source)");
-        MycLook look;
-        int has = myc_analysis_look(cape, 1, &look);
-        j->s = myc_item(&j->arena, rows, myc_capes_source_rows(cape, rows), 0, emblems, myc_capes_emblem_patterns(cape, emblems),
-            has ? &look : NULL, 0);
-        if (j->s != NULL) { j->s->part_guard = 1; j->s->cape_source = 1; }
-        j->source_luts = (MycSourceLuts){cape, NULL, 0, 1};
-    }
-    else
-    {
-        const MycAnalysis* source = j->source;
-        MycPatternIn* patterns = myc_alloc(&j->arena, sizeof(MycPatternIn) * (size_t)(source->npatterns + 1));
-        if (patterns == NULL) return myc_fail(j->err, "out of memory (source)");
-        MycLook look;
-        int has = myc_analysis_look(source, 0, &look);
-        j->s = myc_item(&j->arena, source->rows, source->nrows, source->kit->type == MYC_ARMOR, patterns,
-            myc_patterns_of(source, patterns), has ? &look : NULL, 0);
-        j->source_luts = (MycSourceLuts){source, NULL, 0, 0};
-    }
+    if (!myc_pipeline_model(j->p, j->err)) return 0;
+    int ok = j->scheme != NULL ? MycJobSourceScheme(j) : (j->cape_source != NULL ? MycJobSourceCape(j) : MycJobSourceKit(j));
+    if (!ok) return 0;
     return j->s != NULL || myc_fail(j->err, "out of memory (source item)");
 }
 
@@ -195,8 +205,9 @@ static MycItem* MycJobTargetItem(MycJob* j, const MycAnalysis* target, MycRow** 
     if (patterns == NULL) return NULL;
     MycLook look;
     int has = myc_analysis_look(target, 0, &look);
+    look.keep_hoods = j->request->keep_hoods;
     MycItem* t = myc_item(&j->arena, rows, n, target->kit->type == MYC_ARMOR, patterns, myc_patterns_of(target, patterns),
-        has ? &look : NULL, j->request->keep_hoods);
+        has ? &look : NULL);
     if (t != NULL) t->weapon = weapon;
     *rows_out = rows;
     *nrows_out = n;
@@ -219,16 +230,15 @@ static int MycJobPlanTarget(MycJob* j, MycAnalysis* target, MycMade* made)
     if (!myc_scheme_plan(&plan, j->scheme, t, j->s, j->request->materials, cape)) return myc_fail(j->err, "out of memory (plan)");
     if (t->weapon && j->camo != NULL && !MycJobCamoCopies(&plan, rows, nrows, j->camo)) return myc_fail(j->err, "out of memory (plan)");
     if (!MycJobCapeParts(j, &plan, t, target, made)) return 0;
-    if (!myc_build_luts(&made->arena, target, &plan, p->transfer, &j->source_luts, &made->fits, &made->luts, j->err)) return 0;
+    MycLutFit fit = {p->transfer, &j->source_luts, &made->fits};
+    if (!myc_build_luts(&made->arena, target, &plan, &fit, &made->luts, j->err)) return 0;
     MycPlan patterns;
     myc_plan_init(&patterns, &j->arena);
     if (!myc_pattern_plan(&patterns, t, j->s, &plan)) return myc_fail(j->err, "out of memory (pattern plan)");
     if (!myc_build_patterns(&made->arena, target, &patterns, &made->patterns, j->err)) return 0;
     if (target->nalbedos == 0 && target->nunread == 0) return 1;
-    char report[2048];
-    if (!myc_albedo_plan_specs(&made->arena, target, &plan, &made->luts, MycJobChain, p, report, sizeof report, j->err)) return 0;
-    made->albedo_report = report[0] != 0 ? myc_strdup(&made->arena, report) : NULL;
-    return 1;
+    MycAlbedoSource source = {MycJobChain, p};
+    return myc_albedo_plan_specs(&made->arena, target, &plan, &made->luts, &source, &made->albedo_report, j->err);
 }
 
 MycMade* myc_job_planned(MycJob* j, const char* key, MycAnalysis* const* targets, int n)
@@ -411,37 +421,52 @@ static const uint8_t* MycJobSheet(void* ctx, const MycSheetRecipe* recipe, char*
     return data->data;
 }
 
-/* Recolor Cape: the cape planned against the job's source item; its LUTs join the result (with_cape). */
-static int MycJobWithCape(MycJob* j, MycResult* out)
+/* The cape plan's key against the job's source item (a scheme's, or the source kit's records). */
+static void MycJobCapeKey(MycJob* j, char* key, size_t size)
 {
-    if (j->cape == NULL) return 1;
-    char sum[9], source[96], key[MYC_PLAN_KEY];
-    MycJobRecords(j->cape_kit, sum);
-    size_t at = strlen(out->key);
-    snprintf(out->key + at, sizeof out->key - at, ":cape:%08x:%s", j->request->cape, sum);
+    char sum[9], source[96];
     if (j->scheme != NULL) snprintf(source, sizeof source, "cape:scheme:%s", j->scheme->id);
     else
     {
         MycJobRecords(j->source_kit, sum);
         snprintf(source, sizeof source, "cape:%d:%08x:%s", j->request->mode, j->source_kit->id, sum);
     }
-    myc_job_item_key(j, source, j->cape_kit, key, sizeof key);
+    myc_job_item_key(j, source, j->cape_kit, key, size);
+}
+
+/* The cape plan's emblem sheet copy into the result, when it has one; 0 after myc_fail. */
+static int MycJobCapeSheet(MycJob* j, MycMade* made, MycResult* out)
+{
+    if (!made->has_sheet) return 1;
+    j->p->stage = "emblem sheet";
+    MycSpec* spec = myc_sheet_spec(&made->sheet, MycJobSheet, j, made->sheet_note, sizeof made->sheet_note, j->err);
+    if (j->err->failed) return 0;
+    return spec == NULL || myc_specs_put(&out->arena, &out->luts, made->sheet.name, spec) || myc_fail(j->err, "out of memory");
+}
+
+/* The cape plan's development line, made once per plan. */
+static void MycJobCapeReport(MycJob* j, MycMade* made)
+{
+    if (made->report != NULL) return;
+    char report[1024];
+    myc_capes_report(j->cape, made->has_zones ? &made->zones : NULL, made->has_emblems ? &made->emblems : NULL,
+        made->sheet_note, &made->fits, report, sizeof report);
+    made->report = myc_strdup(&made->arena, report);
+}
+
+/* Recolor Cape: the cape planned against the job's source item; its LUTs join the result (with_cape). */
+static int MycJobWithCape(MycJob* j, MycResult* out)
+{
+    if (j->cape == NULL) return 1;
+    char sum[9], key[MYC_PLAN_KEY];
+    MycJobRecords(j->cape_kit, sum);
+    size_t at = strlen(out->key);
+    snprintf(out->key + at, sizeof out->key - at, ":cape:%08x:%s", j->request->cape, sum);
+    MycJobCapeKey(j, key, sizeof key);
     MycMade* made = myc_job_planned(j, key, &j->cape, 1);
     if (made == NULL || !myc_specs_merge(&out->arena, &out->luts, &made->luts)) return myc_fail(j->err, "%s", j->err->failed ? j->err->why : "out of memory");
-    if (made->has_sheet)
-    {
-        j->p->stage = "emblem sheet";
-        MycSpec* spec = myc_sheet_spec(&made->sheet, MycJobSheet, j, made->sheet_note, sizeof made->sheet_note, j->err);
-        if (j->err->failed) return 0;
-        if (spec != NULL && !myc_specs_put(&out->arena, &out->luts, made->sheet.name, spec)) return myc_fail(j->err, "out of memory");
-    }
-    if (made->report == NULL)
-    {
-        char report[1024];
-        myc_capes_report(j->cape, made->has_zones ? &made->zones : NULL, made->has_emblems ? &made->emblems : NULL,
-            made->sheet_note, made->fits.rows, made->fits.err, report, sizeof report);
-        made->report = myc_strdup(&made->arena, report);
-    }
+    if (!MycJobCapeSheet(j, made, out)) return 0;
+    MycJobCapeReport(j, made);
     if (out->ntargets == 0 && out->target != NULL) MycJobTargets(out, &out->target, 1);
     MycJobTargets(out, (const MycAnalysis* const*)&j->cape, 1);
     if (out->target == NULL) out->target = j->cape;
@@ -466,6 +491,8 @@ static void MycJobSigned(MycJob* j, MycResult* out)
     if (j->kit_source != NULL) MycJobSign(j, j->source_kit, out);
 }
 
+static int MycJobPlanPair(MycJob* j, MycResult* out);
+
 /* The helmet's and armor's parts after the kits are found (Recolor.job's body). */
 static int MycJobKits(MycJob* j, MycResult* out)
 {
@@ -481,6 +508,13 @@ static int MycJobKits(MycJob* j, MycResult* out)
     if (step == MYC_JOB_OK) step = MycJobKitSource(j, out);
     if (step == MYC_JOB_OK) step = MycJobSet(j, out);
     if (step != MYC_JOB_OK) return step == MYC_JOB_DONE;
+    return MycJobPlanPair(j, out);
+}
+
+/* The helmet's and armor's analyses and plans, then the cape's and the signatures (Recolor.job's end). */
+static int MycJobPlanPair(MycJob* j, MycResult* out)
+{
+    const MycRequest* r = j->request;
     MycAnalysis* h = !myc_job_obsolete(j) ? myc_job_analysis(j, j->helmet_kit) : NULL;
     MycAnalysis* a = h != NULL && !myc_job_obsolete(j) ? myc_job_analysis(j, j->armor_kit) : NULL;
     if (j->err->failed) return 0;

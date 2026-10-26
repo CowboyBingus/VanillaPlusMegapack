@@ -1161,13 +1161,12 @@ static void CacheRoundTrip(void)
     MycBuf text = {0};
     CHECK(myc_cache_encode(&text, header, &entry, 1, NULL));
     MycArena arena = {0};
-    MycCacheEntry* entries = NULL;
     MycSamples samples;
-    int n = 0, has_samples = 1;
+    MycCacheDecoded d = {NULL, 0, &samples, 1};
     char why[128] = "";
-    CHECK(myc_cache_decode((const uint8_t*)text.data, text.size, header, &arena, &entries, &n, &samples, &has_samples, why, sizeof why));
-    CHECK(n == 1 && strcmp(entries[0].key, key) == 0 && !has_samples);
-    const MycAnalysis* b = n == 1 ? entries[0].analysis : NULL;
+    CHECK(myc_cache_decode((const uint8_t*)text.data, text.size, header, &arena, &d, why, sizeof why));
+    CHECK(d.n == 1 && strcmp(d.entries[0].key, key) == 0 && !d.has_samples);
+    const MycAnalysis* b = d.n == 1 ? d.entries[0].analysis : NULL;
     CHECK(b != NULL && b->kit->id == 0x0ade6719u && b->kit->type == MYC_ARMOR && b->kit->archive == 0x0123456789abcdefull && b->body == 0);
     if (b != NULL && b->nrows == 1)
     {
@@ -1192,19 +1191,19 @@ static void CacheRoundTrip(void)
     char other[512];
     myc_cache_header("57:14545923", other, sizeof other);
     MycArena scratch = {0};
-    CHECK(!myc_cache_decode((const uint8_t*)text.data, text.size, other, &scratch, &entries, &n, &samples, &has_samples, why, sizeof why));
-    CHECK(!myc_cache_decode((const uint8_t*)text.data, text.size - 100, header, &scratch, &entries, &n, &samples, &has_samples, why, sizeof why));
+    CHECK(!myc_cache_decode((const uint8_t*)text.data, text.size, other, &scratch, &d, why, sizeof why));
+    CHECK(!myc_cache_decode((const uint8_t*)text.data, text.size - 100, header, &scratch, &d, why, sizeof why));
     char* copy = malloc(text.size + 1);
     memcpy(copy, text.data, text.size);
     copy[text.size] = 0;
     char* record = strstr(copy, "\nR ");
     if (record != NULL) record[1] = 'X';
-    CHECK(record != NULL && !myc_cache_decode((const uint8_t*)copy, text.size, header, &scratch, &entries, &n, &samples, &has_samples, why, sizeof why));
+    CHECK(record != NULL && !myc_cache_decode((const uint8_t*)copy, text.size, header, &scratch, &d, why, sizeof why));
     memcpy(copy, text.data, text.size);
     char* old = strstr(copy, "MYCCACHE 13 ");
     if (old != NULL) memcpy(old, "MYCCACHE 12 ", 12);
-    CHECK(old != NULL && !myc_cache_decode((const uint8_t*)copy, text.size, header, &scratch, &entries, &n, &samples, &has_samples, why, sizeof why));
-    CHECK(!myc_cache_decode((const uint8_t*)"", 0, header, &scratch, &entries, &n, &samples, &has_samples, why, sizeof why));
+    CHECK(old != NULL && !myc_cache_decode((const uint8_t*)copy, text.size, header, &scratch, &d, why, sizeof why));
+    CHECK(!myc_cache_decode((const uint8_t*)"", 0, header, &scratch, &d, why, sizeof why));
     free(copy);
     myc_buf_free(&text);
     myc_arena_free(&arena);
@@ -1228,12 +1227,11 @@ static void CacheKeepsTheMostRecentEntries(void)
     MycBuf text = {0};
     CHECK(myc_cache_encode(&text, header, entries, MYC_CACHE_MAX_ENTRIES + 5, NULL));
     MycArena arena = {0};
-    MycCacheEntry* back = NULL;
     MycSamples samples;
-    int n = 0, has_samples = 0;
+    MycCacheDecoded back = {NULL, 0, &samples, 0};
     char why[128];
-    CHECK(myc_cache_decode((const uint8_t*)text.data, text.size, header, &arena, &back, &n, &samples, &has_samples, why, sizeof why));
-    CHECK(n == MYC_CACHE_MAX_ENTRIES && strcmp(back[0].key, entries[0].key) == 0);
+    CHECK(myc_cache_decode((const uint8_t*)text.data, text.size, header, &arena, &back, why, sizeof why));
+    CHECK(back.n == MYC_CACHE_MAX_ENTRIES && strcmp(back.entries[0].key, entries[0].key) == 0);
     myc_buf_free(&text);
     myc_arena_free(&arena);
 }

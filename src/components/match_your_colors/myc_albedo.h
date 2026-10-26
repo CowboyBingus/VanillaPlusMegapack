@@ -33,8 +33,10 @@ void myc_albedo_color_block(const uint8_t* p, uint8_t out[64], int three_color);
 /* The pipeline's fresh copy of a texture's whole mip chain (a spec holding its data, info filled), or NULL (after
  * myc_fail on an error; not found otherwise). */
 typedef MycSpec* (*MycAlbedoChain)(void* ctx, uint64_t name, uint64_t archive, MycTexInfo* info, MycErr* err);
-/* Albedo.plan_specs: the target's recolored albedos for plan into out, and the log line (empty: none) into report. */
+typedef struct MycAlbedoSource { MycAlbedoChain chain; void* ctx; } MycAlbedoSource;
+/* Albedo.plan_specs: the target's recolored albedos for plan into out, and the log line (in arena; NULL: none) into
+ * report. */
 int myc_albedo_plan_specs(MycArena* arena, const MycAnalysis* target, const MycPlan* plan, MycSpecs* out,
-    MycAlbedoChain chain, void* ctx, char* report, size_t size, MycErr* err);
+    const MycAlbedoSource* source, char** report, MycErr* err);
 
 #endif

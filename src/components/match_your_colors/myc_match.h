@@ -49,6 +49,7 @@ typedef struct MycLook
     uint32_t hood_id;
     int has_hoods, borrow, seen, seen_share, has_tint;
     uint64_t tint_cape, tint_material;
+    int keep_hoods;         /* Recolor Hoods off: a target's hoods keep their colors (myc_item) */
 } MycLook;
 
 /* A pattern for the matcher (Recolor.patterns_of): its texture, area and texel 0's color; emblem: a cape source's
@@ -126,7 +127,7 @@ int myc_light(const MycRow* row);
 int myc_is_structure(const MycGroup* g);
 int myc_is_neutral_lab(double L, double a, double b);
 MycItem* myc_item(MycArena* arena, const MycRow* rows, int nrows, int armor, const MycPatternIn* patterns, int npatterns,
-    const MycLook* look, int keep_hoods);
+    const MycLook* look);
 /* The source's palette (its groups of at least PAIR_MIN_SHARE, at most 8; else its largest), into out; how many. */
 int myc_palette_of(const MycItem* source, MycGroup** out);
 MycGroup* myc_identity(MycItem* source);

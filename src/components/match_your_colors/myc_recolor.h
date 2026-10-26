@@ -32,9 +32,12 @@ int myc_patterns_of(const MycAnalysis* analysis, MycPatternIn* out);
 int myc_apply_finish(float* data, int width, int r, const MycSourceLuts* source, const char* key, MycErr* err);
 /* A paint scheme's camo row onto LUT row r of data; 0 after myc_fail. */
 int myc_apply_copy(float* data, int width, int r, const MycSourceLuts* source, const char* key, MycErr* err);
+/* What a LUT's rows are fitted with: the transfer, the source's LUTs (Match Materials' finishes, a scheme's camo rows;
+ * NULL none) and the fits' statistics (NULL none). */
+typedef struct MycLutFit { MycTransfer* tr; const MycSourceLuts* source; MycFits* fits; } MycLutFit;
 /* New LUT data for every target LUT the plan changes, into out (Recolor.build_luts). */
-int myc_build_luts(MycArena* arena, const MycAnalysis* target, const MycPlan* plan, MycTransfer* tr,
-    const MycSourceLuts* source, MycFits* fits, MycSpecs* out, MycErr* err);
+int myc_build_luts(MycArena* arena, const MycAnalysis* target, const MycPlan* plan, const MycLutFit* fit, MycSpecs* out,
+    MycErr* err);
 /* The texel color (sRGB) of a planned pattern (Recolor.pattern_texel). */
 void myc_pattern_texel(const MycGoal* goal, double out[3]);
 /* New pattern textures for every pattern the pattern plan changes (Recolor.build_patterns). */

@@ -72,16 +72,16 @@ static const char* g_squadChoices[4];
 static const char* g_squadColorChoices[3];
 static const char* g_hideChoices[4];
 
-static const char* Tr(const char* key, const char* english) { return vpm_text(s.self, key, english); }
+static const char* MycTr(const char* key, const char* english) { return vpm_text(s.self, key, english); }
 
 /* ---- options ------------------------------------------------------------------------------------------------------ */
 
-static void Choices(void)
+static void MycChoices(void)
 {
     g_modeChoices[0] = "Off";
-    g_modeChoices[1] = Tr("option.mode.helmet", "Helmet Matches Armor");
-    g_modeChoices[2] = Tr("option.mode.armor", "Armor Matches Helmet");
-    g_modeChoices[3] = Tr("option.mode.cape", "Helmet and Armor Match Cape");
+    g_modeChoices[1] = MycTr("option.mode.helmet", "Helmet Matches Armor");
+    g_modeChoices[2] = MycTr("option.mode.armor", "Armor Matches Helmet");
+    g_modeChoices[3] = MycTr("option.mode.cape", "Helmet and Armor Match Cape");
     g_modeChoices[4] = NULL;
     g_schemeChoices[0] = "Off";
     int n = 1;
@@ -91,108 +91,108 @@ static void Choices(void)
         if (scheme == NULL) continue;
         char key[48];
         snprintf(key, sizeof key, "scheme.%s", scheme->id);
-        g_schemeChoices[n++] = Tr(key, scheme->label);
+        g_schemeChoices[n++] = MycTr(key, scheme->label);
     }
     g_schemeChoices[n] = NULL;
     g_squadChoices[0] = "Off";
-    g_squadChoices[1] = Tr("option.squad.missing", "Squadmates Without the Mod");
-    g_squadChoices[2] = Tr("option.squad.everyone", "Everyone");
+    g_squadChoices[1] = MycTr("option.squad.missing", "Squadmates Without the Mod");
+    g_squadChoices[2] = MycTr("option.squad.everyone", "Everyone");
     g_squadChoices[3] = NULL;
-    g_squadColorChoices[0] = Tr("option.squad_colors.own", "Their Own Gear");
-    g_squadColorChoices[1] = Tr("option.squad_colors.yours", "Your Colors");
+    g_squadColorChoices[0] = MycTr("option.squad_colors.own", "Their Own Gear");
+    g_squadColorChoices[1] = MycTr("option.squad_colors.yours", "Your Colors");
     g_squadColorChoices[2] = NULL;
     g_hideChoices[0] = "Off";
-    g_hideChoices[1] = Tr("option.hide_cape.yours", "Your Cape");
-    g_hideChoices[2] = Tr("option.hide_cape.everyone", "Everyone's Capes");
+    g_hideChoices[1] = MycTr("option.hide_cape.yours", "Your Cape");
+    g_hideChoices[2] = MycTr("option.hide_cape.everyone", "Everyone's Capes");
     g_hideChoices[3] = NULL;
 }
 
-static VpmOptionDef Choice(const char* id, const char* label, const char* description, int value, const char* const* choices)
+static VpmOptionDef MycChoiceOption(const char* id, const char* label, const char* description, int value, const char* const* choices)
 {
     return (VpmOptionDef){id, VPM_CHOICE, label, description, value, 0, 0, 0, choices, 0};
 }
 
-static VpmOptionDef Toggle(const char* id, const char* label, const char* description, int value)
+static VpmOptionDef MycToggleOption(const char* id, const char* label, const char* description, int value)
 {
     return (VpmOptionDef){id, VPM_TOGGLE, label, description, value, 0, 0, 0, NULL, 0};
 }
 
-static void Definitions(void)
+static void MycDefinitions(void)
 {
-    Choices();
-    g_defs[O_MODE] = Choice("mode", Tr("option.mode.label", "Color Matching"), Tr("option.mode.description",
+    MycChoices();
+    g_defs[O_MODE] = MycChoiceOption("mode", MycTr("option.mode.label", "Color Matching"), MycTr("option.mode.description",
         "Recolors your helmet to your armor's colors, your armor to your helmet's, or both to your cape's. Squadmates who use "
         "this mod see your colors too (your settings are shared through the squad's online lobby); players without it see "
         "your gear as it is. Visors, lenses and lights keep their colors."), MYC_HELMET_FROM_ARMOR, g_modeChoices);
-    g_defs[O_SCHEME] = Choice("paint_scheme", Tr("option.scheme.label", "Paint Scheme"), Tr("option.scheme.description",
+    g_defs[O_SCHEME] = MycChoiceOption("paint_scheme", MycTr("option.scheme.label", "Paint Scheme"), MycTr("option.scheme.description",
         "Paints your helmet and armor in one of the game's weapon paint schemes, or in the SEAF troopers' colors. While a "
         "scheme is chosen, Color Matching and Leave Complete Sets do not apply; Recolor Hoods and Match Materials do. Visors, "
         "lenses and lights keep their colors."), 1, g_schemeChoices);
-    g_defs[O_SQUAD] = Choice("recolor_squadmates", Tr("option.squad.label", "Recolor Squadmates"), Tr("option.squad.description",
+    g_defs[O_SQUAD] = MycChoiceOption("recolor_squadmates", MycTr("option.squad.label", "Recolor Squadmates"), MycTr("option.squad.description",
         "Recolors your squadmates' helmets and armor with your settings, on your screen only. Squadmates Without the Mod: "
         "players who use this mod keep the colors they chose. Everyone: every squadmate takes your settings. Nothing changes "
         "for them: only you see it."), MYC_SQUAD_OFF, g_squadChoices);
-    g_defs[O_SQUAD_COLORS] = Choice("squadmates_colors", Tr("option.squad_colors.label", "Squadmates' Colors"),
-        Tr("option.squad_colors.description", "For the squadmates Recolor Squadmates recolors. Their Own Gear: your Color "
+    g_defs[O_SQUAD_COLORS] = MycChoiceOption("squadmates_colors", MycTr("option.squad_colors.label", "Squadmates' Colors"),
+        MycTr("option.squad_colors.description", "For the squadmates Recolor Squadmates recolors. Their Own Gear: your Color "
         "Matching on their own gear (their armor matches their own helmet, for example), so a matching set barely changes. "
         "Your Colors: their helmet and armor take your colors, those of the item your Color Matching matches (your armor, "
         "helmet or cape); a paint scheme gives everyone the scheme. Only you see it."), MYC_SQUAD_OWN, g_squadColorChoices);
-    g_defs[O_HIDE_CAPE] = Choice("hide_cape", Tr("option.hide_cape.label", "Hide Cape"), Tr("option.hide_cape.description",
+    g_defs[O_HIDE_CAPE] = MycChoiceOption("hide_cape", MycTr("option.hide_cape.label", "Hide Cape"), MycTr("option.hide_cape.description",
         "Hides capes on the ship and in missions. Your Cape: yours, also on the screens of squadmates who use this mod. "
         "Everyone's Capes: yours and every squadmate's, on your screen. The Armory and the loadout screen still show capes, "
         "so you can still pick one. Players without this mod still see your cape."), MYC_HIDE_OFF, g_hideChoices);
-    g_defs[O_SETS] = Toggle("keep_sets", Tr("option.sets.label", "Leave Complete Sets"), Tr("option.sets.description",
+    g_defs[O_SETS] = MycToggleOption("keep_sets", MycTr("option.sets.label", "Leave Complete Sets"), MycTr("option.sets.description",
         "Keeps the original colors while your helmet and armor belong to the same set."), 1);
-    g_defs[O_HOODS] = Toggle("recolor_hoods", Tr("option.hoods.label", "Recolor Hoods"), Tr("option.hoods.description",
+    g_defs[O_HOODS] = MycToggleOption("recolor_hoods", MycTr("option.hoods.label", "Recolor Hoods"), MycTr("option.hoods.description",
         "Recolors hoods too, such as those of the RS-100 Sanctioner and SC-30 Trailblazer Scout helmets. Off: a hood keeps "
         "its own color, like the visor, while the rest of the helmet still matches."), 1);
-    g_defs[O_MATERIALS] = Toggle("match_materials", Tr("option.materials.label", "Match Materials"),
-        Tr("option.materials.description", "Parts take the material of the color they take: metal parts that take a painted "
+    g_defs[O_MATERIALS] = MycToggleOption("match_materials", MycTr("option.materials.label", "Match Materials"),
+        MycTr("option.materials.description", "Parts take the material of the color they take: metal parts that take a painted "
         "color become that paint (a chrome helmet with a white armor turns white, not bronze), and hard painted parts that "
         "take a helmet's or armor's bare metal become that metal (chrome, gold, cobalt). Cloth and small metal details keep "
         "their material."), 0);
-    g_defs[O_CAPES] = Toggle("recolor_cape", Tr("option.capes.label", "Recolor Cape"), Tr("option.capes.description",
+    g_defs[O_CAPES] = MycToggleOption("recolor_cape", MycTr("option.capes.label", "Recolor Cape"), MycTr("option.capes.description",
         "Recolors your cape too, to the same colors: the armor's with Helmet Matches Armor, the helmet's with Armor Matches "
         "Helmet, or the paint scheme's. A complete set left alone still gives its cape its colors. With Helmet and Armor "
         "Match Cape the cape keeps its colors (it is the one matched). Emblems and other decals keep their colors."), 0);
-    g_defs[O_WEAPONS] = Toggle("recolor_weapons", Tr("option.weapons.label", "Recolor Weapons"),
-        Tr("option.weapons.description", "Experimental. Recolors your weapons too (primary, sidearm, support weapon and "
+    g_defs[O_WEAPONS] = MycToggleOption("recolor_weapons", MycTr("option.weapons.label", "Recolor Weapons"),
+        MycTr("option.weapons.description", "Experimental. Recolors your weapons too (primary, sidearm, support weapon and "
         "their attachments), to the same colors as the cape: the armor's, the helmet's, the cape's or the paint scheme's. "
         "While on, it replaces a weapon's own paint scheme. Lenses, lights and decals keep their colors; grenades and "
         "backpacks keep theirs."), 0);
 }
 
 /* An option's value as the instance takes it (the scheme: 0 none, 1 to the schemes' count). */
-static int ValueOf(int option, double value)
+static int MycValueOf(int option, double value)
 {
     int v = (int)value;
     return option == O_SCHEME ? v - 1 : v;
 }
 
-static void Changed(VpmComponent* self, VpmOption* option, double value)
+static void MycChanged(VpmComponent* self, VpmOption* option, double value)
 {
     if (!s.open) return; /* read when the engine opens */
     for (int i = 0; i < O_COUNT; i++)
-        if (s.options[i] == option) myc_addon_set_option(kNames[i], ValueOf(i, value), i >= O_SETS);
+        if (s.options[i] == option) myc_addon_set_option(kNames[i], MycValueOf(i, value), i >= O_SETS);
 }
 
-static void Register(void)
+static void MycRegister(void)
 {
-    Definitions();
+    MycDefinitions();
     for (int i = 0; i < O_COUNT; i++)
     {
         s.options[i] = vpm_option(s.self, &g_defs[i]);
-        if (s.options[i] != NULL) vpm_option_on_change(s.options[i], Changed);
+        if (s.options[i] != NULL) vpm_option_on_change(s.options[i], MycChanged);
     }
 }
 
 /* The menu's values applied (follow): set_option logs only changes from the instance's defaults. */
-static void Follow(void)
+static void MycFollow(void)
 {
     for (int i = 0; i < O_COUNT; i++)
     {
         double value = s.options[i] != NULL ? vpm_option_value(s.options[i]) : g_defs[i].value;
-        myc_addon_set_option(kNames[i], ValueOf(i, value), i >= O_SETS);
+        myc_addon_set_option(kNames[i], MycValueOf(i, value), i >= O_SETS);
     }
     char text[320];
     myc_addon_options_text(text, sizeof text);
@@ -202,7 +202,7 @@ static void Follow(void)
 /* ---- the instance ------------------------------------------------------------------------------------------------- */
 
 /* The instance's defaults (Addon.new state.options): Follow then applies the menu's values. */
-static void Defaults(void)
+static void MycDefaults(void)
 {
     MycOptions* o = &g.options;
     o->mode = MYC_HELMET_FROM_ARMOR;
@@ -217,7 +217,7 @@ static void Defaults(void)
     g.active = 1;
 }
 
-static void Open(void)
+static void MycOpen(void)
 {
     myc_pool_init(&g.pool, &g.native);
     myc_controller_init(&g.controller, &g.native, &g.pool);
@@ -229,20 +229,20 @@ static void Open(void)
     myc_cloak_init(&g.cloak, &g.native, myc_note);
     g.has_sync = g.syncing = g.has_lineup = g.has_loadout = 1;
     g.has_cloak = g.native.visibility != NULL;
-    Defaults();
+    MycDefaults();
     myc_addon_init_sync_text();
     vpm_set_status(s.self, "starting");
     s.open = 1;
     myc_note("Match Your Colors v1.5 initialized.");
-    Follow();
+    MycFollow();
 }
 
 /* Engine.open, until the engine has filled its script API: -1 waits (the reason logged once), 0 stops the component. */
-static void TryOpen(void)
+static void MycTryOpen(void)
 {
     const char* why = NULL;
     int opened = myc_engine_open(&g.native, &why);
-    if (opened > 0) { Open(); return; }
+    if (opened > 0) { MycOpen(); return; }
     if (opened == 0) { vpm_fail(s.self, "%s", why); return; }
     if (s.waiting_noted) return;
     s.waiting_noted = 1;
@@ -253,19 +253,19 @@ static void TryOpen(void)
 }
 
 /* lint: per-frame */
-static void Tick(VpmComponent* self, float dt)
+static void MycTick(VpmComponent* self, float dt)
 {
     if (s.open) { myc_addon_step(); return; }
-    if (s.frames++ % ENGINE_RETRY_FRAMES == 0) TryOpen();
+    if (s.frames++ % ENGINE_RETRY_FRAMES == 0) MycTryOpen();
 }
 
-static void Loaded(VpmComponent* self, HfEvent event)
+static void MycLoaded(VpmComponent* self, HfEvent event)
 {
-    if (!vpm_tick_start(self, Tick)) vpm_fail(self, "no game-thread tick");
+    if (!vpm_tick_start(self, MycTick)) vpm_fail(self, "no game-thread tick");
 }
 
 /* The cache file's path in the component's data folder, or none (the cache is then off for the session). */
-static void Paths(void)
+static void MycPaths(void)
 {
     MycWorker* w = &g.worker;
     if (!myc_files_data_folder(w->data_folder, (int)(sizeof w->data_folder / sizeof w->data_folder[0])))
@@ -280,7 +280,7 @@ static void Paths(void)
     w->has_cache = n > 0;
 }
 
-static void Stop(VpmComponent* self)
+static void MycStop(VpmComponent* self)
 {
     /* A fault on the worker thread: the engine's objects are the game thread's, which no longer ticks. The colors stay
      * as they are; the textures and the pipeline are left alone (the worker's thread ends). */
@@ -295,17 +295,17 @@ static void Stop(VpmComponent* self)
     myc_notef("Stopped (%s).", reason);
 }
 
-static int Start(VpmComponent* self)
+static int MycStart(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
     memset(&g, 0, sizeof g);
     s.self = self;
     g.self = self;
     g.worker.self = self;
-    Register();
-    Paths();
-    if (!vpm_on_load(self, HF_EVENT_GAME_LOADED, Loaded)) return vpm_fail(self, "no game-loaded event");
+    MycRegister();
+    MycPaths();
+    if (!vpm_on_load(self, HF_EVENT_GAME_LOADED, MycLoaded)) return vpm_fail(self, "no game-loaded event");
     return 0;
 }
 
-const VpmComponentDef vpm_component_match_your_colors = {"match_your_colors", "Match Your Colors", "1.5", 0, Start, Stop};
+const VpmComponentDef vpm_component_match_your_colors = {"match_your_colors", "Match Your Colors", "1.5", 0, MycStart, MycStop};

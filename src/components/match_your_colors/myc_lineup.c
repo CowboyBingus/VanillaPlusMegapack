@@ -96,27 +96,40 @@ static int MycLuOwnSlot(const MycLineup* l, const MycIdentity* identity, int ses
     return -1;
 }
 
+/* The session's peers by UI slot and the local peer (MycLuPeers'; context 0 without a network context). */
+typedef struct MycLuSession { uint32_t lows[SLOTS], highs[SLOTS], low, high; int has[SLOTS], context; } MycLuSession;
+
+static int MycLuLocalPeer(const MycLuSession* ss, int s) { return ss->lows[s] == ss->low && ss->highs[s] == ss->high; }
+
+/* Slot s showing another session peer's desired kits: that peer's card. */
+static void MycLuPeerSlot(MycLineup* l, const MycLuSession* ss, int s, const MycDesired* desired, int ndesired)
+{
+    for (int i = 0; i < ndesired; i++)
+        if (MycLuShows(l, s, desired[i].helmet, desired[i].armor, desired[i].cape))
+        {
+            l->owner_kind[s] = MYC_OWNER_PEER;
+            snprintf(l->owner_key[s], MYC_PEER_KEY, "%08x%08x", ss->highs[s], ss->lows[s]);
+            return;
+        }
+}
+
 /* The owner of each shown player slot (Lineup.owners). */
 static void MycLuOwners(MycLineup* l, const MycIdentity* identity)
 {
-    uint32_t lows[SLOTS], highs[SLOTS], low = 0, high = 0;
-    int has[SLOTS], shown = 0, session_slot = -1, have_desired = 0, ndesired = 0;
+    MycLuSession ss;
+    memset(&ss, 0, sizeof ss);
+    int shown = 0, session_slot = -1, have_desired = 0, ndesired = 0;
     MycDesired desired[MYC_MAX_PLAYERS];
-    int context = MycLuPeers(lows, highs, has, &low, &high);
+    ss.context = MycLuPeers(ss.lows, ss.highs, ss.has, &ss.low, &ss.high);
     for (int s = 0; s < SLOTS; s++)
     {
-        if (context && has[s] && lows[s] == low && highs[s] == high) session_slot = s;
-        if (myc_preview_status(l->watch, s) != MYC_STATUS_ABSENT) shown++;
+        int peer = ss.context && ss.has[s], shows = myc_preview_status(l->watch, s) != MYC_STATUS_ABSENT;
+        if (peer && MycLuLocalPeer(&ss, s)) session_slot = s;
+        shown += shows;
         l->owner_kind[s] = MYC_OWNER_NONE;
-        if (!context || !has[s] || (lows[s] == low && highs[s] == high) || myc_preview_status(l->watch, s) == MYC_STATUS_ABSENT) continue;
+        if (!peer || MycLuLocalPeer(&ss, s) || !shows) continue;
         if (!have_desired) { ndesired = myc_avatar_others_desired(desired); have_desired = 1; }
-        for (int i = 0; i < ndesired; i++)
-            if (MycLuShows(l, s, desired[i].helmet, desired[i].armor, desired[i].cape))
-            {
-                l->owner_kind[s] = MYC_OWNER_PEER;
-                snprintf(l->owner_key[s], MYC_PEER_KEY, "%08x%08x", highs[s], lows[s]);
-                break;
-            }
+        MycLuPeerSlot(l, &ss, s, desired, ndesired);
     }
     int own = MycLuOwnSlot(l, identity, session_slot);
     if (own >= 0) l->owner_kind[own] = MYC_OWNER_LOCAL;
@@ -136,6 +149,19 @@ static const MycSettings* MycLuSettings(const MycLineup* l, int kind, const char
     return kind == MYC_OWNER_PEER ? myc_remote_wanted(l->remote, key, is_mine) : NULL;
 }
 
+/* Slot s's part of the owners line ("" for a slot no one owns); 1 when it names another player's card. */
+static int MycLuOwnerPart(const MycLineup* l, int s, char* out, size_t size)
+{
+    int kind = l->owner_kind[s], mine;
+    out[0] = 0;
+    if (kind == MYC_OWNER_LOCAL) { snprintf(out, size, "slot %d you", s); return 0; }
+    if (kind == MYC_OWNER_NONE) return 0;
+    const MycSettings* settings = MycLuSettings(l, kind, l->owner_key[s], &mine);
+    const char* how = settings == NULL ? "keeps its colors" : (mine ? "your settings" : "shared settings");
+    snprintf(out, size, "slot %d %s (%s)", s, kind == MYC_OWNER_SQUAD ? "a squadmate" : l->owner_key[s], how);
+    return 1;
+}
+
 static void MycLuOwnersText(const MycLineup* l, char* out, size_t size)
 {
     size_t at = 0;
@@ -143,13 +169,9 @@ static void MycLuOwnersText(const MycLineup* l, char* out, size_t size)
     out[0] = 0;
     for (int s = 0; s < SLOTS && at < size; s++)
     {
-        int kind = l->owner_kind[s], mine;
-        if (kind == MYC_OWNER_LOCAL) { at += (size_t)snprintf(out + at, size - at, "%sslot %d you", at ? ", " : "", s); continue; }
-        if (kind == MYC_OWNER_NONE) continue;
-        const MycSettings* settings = MycLuSettings(l, kind, l->owner_key[s], &mine);
-        at += (size_t)snprintf(out + at, size - at, "%sslot %d %s (%s)", at ? ", " : "", s, kind == MYC_OWNER_SQUAD ? "a squadmate" : l->owner_key[s],
-            settings == NULL ? "keeps its colors" : (mine ? "your settings" : "shared settings"));
-        others = 1;
+        char part[128];
+        others |= MycLuOwnerPart(l, s, part, sizeof part);
+        if (part[0] != 0) at += (size_t)snprintf(out + at, size - at, "%s%s", at ? ", " : "", part);
     }
     if (!others) out[0] = 0;
 }
@@ -164,8 +186,8 @@ static void MycLuDrop(MycLineup* l, int s, uint32_t frame)
         l->retiring[l->nretiring++] = (MycRetiring){card->controller, card->controller, NULL};
         l->busy = 1;
     }
-    else { myc_controller_free(card->controller); free(card->controller); }
-    free(card);
+    else { myc_controller_free(card->controller); free(card->controller); } /* lint-ok: C5 a squad card dropped when its slot changes */
+    free(card); /* lint-ok: C5 as above */
     l->cards[s] = NULL;
 }
 
@@ -193,9 +215,9 @@ static int MycLuRebind(MycLineup* l, MycCard* card, uint32_t frame)
 static MycCard* MycLuCard(MycLineup* l, int s)
 {
     if (l->cards[s] != NULL) return l->cards[s];
-    MycCard* card = calloc(1, sizeof *card);
-    MycController* c = calloc(1, sizeof *c);
-    if (card == NULL || c == NULL) { free(card); free(c); return NULL; }
+    MycCard* card = calloc(1, sizeof *card); /* lint-ok: C5 a squad card made when a slot shows a squadmate */
+    MycController* c = calloc(1, sizeof *c); /* lint-ok: C5 as above */
+    if (card == NULL || c == NULL) { free(card); free(c); return NULL; } /* lint-ok: C5 as above */
     card->slot = s;
     myc_controller_init(c, l->native, l->pool);
     card->controller = c;
@@ -255,6 +277,16 @@ static void MycLuRemap(MycLineup* l, const MycIdentity* identity)
     l->has_logged = 1;
 }
 
+/* Slot s's owner as its card takes it: in the loopback the player's own preview is their own peer's card. */
+static int MycLuOwnerOf(const MycLineup* l, int s, int loopback, const char** key)
+{
+    int kind = l->owner_kind[s];
+    *key = l->owner_key[s];
+    if (kind != MYC_OWNER_LOCAL || !loopback) return kind;
+    *key = l->remote->local_key;
+    return l->remote->local_key[0] != 0 ? MYC_OWNER_PEER : MYC_OWNER_NONE;
+}
+
 int myc_lineup_observe(MycLineup* l, uint32_t frame, MycPreviewWatch* w, const MycIdentity* identity, int loopback)
 {
     l->watch = w;
@@ -263,13 +295,8 @@ int myc_lineup_observe(MycLineup* l, uint32_t frame, MycPreviewWatch* w, const M
     int mine = -1;
     for (int s = 0; s < SLOTS; s++)
     {
-        int status = myc_preview_status(w, s), kind = l->owner_kind[s];
-        const char* key = l->owner_key[s];
-        if (kind == MYC_OWNER_LOCAL && loopback)
-        {
-            kind = l->remote->local_key[0] != 0 ? MYC_OWNER_PEER : MYC_OWNER_NONE;
-            key = l->remote->local_key;
-        }
+        const char* key;
+        int status = myc_preview_status(w, s), kind = MycLuOwnerOf(l, s, loopback, &key);
         if (kind == MYC_OWNER_LOCAL && status != MYC_STATUS_ABSENT && mine < 0) mine = s;
         if (kind == MYC_OWNER_LOCAL || status == MYC_STATUS_ABSENT) MycLuDrop(l, s, frame);
         else MycLuUpdate(l, s, kind, key, status, frame);
@@ -286,7 +313,8 @@ int myc_lineup_request(MycLineup* l, MycRequest* out)
         if (card == NULL || !card->dirty || card->failures >= MYC_LINEUP_FAILURE_LIMIT) continue;
         card->dirty = 0;
         l->served = s;
-        myc_remote_request_of(MYC_TARGET_CARD, card->key, &card->settings, card->helmet, card->armor, card->body, card->cape, out);
+        MycWorn worn = {card->helmet, card->armor, card->body, card->cape};
+        myc_remote_request_of(MYC_TARGET_CARD, card->key, &card->settings, &worn, out);
         out->slot = s;
         return 1;
     }
@@ -350,7 +378,7 @@ void myc_lineup_step(MycLineup* l, uint32_t frame, MycSettleFn settle, void* ctx
     {
         if (myc_controller_collect(l->retiring[i].a, frame) > 0) { l->retiring[keep++] = l->retiring[i]; continue; }
         myc_controller_free(l->retiring[i].a);
-        free(l->retiring[i].block);
+        free(l->retiring[i].block); /* lint-ok: C5 a dropped card's controller freed once its textures retired */
     }
     l->nretiring = keep;
     busy = keep > 0;

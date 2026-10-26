@@ -183,6 +183,16 @@ static int MycPairIndex(MycGroup* const* s, int m, const MycGroup* g)
 
 /* Structure groups keep a dark neutral (the source's nearest by lightness); the paint groups into t; the share each
  * palette color took here into pre_used; a cape of no dark neutral gives them a main color its guard allows. */
+/* A structure group given the source's dark neutral nearest by lightness; the share it takes into pre_used. */
+static int MycPairToNeutral(MycArena* arena, MycSearch* c, MycPairs* pairs, MycGroup* g, MycGroup** neutrals, int k)
+{
+    MycGroup* near = myc_nearest_lightness(neutrals, k, g);
+    if (!myc_pairs_add(arena, pairs, g, near)) return 0;
+    int j = MycPairIndex(c->s, c->m, near);
+    c->pre_used[j] = c->pre_used[j] + g->share;
+    return 1;
+}
+
 static int MycPairStructure(MycArena* arena, MycGroup** targets, int n, MycSearch* c, MycPairs* pairs, int suit, int guard)
 {
     MycGroup** neutrals = myc_alloc(arena, sizeof(MycGroup*) * (size_t)(c->m + 1));
@@ -195,12 +205,9 @@ static int MycPairStructure(MycArena* arena, MycGroup** targets, int n, MycSearc
     for (int i = 0; i < n; i++)
     {
         MycGroup* g = targets[i];
-        if (suit || !myc_is_structure(g)) { c->t[c->n++] = g; continue; }
-        if (k == 0) { if (guard) rest[r++] = g; continue; }
-        MycGroup* near = myc_nearest_lightness(neutrals, k, g);
-        if (!myc_pairs_add(arena, pairs, g, near)) return 0;
-        int j = MycPairIndex(c->s, c->m, near);
-        c->pre_used[j] = c->pre_used[j] + g->share;
+        if (suit || !myc_is_structure(g)) c->t[c->n++] = g;
+        else if (k == 0) { if (guard) rest[r++] = g; }
+        else if (!MycPairToNeutral(arena, c, pairs, g, neutrals, k)) return 0;
     }
     return r == 0 || myc_cape_structure(arena, rest, r, c->s, c->m, pairs, c->pre_used);
 }

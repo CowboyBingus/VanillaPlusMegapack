@@ -105,6 +105,33 @@ static int MycTrColumnRule(int i, const double lab[3], const double P[3], const 
     return rule;
 }
 
+/* The first count columns' rules and labs (the camo columns' after the others'). */
+static void MycTrColumnRules(const double* c, const double P[3], const MycTrCtx* ctx, int count, int rules[NCOLUMNS],
+    double labs[NCOLUMNS][3])
+{
+    for (int i = 0; i < count; i++)
+    {
+        int o = myc_tr_columns[i] * 4;
+        MycLab lab = myc_srgb_to_lab(c[o], c[o + 1], c[o + 2]);
+        double l3[3] = {lab.L, lab.a, lab.b};
+        rules[i] = MycTrColumnRule(i, l3, P, ctx);
+        memcpy(labs[i], l3, sizeof l3);
+    }
+    for (int i = CAMO_FIRST; i < count; i++) rules[i] = ctx->all ? RULE_CAMO : (ctx->chromatic ? RULE_HUE : RULE_TONE);
+    if (ctx->all && count > CAMO_FIRST) rules[0] = RULE_CAMO;
+}
+
+/* A coat or bare metal paints every changing column flat; a neutral goal D tones them (but its own and camo ones). */
+static void MycTrGoalRules(int flat, const double D[3], int rules[NCOLUMNS])
+{
+    for (int i = 0; i < NCOLUMNS; i++)
+    {
+        if (rules[i] == RULE_NONE) continue;
+        if (flat == FLAT_COAT || flat == FLAT_METAL) rules[i] = RULE_FLAT;
+        else if (myc_chroma(D[1], D[2]) < TINT_C && rules[i] != RULE_OWN && rules[i] != RULE_CAMO) rules[i] = RULE_TONE;
+    }
+}
+
 /* rules[i] (RULE_NONE: the color stays) and labs[i] for row c with paint P toward D. */
 static void MycTrRules(const double* c, const double P[3], const double D[3], int flat, int rules[NCOLUMNS],
     double labs[NCOLUMNS][3])
@@ -117,22 +144,8 @@ static void MycTrRules(const double* c, const double P[3], const double D[3], in
     ctx.darken = P[0] - D[0] >= DARKEN_FOLLOW_L;
     int count = c[87] >= 0 ? NCOLUMNS : CAMO_FIRST;
     for (int i = 0; i < NCOLUMNS; i++) rules[i] = RULE_NONE;
-    for (int i = 0; i < count; i++)
-    {
-        int o = myc_tr_columns[i] * 4;
-        MycLab lab = myc_srgb_to_lab(c[o], c[o + 1], c[o + 2]);
-        double l3[3] = {lab.L, lab.a, lab.b};
-        rules[i] = MycTrColumnRule(i, l3, P, &ctx);
-        memcpy(labs[i], l3, sizeof l3);
-    }
-    for (int i = CAMO_FIRST; i < count; i++) rules[i] = ctx.all ? RULE_CAMO : (ctx.chromatic ? RULE_HUE : RULE_TONE);
-    if (ctx.all && count > CAMO_FIRST) rules[0] = RULE_CAMO;
-    for (int i = 0; i < NCOLUMNS; i++)
-    {
-        if (rules[i] == RULE_NONE) continue;
-        if (flat == FLAT_COAT || flat == FLAT_METAL) rules[i] = RULE_FLAT;
-        else if (myc_chroma(D[1], D[2]) < TINT_C && rules[i] != RULE_OWN && rules[i] != RULE_CAMO) rules[i] = RULE_TONE;
-    }
+    MycTrColumnRules(c, P, &ctx, count, rules, labs);
+    MycTrGoalRules(flat, D, rules);
 }
 
 /* A color's new CIELAB when the paint goes from P to T. */
@@ -238,56 +251,87 @@ static void MycTrColors(const double* c, const int* rules, double out[NCOLUMNS][
         if (rules[i] != RULE_NONE) memcpy(out[i], &c[myc_tr_columns[i] * 4], sizeof(double) * 3);
 }
 
+/* A fit's bounds on its paint: the goal D, a neutral goal's (only the lightness steps), a metal's chroma cap, the
+ * lightness floor. */
+typedef struct MycTrBounds { double D[3]; int neutral, metal; double floor; } MycTrBounds;
+
 /* The next paint T after a step that reached look g (or the first, from the row's own look). */
-static void MycTrStep(double T[3], const double from[3], const MycLab* g, const MycTrFit* f, const double D[3], int neutral,
-    int metal, double floor)
+static void MycTrStep(double T[3], const double from[3], const MycLab* g, const MycTrFit* f, const MycTrBounds* b)
 {
-    if (neutral && from == T)
+    if (b->neutral && from == T)
     {
-        T[0] = myc_max(T[0] + (f->L - g->L), floor);
+        T[0] = myc_max(T[0] + (f->L - g->L), b->floor);
         return;
     }
-    double next[3] = {myc_max(from[0] + (f->L - g->L), floor), from[1] + (f->a - g->a), from[2] + (f->b - g->b)};
-    MycTrCapChroma(next, D, metal);
+    double next[3] = {myc_max(from[0] + (f->L - g->L), b->floor), from[1] + (f->a - g->a), from[2] + (f->b - g->b)};
+    MycTrCapChroma(next, b->D, b->metal);
     memcpy(T, next, sizeof next);
+}
+
+/* A row's fit in progress: its rules and labs, the paint P it starts from and T it tries, the best colors and look. */
+typedef struct MycTrSteps
+{
+    int rules[NCOLUMNS];
+    double labs[NCOLUMNS][3], best[NCOLUMNS][3], P[3], T[3], best_err;
+    MycTrBounds bounds;
+    MycLab best_look;
+} MycTrSteps;
+
+/* The fit's steps: paint T, look, keep the best colors, the next T (FIT_STEPS at most, until FIT_DONE). */
+static void MycTrIterate(MycTransfer* tr, double* c, const MycTrFit* f, MycTrSteps* s)
+{
+    for (int step = 0; step < FIT_STEPS; step++)
+    {
+        MycTrPaintWith(c, s->rules, s->labs, s->P, s->T);
+        MycLab g = MycTrLook(tr, c, f->cal);
+        double err = myc_de2000(g.L, g.a, g.b, f->L, f->a, f->b);
+        if (err < s->best_err) { s->best_err = err; s->best_look = g; MycTrColors(c, s->rules, s->best); }
+        if (err < FIT_DONE) break;
+        MycTrStep(s->T, s->T, &g, f, &s->bounds);
+    }
+}
+
+/* The fit's start: its rules from paint P (the row's own albedo), bounds, first paint T and error. */
+static void MycTrFitStart(MycTransfer* tr, MycTrRow* row, const MycTrFit* f, MycTrSteps* s)
+{
+    double* c = row->c;
+    double alb[3];
+    s->bounds.D[0] = f->L;
+    s->bounds.D[1] = f->a;
+    s->bounds.D[2] = f->b;
+    MycTrOwnAlbedo(tr, row, alb);
+    row->own = NULL;
+    MycLab p = myc_linear_to_lab(alb[0], alb[1], alb[2]);
+    s->P[0] = p.L; s->P[1] = p.a; s->P[2] = p.b;
+    MycTrRules(c, s->P, s->bounds.D, f->flat, s->rules, s->labs);
+    if (f->base_only)
+        for (int i = 1; i < NCOLUMNS; i++) s->rules[i] = RULE_NONE;
+    s->bounds.neutral = f->cal == NULL && myc_chroma(f->a, f->b) < NEUTRAL_GOAL_C;
+    s->bounds.metal = c[27] > 0.5;
+    s->bounds.floor = f->flat == FLAT_METAL ? -INFINITY : MycTrPaintFloor(s->P[0], s->bounds.metal, c[40] < GLOSSY_ROUGH, myc_is_soft(c));
+    MycLab look = MycTrLookFrom(c, f->cal, alb[0], alb[1], alb[2]);
+    s->best_look = look;
+    MycTrBounds first = s->bounds;
+    first.neutral = 0;
+    MycTrStep(s->T, s->P, &look, f, &first);
+    if (s->bounds.neutral) { s->T[1] = f->a; s->T[2] = f->b; }
+    s->best_err = myc_de2000(look.L, look.a, look.b, f->L, f->a, f->b);
+    if (s->best_err != s->best_err) s->best_err = INFINITY;
+    MycTrColors(c, s->rules, s->best);
 }
 
 /* Fits row (its c written with the best colors); returns the error, the look reached in reached (or NULL). */
 static double MycTrFitRow(MycTransfer* tr, MycTrRow* row, const MycTrFit* f, MycLab* reached)
 {
     double* c = row->c;
-    double D[3] = {f->L, f->a, f->b}, alb[3], P[3], labs[NCOLUMNS][3], best[NCOLUMNS][3];
-    int rules[NCOLUMNS];
-    MycTrOwnAlbedo(tr, row, alb);
-    row->own = NULL;
-    MycLab p = myc_linear_to_lab(alb[0], alb[1], alb[2]);
-    P[0] = p.L; P[1] = p.a; P[2] = p.b;
-    MycTrRules(c, P, D, f->flat, rules, labs);
-    if (f->base_only)
-        for (int i = 1; i < NCOLUMNS; i++) rules[i] = RULE_NONE;
-    int neutral = f->cal == NULL && myc_chroma(f->a, f->b) < NEUTRAL_GOAL_C, metal = c[27] > 0.5;
-    double floor = f->flat == FLAT_METAL ? -INFINITY : MycTrPaintFloor(P[0], metal, c[40] < GLOSSY_ROUGH, myc_is_soft(c));
-    MycLab look = MycTrLookFrom(c, f->cal, alb[0], alb[1], alb[2]), best_look = look;
-    double T[3];
-    MycTrStep(T, P, &look, f, D, 0, metal, floor);
-    if (neutral) { T[1] = f->a; T[2] = f->b; }
-    double best_err = myc_de2000(look.L, look.a, look.b, f->L, f->a, f->b);
-    if (best_err != best_err) best_err = INFINITY;
-    MycTrColors(c, rules, best);
-    for (int step = 0; step < FIT_STEPS; step++)
-    {
-        MycTrPaintWith(c, rules, labs, P, T);
-        MycLab g = MycTrLook(tr, c, f->cal);
-        double err = myc_de2000(g.L, g.a, g.b, f->L, f->a, f->b);
-        if (err < best_err) { best_err = err; best_look = g; MycTrColors(c, rules, best); }
-        if (err < FIT_DONE) break;
-        MycTrStep(T, T, &g, f, D, neutral, metal, floor);
-    }
+    MycTrSteps s;
+    MycTrFitStart(tr, row, f, &s);
+    MycTrIterate(tr, c, f, &s);
     for (int i = 0; i < NCOLUMNS; i++)
-        if (rules[i] != RULE_NONE) memcpy(&c[myc_tr_columns[i] * 4], best[i], sizeof(double) * 3);
+        if (s.rules[i] != RULE_NONE) memcpy(&c[myc_tr_columns[i] * 4], s.best[i], sizeof(double) * 3);
     if (f->flat == FLAT_ALL && !(f->cal != NULL || f->base_only)) MycTrFlatSheen(c, f->a, f->b);
-    if (reached != NULL) *reached = best_look;
-    return best_err;
+    if (reached != NULL) *reached = s.best_look;
+    return s.best_err;
 }
 
 double myc_transfer_fit_base(MycTransfer* tr, const float* values, int width, int row, const double tint[3],
@@ -383,19 +427,18 @@ static void MycTrWriteRow(float* values, size_t base, const double* c, const Myc
     if (rough >= 0) values[base + ROUGHNESS] = (float)rough;
 }
 
-double myc_transfer_apply(MycTransfer* tr, float* values, int width, int row, const MycGoal* goal,
-    const MycSourceLuts* source, const MycLut* origin)
+static int MycTrFlatOf(const MycGoal* goal)
 {
-    MycTrRow r;
-    myc_row_values(values, width, row, r.c);
-    const double* start = origin != NULL && row < 256 ? MycTrStart(tr, origin, row, r.c) : NULL;
-    r.own = start;
-    int flat = goal->all ? FLAT_ALL : (goal->band ? FLAT_COAT : (goal->coat ? FLAT_METAL : FLAT_NONE));
-    MycLab d = MycTrDiffuseGoal(goal);
-    double rough = flat != FLAT_COAT && flat != FLAT_METAL ? MycTrDarkFinish(tr, &r, goal, source, d.L) : -1;
-    if (rough >= 0) { r.c[ROUGHNESS] = rough; r.own = NULL; }
+    if (goal->all) return FLAT_ALL;
+    if (goal->band) return FLAT_COAT;
+    return goal->coat ? FLAT_METAL : FLAT_NONE;
+}
+
+/* The fit toward a goal: its diffuse look; a calibrated goal's own look and calibration (with a finish changed for a
+ * dark color, the calibration's diffuse part alone, in rough_cal). */
+static MycTrFit MycTrGoalFit(const MycGoal* goal, MycLab d, int flat, double rough, double rough_cal[6])
+{
     const double* cal = flat != FLAT_COAT && flat != FLAT_METAL && goal->has_cal ? goal->cal : NULL;
-    double rough_cal[6];
     MycTrFit f = {d.L, d.a, d.b, NULL, 0, flat};
     if (cal != NULL && rough >= 0)
     {
@@ -403,10 +446,23 @@ double myc_transfer_apply(MycTransfer* tr, float* values, int width, int row, co
         rough_cal[3] = 0; rough_cal[4] = 0; rough_cal[5] = 0;
         f.cal = rough_cal;
     }
-    else if (cal != NULL)
-    {
-        f = (MycTrFit){goal->L, goal->a, goal->b, cal, 0, flat};
-    }
+    else if (cal != NULL) f = (MycTrFit){goal->L, goal->a, goal->b, cal, 0, flat};
+    return f;
+}
+
+double myc_transfer_apply(MycTransfer* tr, float* values, int width, int row, const MycGoal* goal,
+    const MycSourceLuts* source, const MycLut* origin)
+{
+    MycTrRow r;
+    myc_row_values(values, width, row, r.c);
+    const double* start = origin != NULL && row < 256 ? MycTrStart(tr, origin, row, r.c) : NULL;
+    r.own = start;
+    int flat = MycTrFlatOf(goal);
+    MycLab d = MycTrDiffuseGoal(goal);
+    double rough = flat != FLAT_COAT && flat != FLAT_METAL ? MycTrDarkFinish(tr, &r, goal, source, d.L) : -1;
+    if (rough >= 0) { r.c[ROUGHNESS] = rough; r.own = NULL; }
+    double rough_cal[6];
+    MycTrFit f = MycTrGoalFit(goal, d, flat, rough, rough_cal);
     double err = MycTrFitRow(tr, &r, &f, NULL);
     if (f.cal != NULL && MycTrRefit(tr, r.c, f.cal, err, &f))
     {

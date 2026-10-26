@@ -232,6 +232,34 @@ int myc_pairs_add(MycArena* arena, MycPairs* pairs, MycGroup* t, MycGroup* s)
     return 1;
 }
 
+/* Every color allowed first (a guard's fallback then gives none it blocked), kept where it already matches. */
+static void MycCapeAllowAll(MycSearch* c)
+{
+    for (int i = 0; i < c->n; i++)
+        for (int j = 0; j < c->m; j++)
+        {
+            const MycGroup* t = c->t[i];
+            const MycGroup* s = c->s[j];
+            MYC_ALLOWED(c, i, j) = 1;
+            MYC_KEEP(c, i, j) = myc_de2000(t->L, t->a, t->b, s->L, s->a, s->b) < MYC_KEEP_DE;
+        }
+}
+
+/* Group i paired with the nearest by lightness of the main colors its guard allows (list: scratch); the share it takes
+ * added to used. 0 out of memory. */
+static int MycCapeStructurePair(MycArena* arena, const MycSearch* c, int i, MycGroup** list, MycPairs* pairs, double* used)
+{
+    int k = 0;
+    for (int j = 0; j < c->m; j++)
+        if (MYC_ALLOWED(c, i, j) && c->s[j]->share >= MYC_MAIN_COLOR) list[k++] = c->s[j];
+    MycGroup* near = myc_nearest_lightness(list, k, c->t[i]);
+    if (near == NULL) return 1;
+    if (!myc_pairs_add(arena, pairs, c->t[i], near)) return 0;
+    for (int j = 0; j < c->m; j++)
+        if (c->s[j] == near) used[j] = used[j] + c->t[i]->share;
+    return 1;
+}
+
 int myc_cape_structure(MycArena* arena, MycGroup** rest, int n, MycGroup** palette, int m, MycPairs* pairs, double* used)
 {
     MycSearch c;
@@ -244,24 +272,10 @@ int myc_cape_structure(MycArena* arena, MycGroup** rest, int n, MycGroup** palet
     c.allowed = myc_alloc(arena, sizeof(int) * (size_t)(n * m + 1));
     MycGroup** list = myc_alloc(arena, sizeof(MycGroup*) * (size_t)(m + 1));
     if (c.keep == NULL || c.allowed == NULL || list == NULL) return 0;
-    for (int i = 0; i < n; i++)
-        for (int j = 0; j < m; j++) /* every color first: a guard's fallback then gives none it blocked */
-        {
-            MYC_ALLOWED(&c, i, j) = 1;
-            MYC_KEEP(&c, i, j) = myc_de2000(rest[i]->L, rest[i]->a, rest[i]->b, palette[j]->L, palette[j]->a, palette[j]->b) < MYC_KEEP_DE;
-        }
+    MycCapeAllowAll(&c);
     myc_capes_dark_parts_guard(&c, MYC_ACCENT_C);
     for (int i = 0; i < n; i++)
-    {
-        int k = 0;
-        for (int j = 0; j < m; j++)
-            if (MYC_ALLOWED(&c, i, j) && palette[j]->share >= MYC_MAIN_COLOR) list[k++] = palette[j];
-        MycGroup* near = myc_nearest_lightness(list, k, rest[i]);
-        if (near == NULL) continue;
-        if (!myc_pairs_add(arena, pairs, rest[i], near)) return 0;
-        for (int j = 0; j < m; j++)
-            if (palette[j] == near) used[j] = used[j] + rest[i]->share;
-    }
+        if (!MycCapeStructurePair(arena, &c, i, list, pairs, used)) return 0;
     return 1;
 }
 

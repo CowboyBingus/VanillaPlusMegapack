@@ -156,7 +156,7 @@ uint64_t myc_binding_entry(uint64_t material, uint32_t slot)
 /* A runtime texture for spec, updatable; NULL with why (the engine gives no render handle). Waits for the renderer. */
 static MycTexture* MycEngineCreate(const MycNative* native, MycSpec* spec, const char** why)
 {
-    MycTexture* t = calloc(1, sizeof(MycTexture) + sizeof(uint32_t) * 14);
+    MycTexture* t = calloc(1, sizeof(MycTexture) + sizeof(uint32_t) * 14); /* lint-ok: C5 a texture made, on the frame an apply or the stock needs one */
     if (t == NULL) { *why = "out of memory"; return NULL; }
     uint32_t* view = (uint32_t*)(t + 1);
     int block = spec->kind == MYC_SPEC_SHEET || spec->kind == MYC_SPEC_ALBEDO;
@@ -176,8 +176,8 @@ static MycTexture* MycEngineCreate(const MycNative* native, MycSpec* spec, const
     t->handle = native->create((uint32_t)t->size, MYC_UPDATABLE, MYC_TEXTURE_VIEW, view, spec->data);
     t->object = native->resource(t->handle);
     uint8_t render[4];
-    if (t->object == 0 || !vpm_read(t->object, render, 4)) { *why = "no texture object"; native->destroy(t->handle); free(t); return NULL; }
-    if ((render[0] | render[1] << 8 | render[2] << 16) == 0xFFFFFF) { *why = "no render handle"; native->destroy(t->handle); free(t); return NULL; }
+    if (t->object == 0 || !vpm_read(t->object, render, 4)) { *why = "no texture object"; native->destroy(t->handle); free(t); return NULL; } /* lint-ok: C5 as above */
+    if ((render[0] | render[1] << 8 | render[2] << 16) == 0xFFFFFF) { *why = "no render handle"; native->destroy(t->handle); free(t); return NULL; } /* lint-ok: C5 as above */
     t->spec = myc_spec_hold(spec);
     return t;
 }
@@ -198,17 +198,26 @@ void myc_pool_init(MycPool* pool, const MycNative* native)
     pool->native = native;
 }
 
-static void MycPoolKey(int kind, int bc1, int width, int height, int mips, size_t size, char* out, size_t n)
+/* What a free texture's list is keyed by: a cape LUT copy is a LUT of its size. */
+typedef struct MycShape { int kind, bc1, width, height, mips; size_t size; } MycShape;
+
+static MycShape MycShapeOf(const MycSpec* spec)
 {
-    if (kind == MYC_SPEC_SHEET) snprintf(out, n, "sheet:%dx%d:%d:%zu", width, height, mips, size);
-    else if (kind == MYC_SPEC_ALBEDO) snprintf(out, n, "albedo:%s%dx%d:%zu", bc1 ? "bc1:" : "bc3:", width, height, size);
-    else snprintf(out, n, "%d", width * 65536 + height);
+    return (MycShape){spec->kind == MYC_SPEC_CAPE ? MYC_SPEC_LUT : spec->kind, spec->bc1, spec->width, spec->height, spec->mips,
+                      spec->size};
 }
 
-static MycPoolList* MycPoolListFor(MycPool* pool, int kind, int bc1, int width, int height, int mips, size_t size)
+static void MycPoolKey(const MycShape* s, char* out, size_t n)
+{
+    if (s->kind == MYC_SPEC_SHEET) snprintf(out, n, "sheet:%dx%d:%d:%zu", s->width, s->height, s->mips, s->size);
+    else if (s->kind == MYC_SPEC_ALBEDO) snprintf(out, n, "albedo:%s%dx%d:%zu", s->bc1 ? "bc1:" : "bc3:", s->width, s->height, s->size);
+    else snprintf(out, n, "%d", s->width * 65536 + s->height);
+}
+
+static MycPoolList* MycPoolListFor(MycPool* pool, const MycShape* shape)
 {
     char key[64];
-    MycPoolKey(kind, bc1, width, height, mips, size, key, sizeof key);
+    MycPoolKey(shape, key, sizeof key);
     for (int i = 0; i < pool->nlists; i++)
         if (strcmp(pool->lists[i].key, key) == 0) return &pool->lists[i];
     if (pool->nlists >= MYC_POOL_LISTS) return NULL;
@@ -219,14 +228,29 @@ static MycPoolList* MycPoolListFor(MycPool* pool, int kind, int bc1, int width, 
 
 void myc_pool_key(const MycSpec* spec, char* out, size_t size)
 {
-    MycPoolKey(spec->kind == MYC_SPEC_CAPE ? MYC_SPEC_LUT : spec->kind, spec->bc1, spec->width, spec->height, spec->mips,
-        spec->size, out, size);
+    MycShape shape = MycShapeOf(spec);
+    MycPoolKey(&shape, out, size);
 }
 
 static MycPoolList* MycPoolSpecList(MycPool* pool, const MycSpec* spec)
 {
-    return MycPoolListFor(pool, spec->kind == MYC_SPEC_CAPE ? MYC_SPEC_LUT : spec->kind, spec->bc1, spec->width, spec->height,
-        spec->mips, spec->size);
+    MycShape shape = MycShapeOf(spec);
+    return MycPoolListFor(pool, &shape);
+}
+
+void myc_sizes_add(MycSizes* sizes, MycSpec* spec)
+{
+    char key[64];
+    myc_pool_key(spec, key, sizeof key);
+    int at = 0;
+    while (at < sizes->n && strcmp(sizes->keys[at], key) != 0) at++;
+    if (at == sizes->n && sizes->n < MYC_SIZES)
+    {
+        sizes->specs[at] = spec;
+        memcpy(sizes->keys[at], key, sizeof key);
+        sizes->counts[sizes->n++] = 0;
+    }
+    if (at < sizes->n) sizes->counts[at]++;
 }
 
 static void MycPoolSheetNote(MycPool* pool, MycTexture* t, const MycSpec* spec, int refilled)
@@ -323,15 +347,15 @@ static void MycPoolDestroy(MycPool* pool, MycTexture* t)
     pool->native->destroy(t->handle);
     myc_spec_drop(t->spec);
     myc_spec_drop(t->previous);
-    free(t);
+    free(t); /* lint-ok: C5 a texture destroyed when the pool holds too many free, RETIRE_FRAMES after its plan changed */
 }
 
 void myc_pool_give(MycPool* pool, MycTexture* t)
 {
     myc_spec_drop(t->previous);
     t->previous = NULL;
-    MycPoolList* list = MycPoolListFor(pool, t->kind == MYC_SPEC_CAPE ? MYC_SPEC_LUT : t->kind, t->bc1, t->width, t->height,
-        t->mips, t->size);
+    MycShape shape = {t->kind == MYC_SPEC_CAPE ? MYC_SPEC_LUT : t->kind, t->bc1, t->width, t->height, t->mips, t->size};
+    MycPoolList* list = MycPoolListFor(pool, &shape);
     int max = t->kind == MYC_SPEC_SHEET ? MYC_POOL_MAX_FREE_SHEETS : (t->kind == MYC_SPEC_ALBEDO ? MYC_POOL_MAX_FREE_ALBEDOS : MYC_POOL_MAX_FREE);
     if (list == NULL || list->count >= max)
     {
@@ -374,39 +398,40 @@ static void MycPoolFill(MycPool* pool, MycSpec* spec, int want)
 
 static const int kMycPoolSizes[10][2] = {{23, 8}, {23, 7}, {23, 6}, {23, 5}, {23, 4}, {16, 8}, {16, 5}, {16, 3}, {16, 1}, {3, 1}};
 
-int myc_pool_stock(MycPool* pool, const MycSpecs* luts, const MycSpecs* patterns)
+/* How many free textures of a size the stock keeps: a sheet's or albedo's as many as the plan has, a LUT size's
+ * POOL_STOCK times (at most POOL_MAX_FREE). */
+static int MycPoolWant(const MycSpec* spec, int count)
 {
-    int before = pool->made;
-    const MycSpecs* kinds[2] = {luts, patterns};
-    MycSpec* specs[256];
-    char keys[256][64];
-    int counts[256], n = 0;
-    for (int k = 0; k < 2; k++)
-        for (int i = 0; i < kinds[k]->n; i++)
-        {
-            MycSpec* spec = kinds[k]->items[i].spec;
-            if (spec->kind == MYC_SPEC_DIRECT) continue;
-            char key[64];
-            myc_pool_key(spec, key, sizeof key);
-            int at = 0;
-            while (at < n && strcmp(keys[at], key) != 0) at++;
-            if (at == n && n < 256) { specs[n] = spec; memcpy(keys[n], key, sizeof key); counts[n++] = 0; }
-            if (at < n) counts[at]++;
-        }
-    for (int i = 0; i < n; i++)
-    {
-        int want = MycPoolBlock(specs[i]) ? counts[i] : (counts[i] * MYC_POOL_STOCK < MYC_POOL_MAX_FREE ? counts[i] * MYC_POOL_STOCK : MYC_POOL_MAX_FREE);
-        MycPoolFill(pool, specs[i], want);
-    }
+    if (MycPoolBlock(spec)) return count;
+    return count * MYC_POOL_STOCK < MYC_POOL_MAX_FREE ? count * MYC_POOL_STOCK : MYC_POOL_MAX_FREE;
+}
+
+/* Every other LUT size of the game POOL_SPARES + 1 times, made with zeros. */
+static void MycPoolSpareSizes(MycPool* pool)
+{
     for (int i = 0; i < 10; i++)
     {
         int w = kMycPoolSizes[i][0], h = kMycPoolSizes[i][1];
-        MycPoolList* list = MycPoolListFor(pool, MYC_SPEC_LUT, 0, w, h, 1, (size_t)w * (size_t)h * 16);
+        MycShape shape = {MYC_SPEC_LUT, 0, w, h, 1, (size_t)w * (size_t)h * 16};
+        MycPoolList* list = MycPoolListFor(pool, &shape);
         if (list == NULL || list->count > MYC_POOL_SPARES) continue;
-        MycSpec* zeros = myc_spec_new(MYC_SPEC_LUT, w, h, (size_t)w * (size_t)h * 16);
+        MycSpec* zeros = myc_spec_new(MYC_SPEC_LUT, w, h, shape.size);
         if (zeros == NULL) continue;
         MycPoolFill(pool, zeros, MYC_POOL_SPARES + 1);
         myc_spec_drop(zeros);
     }
+}
+
+int myc_pool_stock(MycPool* pool, const MycSpecs* luts, const MycSpecs* patterns)
+{
+    static MycSizes sizes;
+    int before = pool->made;
+    const MycSpecs* kinds[2] = {luts, patterns};
+    sizes.n = 0;
+    for (int k = 0; k < 2; k++)
+        for (int i = 0; i < kinds[k]->n; i++)
+            if (kinds[k]->items[i].spec->kind != MYC_SPEC_DIRECT) myc_sizes_add(&sizes, kinds[k]->items[i].spec);
+    for (int i = 0; i < sizes.n; i++) MycPoolFill(pool, sizes.specs[i], MycPoolWant(sizes.specs[i], sizes.counts[i]));
+    MycPoolSpareSizes(pool);
     return pool->made - before;
 }

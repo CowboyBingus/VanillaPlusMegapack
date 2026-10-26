@@ -214,9 +214,10 @@ typedef struct MycRemote
 void myc_remote_init(MycRemote* r, const MycNative* native, MycPool* pool, void (*note)(const char* line),
     MycRecordsSame records_same, void* ctx, int weapons);
 void myc_remote_free(MycRemote* r);
-/* A job request for target with settings s on kits (request_of). */
-void myc_remote_request_of(int target, const char* key, const MycSettings* s, uint32_t helmet, uint32_t armor, uint32_t body,
-    uint32_t cape, MycRequest* out);
+/* The kits a Helldiver or a squad card shows. */
+typedef struct MycWorn { uint32_t helmet, armor, body, cape; } MycWorn;
+/* A job request for target with settings s on worn kits (request_of). */
+void myc_remote_request_of(int target, const char* key, const MycSettings* s, const MycWorn* worn, MycRequest* out);
 /* From a sync poll (members, or n < 0: none); mine: this player's settings for squadmates, or NULL. */
 void myc_remote_update(MycRemote* r, uint32_t frame, const MycMember* members, int n, const MycSettings* mine, int everyone);
 int myc_remote_request(MycRemote* r, MycRequest* out);

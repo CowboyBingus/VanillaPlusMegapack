@@ -102,30 +102,41 @@ static int MycSyncNameChar(char c, int first)
     return first ? alpha : alpha || (c >= '0' && c <= '9');
 }
 
+/* One 'name=value;' field at *at (moved past its ';'): its name and value spans; 0 when it is not one. */
+typedef struct MycSyncSpan { const char* name; size_t name_len; const char* value; size_t value_len; } MycSyncSpan;
+
+static int MycSyncField(const char** at, MycSyncSpan* f)
+{
+    const char* p = *at;
+    f->name = p;
+    if (!MycSyncNameChar(*p, 1)) return 0;
+    while (MycSyncNameChar(*p, 0)) p++;
+    f->name_len = (size_t)(p - f->name);
+    if (*p++ != '=') return 0;
+    f->value = p;
+    while (*p && *p != ';' && *p != '=') p++;
+    if (*p != ';') return 0;
+    f->value_len = (size_t)(p - f->value);
+    *at = p + 1;
+    return 1;
+}
+
 /* KEY2's fields v, m, f, s (a list of 'name=value;' or refused); 1 when well formed. */
 static int MycSyncFields(const char* text, char fields[4][MYC_SYNC_TEXT_MAX + 1], int has[4])
 {
     static const char* const names[4] = {"v", "m", "f", "s"};
-    const char* p = text;
     for (int i = 0; i < 4; i++) has[i] = 0;
-    while (*p)
+    for (const char* p = text; *p;)
     {
-        const char* name = p;
-        if (!MycSyncNameChar(*p, 1)) return 0;
-        while (MycSyncNameChar(*p, 0)) p++;
-        size_t name_len = (size_t)(p - name);
-        if (*p++ != '=') return 0;
-        const char* value = p;
-        while (*p && *p != ';' && *p != '=') p++;
-        if (*p != ';') return 0;
+        MycSyncSpan f;
+        if (!MycSyncField(&p, &f)) return 0;
         for (int i = 0; i < 4; i++)
-            if (name_len == 1 && name[0] == names[i][0])
+            if (f.name_len == 1 && f.name[0] == names[i][0])
             {
-                memcpy(fields[i], value, (size_t)(p - value));
-                fields[i][p - value] = 0;
+                memcpy(fields[i], f.value, f.value_len);
+                fields[i][f.value_len] = 0;
                 has[i] = 1;
             }
-        p++;
     }
     return 1;
 }

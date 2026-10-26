@@ -125,13 +125,11 @@ static int MycVarietyKept(MycPlan* plan, MycItem* t, MycItem* s, MycKept* out)
 
 typedef struct MycVarietyBy { const char* key; double share, L, a, b; } MycVarietyBy;
 
-/* Variety.dominance into d (d->has 0 when nothing shows); 0 out of memory. */
-static int MycVarietyDominance(MycArena* arena, const MycCells* cells, const MycKept* kept, MycDominance* d)
+/* The cells summed by key into by (in first-seen order): how many keys; their total share into *total. */
+static int MycVarietyByKey(const MycCells* cells, MycVarietyBy* by, double* total)
 {
-    MycVarietyBy* by = myc_alloc(arena, sizeof(MycVarietyBy) * (size_t)(cells->n + 1));
-    if (by == NULL) return 0;
     int n = 0;
-    double total = 0.0;
+    *total = 0.0;
     for (int i = 0; i < cells->n; i++)
     {
         const MycCell* c = &cells->cells[i];
@@ -142,11 +140,28 @@ static int MycVarietyDominance(MycArena* arena, const MycCells* cells, const Myc
         by[k].L = by[k].L + c->share * c->L;
         by[k].a = by[k].a + c->share * c->a;
         by[k].b = by[k].b + c->share * c->b;
-        total = total + c->share;
+        *total = *total + c->share;
     }
+    return n;
+}
+
+/* The key of the largest share (the first of equals), or NULL. */
+static const MycVarietyBy* MycVarietyTop(const MycVarietyBy* by, int n)
+{
     const MycVarietyBy* top = NULL;
     for (int k = 0; k < n; k++)
         if (top == NULL || by[k].share > top->share) top = &by[k];
+    return top;
+}
+
+/* Variety.dominance into d (d->has 0 when nothing shows); 0 out of memory. */
+static int MycVarietyDominance(MycArena* arena, const MycCells* cells, const MycKept* kept, MycDominance* d)
+{
+    MycVarietyBy* by = myc_alloc(arena, sizeof(MycVarietyBy) * (size_t)(cells->n + 1));
+    if (by == NULL) return 0;
+    double total;
+    int n = MycVarietyByKey(cells, by, &total);
+    const MycVarietyBy* top = MycVarietyTop(by, n);
     memset(d, 0, sizeof *d);
     if (top == NULL || top->share <= 0) return 1;
     d->has = 1;

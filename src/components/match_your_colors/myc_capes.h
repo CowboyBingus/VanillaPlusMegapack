@@ -48,9 +48,12 @@ int myc_cape_row_at(int i);
 
 /* ---- emblems (myc_capes_emblems.c) -------------------------------------------------------------------------------- */
 
+/* A cape's inputs to the second half of its analysis: its material LUT, its tint (cape LUT) and gradient (NULL: none),
+ * and its rows' areas and tint areas (rows 0-4). */
+typedef struct MycCapeInputs { MycLut* lut; MycLut* tint; const uint8_t* grad; double areas[5], tints[5]; } MycCapeInputs;
 /* The cape's emblems that show (emblems_of), into the analysis (arena); 0 after myc_fail. */
-int myc_cape_emblems_of(MycFind* find, const MycPiece* piece, const MycLut* tint, const uint8_t* grad, int height,
-    MycArena* arena, MycAnalysis* out, MycErr* err);
+int myc_cape_emblems_of(MycFind* find, const MycPiece* piece, const MycCapeInputs* in, MycArena* arena, MycAnalysis* out,
+    MycErr* err);
 /* A BC3 sheet's mip chain with the blocks overlapping rect moved by shift (Lab), in place (Capes.recolor_sheet). */
 void myc_cape_recolor_sheet(uint8_t* data, uint32_t width, uint32_t height, uint32_t mips, const int rect[4],
     const double shift[3]);
@@ -64,8 +67,9 @@ int myc_capes_source_rows(const MycAnalysis* cape, MycRow* out);
 /* Capes.emblem_patterns into out (cape->nemblems long); how many. */
 int myc_capes_emblem_patterns(const MycAnalysis* cape, MycPatternIn* out);
 /* Capes.report: the development log line of a cape's plan. */
+struct MycFits;
 void myc_capes_report(const MycAnalysis* c, const MycZoneOutcome* zones, const MycZoneOutcome* emblems,
-    const char* sheet_note, int fits_rows, double fits_err, char* out, size_t size);
+    const char* sheet_note, const struct MycFits* fits, char* out, size_t size);
 /* Capes.sheet_sums: Adler-32 of a recipe key and of 64 blocks spread over the sheet's bytes. */
 void myc_capes_sheet_sums(const char* key, const uint8_t* data, size_t size, uint32_t* key_sum, uint32_t* data_sum);
 

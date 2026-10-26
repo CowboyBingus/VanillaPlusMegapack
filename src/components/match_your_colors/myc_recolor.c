@@ -197,25 +197,22 @@ static MycSpec* MycRecolorCopy(const MycLut* original, int kind)
 /* A plan's goals of one LUT (row -> goal), from its "lut:row" keys. */
 typedef struct MycLutRows { uint64_t lut; const MycGoal** goals; int* rows; int n; } MycLutRows;
 
-static int MycRecolorRow(const MycLut* original, float* data, int r, const MycGoal* goal, MycTransfer* tr,
-    const MycSourceLuts* source, MycFits* fits, MycErr* err)
+static int MycRecolorRow(const MycLut* original, float* data, int r, const MycGoal* goal, const MycLutFit* fit, MycErr* err)
 {
-    if (goal->finish[0] != 0 && !myc_apply_finish(data, original->width, r, source, goal->finish, err)) return 0;
-    if (goal->copy[0] != 0) return myc_apply_copy(data, original->width, r, source, goal->copy, err);
-    double e = myc_transfer_apply(tr, data, original->width, r, goal, source, goal->finish[0] == 0 ? original : NULL);
-    MycRecolorNoteFit(fits, e);
+    if (goal->finish[0] != 0 && !myc_apply_finish(data, original->width, r, fit->source, goal->finish, err)) return 0;
+    if (goal->copy[0] != 0) return myc_apply_copy(data, original->width, r, fit->source, goal->copy, err);
+    double e = myc_transfer_apply(fit->tr, data, original->width, r, goal, fit->source, goal->finish[0] == 0 ? original : NULL);
+    MycRecolorNoteFit(fit->fits, e);
     return 1;
 }
 
 /* One material LUT's new data (Recolor.build_lut); NULL after myc_fail. */
-static MycSpec* MycRecolorBuildLut(const MycLut* original, const MycLutRows* rows, MycTransfer* tr,
-    const MycSourceLuts* source, MycFits* fits, MycErr* err)
+static MycSpec* MycRecolorBuildLut(const MycLut* original, const MycLutRows* rows, const MycLutFit* fit, MycErr* err)
 {
     MycSpec* spec = MycRecolorCopy(original, MYC_SPEC_LUT);
     if (spec == NULL) { myc_fail(err, "out of memory (LUT copy)"); return NULL; }
     for (int i = 0; i < rows->n; i++)
-        if (rows->rows[i] < original->height
-            && !MycRecolorRow(original, spec->data, rows->rows[i], rows->goals[i], tr, source, fits, err))
+        if (rows->rows[i] < original->height && !MycRecolorRow(original, spec->data, rows->rows[i], rows->goals[i], fit, err))
         {
             myc_spec_drop(spec);
             return NULL;
@@ -225,8 +222,10 @@ static MycSpec* MycRecolorBuildLut(const MycLut* original, const MycLutRows* row
 
 /* A cape LUT's planned tint rows in a copy of it, each fitted over its material row as built (build_tints). */
 static MycSpec* MycRecolorBuildTints(const MycLut* cape, const MycLutRows* rows, const MycLut* material,
-    const MycSpec* built, MycTransfer* tr, MycFits* fits, MycErr* err)
+    const MycSpec* built, const MycLutFit* fit, MycErr* err)
 {
+    MycTransfer* tr = fit->tr;
+    MycFits* fits = fit->fits;
     MycSpec* spec = MycRecolorCopy(cape, MYC_SPEC_CAPE);
     if (spec == NULL) { myc_fail(err, "out of memory (cape LUT copy)"); return NULL; }
     float* data = spec->data;
@@ -275,30 +274,45 @@ static int MycRecolorGroup(MycArena* arena, const MycPlan* plan, MycLutRows** ou
     return n;
 }
 
-int myc_build_luts(MycArena* arena, const MycAnalysis* target, const MycPlan* plan, MycTransfer* tr,
-    const MycSourceLuts* source, MycFits* fits, MycSpecs* out, MycErr* err)
+static int MycRecolorIsTint(const MycAnalysis* target, uint64_t lut) { return target->has_tint && lut == target->tint_cape; }
+
+/* The material LUTs of the plan's goals (every LUT but a cape's tint). */
+static int MycRecolorMaterialLuts(MycArena* arena, const MycAnalysis* target, const MycLutRows* by, int n,
+    const MycLutFit* fit, MycSpecs* out, MycErr* err)
+{
+    for (int i = 0; i < n; i++)
+    {
+        const MycLut* original = myc_analysis_lut(target, by[i].lut);
+        if (MycRecolorIsTint(target, by[i].lut) || original == NULL) continue;
+        MycSpec* spec = MycRecolorBuildLut(original, &by[i], fit, err);
+        if (spec == NULL || !myc_specs_put(arena, out, by[i].lut, spec)) return myc_fail(err, "out of memory (LUTs)");
+    }
+    return 1;
+}
+
+/* A cape's tint LUT, fitted over its material LUT as built. */
+static int MycRecolorTintLuts(MycArena* arena, const MycAnalysis* target, const MycLutRows* by, int n,
+    const MycLutFit* fit, MycSpecs* out, MycErr* err)
+{
+    for (int i = 0; i < n; i++)
+    {
+        if (!MycRecolorIsTint(target, by[i].lut)) continue;
+        const MycLut* cape = myc_analysis_lut(target, by[i].lut);
+        const MycLut* material = myc_analysis_lut(target, target->tint_material);
+        if (cape == NULL || material == NULL) return myc_fail(err, "cape tint LUT %016llx not analysed", (unsigned long long)by[i].lut);
+        MycSpec* spec = MycRecolorBuildTints(cape, &by[i], material, myc_specs_get(out, target->tint_material), fit, err);
+        if (spec == NULL || !myc_specs_put(arena, out, by[i].lut, spec)) return myc_fail(err, "out of memory (cape LUT)");
+    }
+    return 1;
+}
+
+int myc_build_luts(MycArena* arena, const MycAnalysis* target, const MycPlan* plan, const MycLutFit* fit, MycSpecs* out,
+    MycErr* err)
 {
     MycLutRows* by = NULL;
     int n = MycRecolorGroup(arena, plan, &by);
     if (n < 0) return myc_fail(err, "out of memory (plan rows)");
-    for (int i = 0; i < n; i++)
-    {
-        const MycLut* original = myc_analysis_lut(target, by[i].lut);
-        int tint = target->has_tint && by[i].lut == target->tint_cape;
-        if (tint || original == NULL) continue;
-        MycSpec* spec = MycRecolorBuildLut(original, &by[i], tr, source, fits, err);
-        if (spec == NULL || !myc_specs_put(arena, out, by[i].lut, spec)) return myc_fail(err, "out of memory (LUTs)");
-    }
-    for (int i = 0; i < n; i++)
-    {
-        if (!(target->has_tint && by[i].lut == target->tint_cape)) continue;
-        const MycLut* cape = myc_analysis_lut(target, by[i].lut);
-        const MycLut* material = myc_analysis_lut(target, target->tint_material);
-        if (cape == NULL || material == NULL) return myc_fail(err, "cape tint LUT %016llx not analysed", (unsigned long long)by[i].lut);
-        MycSpec* spec = MycRecolorBuildTints(cape, &by[i], material, myc_specs_get(out, target->tint_material), tr, fits, err);
-        if (spec == NULL || !myc_specs_put(arena, out, by[i].lut, spec)) return myc_fail(err, "out of memory (cape LUT)");
-    }
-    return 1;
+    return MycRecolorMaterialLuts(arena, target, by, n, fit, out, err) && MycRecolorTintLuts(arena, target, by, n, fit, out, err);
 }
 
 /* ---- patterns ----------------------------------------------------------------------------------------------------- */

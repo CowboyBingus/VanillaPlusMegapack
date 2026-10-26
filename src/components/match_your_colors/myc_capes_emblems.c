@@ -165,39 +165,55 @@ static int MycEmblemOf(const MycLayer* l, const MycEmblemCtx* ctx, MycEmblem* e)
     return 1;
 }
 
-int myc_cape_emblems_of(MycFind* find, const MycPiece* piece, const MycLut* tint, const uint8_t* grad, int height,
-    MycArena* arena, MycAnalysis* out, MycErr* err)
+/* The tint's emblem layers that are on (how many), those of rows 0-3 into found (*n): a counted cell's outside row is
+ * 0-3, so a later row's layer shows on none. */
+static int MycEmblemLayers(const MycLut* tint, int height, MycLayer found[16], int* n)
 {
-    MycLayer found[4 * 4], layer;
-    int n = 0, on = 0;
-    out->emblems = NULL;
-    out->nemblems = 0;
+    int on = 0;
+    *n = 0;
     for (int r = 0; r < (tint->height < height ? tint->height : height); r++)
         for (int k = 0; k < 4; k++)
         {
+            MycLayer layer;
             if (!MycEmblemLayerOf(tint, r, k, &layer)) continue;
             on++;
-            if (r < 4) found[n++] = layer; /* a counted cell's outside row is 0-3: a later row's layer shows on none */
+            if (r < 4) found[(*n)++] = layer;
         }
-    if (on == 0) return 1;
+    return on;
+}
+
+/* The found layers' emblems that show on the grid, into out (its emblems allocated for n). */
+static void MycEmblemsShown(const MycLayer* found, int n, const MycEmblemCtx* ctx, uint64_t decal, MycAnalysis* out)
+{
+    for (int i = 0; i < n; i++)
+    {
+        MycEmblem* e = &out->emblems[out->nemblems];
+        if (!MycEmblemOf(&found[i], ctx, e)) continue;
+        e->sheet = decal;
+        e->sheet_width = ctx->sheet->width;
+        e->sheet_height = ctx->sheet->height;
+        e->sheet_format = ctx->sheet->format;
+        e->sheet_mips = ctx->sheet->mips;
+        out->nemblems++;
+    }
+}
+
+int myc_cape_emblems_of(MycFind* find, const MycPiece* piece, const MycCapeInputs* in, MycArena* arena, MycAnalysis* out,
+    MycErr* err)
+{
+    MycLayer found[4 * 4];
+    int n = 0;
+    out->emblems = NULL;
+    out->nemblems = 0;
+    if (MycEmblemLayers(in->tint, in->lut->height, found, &n) == 0) return 1;
     MycSheet sheet;
     int have = MycEmblemSheet(find, piece->decal, &sheet, err);
     if (have < 0) return 0;
     if (have == 0) return 1;
     out->emblems = myc_alloc(arena, sizeof(MycEmblem) * (size_t)(n + 1));
     if (out->emblems == NULL) return myc_fail(err, "out of memory (emblems)");
-    MycEmblemCtx ctx = {&sheet, tint, grad};
-    for (int i = 0; i < n; i++)
-    {
-        MycEmblem* e = &out->emblems[out->nemblems];
-        if (!MycEmblemOf(&found[i], &ctx, e)) continue;
-        e->sheet = piece->decal;
-        e->sheet_width = sheet.width;
-        e->sheet_height = sheet.height;
-        e->sheet_format = sheet.format;
-        e->sheet_mips = sheet.mips;
-        out->nemblems++;
-    }
+    MycEmblemCtx ctx = {&sheet, in->tint, in->grad};
+    MycEmblemsShown(found, n, &ctx, piece->decal, out);
     return 1;
 }
 
@@ -221,11 +237,14 @@ static uint16_t MycEmblemEndpoint(int v, const double shift[3])
 
 static int32_t myc_emblem_memo[65536];  /* an endpoint's recolor, once per sheet cell (-1: not yet) */
 
-static void MycEmblemBlocks(uint8_t* data, size_t offset, uint32_t bw, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1,
-    const double shift[3])
+/* A mip's blocks to recolor: its width in blocks and the block rectangle [x0, x1) x [y0, y1). */
+typedef struct MycBlocks { uint32_t bw, x0, y0, x1, y1; } MycBlocks;
+
+static void MycEmblemBlocks(uint8_t* data, size_t offset, const MycBlocks* b, const double shift[3])
 {
-    for (uint32_t by = y0; by < y1; by++)
-        for (uint32_t bx = x0; bx < x1; bx++)
+    uint32_t bw = b->bw;
+    for (uint32_t by = b->y0; by < b->y1; by++)
+        for (uint32_t bx = b->x0; bx < b->x1; bx++)
         {
             size_t at = offset + ((size_t)by * bw + bx) * 16 + 8;
             for (int k = 0; k <= 2; k += 2)
@@ -238,6 +257,22 @@ static void MycEmblemBlocks(uint8_t* data, size_t offset, uint32_t bw, uint32_t 
         }
 }
 
+static uint32_t MycEmblemAtLeast1(uint32_t v) { return v > 0 ? v : 1; }
+static uint32_t MycEmblemMax(uint32_t a, uint32_t b) { return a > b ? a : b; }
+static uint32_t MycEmblemMin(uint32_t a, uint32_t b) { return a < b ? a : b; }
+
+/* Mip m's blocks overlapping rect (at least one block), and its block count (*count). */
+static MycBlocks MycEmblemMip(uint32_t width, uint32_t height, uint32_t m, const int rect[4], size_t* count)
+{
+    uint32_t mw = MycEmblemAtLeast1(width >> m), mh = MycEmblemAtLeast1(height >> m);
+    uint32_t bw = MycEmblemAtLeast1((mw + 3) >> 2), bh = MycEmblemAtLeast1((mh + 3) >> 2);
+    uint32_t rx0 = (uint32_t)rect[0] >> m, ry0 = (uint32_t)rect[1] >> m;
+    uint32_t rx1 = (uint32_t)rect[2] >> m, ry1 = (uint32_t)rect[3] >> m;
+    uint32_t x1 = (MycEmblemMax(rx1, rx0 + 1) + 3) / 4, y1 = (MycEmblemMax(ry1, ry0 + 1) + 3) / 4;
+    *count = (size_t)bw * bh;
+    return (MycBlocks){bw, rx0 / 4, ry0 / 4, MycEmblemMin(x1, bw), MycEmblemMin(y1, bh)};
+}
+
 void myc_cape_recolor_sheet(uint8_t* data, uint32_t width, uint32_t height, uint32_t mips, const int rect[4],
     const double shift[3])
 {
@@ -245,12 +280,9 @@ void myc_cape_recolor_sheet(uint8_t* data, uint32_t width, uint32_t height, uint
     size_t offset = 0;
     for (uint32_t m = 0; m < mips; m++)
     {
-        uint32_t mw = width >> m > 0 ? width >> m : 1, mh = height >> m > 0 ? height >> m : 1;
-        uint32_t bw = (mw + 3) >> 2 > 0 ? (mw + 3) >> 2 : 1, bh = (mh + 3) >> 2 > 0 ? (mh + 3) >> 2 : 1;
-        uint32_t rx0 = (uint32_t)rect[0] >> m, ry0 = (uint32_t)rect[1] >> m;
-        uint32_t rx1 = (uint32_t)rect[2] >> m, ry1 = (uint32_t)rect[3] >> m;
-        uint32_t x1 = ((rx1 > rx0 + 1 ? rx1 : rx0 + 1) + 3) / 4, y1 = ((ry1 > ry0 + 1 ? ry1 : ry0 + 1) + 3) / 4;
-        MycEmblemBlocks(data, offset, bw, rx0 / 4, ry0 / 4, x1 < bw ? x1 : bw, y1 < bh ? y1 : bh, shift);
-        offset += (size_t)bw * bh * 16;
+        size_t count;
+        MycBlocks blocks = MycEmblemMip(width, height, m, rect, &count);
+        MycEmblemBlocks(data, offset, &blocks, shift);
+        offset += count * 16;
     }
 }

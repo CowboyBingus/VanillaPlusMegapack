@@ -287,23 +287,28 @@ static void MycCapeAddSide(MycCapeAcc* acc, int row, double weight, double level
     acc->total = acc->total + weight * MYC_CAPE_TINT_STEPS;
 }
 
-void myc_cape_areas(const uint8_t* cells, int height, const MycLut* tint, const uint8_t* grad, double rows[5],
-    double tints[5], double* total)
+/* Every counted cell of the outline: its outside and inside sides (Capes.areas' loop). */
+static void MycCapeAddCells(MycCapeAcc* acc, const uint8_t* cells, const uint8_t* grad)
 {
     const uint8_t* shape = myc_cape_outline();
-    MycCapeAcc acc;
-    memset(&acc, 0, sizeof acc);
-    acc.height = height;
-    acc.tint = grad != NULL ? tint : NULL;
-    if (tint == NULL) grad = NULL;
     for (int i = 0; i < MYC_CAPE_CELLS; i++)
     {
         const uint8_t* c = cells + i * 4;
         if (shape[i] != 1 || c[3] < MYC_CAPE_THRESHOLD) continue;
         double level = grad != NULL ? grad[i * 4] : 0;
-        MycCapeAddSide(&acc, MycCapeOutsideRow(c), MYC_CAPE_W_OUT, level);
-        MycCapeAddSide(&acc, c[0] >= MYC_CAPE_SET ? 1 : 4, MYC_CAPE_W_IN, level);
+        MycCapeAddSide(acc, MycCapeOutsideRow(c), MYC_CAPE_W_OUT, level);
+        MycCapeAddSide(acc, c[0] >= MYC_CAPE_SET ? 1 : 4, MYC_CAPE_W_IN, level);
     }
+}
+
+void myc_cape_areas(const uint8_t* cells, int height, const MycLut* tint, const uint8_t* grad, double rows[5],
+    double tints[5], double* total)
+{
+    MycCapeAcc acc;
+    memset(&acc, 0, sizeof acc);
+    acc.height = height;
+    acc.tint = grad != NULL ? tint : NULL;
+    MycCapeAddCells(&acc, cells, tint != NULL ? grad : NULL);
     for (int r = 0; r < 5; r++) { rows[r] = 0; tints[r] = 0; }
     *total = acc.total;
     if (acc.total == 0) return;
