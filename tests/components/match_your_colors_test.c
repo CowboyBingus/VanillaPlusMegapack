@@ -7,6 +7,7 @@
  * canned one (myc_g.worker.job, as the Lua tests' TestRecolor.job: the real job reads the game's files, which the
  * offline parity tool covers), run inside the step (myc_g.worker.synchronous) except in the worker thread's own test.
  * Calls per frame are pinned with fake_counts and the fake engine's counts, as the Lua pinned them with frame_budget. */
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
@@ -39,7 +40,9 @@ static const VpmComponentDef* const kDefs[] = {&vpm_component_match_your_colors}
 #define FAIL_HELMET 0x0f0f0f0fu
 #define HELMET_LUT 0x962a946e964ebc40ull
 #define ARMOR_LUT 0xa007a73e4082430eull
-#define CAPE_LUT 0xd4cb1423c8d2a2c8ull
+#define CAPE_LUT 0xd4cb1423c8d2a2c8ull     /* the local cape kit 72492837's (Recolor Cape) */
+#define CAPE_TINT 0x9c385033ddbaaa60ull    /* its cape LUT (the tint), on the cape's materials */
+#define CAPE_LUT_SLOT 0x0e494183u
 #define LUT_SLOT 0x7e662968u
 #define SHIPPED "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC"
 #define GET_API_SHIPPED "48 83 EC 28 83 F9 01 0F 85 11 22 33 44 55"
@@ -200,7 +203,9 @@ static uintptr_t Vanilla(uint64_t name)
 }
 
 /* A unit whose two materials hold the vanilla texture of lut in their LUT slot (one mesh). */
-static void Unit(uint32_t unit, uint64_t lut)
+/* A unit whose two materials hold the vanilla texture of lut in their LUT slot and (tint not 0) of tint in their cape
+ * LUT slot (one mesh; the binding array right after the material's header, as Fake.engine lays it). */
+static void UnitWith(uint32_t unit, uint64_t lut, uint64_t tint)
 {
     int i = E.nunits++;
     E.units[i].unit = unit;
@@ -209,17 +214,37 @@ static void Unit(uint32_t unit, uint64_t lut)
     *(uint8_t*)(E.units[i].mesh + 0xDC) = 0xFF;
     for (int m = 0; m < 2; m++)
     {
-        uintptr_t material = Heap(0x70), array = material + 0x40;
-        Put32(material + 24, 1);
+        uintptr_t material = Heap(0x80), array = material + 0x40;
+        Put32(material + 24, tint != 0 ? 2 : 1);
         Put64(material + 32, array);
         Put32(array, LUT_SLOT);
         Put64(array + 8, Vanilla(lut));
+        if (tint != 0)
+        {
+            Put32(array + 16, CAPE_LUT_SLOT);
+            Put64(array + 24, Vanilla(tint));
+        }
         E.units[i].materials[m] = material;
     }
 }
 
-static uintptr_t Entry(uintptr_t material) { return material + 0x40; }
-static uintptr_t Bound(uint32_t unit, int m) { return (uintptr_t)Get64(Entry(E.units[FindUnit(unit)].materials[m]) + 8); }
+static void Unit(uint32_t unit, uint64_t lut) { UnitWith(unit, lut, 0); }
+
+/* A material's binding entry of slot, or 0. */
+static uintptr_t EntryOf(uintptr_t material, uint32_t slot)
+{
+    uintptr_t array = material + 0x40;
+    for (uint32_t i = 0; i < Get32(material + 24); i++)
+        if (Get32(array + 16 * i) == slot) return array + 16 * i;
+    return 0;
+}
+
+static uintptr_t Entry(uintptr_t material) { return EntryOf(material, LUT_SLOT); }
+static uintptr_t BoundSlot(uint32_t unit, int m, uint32_t slot)
+{
+    return (uintptr_t)Get64(EntryOf(E.units[FindUnit(unit)].materials[m], slot) + 8);
+}
+static uintptr_t Bound(uint32_t unit, int m) { return BoundSlot(unit, m, LUT_SLOT); }
 
 static int Ours(uintptr_t object)
 {
@@ -269,7 +294,8 @@ static void Visibility(uint32_t unit, uint32_t visible, uint8_t children)
 static void SetResource(uint64_t material, uint32_t slot, uint64_t resource)
 {
     E.set_resource++;
-    if (Get32(Entry((uintptr_t)material)) == slot) Put64(Entry((uintptr_t)material) + 8, resource);
+    uintptr_t entry = EntryOf((uintptr_t)material, slot);
+    if (entry != 0) Put64(entry + 8, resource);
 }
 static uint32_t Create(uint32_t size, uint32_t validity, uint32_t view_type, const void* view, const void* data)
 {
@@ -316,7 +342,7 @@ static void MakeEngine(int ready)
     Unit(0x101, ARMOR_LUT);
     Unit(0x102, ARMOR_LUT);
     Unit(0x103, ARMOR_LUT);
-    Unit(0x106, CAPE_LUT);
+    UnitWith(0x106, CAPE_LUT, CAPE_TINT);
     Unit(0x200, HELMET_LUT);
 }
 
@@ -340,6 +366,9 @@ static MycAPiece kArmorPieces[3] = {{.piece = {.slot = 2, .type = 0, .body = 0},
                                     {.piece = {.slot = 4, .type = 0, .body = 0}, .materials = &kMaterial, .nmaterials = 1}};
 static MycAnalysis kHelmet = {.kit = &kHelmetKit, .pieces = kHelmetPieces, .npieces = 1};
 static MycAnalysis kArmor = {.kit = &kArmorKit, .pieces = kArmorPieces, .npieces = 3};
+static MycKit kCapeKit = {.type = MYC_CAPE};
+static MycAPiece kCapePieces[1] = {{.piece = {.slot = 1, .type = 0, .body = 3}, .materials = &kMaterial, .nmaterials = 1}};
+static MycAnalysis kCape = {.kit = &kCapeKit, .pieces = kCapePieces, .npieces = 1};
 
 static const char* Signature(MycCatalogue* kits, uint32_t id)
 {
@@ -361,6 +390,24 @@ static void Sign(MycResult* out, uint32_t id)
     out->signatures[out->nsignatures++] = (MycSigned){id, myc_strdup(&out->arena, text)};
 }
 
+/* Recolor Cape in the canned job (with_cape): the cape's LUT and tint join the result, slot 1 its slot range. */
+static void CannedCape(const MycRequest* r, MycResult* out)
+{
+    if (r->capes && r->cape != 0) Sign(out, r->cape);
+    if (!r->capes || r->cape == 0) return;
+    Lut(out, CAPE_LUT);
+    MycSpec* tint = myc_spec_new(MYC_SPEC_CAPE, 16, 1, 16 * 16);
+    myc_specs_put(&out->arena, &out->luts, CAPE_TINT, tint);
+    char report[64];
+    snprintf(report, sizeof report, "Cape %08x: canned report.", r->cape);
+    out->cape_report = myc_strdup(&out->arena, report);
+    out->targets[out->ntargets++] = &kCape;
+    out->first = out->first < 1 ? out->first : 1;
+    out->last = out->last > 1 ? out->last : 1;
+    size_t at = strlen(out->key);
+    snprintf(out->key + at, sizeof out->key - at, ":cape:%08x", r->cape);
+}
+
 static int Canned(MycPipeline** p, const wchar_t* data, const wchar_t* cache, MycRequest* r, MycResult* out, MycErr* err)
 {
     C.jobs++;
@@ -371,22 +418,25 @@ static int Canned(MycPipeline** p, const wchar_t* data, const wchar_t* cache, My
     if (C.dirty) (*p)->dirty = 1; /* a new analysis made: the cache is due */
     if (!r->has_kits && r->nweapons == 0) { out->action = MYC_PREPARED; return 1; }
     if (r->helmet == FAIL_HELMET) return myc_fail(err, "canned failure");
-    int scheme = r->scheme > 0;
+    int scheme = r->scheme > 0, cape_mode = r->mode == MYC_CAPE_SOURCE && !scheme;
     if (r->mode == MYC_OFF && !scheme) { myc_result_restore(out, NULL, "off"); return 1; }
-    if (!scheme && r->keep_sets && r->helmet == SET_HELMET) { myc_result_restore(out, NULL, "complete set"); return 1; }
-    int helmet = scheme || r->mode == MYC_HELMET_FROM_ARMOR;
+    if (!scheme && !cape_mode && r->keep_sets && r->helmet == SET_HELMET) { myc_result_restore(out, NULL, "complete set"); return 1; }
+    if (cape_mode && r->cape == 0) { myc_result_restore(out, NULL, "no cape"); return 1; }
+    int helmet = scheme || cape_mode || r->mode == MYC_HELMET_FROM_ARMOR, both = scheme || cape_mode;
     out->action = MYC_APPLY;
-    snprintf(out->key, sizeof out->key, "%d:%d:%u:%u:%u:%d:%d", r->mode, r->scheme, r->helmet, r->armor, r->body,
-        r->keep_hoods ? 1 : 0, r->materials ? 1 : 0);
+    snprintf(out->key, sizeof out->key, "%s%d:%d:%u:%u:%u:%d:%d", cape_mode ? "capesrc:" : "", r->mode, r->scheme, r->helmet,
+        r->armor, r->body, r->keep_hoods ? 1 : 0, r->materials ? 1 : 0);
     if (helmet) Lut(out, HELMET_LUT);
-    if (!helmet || scheme) Lut(out, ARMOR_LUT);
+    if (!helmet || both) Lut(out, ARMOR_LUT);
     out->first = helmet ? 0 : 1;
-    out->last = helmet && !scheme ? 0 : 9;
+    out->last = helmet && !both ? 0 : 9;
     out->target = helmet ? &kHelmet : &kArmor;
     out->targets[out->ntargets++] = out->target;
-    if (scheme) out->targets[out->ntargets++] = &kArmor;
+    if (both) out->targets[out->ntargets++] = &kArmor;
     Sign(out, r->helmet);
     Sign(out, r->armor);
+    if (cape_mode) Sign(out, r->cape);
+    else CannedCape(r, out);
     return 1;
 }
 
@@ -927,6 +977,203 @@ static void HideCapeHidesYourCape(void)
     CHECK(strcmp(myc_g.sync_text, SHARED) == 0);
 }
 
+static void ANewHelmetUnitTakesTheSameTexture(void)
+{
+    Boot(1, 1, HELMET, 1);
+    Frames(4);
+    uintptr_t texture = Bound(0x100, 0);
+    E.units[FindUnit(0x100)].alive = 0;
+    Unit(0x104, HELMET_LUT);
+    LocalUnit(0, 0, 0x104);
+    Frames(3);
+    CHECK(Bound(0x104, 0) == texture && Bound(0x104, 1) == texture);
+    CHECK_EQ(E.create, 1 + MYC_POOL_SPARES); /* the same texture kept */
+}
+
+static void ANewPlanBindsOverThePlanBefore(void)
+{
+    Boot(1, 1, HELMET, 1);
+    Frames(4);
+    SetOption("match_materials", 1);
+    Frames(6);
+    SetOption("mode", 3);
+    Frames(6);
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 0); /* the helmet put back */
+    int restored = myc_g.controller.restored;
+    SetOption("paint_scheme", 4);
+    Calls f;
+    int n = 0;
+    do { f = Frame(); n++; } while (f.set_resource == 0 && n < 12);
+    CHECK_EQ(n, 2); /* the job's frame, then its apply's */
+    CHECK_EQ(f.reads, 39); /* the Lua's frame_budget pin: read_into 39, alive 8, set_resource 8, update 2 */
+    CHECK_EQ(f.alive, 8);
+    CHECK_EQ(f.set_resource, 8);
+    CHECK_EQ(f.update, 2); /* both LUTs in pooled textures, refilled */
+    for (uint32_t unit = 0x100; unit <= 0x103; unit++) CHECK_EQ(Recolored(unit, unit == 0x100 ? HELMET_LUT : ARMOR_LUT), 1);
+    CHECK_EQ(myc_g.controller.nbindings, 8);
+    CHECK_EQ(myc_g.controller.restored, restored); /* bound over the plan before's, none put back first */
+}
+
+static void AnotherModsTextureIsNeverBoundOver(void)
+{
+    Boot(1, 1, HELMET, 1);
+    uintptr_t material = E.units[FindUnit(0x100)].materials[0], other = E.units[FindUnit(0x100)].materials[1];
+    uintptr_t foreign = Heap(16), later = Heap(16);
+    Put64(Entry(material) + 8, foreign); /* the other mod's texture, before the first recolor */
+    Frames(4);
+    CHECK(Bound(0x100, 0) == foreign && Ours(Bound(0x100, 1)));
+    uintptr_t recolored = Bound(0x100, 1);
+    Put64(Entry(other) + 8, later); /* the other mod binds its texture after the recolor */
+    Frames(65);
+    CHECK(Bound(0x100, 1) == later && recolored != later); /* not reasserted */
+    CHECK_NO_LOG("The game put an original color texture back");
+    SetOption("match_materials", 1);
+    Frames(6);
+    CHECK(Bound(0x100, 1) == later && Bound(0x100, 0) == foreign); /* a new plan takes over only its own textures */
+    SetOption("mode", 1);
+    Frames(3);
+    CHECK(Bound(0x100, 0) == foreign && Bound(0x100, 1) == later); /* Off restores only its own textures */
+}
+
+static void PreviewEntriesOfTheLocalPlayerAreRecolored(void)
+{
+    Boot(1, 1, HELMET, 1);
+    uintptr_t previews = Heap(2080 + 2184 * 5);
+    Put64(fake_game() + 0x346D580u, previews);
+    Put64(previews + 2080, 0x1234);                  /* slot 0: the remote player's */
+    Put32(previews + 2080 + 2184, 0x5eed0001u);      /* slot 1: the local player's */
+    Put32(previews + 2080 + 2184 + 4, 0x00c0ffeeu);
+    Frames(4);
+    CHECK_LOG("preview slot found");
+    Unit(0x105, HELMET_LUT);
+    Unit(0x205, HELMET_LUT);
+    Put32(previews + 2080 + 2184 + 68 + 12, 0x105); /* local slot, entry 0, helmet */
+    Put32(previews + 2080 + 2184 + 64, 1);
+    Put32(previews + 2080 + 68 + 12, 0x205);        /* remote slot */
+    Put32(previews + 2080 + 64, 1);
+    Frames(3);
+    CHECK_EQ(Recolored(0x105, HELMET_LUT), 1);
+    CHECK_EQ(Recolored(0x205, HELMET_LUT), 0);
+    int idle = 0, others = 0;
+    for (int i = 0; i < 30; i++)
+    {
+        Calls f = Frame();
+        uint32_t base = myc_g.frame % 2 == 1 ? 2 : 1; /* the units, and on odd frames count and entries in one read */
+        if (f.reads == base) idle++;
+        else if (f.reads != base + 2) others++;
+    }
+    CHECK(idle >= 28 && others == 0);
+}
+
+static void OffFreesTheTextureForTheNextPlan(void)
+{
+    Boot(1, 1, HELMET, 1);
+    Frames(4);
+    SetOption("mode", 1);
+    Frames(3);
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 0);
+    CHECK_EQ(myc_pool_free_count(&myc_g.pool), MYC_POOL_SPARES); /* not free at once */
+    Frames(4);
+    CHECK_EQ(myc_pool_free_count(&myc_g.pool), MYC_POOL_SPARES + 1); /* free after the retire delay */
+    CHECK_EQ(E.destroy, 0);
+    SetOption("mode", 2);
+    int create = E.create, update = E.update;
+    Frames(3);
+    CHECK_EQ(E.create - create, 0);
+    CHECK_EQ(E.update - update, 1); /* one texture refilled, none made */
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 1);
+}
+
+static void AChangeWhileAJobRunsDiscardsItsResult(void)
+{
+    Boot(1, 1, HELMET, 1);
+    Frame(); /* the resolve */
+    Frame(); /* the job */
+    SetOption("match_materials", 1);
+    Frame(); /* its end: its options are stale, nothing applied */
+    CHECK_EQ(E.create, 0);
+    Frames(4);
+    CHECK_EQ(E.create, 1 + MYC_POOL_SPARES);
+    CHECK(C.last.materials);
+    Boot(1, 1, HELMET, 1);
+    Frame();
+    Frame();
+    Kits(0, 0x0b0b0b0bu, CAPE, ARMOR); /* the kits change while the job runs */
+    Frame();
+    CHECK_EQ(E.create, 0);
+    Frames(4);
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 1);
+    CHECK(C.last.helmet == 0x0b0b0b0bu);
+}
+
+static void AnOptionSetToItsValueChangesNothing(void)
+{
+    Boot(1, 1, HELMET, 1);
+    Frames(4);
+    int jobs = C.jobs;
+    SetOption("mode", 2);
+    SetOption("keep_sets", 1);
+    Frames(4);
+    CHECK_EQ(C.jobs, jobs);
+    CHECK_NO_LOG("Option mode = 2.");
+    CHECK_NO_LOG("Option keep_sets");
+    SetOption("keep_sets", 0);
+    Frames(3);
+    CHECK_EQ(C.jobs, jobs + 1);
+    CHECK_LOG("Option keep_sets = false.");
+}
+
+static int TintsAre(uint32_t unit, uintptr_t object)
+{
+    return BoundSlot(unit, 0, CAPE_LUT_SLOT) == object && BoundSlot(unit, 1, CAPE_LUT_SLOT) == object;
+}
+
+static void RecolorCapeTakesThePlanWithTheOption(void)
+{
+    Boot(1, 1, HELMET, 1);
+    Frames(4);
+    CHECK_EQ(Recolored(0x106, CAPE_LUT), 0);
+    CHECK(TintsAre(0x106, VanillaOf(CAPE_TINT)));
+    CHECK(!C.last.capes && C.last.cape == CAPE); /* the option off; the cape kit is known */
+    SetOption("recolor_cape", 1);
+    Frames(3);
+    CHECK(C.last.target == MYC_TARGET_AVATAR && C.last.capes && C.last.cape == CAPE);
+    CHECK_EQ(Recolored(0x106, CAPE_LUT), 1);
+    uintptr_t tint = BoundSlot(0x106, 0, CAPE_LUT_SLOT);
+    CHECK(Ours(tint) && tint != Bound(0x106, 0) && TintsAre(0x106, tint)); /* its tint on a runtime texture of its own */
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 1);
+    Frames(30);
+    CHECK_EQ(fake_log_count("Cape 72492837: canned report."), 1);
+    SetOption("recolor_cape", 0);
+    Frames(3);
+    CHECK_EQ(Recolored(0x106, CAPE_LUT), 0);
+    CHECK(TintsAre(0x106, VanillaOf(CAPE_TINT)));
+    int idle, checks, other, quiet;
+    Classify(120, 1, 3, &idle, &checks, &other, &quiet);
+    CHECK(idle + checks + other == 120 && checks >= 3 && quiet);
+}
+
+static void AnotherCapeMattersWhenTheCapeIsTheSource(void)
+{
+    Boot(1, 1, HELMET, 1);
+    Frames(4);
+    int jobs = C.jobs;
+    Kits(0, HELMET, 0x33333333u, ARMOR); /* another cape: no job with Recolor Cape off */
+    Frames(125);
+    CHECK_EQ(C.jobs, jobs);
+    SetOption("mode", 4);
+    Frames(3);
+    CHECK(C.last.mode == MYC_CAPE_SOURCE && C.last.cape == 0x33333333u);
+    CHECK_EQ(Recolored(0x100, HELMET_LUT), 1);
+    CHECK_EQ(Recolored(0x101, ARMOR_LUT), 1);
+    CHECK_EQ(Recolored(0x106, CAPE_LUT), 0); /* the cape keeps its colors: it is the one matched */
+    jobs = C.jobs;
+    Kits(0, HELMET, CAPE, ARMOR); /* the cape changes again: the next chain check sees it */
+    Frames(125);
+    CHECK_EQ(C.jobs, jobs + 1);
+    CHECK(C.last.cape == CAPE);
+}
+
 /* ---- tests: Sync With Mod Users (test_sync.lua) ---------------------------------------------------------------------- */
 
 static struct
@@ -1278,6 +1525,256 @@ static void CacheWritesThroughATemporaryFile(void)
     CHECK(!myc_cache_read(path, &text, &size));
 }
 
+/* ---- tests: decoders and helpers (test_units.lua) -------------------------------------------------------------------- */
+
+static int FromHex(const char* hex, uint8_t* out)
+{
+    int n = 0;
+    for (; hex[0] != 0 && hex[1] != 0; hex += 2)
+    {
+        unsigned v = 0;
+        sscanf(hex, "%2x", &v);
+        out[n++] = (uint8_t)v;
+    }
+    return n;
+}
+
+static uint32_t g_park = 12345;
+static int Park(int n)
+{
+    g_park = (uint32_t)(((uint64_t)g_park * 16807u) % 2147483647u);
+    return (int)(g_park % (uint32_t)n);
+}
+
+static void Lz4Length(uint8_t* p, size_t* at, int rest)
+{
+    while (rest >= 255) { p[(*at)++] = 255; rest -= 255; }
+    p[(*at)++] = (uint8_t)rest;
+}
+
+typedef struct Lz4Case { int literals, offset, length; } Lz4Case;
+
+/* One block of sequences (literals, then a match) as the format says, and its data built byte by byte. */
+static size_t Lz4Block(const Lz4Case* cases, int n, uint8_t* packed, uint8_t* expected, size_t* expected_size)
+{
+    size_t at = 0, e = 0;
+    for (int i = 0; i < n; i++)
+    {
+        int lit = cases[i].literals, length = cases[i].length;
+        size_t literal_at = e;
+        for (int k = 0; k < lit; k++) expected[e++] = (uint8_t)Park(256);
+        int offset = cases[i].offset < (int)e ? cases[i].offset : (int)e;
+        packed[at++] = (uint8_t)((lit >= 15 ? 15 : lit) * 16 + (length - 4 >= 15 ? 15 : length - 4));
+        if (lit >= 15) Lz4Length(packed, &at, lit - 15);
+        memcpy(packed + at, expected + literal_at, (size_t)lit);
+        at += (size_t)lit;
+        packed[at++] = (uint8_t)(offset % 256);
+        packed[at++] = (uint8_t)(offset / 256);
+        if (length - 4 >= 15) Lz4Length(packed, &at, length - 19);
+        for (int k = 0; k < length; k++, e++) expected[e] = expected[e - (size_t)offset];
+    }
+    packed[at++] = 0x50;
+    memcpy(packed + at, "tail!", 5);
+    memcpy(expected + e, "tail!", 5);
+    *expected_size = e + 5;
+    return at + 5;
+}
+
+static void Lz4BlocksDecode(void)
+{
+    static const char* const vectors[][2] = {{"00", ""}, {"1061", "61"},
+        {"3f61626303000c506263616263", "616263616263616263616263616263616263616263616263616263616263616263616263616263"}};
+    uint8_t packed[64], data[128], out[129];
+    for (int i = 0; i < 3; i++)
+    {
+        int np = FromHex(vectors[i][0], packed), nd = FromHex(vectors[i][1], data);
+        CHECK(myc_lz4(packed, (size_t)np, out, (size_t)nd) == nd && memcmp(out, data, (size_t)nd) == 0);
+    }
+    static const uint8_t bad[][4] = {{0xF0}, {0x10}, {0x1F, 0x78, 0x00}, {0x1F, 0x78, 0x09, 0x00}, {0xFF, 0xFF}};
+    static const int sizes[] = {1, 1, 3, 4, 2};
+    for (int i = 0; i < 5; i++) CHECK(myc_lz4(bad[i], (size_t)sizes[i], out, 16) < 0);
+    static const uint8_t overrun[] = {0x1F, 0x78, 0x01, 0x00}; /* one literal, a 19-byte match into 16 bytes */
+    CHECK(myc_lz4(overrun, sizeof overrun, out, 16) < 0);
+    /* long overlapping matches at every offset and length around the switch, and a whole 256 KB chunk of one run */
+    static Lz4Case cases[256];
+    int n = 0;
+    static const int offsets[] = {1, 2, 3, 7, 64, 255, 256, 300}, lengths[] = {4, 255, 256, 257, 511, 4096, 20000};
+    for (int o = 0; o < 8; o++)
+        for (int l = 0; l < 7; l++) cases[n++] = (Lz4Case){1 + Park(300), offsets[o], lengths[l]};
+    for (int i = 0; i < 200; i++)
+    {
+        int literals = Park(40), offset = 1 + Park(600), length = 4 + Park(3000);
+        cases[n++] = (Lz4Case){literals, offset, length};
+    }
+    uint8_t* big = malloc(4u << 20);
+    uint8_t* expected = malloc(4u << 20);
+    uint8_t* decoded = malloc(4u << 20);
+    size_t size = 0, packed_size = Lz4Block(cases, n, big, expected, &size);
+    CHECK(myc_lz4(big, packed_size, decoded, size) == (int64_t)size && memcmp(decoded, expected, size) == 0);
+    Lz4Case run = {1, 1, 262144 - 6};
+    packed_size = Lz4Block(&run, 1, big, expected, &size);
+    CHECK(size == 262144 && myc_lz4(big, packed_size, decoded, size) == 262144 && memcmp(decoded, expected, size) == 0);
+    free(big);
+    free(expected);
+    free(decoded);
+}
+
+static void HalfFloats(void)
+{
+    static const struct { uint8_t lo, hi; double v; } cases[] = {{0x00, 0x3C, 1}, {0x00, 0xC0, -2}, {0xFF, 0x7B, 65504},
+        {0x01, 0x00, 5.9604644775390625e-08}, {0x00, 0x7C, INFINITY}, {0x00, 0x00, 0}, {0x00, 0x38, 0.5},
+        {0x55, 0x35, 0.333251953125}};
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) CHECK(myc_half(cases[i].lo, cases[i].hi) == cases[i].v);
+    double nan = myc_half(0x01, 0x7C);
+    CHECK(nan != nan);
+}
+
+/* A game map at header (Avatar.lookup's layout) with rows probed from the low 32 bits of key x multiplier. */
+static uintptr_t HashedMap(const uint32_t* keys, const uint32_t* values, int n, uint32_t capacity, uint32_t multiplier)
+{
+    uintptr_t header = Heap(32), rows = Heap(8 * capacity);
+    for (uint32_t i = 0; i < capacity; i++) Put32(rows + 8 * i, 0xFFFFFFFFu);
+    for (int k = 0; k < n; k++)
+    {
+        uint32_t slot = (keys[k] * multiplier) % capacity;
+        while (Get32(rows + 8 * slot) != 0xFFFFFFFFu) slot = (slot + 1) % capacity;
+        Put32(rows + 8 * slot, keys[k]);
+        Put32(rows + 8 * slot + 4, values[k]);
+    }
+    Put64(header, rows);
+    Put32(header + 8, capacity);
+    Put32(header + 12, 0xFFFFFFFFu);
+    Put32(header + 16, multiplier);
+    return header;
+}
+
+static void MapLookupsProbeLikeTheGame(void)
+{
+    const uint32_t keys[4] = {5, 21, 37, 15}, values[4] = {0, 7, 9, 3};
+    uintptr_t map = HashedMap(keys, values, 4, 16, 1);
+    uint32_t v = 99;
+    CHECK(myc_avatar_lookup(map, 5, &v) && v == 0);
+    CHECK(myc_avatar_lookup(map, 21, &v) && v == 7);
+    CHECK(myc_avatar_lookup(map, 37, &v) && v == 9);
+    CHECK(myc_avatar_lookup(map, 15, &v) && v == 3);
+    CHECK(!myc_avatar_lookup(map, 6, &v) && !myc_avatar_lookup(map, 53, &v));
+    const uint32_t hashed_keys[2] = {0xe5, 0x96}, hashed_values[2] = {2, 194};
+    uintptr_t hashed = HashedMap(hashed_keys, hashed_values, 2, 1024, 0x9E3779B1u);
+    CHECK(myc_avatar_lookup(hashed, 0xe5, &v) && v == 2);
+    CHECK(myc_avatar_lookup(hashed, 0x96, &v) && v == 194);
+}
+
+static void SumsAsNumpyAndPython(void)
+{
+    double a[13] = {1e16, 1, -1e16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+    CHECK(myc_npsum(a, 3) == ((1e16 + 1) - 1e16));
+    double r[8] = {a[0] + a[8], a[1] + a[9], a[2] + a[10], a[3] + a[11], a[4], a[5], a[6], a[7]};
+    CHECK(myc_npsum(a, 13) == ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7])) + a[12]);
+    double paint[4] = {0.5400885118937857, 0.0019177576986907615, 0.10799373040752351, 0.35};
+    CHECK(paint[0] + paint[1] + paint[2] + paint[3] != 1.0 && myc_pysum(paint, 4) == 1.0);
+    double one = 0.1, ints[3] = {1, 2, 3};
+    CHECK(myc_pysum(NULL, 0) == 0 && myc_pysum(&one, 1) == 0.1 && myc_pysum(ints, 3) == 6);
+}
+
+static void Ciede2000ReferencePairs(void)
+{
+    static const double pairs[][7] = {{50, 2.6772, -79.7751, 50, 0, -82.7485, 2.0425}, {50, 3.1571, -77.2803, 50, 0, -82.7485, 2.8615},
+        {50, -1.3802, -84.2814, 50, 0, -82.7485, 1.0000}, {50, 2.5, 0, 50, 0, -2.5, 4.3065}, {50, 0, 0, 50, -1, 2, 2.3669},
+        {60.2574, -34.0099, 36.2677, 60.4626, -34.1751, 39.4387, 1.2644}, {90.8027, -2.0831, 1.441, 91.1528, -1.6435, 0.0447, 1.4441}};
+    for (size_t i = 0; i < sizeof pairs / sizeof pairs[0]; i++)
+    {
+        const double* p = pairs[i];
+        double d = myc_de2000(p[0], p[1], p[2], p[3], p[4], p[5]);
+        CHECK(d - p[6] < 1e-4 && p[6] - d < 1e-4);
+    }
+}
+
+static void Bc3BlocksDecodeAsPillow(void)
+{
+    uint8_t out[64];
+    static const uint8_t first[16] = {255, 0, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49, 0x00, 0xF8, 0x1F, 0x00, 0xAA, 0xAA, 0xAA, 0xAA};
+    myc_cape_bc3_block(first, out);
+    int ok = 1;
+    for (int t = 0; t < 16; t++) ok &= out[t * 4] == 170 && out[t * 4 + 1] == 0 && out[t * 4 + 2] == 85 && out[t * 4 + 3] == 218;
+    CHECK(ok);
+    static const uint8_t second[16] = {10, 200, 0x88, 0xC6, 0xFA, 0x88, 0xC6, 0xFA, 0x1F, 0x00, 0xE0, 0x07, 0xE4, 0xE4, 0xE4, 0xE4};
+    static const uint8_t want[8][4] = {{0, 0, 255, 10}, {0, 255, 0, 200}, {0, 85, 170, 48}, {0, 170, 85, 86}, {0, 0, 255, 124},
+                                       {0, 255, 0, 162}, {0, 85, 170, 0}, {0, 170, 85, 255}};
+    myc_cape_bc3_block(second, out);
+    ok = 1;
+    for (int t = 0; t < 16; t++) ok &= memcmp(out + t * 4, want[t % 8], 4) == 0;
+    CHECK(ok);
+}
+
+static void PutBlock(uint8_t* p, uint16_t c0, uint16_t c1, uint32_t idx)
+{
+    p[0] = (uint8_t)(c0 & 255);
+    p[1] = (uint8_t)(c0 >> 8);
+    p[2] = (uint8_t)(c1 & 255);
+    p[3] = (uint8_t)(c1 >> 8);
+    for (int k = 0; k < 4; k++) p[4 + k] = (uint8_t)(idx >> (8 * k));
+}
+
+static void AlbedoColorBlockModes(void)
+{
+    uint8_t p[8], out[64];
+    PutBlock(p, 0xF800, 0x001F, 0xE4); /* red, blue; texels 0-3 take indices 0, 1, 2, 3 */
+    myc_albedo_color_block(p, out, 1);
+    static const uint8_t four[4][4] = {{255, 0, 0, 255}, {0, 0, 255, 255}, {170, 0, 85, 255}, {85, 0, 170, 255}};
+    CHECK(memcmp(out, four, 16) == 0);
+    PutBlock(p, 0x001F, 0xF800, 0xE4); /* blue <= red: the 3-color mode */
+    myc_albedo_color_block(p, out, 1);
+    static const uint8_t three[4][4] = {{0, 0, 255, 255}, {255, 0, 0, 255}, {127, 0, 127, 255}, {0, 0, 0, 0}};
+    CHECK(memcmp(out, three, 16) == 0);
+    myc_albedo_color_block(p, out, 0); /* a BC3 color block: 4-color whatever the order */
+    CHECK(out[8] == 85 && out[10] == 170 && out[12] == 170 && out[14] == 85 && out[15] == 255);
+}
+
+static void TheIdleWatchReportsChangesOnce(void)
+{
+    uintptr_t units = Heap(120), slot = Heap(64 + 2116);
+    uintptr_t copies = slot + 64;
+    MycIdentity id;
+    memset(&id, 0, sizeof id);
+    id.units_at = units;
+    MycWatch* w = malloc(sizeof *w);
+    myc_watch_init(w, &id, slot);
+    CHECK(myc_watch_changed(w, 1));
+    CHECK(!myc_watch_changed(w, 1) && !myc_watch_changed(w, 0));
+    fake_counts_reset();
+    myc_watch_changed(w, 0);
+    CHECK_EQ(fake_counts().read, 1); /* without the slot: one read */
+    fake_counts_reset();
+    myc_watch_changed(w, 1);
+    CHECK_EQ(fake_counts().read, 2); /* with the slot: count and entries in one more read */
+    *(uint8_t*)(units + 5) = 1;
+    CHECK(myc_watch_changed(w, 0) && !myc_watch_changed(w, 1));
+    *(uint8_t*)copies = 1; /* an entry appears */
+    CHECK(!myc_watch_changed(w, 0));
+    CHECK(myc_watch_changed(w, 1) && !myc_watch_changed(w, 1));
+    *(uint8_t*)(copies + 4 + 20) = 7; /* the entry's units change */
+    CHECK(myc_watch_changed(w, 1) && !myc_watch_changed(w, 1));
+    *(uint8_t*)(copies + 4 + 132 + 20) = 9; /* bytes past the entries in use do not count */
+    CHECK(!myc_watch_changed(w, 1));
+    fake_hole(copies, 4);
+    CHECK(myc_watch_changed(w, 1) && myc_watch_changed(w, 1)); /* an unreadable slot counts as a change */
+    fake_unhole(copies);
+    *(uint8_t*)copies = 0;
+    CHECK(myc_watch_changed(w, 1) && !myc_watch_changed(w, 1)); /* entry gone */
+    *(uint8_t*)copies = 2;
+    fake_counts_reset();
+    CHECK(myc_watch_changed(w, 1));
+    CHECK_EQ(fake_counts().read, 3); /* grown: the whole slot read again on that frame */
+    fake_counts_reset();
+    CHECK(!myc_watch_changed(w, 1));
+    CHECK_EQ(fake_counts().read, 2);
+    *(uint8_t*)copies = 1;
+    fake_counts_reset();
+    CHECK(myc_watch_changed(w, 1));
+    CHECK_EQ(fake_counts().read, 2); /* shrunk: no second read */
+    free(w);
+}
+
 int main(void)
 {
     RUN(RegistersTheLuaOptions);
@@ -1305,6 +1802,15 @@ int main(void)
     RUN(TheUiPreviewTakesItsOwnPlan);
     RUN(TheCacheIsSavedAfterTheDelay);
     RUN(HideCapeHidesYourCape);
+    RUN(ANewHelmetUnitTakesTheSameTexture);
+    RUN(ANewPlanBindsOverThePlanBefore);
+    RUN(AnotherModsTextureIsNeverBoundOver);
+    RUN(PreviewEntriesOfTheLocalPlayerAreRecolored);
+    RUN(OffFreesTheTextureForTheNextPlan);
+    RUN(AChangeWhileAJobRunsDiscardsItsResult);
+    RUN(AnOptionSetToItsValueChangesNothing);
+    RUN(RecolorCapeTakesThePlanWithTheOption);
+    RUN(AnotherCapeMattersWhenTheCapeIsTheSource);
     RUN(SyncValuesRoundTrip);
     RUN(AnotherModUserIsRecoloredAndTheValueShared);
     RUN(APlayerWithoutTheModKeepsTheirColors);
@@ -1313,5 +1819,13 @@ int main(void)
     RUN(CacheKeepsTheMostRecentEntries);
     RUN(CacheKeys);
     RUN(CacheWritesThroughATemporaryFile);
+    RUN(Lz4BlocksDecode);
+    RUN(HalfFloats);
+    RUN(MapLookupsProbeLikeTheGame);
+    RUN(SumsAsNumpyAndPython);
+    RUN(Ciede2000ReferencePairs);
+    RUN(Bc3BlocksDecodeAsPillow);
+    RUN(AlbedoColorBlockModes);
+    RUN(TheIdleWatchReportsChangesOnce);
     TEST_END();
 }
