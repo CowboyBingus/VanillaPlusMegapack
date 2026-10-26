@@ -1,6 +1,117 @@
-/* Mod Options Menu v1.2.1: not ported yet (the Lua source: components/ModOptionsMenu/src in the Megapack v42). */
-#include "../../core/vpm.h"
+/* Mod Options Menu v1.2.1 (Lua: components/ModOptionsMenu/src/mod_options_menu.lua and its native, widgets, options,
+ * rows and view files), build 25480438.
+ *
+ * A native MODS tab on the escape menu, after GAME, SOCIAL and OPTIONS, built from game.dll's own C++ widgets: the tab
+ * bar gets a fourth label, and while MODS is current the OPTIONS content is shown with its category buttons relabelled
+ * (one per category) and the shown panel's rows replaced by toggle, choice and slider rows built from MOM's own setting
+ * descriptors (setting 139, whose value type is none, so no game setting is ever read or written). Edits stay pending as
+ * on OPTIONS: the game's unapplied-changes flag shows APPLY, Tab applies (with the game's apply sound), and leaving meets
+ * the game's UNAPPLIED CHANGES dialog, whose confirm discards. The description box follows the hovered row. Past 8
+ * categories the buttons show 7 at a time and the 8th turns the pages. Leaving the tab gives everything back to the game.
+ *
+ * On HellForge: the options are the core's registry (vpm.h "options"), not the Lua's own API and values file: each
+ * component that registered options is a category (named after it, in upper case) listing its options, applied values
+ * are vpm_option_value, and APPLY hands each edit to vpm_option_apply (set, saved by the core about a second later, the
+ * owner's on_change). New here: a VANILLA PLUS MEGAPACK category with a switch per component (vpm_component_switch),
+ * which applies from the next session (the row's description says so). The game.dll functions are checked with
+ * vpm_game_code_matches (the bytes as shipped, so another mod's hook does not fail them) at the first tick, as the Lua
+ * checked them in its first update. Texts are English (vpm_text). Dropped: the _G.ModOptionsMenu API for Lua mods, the
+ * values file and its backup (the core saves), the game's Text Language query and text refresh on each opening (no
+ * translations yet), the Lua's set() refreshing an open row (no component sets an option from code, and the core's
+ * vpm_option_set signals nothing: an open page shows such a value from its next build), and the Lua update guard (error
+ * bursts, pauses, shutdown save): the core's crash guard stops the component on a fault, and stop() hands an open view
+ * back to the game as the Lua's guard did.
+ *
+ * Cost (the Lua's test_options_tab.lua budgets: ReadProcessMemory calls per frame):
+ * - Escape menu closed (most of every session): 1 plain load (the UI state pointer in game.dll) and 1 read (the UI stack,
+ *   24 bytes); no Windows call of its own, no allocation, no log. The Lua: 1 read.
+ * - Menu open on another tab, or covered: 2 reads (the stack, the screen pointer; covered: 1) and plain loads of the tab
+ *   bar. The Lua: 2.
+ * - MODS shown, nothing changing: 2 reads, 1 native call (the OPTIONS visual pass), plain loads for the page check, the
+ *   row polls and the selection (and the dialog and the apply key while an edit is pending). The Lua: 2 reads, 1 pass.
+ * - Frames that act (entering or leaving MODS, a page build, an edit, apply, a description): native calls and a log line,
+ *   as the Lua made them.
+ * - Once per session (the first tick): 25 code checks (HfApi.code_matches) and 15 plain loads of the native labels and
+ *   setting 139's descriptor. The Lua: the shared runtime's build hash, 25 byte compares, 15 loads. */
+#include "mom.h"
 
-static int Start(VpmComponent* self) { return vpm_fail(self, "not ported to HellForge yet"); }
+MomState mom;
 
-const VpmComponentDef vpm_component_mod_options_menu = {"mod_options_menu", "Mod Options Menu", "1.2.1", 0, Start, NULL};
+/* The game's escape menu, every game update: the idle gate first (closed: 1 read), then the MODS tab and the view, as
+ * the Lua's step. A view dropped with the menu (closed or rebuilt) never applies its edits; reopening the escape menu
+ * re-initialises every widget MOM touched. lint: per-frame */
+static void Step(VpmComponent* self, float dt)
+{
+    uintptr_t screen = 0;
+    int status = mom_escape_menu(&screen);
+    if (status == MOM_MENU_CLOSED)
+    {
+        if (!mom.hasView) return;
+        mom.hasView = 0;
+        mom_drop_pending();
+        vpm_log(self, "Escape menu closed on the MODS tab.");
+        return;
+    }
+    if (status != MOM_MENU_OPEN) return;
+    if (mom.hasView && mom.view.screen != screen) { mom.hasView = 0; mom_drop_pending(); }
+    if (!mom_ensure_mods_tab(screen))
+    {
+        if (mom.hasView) { mom.hasView = 0; mom_drop_pending(); }
+        return;
+    }
+    uint32_t tab = mom_get32(screen + MOM_TAB_BAR + MOM_TAB_CURRENT);
+    if (mom.hasView)
+    {
+        if (tab != MOM_MODS_TAB) mom_leave_view(&mom.view);
+        else mom_maintain_view(&mom.view);
+    }
+    else if (tab == MOM_MODS_TAB)
+        mom_enter_view(screen);
+    if (!mom.hasView) return;
+    mom_update_apply(&mom.view);
+    mom_update_visuals(&mom.view, dt);
+    mom_neutralize_dialog(&mom.view);
+}
+
+/* The first game update: game.dll's functions, labels and descriptor verified once, then the step from this frame on.
+ * lint: per-frame */
+static void FirstTick(VpmComponent* self, float dt)
+{
+    char why[96];
+    const char* failure = mom_native_verify(why, sizeof why);
+    if (failure != NULL)
+    {
+        vpm_fail(self, "Mod options integration unavailable: %s", failure);
+        return;
+    }
+    vpm_log(self, "Native options layout verified for current game build.");
+    if (!vpm_tick_start(self, Step)) return;
+    Step(self, dt);
+}
+
+/* Hands an open MODS view back to the game as on leaving the tab, but only while its escape menu is still open on top:
+ * a covered or closed menu's view is just dropped, as when the menu closes. The view is dropped first. */
+static void Stop(VpmComponent* self)
+{
+    int had = mom.hasView;
+    mom.hasView = 0;
+    mom_drop_pending();
+    uintptr_t screen = 0;
+    if (had && mom_escape_menu(&screen) == MOM_MENU_OPEN && screen == mom.view.screen) mom_leave_view(&mom.view);
+}
+
+static int Start(VpmComponent* self)
+{
+    memset(&mom, 0, sizeof mom);
+    memset(&mom_native, 0, sizeof mom_native);
+    mom.self = self;
+    mom_text_reset();
+    mom_model_reset();
+    mom_rows_reset();
+    mom.modsTitle = mom_intern(vpm_text(self, "tab.mods", "MODS"));
+    mom.emptyText = mom_intern(vpm_text(self, "category.none", "NO MOD OPTIONS INSTALLED"));
+    if (!vpm_tick_start(self, FirstTick)) return vpm_fail(self, "the game thread could not be reached");
+    return 0;
+}
+
+const VpmComponentDef vpm_component_mod_options_menu = {"mod_options_menu", "Mod Options Menu", "1.2.1", 0, Start, Stop};
