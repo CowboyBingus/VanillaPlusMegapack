@@ -229,10 +229,13 @@ static void Session(void)
     fake_frames(1, DT);
 }
 
+/* The world, the components started and game.dll loaded (HellForge's game-thread callback, the tick, runs only after
+ * HF_EVENT_GAME_LOADED). */
 static void Start(void)
 {
     MakeWorld();
     fake_start(kDefs, 2);
+    fake_fire(HF_EVENT_GAME_LOADED);
 }
 
 /* ---- the fixed slots' lists (build 25480438, read live: the game's stock lists and v2.3's replacement) --------- */
@@ -284,9 +287,13 @@ static void StockLists(int replaced)
 
 static void AddsTheKeyboardDefaultsOnce(void)
 {
-    Start();
+    MakeWorld();
+    fake_start(kDefs, 2);
     StockLists(0);
     fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED); /* the build check's 4 code checks (the core's wait) */
+    CHECK_EQ(fake_counts().code_matches, 4);
+    CHECK_EQ(fake_counts().read, 0);
     fake_frames(1, DT);
     CHECK_LOG("[Mod Bindings Menu] Native binding layout verified for current game build.");
     CHECK_LOG("Mod input actions loaded; native keyboard and controller bindings ready.");
@@ -322,19 +329,95 @@ static void RefusesAnUnreviewedLayout(void)
     for (int c = 0; c < 3; c++)
     {
         fake_setup();
-        Start();
+        MakeWorld();
+        fake_start(kDefs, 2);
         StockLists(0);
         if (c == 0) Game(MBM_BUILD_ROWS_RVA)[3] = 0x90;
         if (c == 1) Game(MBM_TAB_LABELS_RVA)[0] = 0;
         if (c == 2) Put32(Game(MBM_ACTION_LABELS_RVA + (10u * 97u + 1u) * 4u), 1);
+        fake_fire(HF_EVENT_GAME_LOADED);
         fake_counts_reset();
         fake_frames(5, DT);
+        if (c == 0)
+        {
+            /* another builder reads as code not decoded yet: the core waits for it, then stops the component */
+            CHECK(vpm_running(Menu()));
+            fake_frames(60, 1.0f);
+            CHECK_LOG("disabled: binding list builder changed (game.dll 0x1812940)");
+        }
         CHECK_LOG(why[c]);
         CHECK_LOG("inactive on this game build: it changes nothing in the game");
         CHECK(!vpm_running(Menu()));
         CHECK_EQ(fake_counts().read, 0);
         CHECK(SameHex(Record(w.live, 0), kFixedHex[0][0]));
     }
+}
+
+/* ---- game.dll's code decoded in parts after HF_EVENT_GAME_LOADED (vpm_when_code_ready) ------------------------- */
+
+/* The four functions as the game holds them before their part of game.dll is decoded. */
+static void EncodeCode(void)
+{
+    for (int i = 0; i < 4; i++) memset(Game(kCode[i].rva), 0xCC, 16);
+}
+
+/* Still encoded at the event, decoded two seconds later: the tick reads nothing and changes nothing before; then the
+ * rest of the build check and the activation on the frame after the core's next look, as on the first frame. */
+static void TheCodeDecodedLaterActivatesThen(void)
+{
+    MakeWorld();
+    EncodeCode();
+    fake_start(kDefs, 2);
+    StockLists(0);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(fake_counts().code_matches, 1); /* the first function does not match: the look stops there */
+    fake_counts_reset();
+    fake_frames(120, DT);
+    CHECK_EQ(fake_counts().code_matches, 4); /* one look every 30 frames */
+    CHECK_EQ(fake_counts().read + fake_counts().write + fake_counts().log, 0);
+    CHECK_NO_LOG("Native binding layout verified");
+    CHECK(SameHex(Record(w.live, 0), kFixedHex[0][0]));
+    PutCode();
+    fake_counts_reset();
+    fake_frames(30, DT); /* the core's look, then this frame's tick */
+    CHECK_EQ(fake_counts().code_matches, 4);
+    CHECK_LOG("[Mod Bindings Menu] Native binding layout verified for current game build.");
+    CHECK_LOG("Mod input actions loaded; native keyboard and controller bindings ready.");
+    CHECK_LOG("Added Mod Bindings Menu's keyboard defaults to 12 binding records.");
+    for (int i = 0; i < MBM_SLOTS; i++)
+    {
+        if (i == 1) continue;
+        CHECK(SameHex(Record(w.live, i), kFixedHex[i][1]));
+    }
+    fake_counts_reset();
+    fake_frames(3, DT);
+    CHECK_EQ(fake_counts().read, 3); /* idle: the screen stack only, as after a first frame at load */
+    CHECK_EQ(fake_counts().code_matches + fake_counts().log, 0);
+}
+
+/* Never decoded: stopped after 60 s naming the first function, with the Lua's inactive note; nothing read or added. */
+static void TheCodeNeverDecodedStopsItAfterAMinute(void)
+{
+    MakeWorld();
+    EncodeCode();
+    fake_start(kDefs, 2);
+    StockLists(0);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_counts_reset();
+    fake_frames(59, 1.0f);
+    CHECK(vpm_running(Menu()));
+    fake_frames(1, 1.0f);
+    CHECK(!vpm_running(Menu()));
+    CHECK_LOG("[Mod Bindings Menu] disabled: binding list builder changed (game.dll 0x1812940)");
+    CHECK_LOG("[Mod Bindings Menu] Mod Bindings Menu is inactive on this game build: it changes nothing in the game");
+    CHECK_EQ(fake_counts().read + fake_counts().write, 0);
+    for (int i = 0; i < MBM_SLOTS; i++)
+    {
+        if (i == 1) continue;
+        CHECK(SameHex(Record(w.live, i), kFixedHex[i][0]));
+    }
+    CHECK_NO_LOG("keyboard defaults to");
 }
 
 /* ---- 2. registration and reservations (test_api.lua) ----------------------------------------------------------- */
@@ -886,6 +969,8 @@ int main(void)
 {
     CASE(AddsTheKeyboardDefaultsOnce);
     CASE(RefusesAnUnreviewedLayout);
+    CASE(TheCodeDecodedLaterActivatesThen);
+    CASE(TheCodeNeverDecodedStopsItAfterAMinute);
     CASE(RegistersFixedSlotsAndAutomaticActions);
     CASE(KeepsReservationsAcrossSessions);
     CASE(ReservationsExpireAfterThirtySessions);

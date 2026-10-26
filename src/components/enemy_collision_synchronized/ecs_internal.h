@@ -321,10 +321,15 @@ typedef struct EcsNatives
     double (*clock)(void);                                                /* seconds: the poll's work budget */
 } EcsNatives;
 
-/* The reviewed bytes: both setters' first 8, the whole stop and completion routines (contiguous hex). */
-extern const char EcsSetterCode[], EcsStopCode[], EcsCompletionCode[];
-/* The checks of the Lua's api.bind (the physics API table, both setters' first bytes, the whole stop and completion
- * routines): 1 bound, 0 not yet (the game has not set up its physics API), -1 refused (vpm_fail called). */
+/* The reviewed bytes: both setters' first 8 (the exe's), the whole stop and completion routines in parts. */
+extern const VpmCodePin EcsCodePins[];
+extern const int EcsCodePinCount;
+/* Hands EcsCodePins to the core's wait (from start()): EcsBind binds nothing before they read as shipped. 1, or 0
+ * refused. */
+int EcsWaitForCode(VpmComponent* self);
+/* The checks of the Lua's api.bind (the physics API table; both setters' first bytes and the whole stop and completion
+ * routines are the core's wait): 1 bound, 0 not yet (the code is not decoded, or the game has not set up its physics
+ * API), -1 refused (vpm_fail called). */
 int EcsBind(VpmComponent* self);
 /* For the tests: these instead of the game's routines once the checks pass (NULL: the game's). */
 void EcsUseNatives(const EcsNatives* replacement);

@@ -105,16 +105,20 @@ static void AddRuntime(uintptr_t manager, uint32_t index, uint8_t* update)
     if (N.runtimes < 64) N.runtime[N.runtimes++] = (Runtime){manager, index, update};
 }
 
+/* The reviewed routines' bytes: both setters' first 8 in the exe, the stop and completion routines in game.dll. */
+static void PutCode(void)
+{
+    for (int i = 0; i < EcsCodePinCount; i++)
+        Hex(((EcsCodePins[i].flags & VPM_PIN_EXE) ? E() : G()) + EcsCodePins[i].rva, EcsCodePins[i].pattern);
+}
+
 static void Game(void)
 {
     Ptr(G() + 0x3326338, E() + 0x27CD910);
     Ptr(E() + 0x27CD910 + 8, E() + 0x77F4F0);
     Ptr(E() + 0x27CD910 + 0x60, E() + 0x799880);
     Ptr(E() + 0x27CD910 + 0x68, E() + 0x799BA0);
-    Hex(E() + 0x799880, EcsSetterCode);
-    Hex(E() + 0x799BA0, EcsSetterCode);
-    Hex(G() + 0x7ABD00, EcsStopCode);
-    Hex(G() + 0x13C0350, EcsCompletionCode);
+    PutCode();
     Ptr(G() + 0x346D500, Heap(24));
 }
 
@@ -345,8 +349,8 @@ static void BindsOnceThePhysicsApiIsSet(void)
     CHECK_EQ(fake_counts().read + fake_counts().code_matches + fake_counts().log + fake_counts().write, 0);
     Ptr(G() + 0x3326338, E() + 0x27CD910);
     fake_frames(3, DT);
-    /* Both setters, the stop routine in 2 parts and the completion request in 4 (128 bytes a call). */
-    CHECK_EQ(fake_counts().code_matches, 8);
+    /* The code was checked at HF_EVENT_GAME_LOADED (TheCodeIsCheckedAtLoad): the bind checks the table only. */
+    CHECK_EQ(fake_counts().code_matches, 0);
     CHECK_LOG("[Enemy Collision Synchronized] v2.13.0: waiting_for_mission");
     CHECK(Is(vpm_status(fake_component(0)), "waiting_for_mission"));
     CHECK_EQ(Ecs.polls, 1);
@@ -376,9 +380,93 @@ static void RefusesWhatIsNotAsReviewed(void)
         fake_start(kDefs, 1);
         fake_fire(HF_EVENT_GAME_LOADED);
         fake_frames(1, DT);
+        /* changed code reads as code not decoded yet: the core waits for it, then stops the component, naming it */
+        if (c >= 2) CHECK(vpm_running(fake_component(0)));
+        if (c >= 2) fake_frames(60, 1.0f);
         CHECK(!vpm_running(fake_component(0)));
         CHECK_LOG(texts[c]);
     }
+    CHECK_LOG("disabled: Corpse completion request changed (game.dll 0x13C04D0)");
+}
+
+/* ---- game.dll's code decoded in parts after HF_EVENT_GAME_LOADED (vpm_when_code_ready) ------------------------- */
+
+static void EncodeCode(void)
+{
+    for (int i = 0; i < EcsCodePinCount; i++)
+        memset(((EcsCodePins[i].flags & VPM_PIN_EXE) ? E() : G()) + EcsCodePins[i].rva, 0xCC, 128);
+}
+
+/* Decoded at load: the 8 code comparisons at HF_EVENT_GAME_LOADED and nothing else there; the first poll binds. */
+static void TheCodeIsCheckedAtLoad(void)
+{
+    memset(&N, 0, sizeof N);
+    Game();
+    EcsUseNatives(&kStubs);
+    fake_start(kDefs, 1);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    /* Both setters, the stop routine in 2 parts and the completion request in 4 (128 bytes a call). */
+    CHECK_EQ(fake_counts().code_matches, 8);
+    CHECK_EQ(fake_counts().read + fake_counts().log + fake_counts().write, 0);
+    fake_counts_reset();
+    fake_frames(1, DT);
+    CHECK_EQ(fake_counts().code_matches, 0);
+    CHECK_LOG("[Enemy Collision Synchronized] v2.13.0: waiting_for_mission");
+    CHECK_EQ(Ecs.polls, 1);
+}
+
+/* Still encoded at the event, decoded two seconds later: no poll and no read before; the bind on the first poll after
+ * the core's next look. */
+static void TheCodeDecodedLaterBindsThen(void)
+{
+    memset(&N, 0, sizeof N);
+    Game();
+    EncodeCode();
+    EcsUseNatives(&kStubs);
+    fake_start(kDefs, 1);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(fake_counts().code_matches, 1); /* the first setter does not match: the look stops there */
+    fake_counts_reset();
+    fake_frames(120, DT);
+    CHECK_EQ(fake_counts().code_matches, 4); /* one look every 30 frames */
+    CHECK_EQ(fake_counts().read + fake_counts().log + fake_counts().write, 0);
+    CHECK_EQ(Ecs.polls, 0);
+    CHECK(strstr(vpm_status(fake_component(0)), "physics API") != NULL);
+    PutCode();
+    fake_counts_reset();
+    fake_frames(30, DT);
+    CHECK_EQ(fake_counts().code_matches, 8);
+    fake_frames(3, DT); /* the next poll (every 3/64 s) */
+    CHECK_LOG("[Enemy Collision Synchronized] v2.13.0: waiting_for_mission");
+    CHECK(Is(vpm_status(fake_component(0)), "waiting_for_mission"));
+    CHECK(Ecs.polls >= 1);
+    fake_counts_reset();
+    fake_frames(300, DT);
+    CHECK_EQ(fake_counts().code_matches + fake_counts().log, 0);
+}
+
+/* Never decoded: stopped after 60 s naming the first setter; no poll, no read, no command. */
+static void TheCodeNeverDecodedStopsItAfterAMinute(void)
+{
+    memset(&N, 0, sizeof N);
+    Game();
+    EncodeCode();
+    EcsUseNatives(&kStubs);
+    fake_start(kDefs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_counts_reset();
+    fake_frames(59, 1.0f);
+    CHECK(vpm_running(fake_component(0)));
+    fake_frames(1, 1.0f);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Enemy Collision Synchronized] disabled: Position setter changed (helldivers2.exe 0x799880)");
+    CHECK_EQ(fake_counts().read + fake_counts().write, 0);
+    CHECK_EQ(Ecs.polls, 0);
+    CHECK_EQ(N.disables, 0);
+    CHECK_NO_LOG("waiting_for_mission");
+    CHECK_NO_LOG("polls=");
 }
 
 static void PollsEveryIntervalOfFrameTime(void)
@@ -1510,6 +1598,9 @@ int main(void)
     RUN(CatalogueAsReviewed);
     RUN(BindsOnceThePhysicsApiIsSet);
     RUN(RefusesWhatIsNotAsReviewed);
+    RUN(TheCodeIsCheckedAtLoad);
+    RUN(TheCodeDecodedLaterBindsThen);
+    RUN(TheCodeNeverDecodedStopsItAfterAMinute);
     RUN(PollsEveryIntervalOfFrameTime);
     RUN(RaisedPollsRetryThenStop);
     RUN(ModeFieldTwoAndMissionExit);

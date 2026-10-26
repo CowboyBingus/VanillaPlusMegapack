@@ -41,6 +41,13 @@
  *   - Extended bindings and the MORE MODS page need the engine's input and Gui, which a C mod cannot reach yet
  *     (mbm_engine.h). Their logic is ported behind that interface; without a backend an extended binding answers -1 (the
  *     caller's fixed key; the Lua said false until engine input existed) and the MORE MODS tab is not offered (status).
+ *   - The build check's four code checks (the list builder, the tab label setter, the list reset, the input consume)
+ *     are the core's wait (vpm_when_code_ready): game.dll's code is decoded in parts after HF_EVENT_GAME_LOADED, and
+ *     the Lua's first update (this tick's first frame) comes right after that event. They are checked at the event and
+ *     every 30 frames until they read as shipped; the tick does nothing before (no read), then the rest of the build
+ *     check (the tab labels and the action label table, plain loads) runs on its next frame, as on the Lua's first.
+ *     Bytes that never match within 60 s stop the component ("binding list builder changed (game.dll 0x1812940)"),
+ *     with the Lua's inactive note, nothing changed.
  *   - Dropped: the update guard (error bursts, pauses after an error below, the shutdown status), the build hash check
  *     (the core checks the build), the LuaJIT notes, and the Lua's logs of engine button ids. The crash guard covers
  *     faults; stop() gives back what a page borrowed, as the Lua's shut_down.
@@ -64,7 +71,8 @@
  *     the cursor, 11 UI action states; Lua: 7), engine mouse calls, Gui calls only on a change; during a capture 4 (97 UI
  *     action states) and a consume call per active UI action (Lua: 5).
  *   - Before native input exists: 0 reads while the input owner is null (Lua: 1), else the map indexed (up to 9).
- *   - Once per session: the build check (4 code checks, 37 plain loads), activation (the live map indexed, the defaults
+ *   - Once per session: the build check (4 code checks at HF_EVENT_GAME_LOADED, repeated every 30 frames while the code
+ *     is not decoded, at most 60 s; 37 plain loads on the first frame after), activation (the live map indexed, the defaults
  *     map indexed and each fixed slot's two records, the slot 1 note: 32 reads, 33 with the frame's own; Lua: 40), 2
  *     VirtualQuery of game.dll data, and 1 per binding map before its first write. The first sweep reads 3 records per
  *     binding (18 for six).
@@ -90,12 +98,13 @@ const MbmDormant mbm_dormant[MBM_ACTIONS] = {
     {9, 11, 0xAE71F7A9u},
 };
 
-typedef struct MbmCodeCheck { uint32_t rva; const char* pattern; const char* reason; } MbmCodeCheck;
-static const MbmCodeCheck kMbmCodeChecks[] = {
-    {MBM_BUILD_ROWS_RVA, "48 8B C4 53 41 56 48 81 EC D8 00 00 00", "binding list builder changed"},
-    {MBM_SET_TAB_LABELS_RVA, "48 89 54 24 10 53 56 48 83 EC 68 0F 29 74 24 30", "tab bar label setter changed"},
-    {MBM_LIST_RESET_RVA, "40 53 48 83 EC 20 48 8B D9 85 D2 74 30 83 EA 01", "binding list reset changed"},
-    {MBM_INPUT_CONSUME_RVA, "40 53 48 83 EC 20 4C 8B D1 4C 8B CA 48 8B CA E8 DC 7C 28 FF", "input consume routine changed"},
+/* The build check's code: the core's wait (the refusal reads "<name> changed (game.dll 0x...)", as the Lua's reason
+ * "<name> changed"). */
+static const VpmCodePin kMbmCodeChecks[] = {
+    {MBM_BUILD_ROWS_RVA, "48 8B C4 53 41 56 48 81 EC D8 00 00 00", "binding list builder", 0},
+    {MBM_SET_TAB_LABELS_RVA, "48 89 54 24 10 53 56 48 83 EC 68 0F 29 74 24 30", "tab bar label setter", 0},
+    {MBM_LIST_RESET_RVA, "40 53 48 83 EC 20 48 8B D9 85 D2 74 30 83 EA 01", "binding list reset", 0},
+    {MBM_INPUT_CONSUME_RVA, "40 53 48 83 EC 20 4C 8B D1 4C 8B CA 48 8B CA E8 DC 7C 28 FF", "input consume routine", 0},
 };
 static const uint8_t kMbmTabLabels[12] = {0x51, 0xF4, 0x70, 0x8D, 0x60, 0x5C, 0x5E, 0xF1, 0xEB, 0x7F, 0x84, 0x00};
 #define MBM_INACTIVE_NOTE "Mod Bindings Menu is inactive on this game build: it changes nothing in the game " \
@@ -142,16 +151,14 @@ uintptr_t mbm_active_screen(void)
     return (uintptr_t)screen;
 }
 
-/* ---- the build check, on the first frame -------------------------------------------------------------------- */
+/* ---- the build check, on the first frame after the code checks -------------------------------------------- */
 
+/* The rest of the Lua's check, its code checks having passed (the core's wait): the tab labels, the action labels. */
 static const char* MbmLayoutProblem(char* why, size_t size)
 {
-    for (int i = 0; i < 3; i++)
-        if (!vpm_game_code_matches(kMbmCodeChecks[i].rva, kMbmCodeChecks[i].pattern)) return kMbmCodeChecks[i].reason;
     uint8_t labels[sizeof kMbmTabLabels];
     if (!vpm_game_read(MBM_TAB_LABELS_RVA, labels, sizeof labels) || memcmp(labels, kMbmTabLabels, sizeof labels) != 0)
         return "binding tab labels changed";
-    if (!vpm_game_code_matches(kMbmCodeChecks[3].rva, kMbmCodeChecks[3].pattern)) return kMbmCodeChecks[3].reason;
     for (int i = 0; i < MBM_ACTIONS; i++)
     {
         const MbmDormant* d = &mbm_dormant[i];
@@ -254,6 +261,7 @@ static int MbmAwayFrame(void)
 static void MbmTick(VpmComponent* self, float dt)
 {
     mbm.frame++;
+    if (!mbm.code_ready) return; /* the build check's code is not decoded yet (MbmCodeReady) */
     if (MbmIdle(dt)) return;
     s_mbm.idle_armed = 0;
     if (!mbm.initialized && !MbmInitialize(self)) return;
@@ -297,6 +305,7 @@ static const VpmBindingBackend kMbmBackend = {mbm_attach, MbmDown};
  * binding page still shows them. */
 static void MbmStop(VpmComponent* self)
 {
+    if (!mbm.initialized) vpm_log(self, "%s", MBM_INACTIVE_NOTE); /* stopped before the build check passed */
     if (mbm.base == 0) return;
     mbm_panel_hide("stopped");
     if (mbm.ready && mbm_active_screen() != 0)
@@ -315,6 +324,9 @@ void mbm_refresh_status(void)
     vpm_set_status(mbm.self, mbm_panel_available() ? NULL
         : "running; the MORE MODS page is off (it needs the engine's Gui and input, not reachable from C yet)");
 }
+
+/* The build check's code read as shipped (the core's wait, from HF_EVENT_GAME_LOADED): the next frame checks the rest. */
+static void MbmCodeReady(VpmComponent* self, HfEvent event) { mbm.code_ready = 1; }
 
 static void MbmText(VpmComponent* self, char* out, size_t size, const char* key, const char* english)
 {
@@ -339,6 +351,8 @@ static int MbmStart(VpmComponent* self)
     mbm_capture_reset();
     mbm_panel_reset();
     if (!vpm_tick_start(self, MbmTick)) return vpm_fail(self, "the game thread could not be reached");
+    int checks = (int)(sizeof kMbmCodeChecks / sizeof kMbmCodeChecks[0]);
+    if (!vpm_when_code_ready(self, kMbmCodeChecks, checks, MbmCodeReady)) return vpm_fail(self, "game.dll's code checks refused");
     vpm_log(self, "Mod Bindings Menu initialized; waiting for native input actions.");
     mbm_refresh_status();
     vpm_bindings_set_backend(self, &kMbmBackend);
