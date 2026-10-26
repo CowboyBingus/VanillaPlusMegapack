@@ -734,6 +734,8 @@ static int FakeTickRefused(int post) { return g_refuseTicks[post != 0]; }
 
 void fake_setup(void)
 {
+    /* A crash ends the test process with its exit code and the build reports it: no error dialog, no window. */
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     g_game = Region(g_game, FAKE_GAME_SIZE);
     g_exe = Region(g_exe, FAKE_EXE_SIZE);
     g_heap = Region(g_heap, HEAP_SIZE);
