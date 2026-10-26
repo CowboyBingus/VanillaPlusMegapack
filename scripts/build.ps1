@@ -1,6 +1,9 @@
 # Builds the Vanilla Plus Megapack's DLL (vanilla_plus_megapack.dll, beside hellforge-mod.json) and, with -Test, builds
 # and runs its tests (tests/core_test.c, tests/components/<id>_test.c). Uses HellForge's pinned Zig and the mod SDK of a
-# HellForge-Open checkout, with the flags HellForge builds every mod with (src/HellForge.Core/ModKit.cs Flags).
+# HellForge-Open checkout, with the flags HellForge builds every mod with (src/HellForge.Core/ModKit.cs Flags), plus
+# the build's identity (VPM_PACK_VERSION, VPM_COMMIT, VPM_BUILD_DATE). Beside the stripped DLL it builds the same code
+# with line tables, build/symbols/vanilla_plus_megapack-<commit>.dll and .pdb, for scripts/symbolize.py, and records
+# both in build/identity.json.
 # Usage: scripts/build.ps1 [-Test] [-Only <component id>] [-HellForge <HellForge-Open checkout>] [-Zig <zig.exe>]
 # Defaults: HELLFORGE_OPEN, else ../sdk-dev/HellForge-Open beside this repository; HELLFORGE_ZIG, else that checkout's
 # tools/zig/zig.exe, else ../HellForge-Open/tools/zig/zig.exe.
@@ -27,13 +30,49 @@ $env:ZIG_LOCAL_CACHE_DIR=Join-Path $build 'zig-cache'
 # The compiler's temporary files stay in build/ too.
 $env:TMP=$env:TEMP=New-Item -ItemType Directory -Force (Join-Path $build 'tmp')|ForEach-Object FullName
 $failed=0
+# The build's identity, compiled into the DLL (the core logs it at start-up): the manifest's version, the commit (with
+# -dirty when the tree has changes; left out, so the core's fallback applies, when there is no git), the UTC date.
+function Get-BuildIdentity{
+    $version=(Get-Content -Raw -LiteralPath (Join-Path $root 'hellforge-mod.json')|ConvertFrom-Json).version
+    $commit=$null
+    $head=@()
+    if(Get-Command git -ErrorAction SilentlyContinue){$head=@(git -C $root rev-parse --short HEAD 2>$null);if($LASTEXITCODE){$head=@()}}
+    if($head.Count -eq 1){
+        $commit=$head[0].Trim()
+        $changes=@(git -C $root status --porcelain 2>$null)
+        if($LASTEXITCODE){throw 'git status failed: cannot tell whether the tree has changes.'}
+        if($changes.Count){$commit+='-dirty'}
+    }else{Write-Warning 'No git commit found: the DLL carries no commit, and its symbols are named "unknown".'}
+    [pscustomobject]@{version=$version;commit=$commit;date=(Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')}
+}
 if(-not $NoDll){
+    $identity=Get-BuildIdentity
+    $defines=@(('-DVPM_PACK_VERSION="{0}"' -f $identity.version),('-DVPM_BUILD_DATE="{0}"' -f $identity.date))
+    if($identity.commit){$defines+=('-DVPM_COMMIT="{0}"' -f $identity.commit)}
     $sources=@(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Recurse -File -Filter '*.c'|Sort-Object FullName|ForEach-Object FullName)
+    $flags=@('-std=c11','-target','x86_64-windows-gnu','-shared','-O2','-Wall','-Werror','-Wno-unused-parameter')+$defines+@('-I',$sdk)
     $dll=Join-Path $root 'vanilla_plus_megapack.dll'
-    & $Zig cc -std=c11 -target x86_64-windows-gnu -shared -O2 -Wall -Werror -Wno-unused-parameter -s -I $sdk @sources -o $dll
+    & $Zig cc @flags -s @sources -o $dll
     if($LASTEXITCODE){throw 'The DLL did not compile.'}
     Get-ChildItem -LiteralPath $root -File|Where-Object {$_.Extension -in @('.lib','.pdb')}|Remove-Item
     Write-Output ('Built {0} ({1:N0} KB)' -f $dll,((Get-Item -LiteralPath $dll).Length/1KB))
+    # The same DLL unstripped, for scripts/symbolize.py: a PDB beside it (Zig's lld-link writes CodeView, not DWARF).
+    # -gline-tables-only, not -g: full debug info changes clang's code in places, line tables do not, so the pack's
+    # functions sit at the same offsets as in the shipped DLL. symbolize.py --check verifies that.
+    $symbolsDir=Join-Path $build 'symbols'
+    New-Item -ItemType Directory -Force $symbolsDir|Out-Null
+    $symbols=Join-Path $symbolsDir ('vanilla_plus_megapack-{0}.dll' -f $(if($identity.commit){$identity.commit}else{'unknown'}))
+    & $Zig cc @flags -gline-tables-only @sources -o $symbols
+    if($LASTEXITCODE){throw 'The symbols DLL did not compile.'}
+    Get-ChildItem -LiteralPath $symbolsDir -File -Filter '*.lib'|Remove-Item
+    $python=Get-Command python -ErrorAction SilentlyContinue
+    if($python){
+        & $python.Source (Join-Path $PSScriptRoot 'symbolize.py') --check $dll --symbols $symbols
+        if($LASTEXITCODE){throw ('{0} does not match the shipped DLL''s code: its offsets would mislead.' -f $symbols)}
+    }else{Write-Warning ('No python: {0} was not checked against the shipped DLL.' -f $symbols)}
+    $identity|Add-Member -NotePropertyName symbols -NotePropertyValue $symbols
+    [IO.File]::WriteAllText((Join-Path $build 'identity.json'),($identity|ConvertTo-Json)+"`n")
+    Write-Output ('Built {0} with its .pdb (commit {1})' -f $symbols,$identity.commit)
 }
 if($Test){
     $out=Join-Path $build 'tests'
