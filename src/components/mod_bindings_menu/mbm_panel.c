@@ -399,7 +399,7 @@ static const uint8_t* MbmKeysText(MbmRecord* r, char* out, size_t size)
         if ((r->alternatives[a].inputs[0].device == MBM_PAD) == (s_panel.controller != 0))
             at = MbmAlternativeLabel(&r->alternatives[a], text, at, sizeof text);
     if (at == 0) { MbmPanelText(out, size, "binding.none", "NOT BOUND"); return kMbmMuted; }
-    mbm_upper(text, out, size);
+    vpm_upper(text, out, size);
     return kMbmText;
 }
 

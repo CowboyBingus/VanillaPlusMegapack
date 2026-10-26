@@ -25,17 +25,18 @@
  *   roster replays level 10's: HellForge's level 11 starts every enemy's weight as level 10's and allows every group
  *   that allows level 10, and the offline roster has 10 levels.
  * - game.dll's statics are plain loads (the Lua read them with ReadProcessMemory too); heap records go through
- *   HfApi.read. The tick runs before the game's update (HellForge has no after-update callback; the Lua ran after it),
- *   so the native panel's rectangle is the one the previous frame solved.
+ *   vpm_read (guarded plain loads). The tick runs at the start of game.dll's frame update, where the Lua's update ran
+ *   (its frame ran after the updates below it in the chain, which is still before game.dll's update), so the native
+ *   panel's rectangle is the one the previous frame solved, as in the Lua.
  * - It starts ticking at HF_EVENT_GAME_LOADED (the Lua's first update came after game.dll had loaded).
  * - Dropped: the game's Text Language reads (translations are not part of the pack yet: vpm_text is English); the
  *   update guard's pause and resume after the game's own update fails (HellForge does not chain updates); the
  *   shutdown status; the Lua's JIT and loader specifics.
  *
- * Cost per frame (the core's tick): "reads" are HfApi.read (ReadProcessMemory) of heap records, pinned by the tests;
+ * Cost per frame (the core's tick): "reads" are vpm_read (guarded plain loads) of heap records, pinned by the tests;
  * the rest of what the Lua read with ReadProcessMemory are game.dll statics, now plain loads. The Lua's frame_budget
- * pins (test_budget.lua, test_idle.lua) counted both. No other Windows call, no allocation and no log line on a frame
- * that does not act; no write ever.
+ * pins (test_budget.lua, test_idle.lua) counted both. No Windows call, no allocation and no log line on a frame that
+ * does not act; no write ever.
  * - Idle (the ship, a mission's own screens): 1 read (the kept UI manager's screen stack); every 30th frame the full
  *   check: 1 read and 1 plain load. The Lua: 1 read, 2 every 30th.
  * - War table, a highlighted mission, steady: 9 reads and 7 plain loads (Lua: 16 reads). Briefing: 10 and 8 (Lua 18).

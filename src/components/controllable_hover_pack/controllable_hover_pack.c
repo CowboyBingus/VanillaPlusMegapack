@@ -15,10 +15,11 @@
  * or moved in its registry up to 29 frames late; the window counts frames, never the clock.
  *
  * On HellForge:
- * - The tick runs before the game's update (HellForge's game-thread callback) where the Lua ran after it. The order
- *   does not matter here: the cut is a lasting value in the pack's record, not a per-frame flag, so it reaches the
- *   native lift test on the next physics step either way, and the press, the confirmation and the store happen in the
- *   same tick with no game code between them. At most it moves the press and the restoration by one frame.
+ * - The tick runs at the start of game.dll's frame update, where the Lua global update ran. The Lua's step ran after
+ *   the updates below it in that chain, which is still before game.dll's update: the same point of the frame, so the
+ *   press, the cut and the restoration land on the frames the Lua's did. (The cut is a lasting value in the pack's
+ *   record, not a per-frame flag, and the press, the confirmation and the store happen in the same tick with no game
+ *   code between them.)
  * - Writes: plain stores into the pack's records, each checked with vpm_writable when found (hover_settings.c).
  * - The Lua's errors (an unsupported duration mode, storage that is not writable data, a write that did not hold) stop
  *   the component at once with vpm_fail, whose stop() puts the duration back; the Lua's guard stopped after 8 in a
@@ -30,8 +31,8 @@
  *   tab, set when it changes; the first cancellation and the first restoration of the session are logged.
  * - The mission check is the Lua's own (the mode global's active flag and type 1 .. 7), not HF_ON_MISSION_START.
  *
- * COST (calls per frame; the Lua's counts from its frame_budget pins in parentheses; reads are vpm_read, the Lua's
- * ReadProcessMemory; the game.dll globals the Lua read are plain loads here):
+ * COST (calls per frame; the Lua's counts from its frame_budget pins in parentheses; reads are vpm_read, guarded plain
+ * loads, where the Lua's were ReadProcessMemory; the game.dll globals the Lua read are plain loads here):
  * - outside a mission: 1 read every 60th frame, none on the 59 between (2);
  * - in a mission without a usable hover pack: 7 reads every 30th frame with no backpack, 10 with another jump pack
  *   (8, 11); none on the 29 between; the first frame in a mission 20 (25);

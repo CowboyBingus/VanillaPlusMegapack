@@ -18,8 +18,8 @@
  * the entity owner's record address, which the kept layout reads every frame. The core's VpmAvatar holds the avatar
  * manager, index and entity it found, and vpm_action_slot gives the Jump slot (the same formula).
  *
- * Reads go through vpm_read, as the Lua's ReadProcessMemory; game.dll's globals are plain loads (the Lua read them),
- * still counted in the Lua's budget of 160 per snapshot. */
+ * Reads go through vpm_read (guarded plain loads) where the Lua's were ReadProcessMemory; game.dll's globals are plain
+ * loads (the Lua read them), still counted in the Lua's budget of 160 per snapshot. */
 #include <string.h>
 #include "../../core/vpm.h"
 #include "hover.h"

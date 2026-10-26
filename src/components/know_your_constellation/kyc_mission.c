@@ -4,7 +4,7 @@
  * reader keeps (static), so neither the per-frame checks nor the 0.5 s sample allocate.
  *
  * On HellForge: game.dll's statics (the RVA globals and tables) are plain loads, which the Lua read with
- * ReadProcessMemory; heap records go through HfApi.read as before. The difficulty settings row comes from
+ * ReadProcessMemory; heap records go through vpm_read (guarded plain loads). The difficulty settings row comes from
  * HellForge's moved table when it has one (HfApi.difficulty_row, once level 11 is added), else from the game's own table
  * at 0x328D2A0, as the Lua read it; either way the row's level (+4) must be the mission's. A mission at level 11 is
  * accepted once HellForge has added that level (the Lua refused every difficulty above 10). */

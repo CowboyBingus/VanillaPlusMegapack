@@ -14,7 +14,8 @@
  *
  * Memory. Addresses inside game.dll's or the exe's image (statics: RVA globals and tables) are read with plain loads
  * (vpm_game_u64 and friends): the image stays mapped for the whole process. Everything else (the game's heap) is read
- * through vpm_read, HellForge's ReadProcessMemory, which answers 0 on a bad pointer instead of faulting. Writes to code or
+ * through vpm_read: plain loads under the pack's own guard, which answers 0 on a bad pointer instead of faulting
+ * (HellForge's read, a ReadProcessMemory, when the guard is not installed). Writes to code or
  * read-only data go through vpm_write (HfApi.write: it changes the protection for the write).
  *
  * Per-frame rules (the workspace's performance rules, in C): an idle frame stops at the component's idle gate, makes no
@@ -85,7 +86,9 @@ void vpm_tick_stop(VpmComponent* self);
 int vpm_ticking(const VpmComponent* self);
 /* A tick after game.dll's whole update in the same frame (after the world update, the mode's update and the UI pass):
  * for work the Lua did after the game's update, or a second check in the frame. Without the core's hook of the update
- * it runs right after the frame's ticks. One per component, as vpm_tick_start. */
+ * it runs right after the frame's ticks. One per component, as vpm_tick_start. Both start calls answer 0 when the tick
+ * cannot run (no game-thread callback and no frame hook, or the component is not running): the component goes on
+ * without it. */
 int vpm_post_tick_start(VpmComponent* self, VpmTickFn fn);
 void vpm_post_tick_stop(VpmComponent* self);
 int vpm_post_ticking(const VpmComponent* self);
@@ -108,9 +111,9 @@ uint64_t vpm_game_u64(uint32_t rva);
 uint32_t vpm_game_u32(uint32_t rva);
 uint64_t vpm_exe_u64(uint32_t rva);
 
-/* Heap reads: 1 read, 0 not (outside the user-mode range, unmapped, no-access or guard page). Plain loads under a guard of
- * their own: a bad pointer fails the read, never the game, and stops nothing; about 25 ns where the Lua's
- * ReadProcessMemory cost 1-2 us in game. */
+/* Heap reads: 1 read, 0 not (outside the user-mode range, unmapped, no-access or guard page). Plain loads under a guard
+ * of their own: a bad pointer fails the read, never the game, and stops nothing; no Windows call (unmeasured in game;
+ * about 25 ns in the test process) where the Lua's ReadProcessMemory cost 1-2 us in game. */
 int vpm_read(uintptr_t address, void* out, size_t size);
 int vpm_read_u8(uintptr_t address, uint8_t* out);
 int vpm_read_u16(uintptr_t address, uint16_t* out);
@@ -136,6 +139,21 @@ void* vpm_module_export(const char* module, const char* name);
 /* HfApi.code_matches at game.dll + rva: 1 when the bytes as the game shipped them (before any hook) match the IDA-style
  * pattern. */
 int vpm_game_code_matches(uint32_t rva, const char* pattern);
+/* The same at helldivers2.exe + rva. */
+int vpm_exe_code_matches(uint32_t rva, const char* pattern);
+
+/* Code checks that wait for game.dll's code to be decoded. HellForge fires HF_EVENT_GAME_LOADED once one pin of
+ * game.dll reads as decoded, and the rest of its code is decoded in parts after that (HellForge itself gives its own
+ * pins 20 s): a check made at that event can fail on code that is still encoded. vpm_when_code_ready checks every pin
+ * (VpmCodePin: an RVA, its pattern as shipped, a name for the log, VPM_PIN_EXE for the exe's) at
+ * HF_EVENT_GAME_LOADED, then every 30 frames until all match, for at most VPM_CODE_WAIT_SECONDS of game time; ready
+ * runs once (guarded, with HF_EVENT_GAME_LOADED) when they match. After the wait the component is stopped:
+ * "disabled: <name> changed (game.dll 0x<rva>)". The pins must stay valid (static). 1 registered, 0 not. While waiting:
+ * one code_matches per pin every 30 frames (an API call), nothing afterwards. */
+#define VPM_PIN_EXE 0x1u
+#define VPM_CODE_WAIT_SECONDS 60.0f
+typedef struct VpmCodePin { uint32_t rva; const char* pattern; const char* name; uint32_t flags; } VpmCodePin;
+int vpm_when_code_ready(VpmComponent* self, const VpmCodePin* pins, int count, VpmLoadFn ready);
 
 /* The game's hash lookup: a 20-byte header {u64 rows, u32 capacity, u32 empty key, u32 multiplier} whose rows are
  * {u32 key, u32 index}, probed linearly from key * multiplier (at most 64 probes, a power-of-two capacity no larger than
@@ -293,6 +311,12 @@ void vpm_settings_save_soon(void);
 /* Writes a waiting change now (Mod Options Menu's APPLY, as the Lua saved at once); nothing when none waits. */
 void vpm_settings_save_now(void);
 
+/* The component's own folder for files it keeps between sessions (caches, profiles):
+ * %LOCALAPPDATA%\CowboyBingus\VanillaPlusMegapack\<component id>, as the game sees it (HellForge points the game's
+ * LOCALAPPDATA at the installation's user data and copies a sandboxed session's back). Made when missing. 1 with the
+ * path in out (UTF-16, terminated), 0 when it cannot be made. File work only off idle frames. */
+int vpm_data_folder(const VpmComponent* self, wchar_t* out, size_t size);
+
 /* ---- Windows functions resolved at run time --------------------------------------------------------------------- *
  * user32's are found with GetProcAddress at init, so the DLL links only kernel32 (HellForge's own source build passes no
  * libraries). NULL when absent. Each call is a Windows call: never on an idle frame. */
@@ -315,9 +339,9 @@ const char* vpm_text(const VpmComponent* self, const char* key, const char* engl
 /* UTF-8, as the Lua text module (bingus_text.lua v1) every text-showing component carried (core text.c):
  * - decode: the code point at text (at most size bytes), its length in bytes, or 0 when the bytes are not valid UTF-8
  *   (overlong forms, surrogates and values above U+10FFFF are invalid);
- * - encode: a code point's bytes into out (room for 4), their count;
+ * - encode: a code point's bytes (U+10FFFF at most) into out (room for 4), their count;
  * - check: 1 for text a mod may show (valid UTF-8 without control characters; a line feed only with multiline), -1
- *   invalid UTF-8 or -2 a control character, at byte *bad (1-based, when bad is not NULL);
+ *   invalid UTF-8 or -2 a control character, at byte *bad (1-based, when bad is not NULL); NULL is no text: -1 at 0;
  * - length: code points in the first size bytes (an invalid byte counts as one);
  * - upper: upper case for the scripts the game's fonts carry (ASCII, Latin-1, Latin Extended-A, Greek, Cyrillic) into
  *   out (size bytes, always terminated), its length; others, invalid bytes included, stay as they are;

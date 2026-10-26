@@ -35,7 +35,8 @@
  *   no game state, it watches the flag itself, and the flag's change is not one of those events (a live join saw it 0.1 s
  *   before the state went to mission, KB hotjoin-hellpod-drop-research; a mission reset or another writer during a
  *   mission has no event at all), so an event-driven write would not be exactly equivalent.
- * - The tick runs before the game's update each frame; the Lua's poll ran after the update below it (one frame apart).
+ * - The tick runs at the start of game.dll's frame update, where the Lua global update ran. The Lua's poll ran after the
+ *   updates below it in that chain, which is still before game.dll's update: the same point of the frame.
  * - Dropped: the Lua update guard's pause and resume after an error in an update below this mod, its 8-errors-in-a-burst
  *   stop and its shutdown handling (HellForge has no update chain below the pack and no shutdown event; the core's crash
  *   guard stops the component on a fault in its own code, and stop() restores). This component stays off while

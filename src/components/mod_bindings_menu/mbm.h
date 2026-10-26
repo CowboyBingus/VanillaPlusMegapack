@@ -176,9 +176,7 @@ void mbm_mark_set(uint32_t code, int kind, uint32_t found, uint32_t left);
 uint32_t mbm_session(void);
 
 /* mbm_text.c */
-int mbm_text_length(const char* text);   /* code points, -1 not UTF-8 */
 int mbm_display_text(const char* text, int limit, char* out, size_t size); /* 1 usable */
-void mbm_upper(const char* text, char* out, size_t size);
 
 /* mbm_tab.c: the native MODS tab */
 void mbm_tab_reset(void);

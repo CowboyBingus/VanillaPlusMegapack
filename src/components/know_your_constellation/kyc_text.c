@@ -1,52 +1,11 @@
-/* Know Your Constellation's text layout (Bingus Text v1, bingus_text.lua: decode, check, length, boundaries, pieces,
- * wrap), for UTF-8 in any script: measured, wrapped and scrolled by character, never by byte. Translations and the
- * game's Text Language (the rest of bingus_text.lua) are not ported: the pack's texts are English (vpm_text). Nothing
- * here runs per frame: the panel lays out text when its report, geometry or font changes. */
+/* Know Your Constellation's text layout (Bingus Text v1, bingus_text.lua: check, boundaries, pieces, wrap), for UTF-8
+ * in any script: measured, wrapped and scrolled by character, never by byte. The decoding is the core's
+ * (vpm_utf8_decode, the same module's decode); the check here takes a piece of a text by its length, as the panel's
+ * labels are. Translations and the game's Text Language (the rest of bingus_text.lua) are not ported: the pack's texts
+ * are English (vpm_text). Nothing here runs per frame: the panel lays out text when its report, geometry or font
+ * changes. */
 #include <string.h>
 #include "kyc.h"
-
-/* A lead byte: the continuation bytes it needs and its value bits, and the range of the first continuation byte (no
- * overlong forms, surrogates or values above U+10FFFF); 0 when it cannot start a character. */
-static int Lead(uint8_t c, uint32_t* v, uint8_t* lo, uint8_t* hi)
-{
-    *lo = 0x80;
-    *hi = 0xBF;
-    if (c >= 0xC2 && c <= 0xDF) { *v = c - 0xC0u; return 1; }
-    if (c >= 0xE0 && c <= 0xEF)
-    {
-        *v = c - 0xE0u;
-        if (c == 0xE0) *lo = 0xA0;
-        if (c == 0xED) *hi = 0x9F;
-        return 2;
-    }
-    if (c < 0xF0 || c > 0xF4) return 0;
-    *v = c - 0xF0u;
-    if (c == 0xF0) *lo = 0x90;
-    if (c == 0xF4) *hi = 0x8F;
-    return 3;
-}
-
-int kyc_utf8_decode(const char* text, size_t length, size_t at, uint32_t* value, size_t* after)
-{
-    if (at >= length) return 0;
-    uint8_t c = (uint8_t)text[at], lo, hi;
-    if (c < 0x80) { *value = c; *after = at + 1; return 1; }
-    uint32_t v;
-    int n = Lead(c, &v, &lo, &hi);
-    if (n == 0) return 0;
-    for (int k = 1; k <= n; k++)
-    {
-        if (at + (size_t)k >= length) return 0;
-        uint8_t d = (uint8_t)text[at + (size_t)k];
-        if (d < lo || d > hi) return 0;
-        v = v * 64u + (d - 0x80u);
-        lo = 0x80;
-        hi = 0xBF;
-    }
-    *value = v;
-    *after = at + (size_t)n + 1;
-    return 1;
-}
 
 int kyc_text_check(const char* text, size_t length, size_t* bad, const char** why)
 {
@@ -54,34 +13,21 @@ int kyc_text_check(const char* text, size_t length, size_t* bad, const char** wh
     while (i < length)
     {
         uint32_t v;
-        size_t after;
-        if (!kyc_utf8_decode(text, length, i, &v, &after)) { *bad = i + 1; *why = "invalid UTF-8"; return 0; }
+        int n = vpm_utf8_decode(text + i, length - i, &v);
+        if (n == 0) { *bad = i + 1; *why = "invalid UTF-8"; return 0; }
         if (v < 32 || v == 127 || (v >= 0x80 && v < 0xA0)) { *bad = i + 1; *why = "control character"; return 0; }
-        i = after;
+        i += (size_t)n;
     }
     return 1;
-}
-
-size_t kyc_text_length(const char* text, size_t length)
-{
-    size_t count = 0, i = 0;
-    while (i < length)
-    {
-        uint32_t v;
-        size_t after;
-        i = kyc_utf8_decode(text, length, i, &v, &after) ? after : i + 1;
-        count++;
-    }
-    return count;
 }
 
 /* The code point at i (U+FFFD for a byte that is not valid UTF-8) and the byte after it. */
 static uint32_t Next(const char* text, size_t length, size_t i, size_t* after)
 {
     uint32_t v;
-    if (kyc_utf8_decode(text, length, i, &v, after)) return v;
-    *after = i + 1;
-    return 0xFFFDu;
+    int n = vpm_utf8_decode(text + i, length - i, &v);
+    *after = i + (n > 0 ? (size_t)n : 1);
+    return n > 0 ? v : 0xFFFDu;
 }
 
 /* ---- line breaking: a small subset of Unicode UAX #14 ------------------------------------------------------- */

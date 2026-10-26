@@ -2872,11 +2872,11 @@ static void ChatSend(void)
     CHECK(blm_chat_send("x", &sent, &why) && sent == 2 && Count("chat_rpc") == rpcs + 1);
     w.muted = 0;
     /* Long text is cut to 512 bytes on a UTF-8 boundary. */
-    CHECK_EQ(blm_cut("abc", 5), 3);
-    CHECK_EQ(blm_cut("abcdef", 3), 3);
+    CHECK_EQ(vpm_utf8_clip("abc", 5), 3);
+    CHECK_EQ(vpm_utf8_clip("abcdef", 3), 3);
     memset(text, 'x', 510);
     memcpy(text + 510, "\xE2\x82\xAC" "yy", 6);
-    CHECK_EQ(blm_cut(text, 512), 510);
+    CHECK_EQ(vpm_utf8_clip(text, 512), 510);
     CHECK(blm_chat_send(text, &sent, &why));
     CHECK(strlen(g_lastChat) == 510 && Count("chat_rpc") == rpcs + 3);
     memset(text, 'x', 2000);

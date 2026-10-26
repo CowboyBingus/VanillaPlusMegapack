@@ -95,10 +95,18 @@ static void FakeRetention(void* manager, uint32_t id, uint32_t bit, uint8_t enab
     Put32(f->flags, enabled ? Get32(f->flags) | bit : Get32(f->flags) & ~bit);
 }
 
+static int g_fault_horizontal;   /* the next horizontal speed call faults (once) */
+static int* volatile g_nowhere;  /* NULL: a store through it faults */
+
 static void FakeHorizontal(void* entity, float speed)
 {
     Fake* f = FakeByEntity((uintptr_t)entity);
     g_calls.horizontal++;
+    if (g_fault_horizontal)
+    {
+        g_fault_horizontal = 0;
+        *g_nowhere = 1;
+    }
     if (f != NULL) PutF(f->control + 8, speed);
 }
 
@@ -180,6 +188,7 @@ static void ResetFakes(void)
     memset(&g_calls, 0, sizeof g_calls);
     memset(&g_scene, 0, sizeof g_scene);
     g_refuse_vertical = 0;
+    g_fault_horizontal = 0;
     g_mode_writes = 0;
 }
 
@@ -433,11 +442,12 @@ static void MissionCheck(uint32_t reads)
     CHECK(sar_cache.outside == 1);
 }
 
-/* A frame with one check whose reads (and queries) equal these exactly. */
-static Counts Exact(uint32_t reads, uint32_t queries, const char* status)
+/* A frame with these checks (two while a sentry is engaged: here, without the frame hook, the second right after the
+ * first) whose reads (and queries) equal these exactly. */
+static Counts Exact(uint32_t checks, uint32_t reads, uint32_t queries, const char* status)
 {
     Counts c = Frames(1);
-    CHECK_EQ(c.polls, 1);
+    CHECK_EQ(c.polls, checks);
     CHECK_EQ(c.read, reads);
     CHECK_EQ(c.queries, queries);
     CHECK_EQ(c.write, 0);
@@ -473,8 +483,9 @@ static void DecodesTheFixture(void)
     CHECK_EQ(sar_profile_count, 7);
 }
 
-/* One check through the component: the muzzle pose read along the unit path, and the terrain query from the muzzle to
- * the target's raw point, the sentry's unit ignored, with the static-obstacle preset. */
+/* One frame through the component: the muzzle pose read along the unit path, and the terrain query from the muzzle to
+ * the target's raw point, the sentry's unit ignored, with the static-obstacle preset; once per check, and the tracking
+ * sentry is engaged, so the frame makes two. */
 static void QueriesTheTerrainFromTheMuzzle(void)
 {
     MakeWorld();
@@ -482,7 +493,8 @@ static void QueriesTheTerrainFromTheMuzzle(void)
     Started();
     Frames(1);
     CHECK(StatusIs("observing"));
-    CHECK_EQ(g_calls.raycast, 1);
+    CHECK_EQ(sar_state.polls, 2);
+    CHECK_EQ(g_calls.raycast, 2);
     CHECK(g_scene.world == 2 && g_scene.collection == 1 && g_scene.actors == 3 && g_scene.filter == 0x393D9518u);
     CHECK(g_scene.flags == 0x80000009u && g_scene.ignore == UNIT && g_scene.capacity == 1);
     CHECK(g_scene.from[0] == 0 && g_scene.from[1] == -20 && g_scene.from[2] == 0);
@@ -632,7 +644,7 @@ static void WaitsOnTheShipAndInAMission(void)
     Mission(0);
     Started();
     /* On the ship (no mission, no targeting registry): the first check reads nothing (its root is a plain load). */
-    Exact(0, 0, "waiting_for_sentries");
+    Exact(1, 0, 0, "waiting_for_sentries");
     CHECK_EQ(IdleUntilCheck(), 28);
     CHECK(sar_state.polls == 1 && sar_state.updates == 29);
     MissionCheck(1); /* frame 30: the mode record (its pointer is a plain load); the Lua: 2 reads and a pointer decode */
@@ -653,54 +665,57 @@ static void WaitsOnTheShipAndInAMission(void)
     CHECK_EQ(IdleUntilCheck(), 29);
     MissionCheck(0); /* frame 150 */
     CHECK_EQ(IdleUntilCheck(), 29);
-    Exact(4, 0, "waiting_for_sentries"); /* frame 180; the Lua: 6 reads, 3 pointer decodes */
+    Exact(1, 4, 0, "waiting_for_sentries"); /* frame 180; the Lua: 6 reads, 3 pointer decodes */
     CHECK_EQ(IdleUntilCheck(), 29);
-    Exact(3, 0, "waiting_for_sentries"); /* frame 210: the rescan; the Lua: 4 */
+    Exact(1, 3, 0, "waiting_for_sentries"); /* frame 210: the rescan; the Lua: 4 */
     CHECK_EQ(IdleUntilCheck(), 29);
-    Exact(4, 0, "waiting_for_sentries"); /* frame 240: the rescan and the mission check; the Lua: 6 */
+    Exact(1, 4, 0, "waiting_for_sentries"); /* frame 240: the rescan and the mission check; the Lua: 6 */
     CHECK(sar_state.polls == 4 && sar_state.updates == 240);
 }
 
-/* A sentry located, tracking, losing and reacquiring its target, removed while held, then placed again. */
+/* A sentry located, tracking, losing and reacquiring its target, removed while held, then placed again. Per frame, as the
+ * Lua's frame_budget pinned it (its read and read_into together): two checks while a sentry is engaged, here without
+ * the frame hook, so the second runs right after the first. */
 static void HoldsAndPausesOnceATargetIsLost(void)
 {
     MakeWorld();
     Started();
     Frames(1); /* located; the functions bound */
     CHECK(StatusIs("observing"));
-    /* Tracking (one check; the Lua made two per frame while engaged, 36 reads and 22 into-reads, not counting its pose
-     * and terrain reads): the kept layout 20, the pose 6, the target guard twice, the scheduler 2, the transition 1. */
-    Counts c = Exact(31, 0, "observing");
-    CHECK_EQ(c.natives, 1); /* the ray query */
+    /* Tracking, per check: the kept layout 20, the pose 6, the target guard twice, the scheduler 2, the transition 1. The
+     * Lua: 58 over its two checks, not counting its pose and terrain reads. */
+    Counts c = Exact(2, 62, 0, "observing");
+    CHECK_EQ(c.natives, 2); /* the ray query, per check */
     /* The target is lost: fire pauses (its identity read again), the search request (1 query), the hold (3) and the fire
-     * mode's (1): each range's first query; the Lua: 134 reads, 22 into-reads and 5 queries over two checks. */
+     * mode's (1): each range's first query; then the held check (27). The Lua: 156 and 5 queries over two checks. */
     Target(0, 32);
-    c = Exact(110, 5, "firing_paused");
+    c = Exact(2, 137, 5, "firing_paused");
     CHECK_EQ(c.natives, 4); /* fire mode, retention, both speeds */
     CHECK(sar_state.holds == 1 && sar_state.holding == 1 && sar_state.fire_pauses == 1 && sar_state.reselections == 1);
     CHECK_EQ(Get32(w.modes), 0);
     CHECK_EQ(Get32(w.nt + 16), 2);
     CHECK(GetF(w.control + 8) == 0 && GetF(w.control + 12) == 0);
     CHECK_EQ(Get64(w.behavior + 152), NOW);
-    Exact(27, 0, "firing_paused"); /* holding: the pending request is followed (1 read); the Lua: 32 over two checks */
+    Exact(2, 54, 0, "firing_paused"); /* holding: the pending request is followed (1 read per check); the Lua: 54 */
     /* A new target before the native handler used the request: fire resumes, the request is restored and the hold ends.
-     * Every range was verified at the loss: no query (the Lua: 5). */
+     * Every range was verified at the loss: no query (the Lua: 5). That check saw the retention bit still set, so the
+     * next one records the aim: it runs at once (the Lua's second check did, before the game's update), and the
+     * post-update one follows: 106 + 31 + 31 (the Lua: 152 over two checks). */
     Target(TARGET, 3);
-    c = Exact(106, 0, "observing");
+    c = Exact(3, 168, 0, "observing");
     CHECK(sar_state.releases == 1 && sar_state.fire_resumes == 1 && sar_state.holding == 0 && sar_state.fire_paused == 0);
     CHECK(Get32(w.modes) == 1 && Get32(w.nt + 16) == 0 && GetF(w.control + 8) == 80 && GetF(w.control + 12) == 50);
     CHECK_EQ(Get64(w.behavior + 152), DEADLINE);
-    /* One check per frame: the reacquired frame saw the retention bit still set, so the aim is recorded on the next one
-     * (the Lua's check after the game update recorded it in the same frame). */
-    Exact(31, 0, "observing");
+    CHECK(sar_aim_record(SENTRY) != NULL && sar_aim_record(SENTRY)->has_raw);
+    Exact(2, 62, 0, "observing");
     Target(0, 32);
-    Exact(110, 0, "firing_paused");
+    Exact(2, 137, 0, "firing_paused");
     CHECK(sar_state.holds == 2 && sar_state.reselections == 2);
     CHECK_EQ(Get64(w.behavior + 152), NOW + 100000); /* at least 100 ms after the last request */
-    /* The sentry vanishes while held: the three releases in one check. The registry emptied, so its ranges are queried
-     * again (5, as the Lua). */
+    /* The sentry vanishes while held: the three releases in one check, which leaves nothing engaged (no second). The
+     * registry emptied, so its ranges are queried again (5, as the Lua; its 96 reads in one check too). */
     Put32(w.tm + 324, 0);
-    Exact(76, 5, "waiting_for_sentries");
+    Exact(1, 76, 5, "waiting_for_sentries");
     CHECK(sar_aim_record(SENTRY) == NULL && sar_fire_record(SENTRY) == NULL);
     CHECK(Get32(w.modes) == 1 && Get32(w.nt + 16) == 0 && GetF(w.control + 8) == 80 && Get64(w.behavior + 152) == DEADLINE);
     /* Nothing held, paused or requested any more: the gate waits for the next 30th check. */
@@ -715,10 +730,12 @@ static void HoldsAndPausesOnceATargetIsLost(void)
     Put32(w.rt, 0);
     w.triggers[0] = 0;
     CHECK_EQ(IdleUntilCheck(), 29);
+    uint32_t mission = (sar_cache.checks + 1) % SAR_MISSION_EVERY == 0 ? 1u : 0u; /* the gate's mission check */
     c = Frames(1);
-    CHECK_EQ(c.read, (sar_state.updates % 60 == 0 ? 1u : 0u) + 48u);
+    CHECK_EQ(c.read, mission + 48u);
     CHECK(StatusIs("observing") && !sar_cache.idle);
-    Exact(26, 0, "observing");
+    Exact(1, 26, 0, "observing"); /* not engaged: one check (the Lua: 26) */
+    CHECK(!vpm_post_ticking(Self()));
 }
 
 /* A hold that fails part way (the vertical setter refused) is undone in the same check: the search request, fire and
@@ -772,6 +789,203 @@ static void FollowsMovedArrays(void)
     memset(w.behavior, 0, 504);
     Frames(1);
     CHECK(sar_layouts[0].used && sar_layouts[0].row.behavior_address == (uintptr_t)behavior && sar_layouts[0].row.target == TARGET);
+}
+
+/* ---- the second check after game.dll's update (the core's frame hook) ---------------------------------------------- */
+
+static void (*g_inUpdate)(void); /* what the game's update changes, on the next engine frame only */
+static uint32_t g_holdingInUpdate, g_pausedInUpdate;
+static int g_recordInUpdate;     /* the sentry's aim was recorded when the game's update ran */
+
+/* The game's own update (fake_after_tick's step, inside game.dll's frame update): it notes what the frame's checks
+ * before it had done, then makes the change the test put up. */
+static void GameUpdate(float dt)
+{
+    const SarAimRecord* r = sar_aim_record(SENTRY);
+    g_holdingInUpdate = sar_state.holding;
+    g_pausedInUpdate = sar_state.fire_paused;
+    g_recordInUpdate = r != NULL && r->has_raw;
+    void (*change)(void) = g_inUpdate;
+    g_inUpdate = NULL;
+    if (change != NULL) change();
+}
+
+/* hooked: game.dll's frame update decoded, so the core's frame hook goes in at the load and the post-update tick runs
+ * after the game's update; otherwise the fallback, with both ticks in HellForge's callback before it. */
+static void StartedEngine(int hooked)
+{
+    MakeWorld();
+    fake_frame_update(hooked);
+    Started();
+    CHECK_EQ(vpm_frame_hooked(), hooked ? 1 : 0);
+    fake_after_tick(GameUpdate);
+    g_inUpdate = NULL;
+}
+
+/* One engine frame whose game update makes this change, and its calls. */
+static Counts EngineFrame(void (*change)(void))
+{
+    uint32_t queries = sar_writable_queries(), polls = sar_state.polls;
+    int natives = NativeCalls();
+    g_inUpdate = change;
+    fake_counts_reset();
+    fake_engine_frames(1, DT);
+    FakeCounts f = fake_counts();
+    return (Counts){f.read, f.write, f.log, sar_writable_queries() - queries, (uint32_t)(NativeCalls() - natives),
+        sar_state.polls - polls};
+}
+
+static void LoseTarget(void) { Target(0, 32); }
+/* The target is lost and the engine moves the raw aim at once (the snap back the hold prevents). */
+static void LoseTargetAndSnap(void)
+{
+    Target(0, 32);
+    Vec(w.rt + 8, 9, 9, 9);
+}
+static void LoseTargetAndFault(void)
+{
+    Target(0, 32);
+    g_fault_horizontal = 1;
+}
+
+/* Everything the component changes is back as the game had it. */
+static int Untouched(void)
+{
+    return Get32(w.modes) == 1 && Get32(w.nt + 16) == 0 && GetF(w.control + 8) == 80 && GetF(w.control + 12) == 50 &&
+        Get64(w.behavior + 152) == DEADLINE;
+}
+
+/* The game's update loses the target. Hooked, the second check answers it after that update, in the same frame: the
+ * hold, the fire pause and the search request; in the fallback the next frame's first check answers it. Either way
+ * before the next update. */
+static void TargetLostInsideTheUpdate(void)
+{
+    for (int hooked = 1; hooked >= 0; hooked--)
+    {
+        fake_setup();
+        StartedEngine(hooked);
+        EngineFrame(NULL); /* located; the functions bound */
+        Counts c = EngineFrame(NULL);
+        CHECK(c.polls == 2 && c.read == 62 && c.natives == 2 && c.queries == 0); /* tracking: as without the hook */
+        CHECK(vpm_post_ticking(Self()));
+        c = EngineFrame(LoseTarget);
+        CHECK_EQ(c.polls, 2);
+        CHECK_EQ(g_holdingInUpdate, 0);
+        CHECK_EQ(sar_state.holding, (uint32_t)hooked);
+        CHECK_EQ(sar_state.fire_paused, (uint32_t)hooked);
+        CHECK_EQ(Get32(w.modes), hooked ? 0u : 1u);
+        CHECK_EQ(Get32(w.nt + 16), hooked ? 2u : 0u);
+        CHECK_EQ(Get64(w.behavior + 152), hooked ? NOW : DEADLINE);
+        CHECK(StatusIs(hooked ? "firing_paused" : "observing"));
+        /* Hooked: the tracking check (31), then the loss after the update (110, 5 queries, 4 setters). */
+        if (hooked) CHECK(c.read == 141 && c.queries == 5 && c.natives == 1 + 4);
+        c = EngineFrame(NULL);
+        CHECK(g_holdingInUpdate == 1 && g_pausedInUpdate == 1); /* in place for the next update, either way */
+        CHECK(sar_state.holding == 1 && sar_state.holds == 1 && StatusIs("firing_paused"));
+        CHECK(c.polls == 2 && c.read == (hooked ? 54u : 27u + 110u));
+        vpm_core_stop(Self(), "test");
+        CHECK(Untouched());
+    }
+}
+
+/* A target reacquired while held: that check releases the hold, and the next one records the new target's aim. It runs
+ * at once, before the game's update, where the Lua's second check did; so a loss inside that very update is held by
+ * the post-update check with the recorded aim, in the same frame. Without the check at once the aim would be recorded
+ * only after the update, too late for that loss. */
+static void ReacquiredThenLostInTheUpdate(void)
+{
+    StartedEngine(1);
+    EngineFrame(NULL);
+    EngineFrame(LoseTarget);
+    CHECK_EQ(sar_state.holding, 1);
+    Target(TARGET, 3);
+    uint8_t aim[12];
+    memcpy(aim, w.rt + 8, sizeof aim);
+    Counts c = EngineFrame(LoseTargetAndSnap);
+    CHECK_EQ(c.polls, 3);
+    CHECK(g_recordInUpdate && g_holdingInUpdate == 0);
+    CHECK(sar_state.releases == 1 && sar_state.holds == 2 && sar_state.holding == 1 && sar_state.late_aim == 1);
+    CHECK(memcmp(w.rt + 8, aim, sizeof aim) == 0); /* the snap undone: the reacquired target's aim */
+    CHECK(StatusIs("firing_paused"));
+    /* A frame whose check releases nothing makes no check at once. */
+    c = EngineFrame(NULL);
+    CHECK_EQ(c.polls, 2);
+    vpm_core_stop(Self(), "test");
+    CHECK(Untouched());
+}
+
+/* Frames with no sentry engaged are what they were with the frame hook: no post-update tick, no call on waiting frames
+ * but the mission checks, one check per frame for a sentry with no target. */
+static void IdleFramesHaveNoPostCheck(void)
+{
+    StartedEngine(1);
+    Ptr(Game(0x3326D30), NULL);
+    Ptr(Game(0x3326740), NULL);
+    Ptr(Game(0x3326D70), NULL);
+    Mission(0);
+    uint32_t calls = 0, polls = 0;
+    for (int i = 0; i < 120; i++)
+    {
+        Counts c = EngineFrame(NULL);
+        calls += c.read + c.write + c.log + c.queries + c.natives;
+        polls += c.polls;
+        CHECK(!vpm_post_ticking(Self()));
+    }
+    CHECK_EQ(polls, 1);
+    CHECK_EQ(calls, 3); /* the mission checks at frames 30, 60 and 120 (1 read each) */
+    CHECK_EQ(fake_hook_count(), 1); /* the frame hook only */
+    fake_setup();
+    StartedEngine(1);
+    Target(0, 32);
+    Put32(w.rt, 0);
+    w.triggers[0] = 0;
+    EngineFrame(NULL);
+    for (int i = 0; i < 5; i++)
+    {
+        Counts c = EngineFrame(NULL);
+        CHECK(c.polls == 1 && c.read == 26 && c.write + c.queries + c.natives == 0);
+        CHECK(!vpm_post_ticking(Self()));
+    }
+    CHECK(StatusIs("observing"));
+}
+
+/* The post-update tick goes when nothing is engaged any more, and with the component. */
+static void PostCheckStops(void)
+{
+    StartedEngine(1);
+    EngineFrame(NULL);
+    EngineFrame(LoseTarget);
+    CHECK(sar_state.holding == 1 && vpm_post_ticking(Self()));
+    /* The sentry vanishes while held: the releases in the first check, then nothing is engaged. */
+    Put32(w.tm + 324, 0);
+    Counts c = EngineFrame(NULL);
+    CHECK(c.polls == 1 && !vpm_post_ticking(Self()));
+    CHECK(Untouched() && StatusIs("waiting_for_sentries"));
+    /* Stopped while engaged: restored, and no check runs any more. */
+    fake_setup();
+    StartedEngine(1);
+    EngineFrame(NULL);
+    EngineFrame(LoseTarget);
+    vpm_core_stop(Self(), "test");
+    CHECK(!vpm_post_ticking(Self()) && Untouched());
+    c = EngineFrame(NULL);
+    CHECK_EQ(c.polls + c.read + c.natives, 0);
+}
+
+/* A fault in the post-update check (a game function the hold calls) stops the component; its stop puts back the fire
+ * pause, the search request and the half-made hold. The frame's first check, before the update, ran clean. */
+static void AFaultInThePostCheck(void)
+{
+    StartedEngine(1);
+    EngineFrame(NULL);
+    Counts c = EngineFrame(LoseTargetAndFault);
+    CHECK_EQ(c.polls, 2);
+    CHECK(!vpm_running(Self()));
+    CHECK_LOG("[Sentry Aim Retention] disabled: fault 0xC0000005");
+    CHECK_NO_LOG("its stop did not finish");
+    CHECK(Untouched());
+    c = EngineFrame(NULL);
+    CHECK_EQ(c.polls + c.read + c.natives, 0);
 }
 
 /* ---- test_loader.lua: own errors --------------------------------------------------------------------------------- */
@@ -2143,6 +2357,11 @@ int main(void)
     RUN(HoldsAndPausesOnceATargetIsLost);
     RUN(UndoesAFailedHold);
     RUN(FollowsMovedArrays);
+    RUN(TargetLostInsideTheUpdate);
+    RUN(ReacquiredThenLostInTheUpdate);
+    RUN(IdleFramesHaveNoPostCheck);
+    RUN(PostCheckStops);
+    RUN(AFaultInThePostCheck);
     RUN(StopsAfterEightErrorsInABurst);
     RUN(StopsAtOnceWhenARestoreFails);
     RUN(LossHoldsAimAndScanReleases);

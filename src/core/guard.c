@@ -142,9 +142,9 @@ static __attribute__((noinline)) void CopyIn(uint8_t* out, uintptr_t from, size_
 
 /* A read of the game's memory as plain loads under a guard of its own: 1 read, 0 when the memory cannot be read (an
  * unmapped, no-access or guard page: the fault ends the copy, and *out may hold part of it), -1 when no guard is
- * installed (the caller reads through HellForge instead). It stops no component and logs nothing. About 25 ns plus the
- * copy (KB hellforge-megapack-native-port 2a), where a ReadProcessMemory costs 1-2 us in game; a fault costs an
- * exception dispatch, a few microseconds, and comes only from a bad pointer. */
+ * installed (the caller reads through HellForge instead). It stops no component and logs nothing. Unmeasured in game:
+ * about 25 ns plus the copy in the test process (KB hellforge-megapack-native-port 2a), where a ReadProcessMemory costs
+ * 1-2 us in game; a fault costs an exception dispatch, a few microseconds, and comes only from a bad pointer. */
 __attribute__((noinline)) int vpm_guard_copy(void* out, uintptr_t from, size_t size)
 {
     if (g_handler == NULL) return -1;

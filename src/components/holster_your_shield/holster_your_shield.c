@@ -10,7 +10,8 @@
  * This makes the same calls when the player presses Backpack Function (action slot 37, after rebinding and controller
  * processing) while wearing a shield backpack:
  *   - shield in hand: it goes on the back, and stays there: when the game draws it again (a weapon switch, a dropped
- *     objective, the re-wield after an action), it is stowed again on the next frame (at most 6 times in 120 frames);
+ *     objective, the re-wield after an action), it goes back inside the game's draw (the re-draw hook below), or on
+ *     the next frame when the draw came another way or the hook is not in (at most 6 re-stows in 120 frames);
  *   - pressed again: it comes back to the hand if the weapon in hand is one-handed and nothing else is held (the
  *     game's own conditions); otherwise the game draws it at the next one-handed wield.
  * Before every call everything is found again from the game's registries and the backpack's type is read again. Every
@@ -26,21 +27,47 @@
  * an owned Helldiver avatar."). Its pieces come from the core where they are the same: vpm_lookup (the game's map),
  * vpm_avatar_still (the first three checks of the Lua's still_valid), vpm_action_slot (the key). The Lua's session
  * summary at shutdown is written at each mission's end instead (HellForge has no shutdown event), and when the core
- * stops the component. A detour of the game's re-draw (0xA95A90) could replace the per-frame re-stow: a later
- * improvement, not built; this ports the Lua's re-stow 1:1.
+ * stops the component.
  *
- * Cost per frame (reads are vpm_read, ReadProcessMemory; tests/components/holster_your_shield_test.c pins each path;
- * the Lua's frame_budget pins in brackets, its views and pointer reads together):
+ * The game's re-draw, hooked (the Lua could not: GameGuard flags a changed game.dll; decoded game.dll of 25480438).
+ * 0xA95A90(avatar record, send, blend) runs on every wield of the weapon in hand: 51 direct calls and no pointer to it,
+ * 7 in the weapon code (0xA55F90 .. 0xA926ED, send 1 or their caller's flag) and 44 in animation-event handlers
+ * (0x10A1F10 .. 0x119DA0C, send 0); the record is the avatar's 24-byte entity record (+8 its entity id), blend (r8b)
+ * picks 1.0 or 0.0 for the wield; no caller uses its result (rax). It first wields the weapon (0x786190, 0x8C0E90;
+ * with send 1 also rpc_wield_weapon 0xBE1640 and the RPC 0xBE0980) and only then, when that weapon is one-handed
+ * (0x8C2010), the avatar's row is owned here, the backpack is type 25 and nothing else is held (or the shield is),
+ * draws the shield: 0x9ABC30(shield), 0x9AC8E0(2) and, with send 1, rpc_set_held_carryable(-2, avatar, shield, 2).
+ * So the draw cannot be skipped on its own: skipping the call skips the weapon's wield and its RPCs (the
+ * weapon would not be in hand for the game or the other players), and making its checks fail means writing game
+ * memory. The detour therefore calls the original exactly once with its three registers and returns its result, and
+ * then, for the toggled Helldiver only (the entity id at record + 8) when the row holds the shield, stows it with the
+ * checks and calls of a press: the game's own stow (0xA95910's calls) right after the game's own draw, in the same call
+ * on the same thread, so the row is as the 1:1 re-stow leaves it one frame later, no frame shows the shield in hand,
+ * the caller goes on with the shield on the back (as after a two-handed wield) and both RPCs go out in the same frame,
+ * the stow's last. Every other call only calls the original: no toggle, another Helldiver, no draw, the component
+ * stopped, a nested call while the original or the component's own calls run (the outermost call stows once, after
+ * all of them). A fault in the detour's work stops the component; the original has run and its result is returned.
+ * The 1:1 re-stow on the next frame stays as the fallback when the hook cannot go in (its bytes differ, HellForge
+ * refuses it), and as the safety net while it is in: the game also draws the shield without 0xA95A90 when an objective
+ * is dropped (0xA44B40), when a shield backpack is equipped (0x97CFEE), and from the held-carryable RPC's receivers
+ * (0xBA7CF0, 0xB7DB7B).
+ *
+ * Cost per frame (vpm_read is a guarded plain load; tests/components/holster_your_shield_test.c pins each path; the
+ * Lua's frame_budget pins in brackets, its views and pointer reads together):
  *   no local player (menus, loading): nothing; every 30th frame 1 read [3]
  *   kept row, another backpack: 1 read [1]
  *   shield worn, no press: 2 reads [2]
  *   every 30th frame with a kept row: + 4 reads [+ 6]
- *   a press that stows, or a re-stow: 31 reads and the 3 game calls [37 and the 3 calls]
+ *   a press that stows, or a re-stow on the next frame: 31 reads and the 3 game calls [37 and the 3 calls]
  *   a press that draws: 41 reads and the 3 game calls [49 and the 3 calls]
  *   the frame after a move: 2 reads and its log line [2]
+ * Per call of the game's re-draw, with the hook in: no toggle, or the component stopped: nothing but the original (two
+ * plain loads); toggled, another Helldiver: 1 read; toggled, no draw: 2 reads; a draw put back: 31 reads and the 3 game
+ * calls inside the call, where the fallback makes the same 31 reads and 3 calls on the next frame (and the Lua 37 reads
+ * and the 3 calls), and the frame after only the move's check. Idle frames cost the same with the hook as without.
  * Fewer reads than the Lua because game.dll's globals are plain loads here. No write, no page query (VirtualQuery), no
- * allocation and no other Windows call on any path. Once per session, at HF_EVENT_GAME_LOADED: 3 code checks and 2
- * plain loads (the game's "nothing held" ids). */
+ * allocation and no other Windows call on any path. Once per session, at HF_EVENT_GAME_LOADED: 4 code checks (the
+ * three functions and the re-draw's first 25 bytes), the hook, and 2 plain loads (the game's "nothing held" ids). */
 #include <stdio.h>
 #include <string.h>
 #include "../../core/vpm.h"
@@ -52,6 +79,11 @@
 #define SET_ITEM_RVA 0x9ABC30u     /* (inventory, avatar entity, item): sets the held carryable */
 #define SET_MODE_RVA 0x9AC8E0u     /* (inventory, avatar entity, mode): 2 held, 1 put away */
 #define SEND_HELD_RVA 0xBE20B0u    /* (peer, avatar entity, item, mode): rpc_set_held_carryable, peer -2 = everyone */
+#define REDRAW_RVA 0xA95A90u       /* (avatar record, send, blend): wields the weapon in hand, then draws the shield */
+/* Its first instructions as shipped: mov [rsp+20h], rbx; push rdi; push r12; push r15; sub rsp, 30h; movzx edi, r8b;
+ * mov r12d, edx; mov r8d, [rcx+8] (the avatar's entity id). */
+#define REDRAW_SHIPPED "48 89 5C 24 20 57 41 54 41 57 48 83 EC 30 41 0F B6 F8 44 8B E2 44 8B 41 08"
+#define RECORD_ENTITY 8u           /* the entity id in a 24-byte entity record */
 
 #define PM_COUNTS 0x84u            /* player manager: two counts, each 1 .. 4 with a local player */
 #define PM_PLAYER 0xE8u            /* the local player's record (24 bytes, owned bit in word 5) */
@@ -86,6 +118,8 @@
 typedef void (*SetItemFn)(uint64_t inventory, uint32_t avatar, uint32_t item);
 typedef uint64_t (*SetModeFn)(uint64_t inventory, uint32_t avatar, uint32_t mode);
 typedef void (*SendHeldFn)(int64_t peer, uint32_t avatar, uint32_t item, uint32_t mode);
+/* Whole registers, so the detour passes on exactly what the caller left in rcx, rdx and r8 (it sets edx and r8b). */
+typedef uint64_t (*RedrawFn)(uint64_t record, uint64_t send, uint64_t blend);
 
 typedef struct GameFunction { const char* name; uint32_t rva; const char* prologue; } GameFunction;
 /* The first 16 bytes of each function, checked once per session before anything is called. */
@@ -111,13 +145,17 @@ typedef struct Kept
 typedef struct Row { uint32_t backpack, held, slot, mode; } Row;
 
 typedef struct Pending { uint32_t mode, shield; const char* label; } Pending;
-typedef struct Counts { uint32_t presses, holsters, draws, restows, checked, failed, refused; } Counts;
+typedef struct Counts { uint32_t presses, holsters, draws, restows, inside, checked, failed, refused; } Counts;
 
 static struct
 {
+    VpmComponent* self;
     SetItemFn set_item;
     SetModeFn set_mode;
     SendHeldFn send_held;
+    RedrawFn redraw;   /* the hook's original: HellForge rewrites it when another hook joins the chain */
+    int hooked;
+    int busy;          /* inside the game's re-draw or the component's own calls: a nested re-draw is the game's */
     int bound;
     uint32_t none_item, none_slot;
     uint64_t frame;
@@ -361,14 +399,17 @@ static void BackpackChanged(VpmComponent* self, uint32_t backpack)
     if (s.shield) vpm_log(self, "Shield backpack %u worn: Backpack Function toggles it.", backpack);
 }
 
-/* The three calls of one move, exactly as the game makes them, then the check on the next frame. */
+/* The three calls of one move, exactly as the game makes them, then the check on the next frame. A re-draw the game
+ * makes inside them is left to the game (busy): the move does not start another. */
 static void Move(uint32_t shield, uint32_t mode, const char* label)
 {
     uint64_t inventory = s.kept.inventory;
     uint32_t avatar = s.kept.avatar_id;
+    s.busy = 1;
     s.set_item(inventory, avatar, mode == MODE_HELD ? shield : s.none_item);
     (void)s.set_mode(inventory, avatar, mode); /* its result is unused, as in the Lua */
     s.send_held(-2, avatar, shield, mode);
+    s.busy = 0;
     s.has_pending = 1;
     s.pending = (Pending){mode, shield, label};
     if (mode == MODE_HELD) s.counts.draws++;
@@ -445,8 +486,9 @@ static void DropOldRestows(void)
     s.restow_count -= old;
 }
 
-/* The game drew the shield while the toggle is on: stow it again, unless that keeps happening. */
-static void Restow(VpmComponent* self, uint32_t shield)
+/* The game drew the shield while the toggle is on: stow it again, unless that keeps happening. inside: from the re-draw's
+ * detour, in the game's draw; else from the tick, on the frame after it. */
+static void Restow(VpmComponent* self, uint32_t shield, int inside)
 {
     DropOldRestows();
     if (s.restow_count >= RESTOW_LIMIT)
@@ -465,7 +507,8 @@ static void Restow(VpmComponent* self, uint32_t shield)
     if (row.held != shield) return;
     s.restows[s.restow_count++] = s.frame;
     s.counts.restows++;
-    Move(shield, MODE_AWAY, "Shield back to the back after the game drew it");
+    if (inside) s.counts.inside++;
+    Move(shield, MODE_AWAY, inside ? "Shield kept on the back as the game drew it" : "Shield back to the back after the game drew it");
 }
 
 /* Action 37's held time, as its float bits: 0 when released, positive below infinity while held. */
@@ -509,7 +552,7 @@ static void Watch(VpmComponent* self)
     if (!s.has_backpack || row.backpack != s.backpack) BackpackChanged(self, row.backpack);
     if (!s.shield) return;
     if (KeyPressed()) { Press(self, row.backpack); return; }
-    if (s.toggled && row.held == row.backpack) Restow(self, row.backpack);
+    if (s.toggled && row.held == row.backpack) Restow(self, row.backpack, 0); /* the fallback, and the hook's safety net */
 }
 
 /* The tick: one row read; a key read while a shield is worn; the rest only when something happens. Without a kept
@@ -521,13 +564,43 @@ static void Step(VpmComponent* self, float dt)
     if (s.frame % CHECK_FRAMES == 0) Check(self);
 }
 
+/* ---- the game's re-draw (0xA95A90) ------------------------------------------------------------------------------- */
+
+/* After the original ran for the toggled Helldiver: the shield it drew goes back at once, through the checks and calls
+ * of a re-stow. No draw (a two-handed weapon, an objective held, another backpack): one row read. lint: per-frame */
+static void AfterRedraw(void* unused)
+{
+    Row row;
+    if (!s.toggled || !s.has_kept || !s.shield || !ReadRow(s.kept.row, &row)) return;
+    if (row.backpack == s.backpack && row.held == row.backpack) Restow(s.self, row.backpack, 1);
+}
+
+/* The detour: the original exactly once, with the caller's registers, and its result; then, for the toggled Helldiver
+ * only, AfterRedraw under the crash guard. The gate reads nothing until the toggle is on, then the entity id the game
+ * itself reads first (record + 8). lint: per-frame */
+static uint64_t Redraw(uint64_t record, uint64_t send, uint64_t blend)
+{
+    uint32_t avatar = 0;
+    if (!vpm_running(s.self) || !s.toggled || s.busy || !vpm_read_u32((uintptr_t)record + RECORD_ENTITY, &avatar) ||
+        avatar != s.toggled_for)
+        return s.redraw(record, send, blend);
+    s.busy = 1;
+    uint64_t result = s.redraw(record, send, blend);
+    s.busy = 0;
+    (void)vpm_guarded(s.self, AfterRedraw, NULL); /* a fault stops the component, and the core logs it */
+    return result;
+}
+
 /* ---- the session ------------------------------------------------------------------------------------------------- */
 
+/* The Lua's summary; with the hook in, the re-stows also say how many were made inside the game's draw. */
 static void Summary(char* out, size_t size)
 {
     const Counts* c = &s.counts;
-    snprintf(out, size, "presses %u, to the back %u (re-stows %u), to the hand %u, checks done %u, failed %u, refused %u",
-        c->presses, c->holsters, c->restows, c->draws, c->checked, c->failed, c->refused);
+    char inside[48] = "";
+    if (s.hooked) snprintf(inside, sizeof inside, ", %u inside the game's draw", c->inside);
+    snprintf(out, size, "presses %u, to the back %u (re-stows %u%s), to the hand %u, checks done %u, failed %u, refused %u",
+        c->presses, c->holsters, c->restows, inside, c->draws, c->checked, c->failed, c->refused);
 }
 
 /* The Lua's shutdown summary, at each mission's end (cumulative for the session). lint: per-frame */
@@ -539,7 +612,17 @@ static void MissionEnded(VpmComponent* self, const HfEventInfo* event)
     vpm_log(self, "This session so far: %s.", summary);
 }
 
-/* The three functions bound after their first bytes were checked, the "nothing held" ids read, the tick started. */
+/* The game's re-draw hooked, or why the re-stow stays on the next frame (vpm_hook has logged the refusal). */
+static void HookRedraw(VpmComponent* self)
+{
+    s.hooked = vpm_hook(self, REDRAW_RVA, REDRAW_SHIPPED, (void*)Redraw, (void**)&s.redraw);
+    vpm_log(self, "The game's re-draw (game.dll 0x%X) %s.", REDRAW_RVA, s.hooked
+        ? "is hooked: a shield the game draws while it is on the back goes back inside the draw"
+        : "is not hooked: a shield the game draws while it is on the back goes back on the next frame");
+}
+
+/* The three functions bound after their first bytes were checked, the "nothing held" ids read, the tick started, the
+ * re-draw hooked. */
 static void GameLoaded(VpmComponent* self, HfEvent event)
 {
     if (s.bound) return;
@@ -558,9 +641,11 @@ static void GameLoaded(VpmComponent* self, HfEvent event)
     if (!vpm_tick_start(self, Step)) { vpm_fail(self, "the game thread could not be reached"); return; }
     s.bound = 1;
     vpm_log(self,"Holster Your Shield v%s initialized.", vpm_def(self)->version);
+    HookRedraw(self);
 }
 
-/* Nothing to put back: the component writes no memory, and the shield stays where the game has it. */
+/* Nothing to put back: the component writes no memory, and the shield stays where the game has it. The re-draw's hook
+ * stays for the session (HellForge's hooks do) and only calls the original from now on. */
 static void Stop(VpmComponent* self)
 {
     if (!s.bound) return;
@@ -572,6 +657,7 @@ static void Stop(VpmComponent* self)
 static int Start(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
+    s.self = self;
     if (!vpm_on_load(self, HF_EVENT_GAME_LOADED, GameLoaded)) return vpm_fail(self, "game.dll's load event refused");
     (void)vpm_listen(self, HF_ON_MISSION_END, MissionEnded, 0); /* the summary only; the core logs a refusal */
     return 0;

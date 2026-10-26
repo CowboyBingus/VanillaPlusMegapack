@@ -4,26 +4,31 @@
 #include <string.h>
 #include "vpm.h"
 
+/* A lead byte: the continuation bytes it needs (0: it starts no character), its bits of the value, and the range of
+ * the first continuation byte (which rules out overlong forms, surrogates and values above U+10FFFF). */
+static int Lead(unsigned c, uint32_t* value, unsigned* lo, unsigned* hi)
+{
+    *lo = c == 0xE0 ? 0xA0 : c == 0xF0 ? 0x90 : 0x80;
+    *hi = c == 0xED ? 0x9F : c == 0xF4 ? 0x8F : 0xBF;
+    if (c >= 0xC2 && c <= 0xDF) { *value = c - 0xC0; return 1; }
+    if (c >= 0xE0 && c <= 0xEF) { *value = c - 0xE0; return 2; }
+    if (c >= 0xF0 && c <= 0xF4) { *value = c - 0xF0; return 3; }
+    return 0;
+}
+
 int vpm_utf8_decode(const char* text, size_t size, uint32_t* value)
 {
     const unsigned char* t = (const unsigned char*)text;
     if (size == 0) return 0;
-    unsigned c = t[0];
-    if (c < 0x80) { *value = c; return 1; }
-    int n;
+    if (t[0] < 0x80) { *value = t[0]; return 1; }
     uint32_t v;
-    if (c >= 0xC2 && c <= 0xDF) { n = 1; v = c - 0xC0; }
-    else if (c >= 0xE0 && c <= 0xEF) { n = 2; v = c - 0xE0; }
-    else if (c >= 0xF0 && c <= 0xF4) { n = 3; v = c - 0xF0; }
-    else return 0;
-    unsigned lo = c == 0xE0 ? 0xA0 : c == 0xF0 ? 0x90 : 0x80;
-    unsigned hi = c == 0xED ? 0x9F : c == 0xF4 ? 0x8F : 0xBF;
-    if ((size_t)n >= size) return 0;
+    unsigned lo, hi;
+    int n = Lead(t[0], &v, &lo, &hi);
+    if (n == 0 || (size_t)n >= size) return 0;
     for (int k = 1; k <= n; k++)
     {
-        unsigned d = t[k];
-        if (d < lo || d > hi) return 0;
-        v = v * 64 + (d - 0x80);
+        if (t[k] < lo || t[k] > hi) return 0;
+        v = v * 64 + (t[k] - 0x80u);
         lo = 0x80;
         hi = 0xBF;
     }
@@ -50,19 +55,29 @@ int vpm_utf8_encode(uint32_t value, char* out)
     return 4;
 }
 
+/* A character no mod shows: the C0 controls (a line feed only where multiline allows it), DEL and the C1 controls. */
+static int Control(uint32_t v, int multiline)
+{
+    return (v < 32 && !(multiline && v == 10)) || v == 127 || (v >= 0x80 && v < 0xA0);
+}
+
+/* The check's refusal (-1 or -2) at a 1-based byte, 0 for no text at all. */
+static int Refuse(int refusal, size_t at, size_t* bad)
+{
+    if (bad != NULL) *bad = at;
+    return refusal;
+}
+
 int vpm_utf8_check(const char* text, int multiline, size_t* bad)
 {
+    if (text == NULL) return Refuse(-1, 0, bad); /* the Lua's "not a string" */
     size_t n = strlen(text);
     for (size_t i = 0; i < n;)
     {
         uint32_t v;
         int length = vpm_utf8_decode(text + i, n - i, &v);
-        int control = (v < 32 && !(multiline && v == 10)) || v == 127 || (v >= 0x80 && v < 0xA0);
-        if (length == 0 || control)
-        {
-            if (bad != NULL) *bad = i + 1;
-            return length == 0 ? -1 : -2;
-        }
+        if (length == 0) return Refuse(-1, i + 1, bad);
+        if (Control(v, multiline)) return Refuse(-2, i + 1, bad);
         i += (size_t)length;
     }
     return 1;

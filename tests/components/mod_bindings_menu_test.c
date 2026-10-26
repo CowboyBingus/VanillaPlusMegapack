@@ -654,7 +654,11 @@ static uint32_t GuiText(uint32_t h, const char* text, float x, float y, float l,
     snprintf(g_texts[h], sizeof g_texts[h], "%s", text);
     return h;
 }
-static int GuiWidth(const char* text, float size, float* width) { *width = (float)mbm_text_length(text) * size / 2; return 1; }
+static int GuiWidth(const char* text, float size, float* width)
+{
+    *width = (float)vpm_utf8_length(text, strlen(text)) * size / 2;
+    return 1;
+}
 static const MbmGui kGui = {GuiOpen, GuiClose, GuiAlive, GuiRect, GuiText, GuiWidth};
 
 static int Shown(const char* text)

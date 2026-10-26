@@ -8,6 +8,7 @@ static size_t g_gameSize, g_exeSize;
 /* The tests' stand-ins (vpm_core_test_hooks): none in the pack's DLL. */
 static VpmTestHooks g_hooks;
 void vpm_core_test_hooks(const VpmTestHooks* hooks) { g_hooks = hooks != NULL ? *hooks : (VpmTestHooks){0}; }
+int vpm_test_tick_refused(int post) { return g_hooks.tick_refused != NULL && g_hooks.tick_refused(post); }
 
 uintptr_t vpm_game(void) { return g_game; }
 size_t vpm_game_size(void) { return g_gameSize; }
@@ -144,6 +145,11 @@ void* vpm_module_export(const char* module, const char* name)
 int vpm_game_code_matches(uint32_t rva, const char* pattern)
 {
     return g_game != 0 && rva < g_gameSize && vpm_core_hf()->code_matches(g_game + rva, pattern);
+}
+
+int vpm_exe_code_matches(uint32_t rva, const char* pattern)
+{
+    return g_exe != 0 && rva < g_exeSize && vpm_core_hf()->code_matches(g_exe + rva, pattern);
 }
 
 /* ---- the game's hash lookup ------------------------------------------------------------------------------------- */

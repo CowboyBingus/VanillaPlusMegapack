@@ -26,9 +26,10 @@
  *
  * On HellForge: the Lua's reads, checks, stores and log lines, with plain loads for the six game.dll globals.
  * - The game state is read where the Lua read it, with the presenters, not taken from HF_ON_STATE. HellForge polls the
- *   same field in the same frame (its events tick runs just before the pack's tick), but it reports no state it cannot
- *   read or above 8 and no change to 0, where the Lua's check answers "unknown" or "not preparing"; the saving would be
- *   one read per poll.
+ *   same field in the same frame (its events tick, in its game-thread callback inside game.dll's update: after the
+ *   pack's tick, or just before it while the core's frame hook is not in), but it reports no state it cannot read or
+ *   above 8 and no change to 0, where the Lua's check answers "unknown" or "not preparing"; the saving would be one read
+ *   per poll.
  * - The pods are found by the Lua's manager scan, not by HF_ON_SPAWN: the scan also finds a pod spawned before the
  *   loading screen came up, and checks what the event does not report (the owned bit, the phase, the id map's index);
  *   whether hellpods pass SpawnEntity 0xFDC140 is not verified.
@@ -40,7 +41,7 @@
  *   below (no Lua update chain; the core's guard stops the component at a fault and stop() releases the pod, as the
  *   Lua's stop did), the shutdown check, the event log's seconds column (HellForge stamps each line) and the LuaJIT notes.
  *
- * Cost (reads through HfApi.read, ReadProcessMemory; the Lua's frame_budget pins in brackets, counting the globals):
+ * Cost (reads are vpm_read, guarded plain loads; the Lua's frame_budget pins in brackets, counting the globals):
  * - idle (ship, menus, a mission without a loading screen): 2 reads every 0.25 s (state, presenters) [4], nothing between;
  * - a loading period, every frame: 6 (state, presenters, client state, hotjoin flags, scenes, manager header) [11]; when
  *   the count changed and every 0.25 s, two scans (sighting and hold) of 1 read per 256 pods and 1 per pod, with the

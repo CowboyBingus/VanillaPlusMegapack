@@ -22,16 +22,34 @@
  * On HellForge, as in the Lua: the same addresses, reads, checks, writes and native calls, with these differences.
  * - Native calls go through C function pointers to the same game.dll and exe functions, on the game thread (the tick).
  * - Reads of game.dll's and the exe's images (globals, the exe's tables) are plain loads; heap reads go through
- *   vpm_read, as the Lua's ReadProcessMemory. Every guard is verified the same way before writes.
+ *   vpm_read (a guarded plain load) where the Lua used ReadProcessMemory. Every guard is verified the same way before
+ *   writes.
  * - Writes are plain stores after one VirtualQuery per target span, remembered for the session (cv_writable), where the
  *   Lua checked protection before every write; each store is read back as before.
  * - The local avatar is the Lua's own resolution (light reads with guards handed to the vault check, a kept identity,
  *   the mission gate first), not vpm_local_avatar: that one has no mission gate, accepts other player counts and keeps
  *   no guards. The input address is vpm_action_slot's (slot 14).
  * - Time is the sum of dt (the Lua's api.time()).
- * - One check per frame, plus the Lua's replayed check on the frame work starts. The Lua's second check after the
- *   game's update while work is in progress is dropped: HellForge's tick runs at one place in the frame (the menu sound
- *   manager's update) and has no after-update callback, and back to back the second check would see the same state.
+ * - The checks per frame are the Lua's (archive_loader.lua step and after): the first at the start of game.dll's
+ *   update, where the Lua global `update` ran; the replayed one at once on the frame work starts; and while work is in
+ *   progress (state.busy not false after them) a second one. The Lua made that second check after its update chain,
+ *   still before game.dll's update; here it runs after game.dll's whole update in the same frame (the core's
+ *   post-update tick). Why that point is the same or better:
+ *   - It sees what that update did, in the frame it did it: the vault stage the update reached (a batch completed or
+ *     consumed), a climb the native driver started, an identity or settings cell that changed, and what HellForge's
+ *     other mods changed in their callbacks, which run inside that update. The Lua's second check saw none of that
+ *     (only its update chain ran in between) and left it to the next frame's first check. The answer (the alternative
+ *     prepared, the speed cap, a restore) is in place before the next update either way, now from the end of the frame
+ *     it was needed in; the next frame's first check confirms it.
+ *   - What the Lua's second check answered before the update, and the post-update point would answer one update
+ *     later, are the first check's own changes. What a check changed the next check only keeps (a prepared
+ *     alternative, an armed lease, a cap, a restore), except in two cases, where a second check runs at once, where the
+ *     Lua made it: a climb the check's own native retry started under an armed slope lease (the Lua capped its speed
+ *     before the update; the post-update check still follows), and a check that raised (it restored everything and
+ *     started fresh; from there the Lua's second check could prepare a stage-2 batch again before the update consumed
+ *     it; that frame has no post-update check, two checks as the Lua's).
+ *   The post-update tick is registered when work starts and removed when it ends: an idle frame has none. Without the
+ *   core's frame hook it runs right after the tick, back to back, where the Lua made its second check.
  * - Raised errors (a snapshot that could not be read, an invalid native result) keep the Lua's outcomes: a waiting
  *   status, a refusal that stops the component, or an error of the check, which restores everything and starts fresh;
  *   8 in a burst (a burst ends after 3600 clean frames) stop the component. The Lua's pcall guards, its pause after an
@@ -42,13 +60,20 @@
  * Detours on the selector (game.dll 0xA9E450) and the settings lookup would replace the per-frame checks: a later
  * improvement, not built.
  *
- * COST (tests/components/consistent_vaulting_test.c pins each count; reads are vpm_read, about 1-2 us each in game, and
- * the Lua's are its frame_budget pins of read + read_into, each one ReadProcessMemory; VQ is VirtualQuery):
+ * COST (tests/components/consistent_vaulting_test.c pins each count; reads are vpm_read, guarded plain loads with no
+ * Windows call (unmeasured in game), and the Lua's are its frame_budget pins of read + read_into, each one
+ * ReadProcessMemory; VQ is VirtualQuery):
  * - Idle frames, with the idle gate: outside a mission 59 of 60 frames no call, the 60th 1 read (Lua 2: the mode
  *   pointer is a plain load now); in a mission 9 of 10 frames 1 read (the input byte at the kept avatar index), the
- *   10th 6 reads (Lua 7). No VQ, no write, no native call, no allocation, no log.
- * - Active frames make one check (the Lua two while busy: one more after the game's update), plus the replayed check
- *   on the frame work starts: a press on a gated frame arms with 2 checks and 180 reads (Lua 3 checks, 252).
+ *   10th 6 reads (Lua 7). No VQ, no write, no native call, no allocation, no log, no post-update tick (pinned with and
+ *   without the frame hook).
+ * - Busy frames make two checks, as the Lua: a held lease 78 reads (Lua 2 x 44 = 88). Three on the frame work starts,
+ *   as the Lua: a press on a gated frame arms with 219 reads (Lua 252). Three on a frame whose own retry started a
+ *   climb under an uncapped slope lease, one more than the Lua, at most once per assisted climb, so that the cap is in
+ *   place before the update as in the Lua and the post-update check still sees that update. A frame whose check raised
+ *   makes two, both before the update, as the Lua. The post-update tick adds the core's call and two time-stamp counter
+ *   reads per busy frame; registering and removing it, one each per busy period (a list scan of the core's, no Windows
+ *   call).
  * - One check, C reads (Lua reads): input held without a new press 40 (45); held on a retained query 47 (52); slope
  *   lease armed 140 and 2 VQ the first time (163, 2); lease or climb held 39 (44); climb starts, the speed cap, 70 and
  *   1 VQ the first time (81, 1); lease released 101, 0 VQ (114, 3). The vault alone: alternative prepared 161, 1 VQ
@@ -69,6 +94,7 @@ static struct
 {
     CvState state;
     int skipped;      /* the last frame left nothing in progress (the Lua's skipped) */
+    int post;         /* the post-update tick is registered (only while work is in progress) */
     int failed;       /* this frame's check raised */
     int errors;       /* own errors in this burst */
     int clean;        /* frames without one since the last */
@@ -169,9 +195,66 @@ static void Check(VpmComponent* self)
     else Report(self, reason);
 }
 
-/* One check per frame, before the game's update; the idle gate answers idle frames first. Work that starts right after
- * a frame that left nothing in progress gets a second check at once, as the Lua replayed it: the first check's own
- * native retry can start a climb that an armed lease must cap now. lint: per-frame */
+/* The frame's last check is done: a frame without an own error counts toward the end of a burst (the guard's
+ * count_clean, after its after-update step). */
+static void FrameDone(void)
+{
+    if (!s.failed && ++s.clean == CLEAN_FRAMES) s.errors = 0;
+}
+
+/* The Lua's second check (archive_loader.lua after()), after game.dll's whole update in the same frame. Registered only
+ * while the frame's checks left work in progress, so it always checks. lint: per-frame */
+static void PostTick(VpmComponent* self, float dt)
+{
+    Check(self);
+    FrameDone();
+}
+
+/* Registers the post-update tick while a second check is due and removes it when not: an idle frame has none. One
+ * compare while nothing changes. 0 when it could not be registered. */
+static int PostDue(VpmComponent* self, int due)
+{
+    if (due == s.post) return 1;
+    if (!due)
+    {
+        vpm_post_tick_stop(self);
+        s.post = 0;
+        return 1;
+    }
+    s.post = vpm_post_tick_start(self, PostTick);
+    return s.post;
+}
+
+/* This frame's checks started a native climb (their own retry) while a slope lease is armed and its speed is not capped
+ * yet. The Lua's second check ran right after the first, before the game's update, and capped it there. */
+static int ClimbUncapped(const CvState* st, uint32_t starts)
+{
+    return st->counters.native_starts != starts && st->has_lease && st->lease.kind == CV_KIND_SLOPE &&
+        !st->lease.speed_capped;
+}
+
+/* The Lua's second check, while work is in progress (state.busy not false after the first, the Lua's condition): after
+ * game.dll's update (PostTick, which ends the frame). At once, where the Lua made it, after a check that raised: from
+ * the fresh start it may prepare a stage-2 batch again before the update consumes it (and the frame makes two checks,
+ * as the Lua's); also when the post-update tick could not be registered. lint: per-frame */
+static void SecondCheck(VpmComponent* self)
+{
+    if (s.skipped)
+    {
+        (void)PostDue(self, 0);
+        FrameDone();
+        return;
+    }
+    if (!s.failed && PostDue(self, 1)) return;
+    (void)PostDue(self, 0);
+    Check(self);
+    FrameDone();
+}
+
+/* The first check, before the game's update; the idle gate answers idle frames first. A second check at once, as the
+ * Lua's replay: for work that starts right after a frame that left nothing in progress (the first check's own native
+ * retry can start a climb that an armed lease must cap now), and for a climb this frame's retry started under an
+ * uncapped lease. Then the frame's second check (SecondCheck). lint: per-frame */
 static void Tick(VpmComponent* self, float dt)
 {
     CvState* st = &s.state;
@@ -179,15 +262,16 @@ static void Tick(VpmComponent* self, float dt)
     s.failed = 0;
     if (!cv_slope_idle(st))
     {
+        uint32_t starts = st->counters.native_starts;
         Check(self);
-        if (vpm_running(self) && !s.failed && s.skipped && st->busy != 0)
+        if (vpm_running(self) && !s.failed && ((s.skipped && st->busy != 0) || ClimbUncapped(st, starts)))
         {
             s.skipped = 0;
             Check(self);
         }
     }
     s.skipped = st->busy == 0;
-    if (!s.failed && ++s.clean == CLEAN_FRAMES) s.errors = 0;
+    if (vpm_running(self)) SecondCheck(self);
 }
 
 static void GameLoaded(VpmComponent* self, HfEvent event)

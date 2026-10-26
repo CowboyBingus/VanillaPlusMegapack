@@ -32,7 +32,7 @@
  * the live test build's turret log (test_hooks.lua).
  *
  * COST. Idle frames (every frame but one in 120): a frame counter; no read, no Windows call, no allocation (the Lua: the
- * same, under its update guard). One frame in 120, the turret watch's look (reads are HfApi.read, ReadProcessMemory):
+ * same, under its update guard). One frame in 120, the turret watch's look (reads are vpm_read, guarded plain loads):
  *   menus (no WeaponHeat manager)                0 reads (its pointer is a plain load in game.dll; the Lua: 1 read)
  *   the ship (a manager without instances)       1 read (the Lua: 2)
  *   a mission, nothing overheated                2 reads (the Lua: 3)
