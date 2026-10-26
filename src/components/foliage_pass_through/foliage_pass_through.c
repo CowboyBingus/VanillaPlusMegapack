@@ -30,7 +30,6 @@
 
 #define BUFFER_RVA 0x348E2F8u  /* the loaded generated_projectile_settings buffer (loader 0x11EC5A0) */
 #define LIST_SITE 0x75A391u    /* mov rax, qword ptr [rcx + rax*8 + 0x37C7670]: the list's reader in 0x75A0D0 */
-#define LIST_SITE_CODE "48 8B 84 C1"
 #define VANILLA_LIST 0x37C7670u
 #define SLOTS 351u             /* the game's types 0 .. 350 */
 #define ROW_SIZE 0x110u        /* ProjectileInfo */
@@ -52,7 +51,9 @@ static struct
     int projectiles_ready; /* HF_EVENT_PROJECTILES_READY came first: CodeReady takes it up */
 } s;
 
-static const VpmCodePin kPins[] = {{LIST_SITE, LIST_SITE_CODE, "the projectile list's reader", 0}};
+static const VpmCodePin kPins[] = {
+    {LIST_SITE, "48 8B 84 C1", "the projectile list's reader", 0},
+};
 
 static uint64_t g_list[SLOTS]; /* the list as read at the apply (static: 2808 bytes, off the game thread's stack) */
 

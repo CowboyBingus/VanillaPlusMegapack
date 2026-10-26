@@ -82,7 +82,6 @@
 #define HOLDER_MANAGER 0x3326DC0u   /* game.dll: the weapon holders; +32 weapon id -> row, +64 its 48-byte rows */
 #define MISSION_RECORD 0x33266A0u   /* game.dll: the mission record (68 bytes; the loader's frame-state definition) */
 #define FIRE_MODE_SETTER 0x755F90u  /* game.dll: the fire-mode setter, the Lua's build fingerprint */
-#define FIRE_MODE_CODE "48 89 4C 24 08 53 55 56 57 41 57 48 83 EC 20"
 #define ARC_ENTITY HF_ENTITY_ARC3_ARC_THROWER /* the Lua's ARC_RESOURCE, '\xe6\x06\x73\x0f\xd5\x9c\xde\x96' */
 #define ARC_LOW ((uint32_t)ARC_ENTITY)
 #define ARC_HIGH ((uint32_t)(ARC_ENTITY >> 32))
@@ -652,7 +651,9 @@ static void Tick(VpmComponent* self, float dt)
 /* ---- lifecycle ----------------------------------------------------------------------------------------------------- */
 
 /* The fire-mode setter's code, checked first (the Lua's build fingerprint). */
-static const VpmCodePin kPins[] = {{FIRE_MODE_SETTER, FIRE_MODE_CODE, "the fire-mode setter", 0}};
+static const VpmCodePin kPins[] = {
+    {FIRE_MODE_SETTER, "48 89 4C 24 08 53 55 56 57 41 57 48 83 EC 20", "the fire-mode setter", 0},
+};
 
 /* The record, once the setter's code has been checked; again when the game reloads its entity data (the record may have
  * moved; HellForge renews the live edit). */

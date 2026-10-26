@@ -67,7 +67,6 @@
 #define SPAN (GROUPS_RVA + GROUPS * GROUP_SIZE - TIERS_RVA) /* both tables and the 76 bytes between them */
 #define AT_GROUPS (GROUPS_RVA - TIERS_RVA)
 #define LIST_SITE 0x17EF922u    /* mov r14, qword ptr [rcx + rax*8 + 0x37CB600]: the arcade widget's row lookup */
-#define LIST_SITE_CODE "4C 8B B4 C1"
 #define VANILLA_LIST 0x37CB600u /* StratagemInfo pointers by stratagem type, 8 bytes each */
 #define TYPES 150u              /* StratagemType values of this build, None (0) included */
 #define PROBE 124u              /* Reinforce: once its settings pointer is set, the stratagem settings are loaded */
@@ -356,7 +355,9 @@ static void Wait(VpmComponent* self, float dt)
 }
 
 /* The reader's code, as vpm_when_code_ready checks it before the attempt. */
-static const VpmCodePin kPins[] = {{LIST_SITE, LIST_SITE_CODE, "the stratagem list's reader", 0}};
+static const VpmCodePin kPins[] = {
+    {LIST_SITE, "4C 8B B4 C1", "the stratagem list's reader", 0},
+};
 
 /* The reader's bytes read as shipped (at HF_EVENT_GAME_LOADED, or on the frame they first do): the attempt. */
 static void CodeReady(VpmComponent* self, HfEvent event)

@@ -68,7 +68,6 @@
 #define AT_FLAGS 0x170u              /* beacon_flags */
 #define OWNED NAVIGATION_OWNED_BIT
 #define LIST_SITE 0x62F087u          /* mov rax, qword ptr [rcx + rdx*8 + 0x37CB600]: a reader of the list */
-#define LIST_SITE_CODE "48 8B 84 D1"
 #define VANILLA_LIST 0x37CB600u
 #define SLOTS 150u                   /* the game's list: types 0 .. 149 */
 #define MOVED_SLOTS 198u             /* HellForge's moved list: 150, and room for 48 that mods add */
@@ -102,7 +101,9 @@ static uint8_t g_source[DATA_SIZE]; /* the settings as checked, then as they sho
 static uint8_t g_now[DATA_SIZE];    /* a later read of them */
 static uint64_t g_list[MOVED_SLOTS];
 static const HfField kFlags = HF_FIELD(StratagemSettings, beacon_flags);
-static const VpmCodePin kPins[] = {{LIST_SITE, LIST_SITE_CODE, "the stratagem list's reader", 0}};
+static const VpmCodePin kPins[] = {
+    {LIST_SITE, "48 8B 84 D1", "the stratagem list's reader", 0},
+};
 
 /* api.pointer: a value that can be a user-mode pointer, else 0. */
 static uintptr_t Pointer(uint64_t value) { return vpm_plausible((uintptr_t)value) ? (uintptr_t)value : 0; }
