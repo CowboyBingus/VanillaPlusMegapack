@@ -156,7 +156,7 @@ int myc_addon_start_job(uint32_t frame, int target, const MycRequest* given)
     g.job_frame = frame;
     if (myc_worker_give(&g.worker, MYC_TASK_JOB, r)) return 1;
     g.job = 0;
-    vpm_fail(g.self, "the worker thread could not start");
+    vpm_fail(g.self, "the worker thread could not start (error %lu)", g.worker.start_error);
     return 0;
 }
 

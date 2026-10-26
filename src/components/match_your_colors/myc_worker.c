@@ -16,6 +16,7 @@
  * a fault ends the task, the worker takes no further task, and the game thread stops the component at its next look
  * at the busy flag (myc_worker_busy). stop() then runs on the game thread as for any other stop: the worker is idle,
  * the game's objects get their originals back. */
+#include <stdio.h>
 #include <windows.h>
 #include "myc_addon.h"
 
@@ -73,9 +74,10 @@ static int MycWorkerStart(MycWorker* w)
 {
     if (w->thread != NULL) return 1;
     w->wake = CreateEventW(NULL, FALSE, FALSE, NULL);
-    if (w->wake == NULL) return 0;
+    if (w->wake == NULL) { w->start_error = GetLastError(); return 0; } /* lint-ok: C4 once, if the first task's event cannot be made */
     w->thread = CreateThread(NULL, 0, MycWorkerMain, w, 0, &w->thread_id); /* lint-ok: C6 the jobs' worker (header) */
     if (w->thread != NULL) return 1;
+    w->start_error = GetLastError(); /* lint-ok: C4 once, if the first task's thread cannot be made */
     CloseHandle(w->wake); /* lint-ok: C4 once, if the first task's thread cannot be made */
     w->wake = NULL;
     return 0;
@@ -93,7 +95,9 @@ int myc_worker_give(MycWorker* w, int task, MycRequest* request)
     }
     if (!MycWorkerStart(w)) return 0;
     InterlockedExchange(&w->busy, 1);
+    w->tasks++;
     if (SetEvent(w->wake)) return 1; /* lint-ok: C4 one call per task, on the frame that gives it */
+    w->start_error = GetLastError(); /* lint-ok: C4 a failed wake, on the frame that gives the task */
     InterlockedExchange(&w->busy, 0);
     return 0;
 }
@@ -105,12 +109,41 @@ int myc_worker_stop(MycWorker* w, unsigned long timeout_ms)
     if (w->thread == NULL) return 1;
     SetEvent(w->wake);
     DWORD waited = WaitForSingleObject(w->thread, timeout_ms);
-    if (waited != WAIT_OBJECT_0) return 0; /* still in a task: its memory stays (it is never freed) */
+    if (waited != WAIT_OBJECT_0) /* still in a task: its memory stays (it is never freed) */
+    {
+        w->stuck = 1;
+        return 0;
+    }
     CloseHandle(w->thread);
     CloseHandle(w->wake);
     w->thread = NULL;
     w->wake = NULL;
     return 1;
+}
+
+static const char* TaskName(int task)
+{
+    return task == MYC_TASK_JOB ? "a job" : task == MYC_TASK_SAVE ? "the cache save" : task == MYC_TASK_CLOSE ? "the reader's close" : "a task";
+}
+
+static const char* WorkerState(const MycWorker* w)
+{
+    if (w->stuck) return "did not end when stopped";
+    if (w->faulted) return "faulted";
+    if (w->thread == NULL) return "not started";
+    return w->busy ? "busy" : w->quit ? "stopped" : "idle";
+}
+
+/* Read on the game thread: busy, faulted and quit are interlocked; the task and the count are the game thread's own; the
+ * last task's time only while the worker is idle. */
+void myc_worker_describe(const MycWorker* w, char* out, size_t size)
+{
+    char last[96] = "";
+    if (w->busy || w->stuck) snprintf(last, sizeof last, ", running %s", TaskName(w->task));
+    else if (w->tasks > 0) snprintf(last, sizeof last, ", the last (%s) took %.2f s", TaskName(w->task), w->seconds);
+    char error[48] = "";
+    if (w->start_error != 0) snprintf(error, sizeof error, "; last start error %lu", w->start_error);
+    snprintf(out, size, "worker %s, %lu tasks this session%s%s", WorkerState(w), w->tasks, last, error);
 }
 
 int myc_worker_busy(MycWorker* w)

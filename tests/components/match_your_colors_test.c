@@ -853,6 +853,11 @@ static void JobsRunOnTheWorkerThread(void)
         Frames(1);
     }
     CHECK_EQ(Recolored(0x101, ARMOR_LUT), 1);
+    /* the core's summary at a mission's end has the worker's state */
+    HfStateEvent end = {{sizeof end, HF_ON_MISSION_END, 1}, HF_STATE_MISSION, HF_STATE_SHIP};
+    fake_emit(&end.info);
+    CHECK_LOG("[core]   Match Your Colors: worker ");
+    CHECK_LOG(" tasks this session");
     vpm_fail(fake_component(0), "test stop");
     CHECK(myc_g.worker.thread == NULL); /* joined */
     CHECK_EQ(Recolored(0x101, ARMOR_LUT), 0);
@@ -889,6 +894,7 @@ static void AFaultOnTheWorkerStopsItOnTheGameThread(void)
     CHECK(!vpm_running(fake_component(0)));
     CHECK(C.thread != 0 && C.thread != GetCurrentThreadId());
     CHECK_LOG("[Match Your Colors] disabled: fault on the worker thread: fault 0xC0000005");
+    CHECK_LOG(" in its worker thread");
     CHECK_EQ(fake_log_count("disabled:"), 1);
     CHECK_LOG("[Match Your Colors] Stopped (fault on the worker thread: fault 0xC0000005");
     CHECK_EQ(Recolored(0x100, HELMET_LUT), 0); /* the originals back, from the game thread */
