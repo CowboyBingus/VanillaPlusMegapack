@@ -712,6 +712,7 @@ static void FirstVisitRetainsAndLeases(void)
     CHECK_EQ(apc_images_stats()->gated_ticks >= 30, 1);
     CHECK_EQ(apc_images_stats()->retained, 1);
     CHECK_EQ(e.creates, 1);
+    CHECK_NO_LOG("mod content");             /* no row past the bounds: the 1:1 path, nothing skipped */
     /* A step that cannot reuse its snapshot (the busy flag changed; the image tick stays gated): the asset snapshot (13:
      * the lease table's owner 2, the stack, the UI world and busy flag, the manager, the catalogue key 4, the dependency
      * identity 2, the preview ring) and the valid-lease check (3). */
@@ -1139,29 +1140,184 @@ static void ProfileChecks(void)
     CHECK_LOG("; 2 learned items");
 }
 
-/* HellForge content past the Lua's bounds: a loadout package record of its own (index 541 and up: add_entity with
- * own_all) fails the catalogue as the Lua's check did; the asset step waits and says why, once. */
-static void HellForgeRecordsPastTheBounds(void)
+/* ---- HellForge's records for mod content, past the Lua's bounds ------------------------------------------------- */
+
+#define VANILLA_WEAPON 0x0BADC0DEull           /* a weapon with a vanilla loadout package record (0) */
+#define VANILLA_PACKAGE 0xB000000000000000ull
+#define MOD_WEAPON 0x80932FA0ED6901D3ull       /* HellForge's copy with records of its own (add_entity, own_all) */
+#define MOD_WEAPON_2 0x80932FA0ED6901D4ull
+
+/* Request k shows a weapon (kind 0) with this entity id. */
+static void WeaponItem(int k, uint64_t weapon)
+{
+    uint8_t* item = ItemAt(k / VISIBLE, k % VISIBLE);
+    Put64(item + 24, weapon);
+    Put32(item + 100, 0);
+}
+
+/* A loadout package index row: the weapon and the record it names. */
+static void LoadoutRow(uint8_t* table, int row, uint64_t weapon, uint32_t record)
+{
+    Put64(table + row * 16, weapon);
+    Put32(table + row * 16 + 8, record);
+}
+
+/* A weapon configuration index row. */
+static void ConfigurationRow(uint8_t* definitions, int row, uint64_t weapon, uint32_t index)
+{
+    Put64(definitions + row * 16, weapon);
+    Put32(definitions + row * 16 + 8, index);
+}
+
+/* The leases one visit takes: items 2..17 are armor (their kits' packages), item 0 the vanilla weapon's package. */
+static int VisitLeases(void)
+{
+    int n = LeaseCount(VANILLA_PACKAGE);
+    for (int k = 2; k < ITEMS; k++) n += (int)LeaseCount(Package(k));
+    return n;
+}
+
+/* Creates and destroys over a second, from now. */
+static void NoChurn(void)
+{
+    int creates = e.creates, destroys = e.destroys;
+    Frames(60);
+    CHECK_EQ(e.creates - creates, 0);
+    CHECK_EQ(e.destroys - destroys, 0);
+}
+
+/* Vanilla rows with HellForge's rows beside them (the Lua failed the whole catalogue): the vanilla weapon and the armor
+ * keep their leases and every tile its cached image, the mod weapon gets no lease (as an unknown item: the game loads it
+ * itself), the skip is logged once, nothing churns and the per-frame counts are the vanilla ones. */
+static void OverBoundRowsSkipped(void)
 {
     BuildWorld();
     ForgetProfile();
-    Put64(w.weapons, 0x80932FA0ED6901D3ull);
-    Put32(w.weapons + 8, 541);
+    WeaponItem(0, VANILLA_WEAPON);
+    WeaponItem(1, MOD_WEAPON);
+    LoadoutRow(w.weapons, 0, VANILLA_WEAPON, 0);
+    Put64(w.weapons + 17280 + 8, VANILLA_PACKAGE);
+    LoadoutRow(w.weapons, 1, MOD_WEAPON, 541);
+    ConfigurationRow(w.definitions, 0, VANILLA_WEAPON, 0);
+    ConfigurationRow(w.definitions, 1, MOD_WEAPON, 325);
     Boot();
     Frames(12);
     Top(5, 1);
     Frames(60);
-    CHECK_EQ(strcmp(vpm_status(C()), "waiting_for_ui"), 0);
-    CHECK_LOG("[Armory Preview Cache] waiting for the UI: Weapon record bound changed");
+    CHECK_EQ(strcmp(vpm_status(C()), "resident"), 0);
+    CHECK_EQ(LeaseCount(VANILLA_PACKAGE), 1);
+    CHECK_EQ(VisitLeases(), ITEMS - 1);
+    CHECK_EQ(LeaseRowCount(), ITEMS - 1);    /* nothing for the mod weapon */
+    CHECK(apc_policy()->unresolved > 0);
+    CHECK_EQ(fake_log_count("[Armory Preview Cache] mod content: 1 loadout package records and 1 weapon configurations past the Lua's bounds"), 1);
+    CHECK_NO_LOG("waiting for the UI");
+    CHECK_EQ(e.creates, 1);
+    CHECK_EQ(e.destroys, 0);
+    CHECK_EQ(Bound(P(w.atlas)), VISIBLE);    /* the mod weapon's tile too: the image side never reads the catalogues */
+    NoChurn();
+    int plain = 0, step = 0;
+    for (int i = 0; i < 30; i++)
+    {
+        FakeCounts c = Frame();
+        plain += c.read == 17 && e.polls == 0;
+        step += c.read == 19 && e.polls == 1;
+    }
+    CHECK_EQ(plain, 20);
+    CHECK_EQ(step, 10);
+    Top(3, 1);
+    Frames(6);
     CHECK_EQ(LeaseRowCount(), 0);
-    CHECK(vpm_running(C()));
-    const char* log = fake_log_text();
-    const char* first = strstr(log, "waiting for the UI");
-    CHECK(first != NULL && strstr(first + 1, "waiting for the UI") == NULL);
-    /* As in the Lua, the failed snapshot's cleanup also hands every image back: the next frame retains the request
-     * again, so an atlas is created and destroyed every 50 ms while that content is loaded. */
-    CHECK_EQ(e.creates, 21);
-    CHECK_EQ(e.destroys, 20);
+    CHECK_EQ(e.releases, ITEMS - 1);
+    CHECK_EQ(fake_log_count("mod content:"), 1);
+}
+
+/* Only HellForge's rows (no vanilla weapon at all): nothing fails, the mod weapons get no lease, the armor does. */
+static void OnlyOverBoundRows(void)
+{
+    BuildWorld();
+    ForgetProfile();
+    WeaponItem(0, MOD_WEAPON);
+    WeaponItem(1, MOD_WEAPON_2);
+    LoadoutRow(w.weapons, 0, MOD_WEAPON, 541);
+    LoadoutRow(w.weapons, 7, MOD_WEAPON_2, 600);
+    ConfigurationRow(w.definitions, 3, MOD_WEAPON, 400);
+    Boot();
+    Frames(12);
+    Top(5, 1);
+    Frames(60);
+    CHECK_EQ(strcmp(vpm_status(C()), "resident"), 0);
+    CHECK_EQ(LeaseRowCount(), ITEMS - 2);
+    CHECK_EQ(fake_log_count("[Armory Preview Cache] mod content: 2 loadout package records and 1 weapon configurations"), 1);
+    CHECK_EQ(e.creates, 1);
+    CHECK_EQ(Bound(P(w.atlas)), VISIBLE);
+    NoChurn();
+}
+
+/* HellForge loading its data again mid-session (new copies of the tables, with a mod's record past the bounds): the
+ * catalogues are rebuilt, the new rows skipped and logged once with the new count; the vanilla leases stay, nothing is
+ * released or taken again for them. */
+static void RowBecomesOverBound(void)
+{
+    BuildWorld();
+    ForgetProfile();
+    WeaponItem(0, VANILLA_WEAPON);
+    WeaponItem(1, MOD_WEAPON);                /* not in the tables yet: an unknown item */
+    LoadoutRow(w.weapons, 0, VANILLA_WEAPON, 0);
+    Put64(w.weapons + 17280 + 8, VANILLA_PACKAGE);
+    ConfigurationRow(w.definitions, 0, VANILLA_WEAPON, 0);
+    Boot();
+    Frames(12);
+    Top(5, 1);
+    Frames(60);
+    CHECK_EQ(VisitLeases(), ITEMS - 1);
+    CHECK_NO_LOG("mod content");
+    int acquires = e.acquires, releases = e.releases;
+    uint8_t* weapons = fake_heap(1080 * 16 + 540 * 32);
+    uint8_t* definitions = fake_heap(10368 + 46600);
+    memcpy(weapons, w.weapons, 1080 * 16 + 540 * 32);
+    memcpy(definitions, w.definitions, 10368 + 46600);
+    LoadoutRow(weapons, 1, MOD_WEAPON, 541);
+    ConfigurationRow(definitions, 1, MOD_WEAPON, 325);
+    Put64(w.database + 0xF12558, P(weapons));
+    Put64(w.database + 0xF12E10, P(definitions));
+    Put32(w.ui + 15892, 1);                   /* something the policy reads changes, so the next step reads afresh */
+    Frames(6);
+    Put32(w.ui + 15892, 0);
+    Frames(120);
+    CHECK_EQ(fake_log_count("[Armory Preview Cache] mod content: 1 loadout package records and 1 weapon configurations"), 1);
+    CHECK_EQ(fake_log_count("mod content:"), 1);
+    CHECK_EQ(VisitLeases(), ITEMS - 1);
+    CHECK_EQ(LeaseRowCount(), ITEMS - 1);
+    CHECK_EQ(e.acquires, acquires);
+    CHECK_EQ(e.releases, releases);
+    CHECK_EQ(strcmp(vpm_status(C()), "resident"), 0);
+}
+
+/* A check the Lua keeps fails mid-visit (the kit catalogue past its bound): the step waits ("waiting_for_ui", logged
+ * once) and releases the leases as the Lua did, but the retained images stay: no atlas is created or destroyed while it
+ * waits (the Lua: one of each every 50 ms). It resumes when the catalogue is back. */
+static void FailedSnapshotKeepsImages(void)
+{
+    Visit();
+    CHECK_EQ(LeaseRowCount(), ITEMS);
+    CHECK_EQ(e.creates, 1);
+    Put32(w.kits + 8, 2000);
+    Put32(w.ui + 15892, 1);                   /* the catalogues are static data to the gate: a step reads afresh when */
+    Frames(6);                                /* something the policy reads changes (here the busy flag) */
+    CHECK_EQ(strcmp(vpm_status(C()), "waiting_for_ui"), 0);
+    CHECK_EQ(LeaseRowCount(), 0);
+    NoChurn();
+    NoChurn();
+    CHECK_EQ(e.creates, 1);
+    CHECK_EQ(e.destroys, 0);
+    CHECK_EQ(Bound(P(w.atlas)), VISIBLE);
+    CHECK_EQ(apc_images_texture_count(), 1);
+    CHECK_EQ(fake_log_count("[Armory Preview Cache] waiting for the UI: Catalogue bounds changed"), 1);
+    Put32(w.kits + 8, ITEMS);
+    Frames(30);
+    CHECK_EQ(LeaseRowCount(), ITEMS);
+    CHECK(strcmp(vpm_status(C()), "waiting_for_ui") != 0);
+    CHECK_EQ(e.creates, 1);
 }
 
 /* The pre-select (weapon mode): its block and three widgets' record pointers replace the grid block: 10 reads per
@@ -1486,6 +1642,51 @@ static void WeaponDependencies(void)
     CHECK_EQ(LeaseCount(0xB000000000000000ull), 1);
     CHECK_EQ(LeaseCount(packageOf), 1);
     CHECK_EQ(apc_policy()->dependency_acquires, 1);
+    CHECK_NO_LOG("mod content");
+}
+
+/* The same with a mod weapon's configuration past the bound beside it (and that weapon queued for a preview): the vanilla
+ * weapon keeps its dependency, the mod weapon has no defaults and is not a known weapon, the skip is logged once. */
+static void DependenciesBesideOverBound(void)
+{
+    BuildWorld();
+    ForgetProfile();
+    const uint64_t weapon = 0x0BADC0DE, attachment = 0x4003, packageOf = 0xB000000000000001ull;
+    WeaponItem(0, weapon);
+    WeaponItem(1, MOD_WEAPON);
+    LoadoutRow(w.weapons, 0, weapon, 0);
+    Put64(w.weapons + 17280 + 8, 0xB000000000000000ull);
+    ConfigurationRow(w.definitions, 0, weapon, 0);
+    ConfigurationRow(w.definitions, 1, MOD_WEAPON, 325);
+    uint8_t* config = w.definitions + 10368;
+    Put32(config, 1);
+    Put32(config + 4, 77);
+    uint8_t* row = fake_heap(88);
+    uint32_t* kindList = fake_heap(4);
+    kindList[0] = 1;
+    Put32(row + 8, 77);
+    Put64(row + 32, attachment);
+    Put64(row + 48, P(kindList));
+    Put32(row + 56, 1);
+    Put64(w.groupHeader, P(row));
+    Put32(w.groupHeader + 8, 1);
+    Put64(w.mapRows + (attachment % 16) * 16, attachment);
+    Put64(w.mapRows + (attachment % 16) * 16 + 8, packageOf);
+    uint8_t* job = w.preview + 50456;        /* the mod weapon queued with the attachment: not a known weapon, unread */
+    Put32(w.preview + 50452, 1);
+    Put64(job + 64, MOD_WEAPON);
+    Put32(job + 80, 1);
+    Put64(job + 88, attachment);
+    Boot();
+    Frames(12);
+    Top(5, 1);
+    Frames(40);
+    CHECK_EQ(LeaseCount(0xB000000000000000ull), 1);
+    CHECK_EQ(LeaseCount(packageOf), 1);
+    CHECK_EQ(apc_policy()->dependency_acquires, 1);
+    CHECK_EQ(LeaseRowCount(), ITEMS);         /* the vanilla weapon, its attachment, 16 armor; nothing for the mod's */
+    CHECK_EQ(fake_log_count("[Armory Preview Cache] mod content: 0 loadout package records and 1 weapon configurations"), 1);
+    CHECK_EQ(strcmp(vpm_status(C()), "resident"), 0);
 }
 
 int main(void)
@@ -1517,7 +1718,10 @@ int main(void)
     RUN(OwnershipChanges);
     RUN(StartupPrewarm);
     RUN(ProfileChecks);
-    RUN(HellForgeRecordsPastTheBounds);
+    RUN(OverBoundRowsSkipped);
+    RUN(OnlyOverBoundRows);
+    RUN(RowBecomesOverBound);
+    RUN(FailedSnapshotKeepsImages);
     RUN(PreselectReads);
     RUN(PreparingGridReads);
     RUN(OnceOnlyCosts);
@@ -1529,5 +1733,6 @@ int main(void)
     RUN(BriefingNeverIdle);
     RUN(BriefingLoadout);
     RUN(WeaponDependencies);
+    RUN(DependenciesBesideOverBound);
     TEST_END();
 }

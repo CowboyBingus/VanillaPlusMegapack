@@ -8,10 +8,14 @@
  *
  * A thumbnail item resolves to its package through the game's catalogues: a weapon (kinds 0, 1) through its loadout
  * package record (component table 28 of the entity state, 1080 index rows and 540 records), a helmet, armor or cape
- * (kinds 2..4) through the kit presets and kits. The bounds the Lua checked stay: a catalogue outside them fails the
- * snapshot, as in the Lua. HellForge content can reach them (a record of its own in table 28 sits past the vanilla 541:
- * add_entity with own_all or model_from, or a weapon naming LoadoutPackageComponentData), and then the asset step waits
- * ("waiting_for_ui") while that content is loaded, as the Lua would. */
+ * (kinds 2..4) through the kit presets and kits. The bounds the Lua checked stay, with one change for HellForge content:
+ * an index row naming a record past the Lua's 540 is skipped, not a failure of the whole catalogue (the Lua's
+ * "Weapon record bound changed"). Such rows are HellForge's own records for mod content (its copy of table 28 keeps
+ * every vanilla record and puts a mod's after them, from 541: add_entity with own_all or model_from, a weapon naming
+ * LoadoutPackageComponentData); the Lua stopped every lease and image while one was loaded. Their items now resolve to
+ * no package, as items the component does not know: the game loads them as it does without the component, and every
+ * vanilla item keeps its lease. apc_native_skipped counts them (the log says so once per count). Every other bound
+ * fails the snapshot as in the Lua. */
 #include "apc.h"
 
 #define LEASE_ROWS 1024
@@ -55,6 +59,7 @@ static struct
     LeaseFn acquire, release;
     int has_catalog;
     uint64_t catalog[6];                 /* kits, their pointers and count, presets and count, weapon table */
+    uint32_t skipped;                    /* index rows past the Lua's bound in the last catalogue built */
 } g;
 
 static uint32_t g_leaseRows[LEASE_ROWS * 4];   /* the lease table's rows (16 bytes: identifier, 64-bit count) */
@@ -236,22 +241,26 @@ static int Presets(uintptr_t po, uint32_t pc)
     return 1;
 }
 
-/* The loadout package records: 1080 index rows {entity, record}, then 540 records with the package at +8. */
-static int Weapons(uintptr_t wt)
+/* The loadout package records: 1080 index rows {entity, record}, then 540 records with the package at +8. A row naming a
+ * record past them (HellForge's own record for mod content) is skipped: its entity gets no package from us. */
+static int Weapons(uintptr_t wt, uint32_t* skipped)
 {
     static uint8_t records[540 * 32];
+    *skipped = 0;
     if (!Read(wt, g_buffer, 1080 * 16) || !Read(wt + 17280, records, sizeof records)) return 0;
     for (uint32_t i = 0; i < 1080; i++)
     {
         uint64_t id = ApcU64(g_buffer, i * 16);
-        if (id == 0) continue;
         uint32_t index = ApcU32(g_buffer, i * 16 + 8);
-        if (index >= 540) return apc_fail("Weapon record bound changed");
+        if (id == 0) continue;
+        if (index >= 540) { (*skipped)++; continue; }
         uint64_t package = ApcU64(records, index * 32 + 8);
         if (package != 0) (void)apc_map_put(&g_weapons, id, package); /* 2048 slots for 1080 rows */
     }
     return 1;
 }
+
+uint32_t apc_native_skipped(void) { return g.skipped; }
 
 /* Rebuilt when the catalogues' identity changes. A rebuild that fails leaves none (the next one builds them again; the
  * Lua kept the half-built tables). */
@@ -268,7 +277,9 @@ static int Catalog(void)
     apc_map_clear(&g_kits);
     apc_map_clear(&g_presets);
     apc_map_clear(&g_weapons);
-    if (!Kits(kp, kc) || !Presets(po, pc) || !Weapons(wt)) return 0;
+    uint32_t skipped = 0;
+    if (!Kits(kp, kc) || !Presets(po, pc) || !Weapons(wt, &skipped)) return 0;
+    g.skipped = skipped;
     memcpy(g.catalog, key, sizeof key);
     g.has_catalog = 1;
     return 1;
