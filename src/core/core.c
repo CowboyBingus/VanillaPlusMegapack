@@ -111,6 +111,8 @@ int vpm_fail(VpmComponent* self, const char* format, ...)
     return 1;
 }
 
+int vpm_guarded(VpmComponent* self, void (*fn)(void*), void* arg) { return vpm_core_guarded(self, fn, arg); }
+
 int vpm_core_guarded(VpmComponent* component, void (*fn)(void*), void* arg)
 {
     VpmFault fault;
@@ -379,6 +381,7 @@ void vpm_core_reset(void)
 
 static VpmUser32 g_user32;
 const VpmUser32* vpm_user32(void) { return &g_user32; }
+void vpm_user32_set(const VpmUser32* table) { g_user32 = *table; }
 
 void vpm_user32_init(void)
 {

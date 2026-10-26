@@ -280,6 +280,10 @@ static void* FakeModuleExport(const char* module, const char* name)
 
 static void FakeWritableQuery(void) { g_counts.writable++; }
 
+/* vpm_read in tests: the read of the API the core was started with (the fake's, or a test's copy of it wrapping it), so
+ * the fake's regions, holes and counts apply. */
+static int FakeCoreRead(uintptr_t address, void* out, size_t size) { return vpm_core_hf()->read(address, out, size) == 0; }
+
 /* ---- logging ----------------------------------------------------------------------------------------------------- */
 
 static void FakeLog(HfMod* mod, const char* format, ...)
@@ -355,9 +359,25 @@ static int FakeOnGameThread(HfMod* mod, HfTickCallback callback, void* user)
     return 1;
 }
 
+static void (*g_afterTick)(float dt);
+void fake_after_tick(void (*fn)(float dt)) { g_afterTick = fn; }
+
 void fake_frames(int n, float dt)
 {
-    for (int i = 0; i < n && g_tick != NULL; i++) g_tick(fake_mod(), dt, g_tickUser);
+    for (int i = 0; i < n && g_tick != NULL; i++)
+    {
+        g_tick(fake_mod(), dt, g_tickUser);
+        if (g_afterTick != NULL) g_afterTick(dt);
+    }
+}
+
+void fake_user32(const VpmUser32* table) { vpm_user32_set(table); }
+
+void* fake_hook_detour(uintptr_t target)
+{
+    for (int i = g_hookCount - 1; i >= 0; i--)
+        if (g_hooks[i].target == target) return g_hooks[i].detour;
+    return NULL;
 }
 
 static int FakeSubscribe(HfMod* mod, uint32_t kind, HfListener listener, void* user, int32_t priority)
@@ -468,7 +488,9 @@ static int FakeHookEx(HfMod* mod, uintptr_t target, void* detour, void** origina
     g_counts.hook++;
     if (g_hookCount >= MAX_HOOKS) return 1;
     g_hooks[g_hookCount++] = (FakeHook){target, detour, priority};
-    *original = NULL;
+    /* The function itself goes on, unless the test named another original: a stand-in's jump reaches the test's
+     * function, as HellForge's chain would reach the game's. */
+    *original = (void*)target;
     for (int i = 0; i < g_originalCount; i++)
         if (g_originals[i].target == target) *original = g_originals[i].original;
     return 0;
@@ -653,6 +675,7 @@ void fake_setup(void)
     g_loadCount = g_listenerCount = g_liveCount = g_hookCount = g_originalCount = g_rowCount = g_modCount = 0;
     g_tick = NULL;
     g_tickUser = NULL;
+    g_afterTick = NULL;
     g_state = HF_STATE_NONE;
     snprintf(g_build, sizeof g_build, "25480438");
     memset(&g_counts, 0, sizeof g_counts);
@@ -661,7 +684,7 @@ void fake_setup(void)
     g_modStruct.api = &g_api;
     g_standInCount = g_exportCount = 0;
     g_afterFn = NULL;
-    static const VpmTestHooks hooks = {FakeWritableQuery, FakeModuleExport};
+    static const VpmTestHooks hooks = {FakeWritableQuery, FakeModuleExport, FakeCoreRead};
     vpm_core_test_hooks(&hooks);
     vpm_core_reset();
     DeleteFileW(L"vpm-test-settings.ini");

@@ -44,6 +44,8 @@ typedef struct VpmFault
 void vpm_guard_install(void);
 /* Runs fn(arg) under the guard: 0, or the code of the fault that ended it (described in *fault). */
 DWORD vpm_guard_call(void (*fn)(void*), void* arg, VpmFault* fault);
+/* Plain loads under a guard of their own (vpm_read): 1 read, 0 unreadable, -1 no guard installed. */
+int vpm_guard_copy(void* out, uintptr_t from, size_t size);
 void vpm_fault_text(const VpmFault* fault, char* out, size_t size);
 uintptr_t vpm_self_base(void);
 
@@ -73,7 +75,10 @@ typedef struct VpmTestHooks
 {
     void (*writable_query)(void);                                 /* called before each VirtualQuery of vpm_writable */
     void* (*module_export)(const char* module, const char* name); /* answers vpm_module_export */
+    int (*read)(uintptr_t address, void* out, size_t size);       /* answers vpm_read's plausible reads: 1 read, 0 not */
 } VpmTestHooks;
+/* Tests: the user32 functions vpm_user32() answers. */
+void vpm_user32_set(const VpmUser32* table);
 void vpm_core_test_hooks(const VpmTestHooks* hooks);
 
 /* The pack's entry with a given component list: hellforge_mod_init passes src/components.c's; the tests pass their

@@ -99,7 +99,9 @@ uint64_t vpm_game_u64(uint32_t rva);
 uint32_t vpm_game_u32(uint32_t rva);
 uint64_t vpm_exe_u64(uint32_t rva);
 
-/* Heap reads through HfApi.read: 1 read, 0 not (bad pointer, unmapped page). */
+/* Heap reads: 1 read, 0 not (outside the user-mode range, unmapped, no-access or guard page). Plain loads under a guard of
+ * their own: a bad pointer fails the read, never the game, and stops nothing; about 25 ns where the Lua's
+ * ReadProcessMemory cost 1-2 us in game. */
 int vpm_read(uintptr_t address, void* out, size_t size);
 int vpm_read_u8(uintptr_t address, uint8_t* out);
 int vpm_read_u16(uintptr_t address, uint16_t* out);
@@ -130,6 +132,22 @@ int vpm_game_code_matches(uint32_t rva, const char* pattern);
  * {u32 key, u32 index}, probed linearly from key * multiplier (at most 64 probes, a power-of-two capacity no larger than
  * limit). 1 with *index set (never 0xFFFFFFFF), 0 when the key is absent or the table unreadable. Reads: 1 + probes. */
 int vpm_lookup(uintptr_t header, uint32_t key, uint32_t limit, uint32_t* index);
+
+/* ---- hooks (detours) -------------------------------------------------------------------------------------------- *
+ * vpm_hook detours game.dll + rva (vpm_hook_exe: the exe + rva) to detour, after checking the function's bytes as the
+ * game shipped them (HfApi.code_matches: another mod's hook does not hide them) against `shipped`, an IDA-style pattern
+ * of its first instructions. *original receives what the detour calls to go on (HfApi.hook_ex: the next hook in the
+ * function's chain, or the function). 1 hooked, 0 not (the log says why). Call it from start() for the exe, from
+ * HF_EVENT_GAME_LOADED or later for game.dll. Hooks stay for the session, so:
+ *   - a detour checks vpm_running(self) first and, when the component is stopped, only calls *original;
+ *   - a detour runs on the game's stack, outside the core's guard: its own work goes in a function run with
+ *     vpm_guarded, and *original is called outside it;
+ *   - mark it `lint: per-frame` (it runs on every call of the game's function). */
+int vpm_hook(VpmComponent* self, uint32_t rva, const char* shipped, void* detour, void** original);
+int vpm_hook_exe(VpmComponent* self, uint32_t rva, const char* shipped, void* detour, void** original);
+/* Runs fn(arg) under the crash guard for the component: 1 when it ran to its end, 0 after a fault (the component is then
+ * stopped and its stop() run). For a detour's own work. */
+int vpm_guarded(VpmComponent* self, void (*fn)(void*), void* arg);
 
 /* ---- the local player (Arc Thrower Revamped v1.7.1's resolution) ------------------------------------------------- */
 

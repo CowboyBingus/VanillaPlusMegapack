@@ -5,6 +5,10 @@
 static uintptr_t g_game, g_exe;
 static size_t g_gameSize, g_exeSize;
 
+/* The tests' stand-ins (vpm_core_test_hooks): none in the pack's DLL. */
+static VpmTestHooks g_hooks;
+void vpm_core_test_hooks(const VpmTestHooks* hooks) { g_hooks = hooks != NULL ? *hooks : (VpmTestHooks){0}; }
+
 uintptr_t vpm_game(void) { return g_game; }
 size_t vpm_game_size(void) { return g_gameSize; }
 uintptr_t vpm_exe(void) { return g_exe; }
@@ -50,11 +54,17 @@ uint64_t vpm_exe_u64(uint32_t rva)
     return vpm_exe_read(rva, &value, sizeof value) ? value : 0;
 }
 
-/* The heap read every component uses: ReadProcessMemory, as the Lua api.read was. Components gate it (each header states
- * its reads per frame, and its test pins them). */
+/* The heap read every component uses: plain loads under the core's guard (vpm_guard_copy), where the Lua's api.read was a
+ * ReadProcessMemory. An address outside the user-mode range fails at once, as ReadProcessMemory does, without a fault.
+ * Without the guard (it could not be installed) it reads through HfApi.read. Components gate it: each header states its
+ * reads per frame, and its test pins them (the harness answers them through VpmTestHooks.read). */
 int vpm_read(uintptr_t address, void* out, size_t size)
 {
-    return address != 0 && vpm_core_hf()->read(address, out, size) == 0; /* lint-ok: C4 the heap read; callers count and gate it */
+    if (size == 0 || !vpm_plausible(address) || address + size < address || !vpm_plausible(address + size - 1)) return 0;
+    if (g_hooks.read != NULL) return g_hooks.read(address, out, size); /* lint-ok: C4 the tests' stand-in; never set in the DLL */
+    int copied = vpm_guard_copy(out, address, size);
+    if (copied >= 0) return copied;
+    return vpm_core_hf()->read(address, out, size) == 0; /* lint-ok: C4 only without the guard; callers count and gate it */
 }
 int vpm_read_u8(uintptr_t address, uint8_t* out) { return vpm_read(address, out, sizeof *out); }
 int vpm_read_u16(uintptr_t address, uint16_t* out) { return vpm_read(address, out, sizeof *out); }
@@ -70,9 +80,6 @@ uintptr_t vpm_ptr(uintptr_t address)
 
 int vpm_plausible(uintptr_t pointer) { return pointer >= 0x10000 && pointer < 0x800000000000ull; }
 
-/* The tests' stand-ins (vpm_core_test_hooks): none in the pack's DLL. */
-static VpmTestHooks g_hooks;
-void vpm_core_test_hooks(const VpmTestHooks* hooks) { g_hooks = hooks != NULL ? *hooks : (VpmTestHooks){0}; }
 
 int vpm_write(uintptr_t address, const void* data, size_t size)
 {
@@ -94,6 +101,37 @@ int vpm_writable(uintptr_t address, size_t size)
         at = regionEnd;
     }
     return 1;
+}
+
+/* ---- hooks -------------------------------------------------------------------------------------------------------- */
+
+typedef struct Image { const char* name; uintptr_t base; size_t size; } Image;
+
+static int HookAt(VpmComponent* self, Image image, uint32_t rva, const char* shipped, void* detour, void** original)
+{
+    const HfApi* hf = vpm_core_hf();
+    if (image.base == 0 || rva >= image.size) { vpm_log(self, "hook refused: %s+0x%X is not in the image", image.name, rva); return 0; }
+    if (!hf->code_matches(image.base + rva, shipped))
+    {
+        vpm_log(self, "hook refused: %s+0x%X is not the reviewed function", image.name, rva);
+        return 0;
+    }
+    if (hf->hook_ex(vpm_mod(), image.base + rva, detour, original, 0) != 0)
+    {
+        vpm_log(self, "hook refused at %s+0x%X: %s", image.name, rva, hf->last_log(vpm_mod()));
+        return 0;
+    }
+    return 1;
+}
+
+int vpm_hook(VpmComponent* self, uint32_t rva, const char* shipped, void* detour, void** original)
+{
+    return HookAt(self, (Image){"game.dll", g_game, g_gameSize}, rva, shipped, detour, original);
+}
+
+int vpm_hook_exe(VpmComponent* self, uint32_t rva, const char* shipped, void* detour, void** original)
+{
+    return HookAt(self, (Image){"helldivers2.exe", g_exe, g_exeSize}, rva, shipped, detour, original);
 }
 
 void* vpm_module_export(const char* module, const char* name)

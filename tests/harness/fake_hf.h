@@ -47,8 +47,14 @@ void fake_refuse_writes(int refuse);
 
 /* Fires a load event: its registered callbacks run, later registrations get it at once. */
 void fake_fire(HfEvent event);
-/* Runs the game-thread callback n times. */
+/* Runs the game-thread callback n times; after each, the step fake_after_tick named (the game's own update), if any. */
 void fake_frames(int n, float dt);
+void fake_after_tick(void (*fn)(float dt));
+/* What vpm_user32() answers from now on (a test's stand-ins for GetAsyncKeyState and the others). */
+void fake_user32(const VpmUser32* table);
+/* The detour the code hooked at target last (hook, hook_ex, vpm_hook), or NULL. Its *original is the target itself
+ * (a fake_stand_in's jump reaches the test's function), unless fake_set_original named another. */
+void* fake_hook_detour(uintptr_t target);
 /* Delivers a game event to its listeners (event->kind). */
 void fake_emit(const HfEventInfo* event);
 void fake_set_state(uint32_t state);
