@@ -763,8 +763,12 @@ static void TheOptionsPagesFollowTheScreenStack(void)
 
 /* ---- the runtime (test_install.lua, test_ui_sim.lua, test_settings_input.lua) ----------------------------------- */
 
+/* A routine that differs reads as code not decoded yet: the core waits for it, then stops the component, naming it. */
 static void StartsAtGameLoad(void)
 {
+    static const char* const why[5] = {"disabled: native grid solver changed (game.dll 0x18D2B60)",
+        "disabled: native scroll setter changed (game.dll 0x1794530)", "disabled: native position setter changed (game.dll 0x14476A0)",
+        "disabled: native animation stop changed (game.dll 0x1439D40)", "disabled: native input consume changed (game.dll 0x12FDE90)"};
     Session(GRID);
     CHECK_LOG("[Clickable Scrollbars] running: drags the equipment, Career, Controls and Settings scrollbars");
     CHECK(vpm_ticking(fake_component(0)));
@@ -778,8 +782,11 @@ static void StartsAtGameLoad(void)
         InstallUser32();
         g_in = (Input){1, 1, 200, 600, 0, 0};
         fake_fire(HF_EVENT_GAME_LOADED);
+        CHECK(vpm_running(fake_component(0)) && !vpm_ticking(fake_component(0)));
+        fake_frames(60, 1.0f);
         CHECK(!vpm_running(fake_component(0)));
-        CHECK_LOG("disabled: unsupported native scroll routine");
+        CHECK_LOG(why[i]);
+        CHECK_EQ(g_win.key + g_game.stop + g_game.scroll + g_game.position + g_game.solve + g_game.consume, 0);
         ResetCalls();
         fake_frames(10, 1.0f / 60);
         CHECK_EQ(g_win.key, 0);
@@ -791,6 +798,89 @@ static void StartsAtGameLoad(void)
     ((VpmUser32*)vpm_user32())->ScreenToClient = NULL;
     fake_fire(HF_EVENT_GAME_LOADED);
     CHECK_LOG("disabled: user32.ScreenToClient unavailable");
+}
+
+/* ---- game.dll's code decoded in parts after HF_EVENT_GAME_LOADED (vpm_when_code_ready) ------------------------- */
+
+/* The world and the component past game load, the routines as the test lays them (or still encoded). */
+static void LoadedWith(int signatures)
+{
+    fake_setup();
+    g_ignore = g_frozen = 0;
+    NewWorld(GRID);
+    Stubs();
+    if (signatures) PutSignatures();
+    fake_start(kDefs, 1);
+    InstallUser32();
+    g_in = (Input){0, 1, 200, 600, 0, 0};
+    ResetCalls();
+    fake_fire(HF_EVENT_GAME_LOADED);
+}
+
+/* Decoded at load: the five checks there, the process id, the tick and the log line, as before. */
+static void TheRoutinesDecodedAtLoadStartItThere(void)
+{
+    LoadedWith(1);
+    CHECK_EQ(fake_counts().code_matches, 5);
+    CHECK_EQ(fake_counts().read, 0);
+    CHECK_EQ(fake_counts().log, 1);
+    CHECK(vpm_ticking(fake_component(0)));
+    ResetCalls();
+    fake_frames(60, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 0);
+    CHECK_EQ(g_win.key, 60); /* the idle gate's one call per frame */
+}
+
+/* Still encoded at load, decoded two seconds later: no tick, no Windows call and no read before; then the component
+ * starts on the frame of the core's next look and drags as at load. */
+static void TheRoutinesDecodedLaterStartItThen(void)
+{
+    LoadedWith(0);
+    CHECK_EQ(fake_counts().code_matches, 1); /* the first routine does not match: the look stops there */
+    CHECK(vpm_running(fake_component(0)) && !vpm_ticking(fake_component(0)));
+    ResetCalls();
+    g_in.down = 1;
+    fake_frames(120, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 4); /* one look every 30 frames */
+    CHECK_EQ(fake_counts().read + fake_counts().log, 0);
+    CHECK_EQ(g_win.key + g_win.cursor + g_win.foreground, 0);
+    CHECK_NO_LOG("running:");
+    g_in.down = 0;
+    PutSignatures();
+    ResetCalls();
+    fake_frames(30, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 5);
+    CHECK_LOG("[Clickable Scrollbars] running: drags the equipment, Career, Controls and Settings scrollbars");
+    CHECK(vpm_ticking(fake_component(0)));
+    PutJumps();
+    Positions();
+    g_in.x = g_at.x;
+    g_in.y = g_at.thumb_y;
+    Tick();
+    g_in.down = 1;
+    Tick();
+    for (int i = 0; i < 20; i++) { g_in.y++; Tick(); }
+    CHECK(Counts().verified == 1 && Counts().drag_active);
+    CHECK(g_game.scroll > 0 || Counts().writes > 0);
+}
+
+/* Never decoded: stopped after 60 s naming the first routine; no tick, no Windows call, no read, no game call. */
+static void TheRoutinesNeverDecodedStopItAfterAMinute(void)
+{
+    LoadedWith(0);
+    ResetCalls();
+    g_in.down = 1;
+    fake_frames(59, 1.0f);
+    CHECK(vpm_running(fake_component(0)));
+    fake_frames(1, 1.0f);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Clickable Scrollbars] disabled: native grid solver changed (game.dll 0x18D2B60)");
+    CHECK_EQ(fake_counts().read + fake_counts().write, 0);
+    CHECK_EQ(g_win.key + g_win.cursor + g_win.foreground + g_win.process + g_win.rect + g_win.to_client, 0);
+    CHECK_EQ(g_game.stop + g_game.scroll + g_game.position + g_game.solve + g_game.consume, 0);
+    ResetCalls();
+    fake_frames(60, 1.0f);
+    CHECK_EQ(fake_counts().code_matches + g_win.key, 0);
 }
 
 /* Absent, hidden or unsupported owners, and presses outside or unfocused: no write, no log. */
@@ -1106,6 +1196,9 @@ int main(void)
     RUN(CareerAndTheOptionsListsWriteThroughTheirSetters);
     RUN(TheOptionsPagesFollowTheScreenStack);
     RUN(StartsAtGameLoad);
+    RUN(TheRoutinesDecodedAtLoadStartItThere);
+    RUN(TheRoutinesDecodedLaterStartItThen);
+    RUN(TheRoutinesNeverDecodedStopItAfterAMinute);
     RUN(InertCasesDoNothing);
     RUN(ThumbDragsFollowThePointer);
     RUN(VerifiedDragsLogOnceAndAnimationsStop);

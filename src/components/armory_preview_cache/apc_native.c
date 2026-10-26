@@ -54,6 +54,12 @@ static const ApcSignature kSignatures[] = {
     {0, 0x12FE649u, "C3"},
 };
 
+const ApcSignature* apc_native_signatures(int* count)
+{
+    *count = (int)(sizeof kSignatures / sizeof kSignatures[0]);
+    return kSignatures;
+}
+
 static struct
 {
     LeaseFn acquire, release;
@@ -108,8 +114,6 @@ int apc_native_init(void)
     apc_map_clear(&g_kits);
     apc_map_clear(&g_presets);
     apc_map_clear(&g_weapons);
-    if (!apc_signatures_match(kSignatures, (int)(sizeof kSignatures / sizeof kSignatures[0])))
-        return apc_fail("Native instruction mismatch");
     uintptr_t root, app;
     if (!GamePointer(APC_RVA_ROOT_API, &root)) return 0;
     if (root != vpm_exe() + APC_EXE_ROOT_API) return apc_fail("Unexpected script API");

@@ -21,6 +21,13 @@
  *
  * On HellForge, as in the Lua: the same addresses, reads, checks, writes and native calls, with these differences.
  * - Native calls go through C function pointers to the same game.dll and exe functions, on the game thread (the tick).
+ * - The code checks (the native binding's three routines, once per session; the override routine's, before each
+ *   override creation) run where the Lua made them: at the first check that calls a game function (a climb press or a
+ *   held vault query in a mission) and at an assist's arming. Never at HF_EVENT_GAME_LOADED, the first tick, idle
+ *   frames or on the ship. A mission comes after the ship and a drop, far past HellForge's decoding of game.dll in
+ *   parts after that event (its own later pins get 20 s), so they stay there rather than on vpm_when_code_ready. Bytes
+ *   that did not match would answer a waiting status (the binding's) or an error of the check (the override's), not a
+ *   stop, and the next check that needs them tries again.
  * - Reads of game.dll's and the exe's images (globals, the exe's tables) are plain loads; heap reads go through
  *   vpm_read (a guarded plain load) where the Lua used ReadProcessMemory. Every guard is verified the same way before
  *   writes.
@@ -49,7 +56,8 @@
  *     started fresh; from there the Lua's second check could prepare a stage-2 batch again before the update consumed
  *     it; that frame has no post-update check, two checks as the Lua's).
  *   The post-update tick is registered when work starts and removed when it ends: an idle frame has none. Without the
- *   core's frame hook it runs right after the tick, back to back, where the Lua made its second check.
+ *   core's frame hook it runs right after the tick, back to back, where the Lua made its second check. When the core
+ *   refuses the post-update tick, the second check runs at once, there too, and the next busy frame asks again.
  * - Raised errors (a snapshot that could not be read, an invalid native result) keep the Lua's outcomes: a waiting
  *   status, a refusal that stops the component, or an error of the check, which restores everything and starts fresh;
  *   8 in a burst (a burst ends after 3600 clean frames) stop the component. The Lua's pcall guards, its pause after an

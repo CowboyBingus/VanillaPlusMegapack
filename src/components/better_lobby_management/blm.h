@@ -126,12 +126,17 @@ const char* blm_changed(const char* name);
 int blm_game_code_ok(const BlmCode* table, int count, const char** why);
 /* game.dll + the rva of the record named name, or 0. */
 uintptr_t blm_code_address(const BlmCode* table, int count, const char* name);
-/* G.CODE, G.EXE_CODE, G.NATIVES: 1, or 0 with *why ("host-left check changed"). */
-int blm_game_verify(const char** why);
+/* G.CODE, G.EXE_CODE, G.NATIVES as the core's wait for decoded code checks them (vpm_when_code_ready: the refusal
+ * reads "host-left check changed (game.dll 0x10834ED)"), in the Lua's order; their count. */
+int blm_game_pins(const VpmCodePin** pins);
 /* The engine API tables exist (one plain load). */
 int blm_engine_ready(void);
-/* The engine lobby and package API slots: checked, then bound into blm_native. 1, or 0 with *why. */
-int blm_engine_bind(const char** why);
+/* The engine lobby and package API slots resolved through the tables (6 reads), in the Lua's order: NULL with *pins the
+ * slots' functions for the core's wait (a target outside the game's and the exe's images is checked at once, as the
+ * Lua's check did), or the refusal ("engine lobby API unavailable", "engine continent changed"). */
+const char* blm_engine_resolve(const VpmCodePin** pins, int* count);
+/* Once the slots' functions read as shipped: they and the game's natives bound into blm_native. */
+void blm_engine_bind(void);
 /* A pattern's bytes at an address any module holds (exe code, an engine slot's target). */
 int blm_code_at(uintptr_t address, const char* pattern);
 

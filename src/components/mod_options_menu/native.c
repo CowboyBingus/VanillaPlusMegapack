@@ -1,40 +1,44 @@
 /* Mod Options Menu: game.dll's native functions, labels and setting descriptor, verified once per session (the Lua's
- * native.lua initialize). The Lua compared each function's first bytes in memory; here vpm_game_code_matches compares
- * them as the game shipped them, so a hook another mod or HellForge placed on one of them does not fail the check (the
- * call then runs through that hook, as any call into game.dll would). The build itself is the core's check. */
-#include <stdio.h>
+ * native.lua initialize). The Lua compared each function's first bytes in memory at its first update; here the core's
+ * wait (vpm_when_code_ready) compares them as the game shipped them, so a hook another mod or HellForge placed on one of
+ * them does not fail the check (the call then runs through that hook, as any call into game.dll would), and it compares
+ * them from HF_EVENT_GAME_LOADED until they read as decoded (every 30 frames, at most 60 s), since game.dll's code is
+ * decoded in parts after that event. The labels and the descriptor are data, read once the functions match. The build
+ * itself is the core's check. */
 #include "../../core/vpm.h"
 #include "native.h"
 
-const MomNativeEntry mom_native_entries[MOM_NATIVE_COUNT] = {
-    [MOM_SET_TAB_LABELS] = {"set_tab_labels", 0x17AAC50u, "48 89 54 24 10 53 56 48 83 EC 68 0F 29 74 24 30"},
-    [MOM_SELECT_CATEGORY] = {"select_category", 0x19999C0u, "40 53 48 83 EC 20 48 8B D9 89 91 58 1E 14 00 39"},
-    [MOM_SET_CONTENT_HIDDEN] = {"set_content_hidden", 0x19984C0u, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 50 41"},
-    [MOM_ROW_RESET] = {"row_reset", 0x17FF700u, "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55"},
-    [MOM_ROW_RELEASE] = {"row_release", 0x17FF4B0u, "48 89 5C 24 08 57 48 83 EC 20 8B 81 C0 7A 00 00"},
-    [MOM_ROW_INIT] = {"row_init", 0x17FE8D0u, "48 89 5C 24 08 57 48 83 EC 70 48 8B BC 24 B0 00"},
-    [MOM_ADD_CHILD] = {"add_child", 0x144C5C0u, "40 53 48 83 EC 20 4C 8B CA 48 8B D9 48 8B 91 E0"},
-    [MOM_SET_VISIBLE] = {"set_visible", 0x144CFB0u, "48 83 EC 28 44 8B 01 4C 8B D1 41 8B C0 45 8B C8"},
-    [MOM_SET_LABEL] = {"set_label", 0x143BF90u, "48 83 EC 28 4C 8B D9 39 91 10 01 00 00 0F 84 80"},
-    [MOM_SET_STRING_ARG] = {"set_string_arg", 0x143C950u, "40 53 48 83 EC 20 48 8B D9 48 81 C1 10 01 00 00"},
-    [MOM_CLEAR_ARGS] = {"clear_args", 0x143A0F0u, "80 B9 58 01 00 00 00 C6 81 58 01 00 00 00 0F 97"},
-    [MOM_SET_CHOICE] = {"set_choice", 0x17FE7E0u, "80 B9 F8 32 00 00 00 74 28 83 FA 10 73 23 48 63"},
-    [MOM_SET_SLIDER] = {"set_slider", 0x17FC2C0u, "40 53 48 83 EC 20 F3 0F 10 91 AC 08 00 00 48 8B"},
-    [MOM_FINISH_SIMPLE] = {"finish_simple", 0x1807060u, "48 89 5C 24 08 57 48 83 EC 30 8B 81 10 0B 00 00"},
-    [MOM_FINISH_ACCESS] = {"finish_access", 0x1800FE0u, "48 89 5C 24 08 57 48 83 EC 30 8B 81 50 57 00 00"},
-    [MOM_SCROLL_THUMB] = {"scroll_thumb", 0x1793F60u, "48 89 5C 24 10 57 48 83 EC 40 48 8B D9 0F 29 74"},
-    [MOM_SCROLL_EXTENT] = {"scroll_extent", 0x1794600u, "F3 0F 10 A1 B0 07 00 00 0F 28 D1 0F 2E E2 7A 02"},
-    [MOM_SET_OPACITY] = {"set_opacity", 0x1448AD0u, "40 57 48 83 EC 20 F3 0F 10 41 44 48 8B F9 0F 2E"},
-    [MOM_SCROLL_RESET] = {"scroll_reset", 0x1794570u, "80 B9 B5 07 00 00 00 74 19 F3 0F 10 89 BC 07 00"},
-    [MOM_OPTIONS_VISUAL] = {"options_visual", 0x1998590u, "48 8B C4 57 48 83 EC 70 80 B9 15 22 14 00 00 48"},
-    [MOM_MEASURE_TEXT] = {"measure_text", 0x144E1A0u, "40 53 48 83 EC 70 48 8B D9 8B 09 8B C1 C1 E8 12"},
+const VpmCodePin mom_native_pins[MOM_NATIVE_COUNT] = {
+    [MOM_SET_TAB_LABELS] = {0x17AAC50u, "48 89 54 24 10 53 56 48 83 EC 68 0F 29 74 24 30", MOM_UNAVAILABLE "set_tab_labels", 0},
+    [MOM_SELECT_CATEGORY] = {0x19999C0u, "40 53 48 83 EC 20 48 8B D9 89 91 58 1E 14 00 39", MOM_UNAVAILABLE "select_category", 0},
+    [MOM_SET_CONTENT_HIDDEN] = {0x19984C0u, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 50 41",
+        MOM_UNAVAILABLE "set_content_hidden", 0},
+    [MOM_ROW_RESET] = {0x17FF700u, "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55", MOM_UNAVAILABLE "row_reset", 0},
+    [MOM_ROW_RELEASE] = {0x17FF4B0u, "48 89 5C 24 08 57 48 83 EC 20 8B 81 C0 7A 00 00", MOM_UNAVAILABLE "row_release", 0},
+    [MOM_ROW_INIT] = {0x17FE8D0u, "48 89 5C 24 08 57 48 83 EC 70 48 8B BC 24 B0 00", MOM_UNAVAILABLE "row_init", 0},
+    [MOM_ADD_CHILD] = {0x144C5C0u, "40 53 48 83 EC 20 4C 8B CA 48 8B D9 48 8B 91 E0", MOM_UNAVAILABLE "add_child", 0},
+    [MOM_SET_VISIBLE] = {0x144CFB0u, "48 83 EC 28 44 8B 01 4C 8B D1 41 8B C0 45 8B C8", MOM_UNAVAILABLE "set_visible", 0},
+    [MOM_SET_LABEL] = {0x143BF90u, "48 83 EC 28 4C 8B D9 39 91 10 01 00 00 0F 84 80", MOM_UNAVAILABLE "set_label", 0},
+    [MOM_SET_STRING_ARG] = {0x143C950u, "40 53 48 83 EC 20 48 8B D9 48 81 C1 10 01 00 00", MOM_UNAVAILABLE "set_string_arg", 0},
+    [MOM_CLEAR_ARGS] = {0x143A0F0u, "80 B9 58 01 00 00 00 C6 81 58 01 00 00 00 0F 97", MOM_UNAVAILABLE "clear_args", 0},
+    [MOM_SET_CHOICE] = {0x17FE7E0u, "80 B9 F8 32 00 00 00 74 28 83 FA 10 73 23 48 63", MOM_UNAVAILABLE "set_choice", 0},
+    [MOM_SET_SLIDER] = {0x17FC2C0u, "40 53 48 83 EC 20 F3 0F 10 91 AC 08 00 00 48 8B", MOM_UNAVAILABLE "set_slider", 0},
+    [MOM_FINISH_SIMPLE] = {0x1807060u, "48 89 5C 24 08 57 48 83 EC 30 8B 81 10 0B 00 00", MOM_UNAVAILABLE "finish_simple", 0},
+    [MOM_FINISH_ACCESS] = {0x1800FE0u, "48 89 5C 24 08 57 48 83 EC 30 8B 81 50 57 00 00", MOM_UNAVAILABLE "finish_access", 0},
+    [MOM_SCROLL_THUMB] = {0x1793F60u, "48 89 5C 24 10 57 48 83 EC 40 48 8B D9 0F 29 74", MOM_UNAVAILABLE "scroll_thumb", 0},
+    [MOM_SCROLL_EXTENT] = {0x1794600u, "F3 0F 10 A1 B0 07 00 00 0F 28 D1 0F 2E E2 7A 02", MOM_UNAVAILABLE "scroll_extent", 0},
+    [MOM_SET_OPACITY] = {0x1448AD0u, "40 57 48 83 EC 20 F3 0F 10 41 44 48 8B F9 0F 2E", MOM_UNAVAILABLE "set_opacity", 0},
+    [MOM_SCROLL_RESET] = {0x1794570u, "80 B9 B5 07 00 00 00 74 19 F3 0F 10 89 BC 07 00", MOM_UNAVAILABLE "scroll_reset", 0},
+    [MOM_OPTIONS_VISUAL] = {0x1998590u, "48 8B C4 57 48 83 EC 70 80 B9 15 22 14 00 00 48", MOM_UNAVAILABLE "options_visual", 0},
+    [MOM_MEASURE_TEXT] = {0x144E1A0u, "40 53 48 83 EC 70 48 8B D9 8B 09 8B C1 C1 E8 12", MOM_UNAVAILABLE "measure_text", 0},
     /* Position and size share their first 27 bytes; byte 28 picks the field. */
-    [MOM_SET_POSITION] = {"set_position", 0x14476A0u,
-        "48 89 5C 24 18 48 89 6C 24 20 48 89 54 24 10 56 57 41 57 48 83 EC 20 F3 0F 10 41 04"},
-    [MOM_SET_SIZE] = {"set_size", 0x1447160u,
-        "48 89 5C 24 18 48 89 6C 24 20 48 89 54 24 10 56 57 41 57 48 83 EC 20 F3 0F 10 41 0C"},
-    [MOM_HIDE_DESCRIPTION] = {"hide_description", 0x17FAB90u, "48 89 5C 24 10 57 48 83 EC 70 0F B6 DA 48 8B F9"},
-    [MOM_PLAY_SOUND] = {"play_sound", 0x1327F50u, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48"},
+    [MOM_SET_POSITION] = {0x14476A0u, "48 89 5C 24 18 48 89 6C 24 20 48 89 54 24 10 56 57 41 57 48 83 EC 20 F3 0F 10 41 04",
+        MOM_UNAVAILABLE "set_position", 0},
+    [MOM_SET_SIZE] = {0x1447160u, "48 89 5C 24 18 48 89 6C 24 20 48 89 54 24 10 56 57 41 57 48 83 EC 20 F3 0F 10 41 0C",
+        MOM_UNAVAILABLE "set_size", 0},
+    [MOM_HIDE_DESCRIPTION] = {0x17FAB90u, "48 89 5C 24 10 57 48 83 EC 70 0F B6 DA 48 8B F9",
+        MOM_UNAVAILABLE "hide_description", 0},
+    [MOM_PLAY_SOUND] = {0x1327F50u, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48", MOM_UNAVAILABLE "play_sound", 0},
 };
 
 const uint32_t mom_tab_labels[3] = {0xD876B36Eu, 0x78934E12u, 0x8C02BD80u};
@@ -48,7 +52,7 @@ const uint32_t mom_category_labels[9] = {0x396F27D7u, 0x196248D0u, 0xA522D2D0u, 
 
 MomNative mom_native;
 
-static void* At(uintptr_t base, int index) { return (void*)(base + mom_native_entries[index].rva); }
+static void* At(uintptr_t base, int index) { return (void*)(base + mom_native_pins[index].rva); }
 
 #define BIND(field, index) mom_native.field = (__typeof__(mom_native.field))At(base, index)
 
@@ -100,16 +104,10 @@ static int LabelsAsReviewed(const char** why)
     return 1;
 }
 
-const char* mom_native_verify(char* why, size_t size)
+const char* mom_native_verify(void)
 {
     uintptr_t base = vpm_game();
     if (base == 0) return "game modules unavailable";
-    for (int i = 0; i < MOM_NATIVE_COUNT; i++)
-        if (!vpm_game_code_matches(mom_native_entries[i].rva, mom_native_entries[i].code))
-        {
-            snprintf(why, size, "%s changed", mom_native_entries[i].name);
-            return why;
-        }
     const char* reason = NULL;
     if (!LabelsAsReviewed(&reason)) return reason;
     Bind(base);

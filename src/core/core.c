@@ -406,11 +406,13 @@ int vpm_when_code_ready(VpmComponent* self, const VpmCodePin* pins, int count, V
     return 1;
 }
 
-/* At HF_EVENT_GAME_LOADED: every wait looked at once. */
+/* At HF_EVENT_GAME_LOADED: every wait looked at once. A wait a ready registers during the pass was looked at by its
+ * registration: the pass covers only those registered before it. */
 static void CodeWaitsLoaded(void)
 {
     g_codeLoaded = 1;
-    for (int i = 0; i < g_codeWaitCount; i++) LookAt(&g_codeWaits[i], 0);
+    int count = g_codeWaitCount;
+    for (int i = 0; i < count; i++) LookAt(&g_codeWaits[i], 0);
 }
 
 /* Per frame while a wait is open: the time, and a look every CODE_CHECK_FRAMES frames. */
@@ -420,7 +422,8 @@ static void CodeWaitsTick(float dt)
     g_codeWaited += dt;
     int final = g_codeWaited >= VPM_CODE_WAIT_SECONDS;
     if (++g_codeFrames % CODE_CHECK_FRAMES != 0 && !final) return;
-    for (int i = 0; i < g_codeWaitCount; i++) LookAt(&g_codeWaits[i], final);
+    int count = g_codeWaitCount; /* as at the event: one registered during the pass was looked at by its registration */
+    for (int i = 0; i < count; i++) LookAt(&g_codeWaits[i], final);
 }
 
 /* ---- costs: per component, at each mission's end --------------------------------------------------------------- */

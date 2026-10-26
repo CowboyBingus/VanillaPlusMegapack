@@ -44,6 +44,11 @@
  *     clear anyway, and the difference cannot arise on 25480438;
  *   - when HF_ON_STATE cannot be subscribed (HellForge refuses it), or HellForge never delivers a state (its game-thread
  *     hook is off), the Lua's poll runs for the whole session, as the 1:1 port did.
+ * No code checks, so nothing here waits for game.dll's code to be decoded (vpm_when_code_ready): HellForge fires
+ * HF_EVENT_GAME_LOADED once one of game.dll's pins reads as decoded and decodes the rest in parts after it, but this
+ * component compares no code bytes and hooks nothing. It reads data only (the game object's static pointer with a plain
+ * load and the state through the pointer, both checked for plausibility on every read, as the Lua), and the Wwise
+ * exports it calls are found in the Wwise plugin, a module of its own, at HF_EVENT_ENTITIES_READY, long after.
  * The Lua pack's other half, a patched music_init sound bank (music no longer silent on seven biomes), is game data:
  * this component does not carry it (the pack ships no game bytes, and a HellForge data spec cannot replace a bank in
  * place yet).

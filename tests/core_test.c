@@ -1657,6 +1657,50 @@ static void WaitsOfSeveralComponents(void)
     CHECK_LOG("[Waiting Exe] disabled: exe function changed (helldivers2.exe 0x333000)");
 }
 
+static const VpmCodePin kFirstStage[] = {{0x111000, kPinA, "first function", 0}};
+static void ReadyWaitsAgain(VpmComponent* self, HfEvent event)
+{
+    g_readyRuns++;
+    (void)vpm_when_code_ready(self, kExePins, 1, Ready);
+}
+static int StartStaged(VpmComponent* self) { return vpm_when_code_ready(self, kFirstStage, 1, ReadyWaitsAgain) ? 0 : 1; }
+static const VpmComponentDef kStaged = {"staged", "Staged", "1.0", 0, StartStaged, NULL};
+
+/* A wait registered from another's ready is looked at once, at its registration: not again in the same pass, at the
+ * event or at a frame's look. */
+static void AWaitFromAReadyIsLookedAtOnce(void)
+{
+    g_readyRuns = g_readyFault = 0;
+    LayPin((uint8_t*)fake_game(), 0x111000, kPinA);
+    const VpmComponentDef* defs[] = {&kStaged};
+    fake_start(defs, 1);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(g_readyRuns, 1);
+    CHECK_EQ(fake_counts().code_matches, 1 + 1); /* the first stage's pin, the second's at its registration */
+    fake_counts_reset();
+    fake_frames(30, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 1); /* the second stage's look; the first is done */
+    LayPin((uint8_t*)fake_exe(), 0x333000, kPinA);
+    fake_frames(30, 1.0f / 60);
+    CHECK_EQ(g_readyRuns, 2);
+
+    /* the same from a frame's look: the first stage decoded after the event */
+    fake_setup();
+    g_readyRuns = 0;
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    LayPin((uint8_t*)fake_game(), 0x111000, kPinA);
+    fake_frames(29, 1.0f / 60);
+    fake_counts_reset();
+    fake_frames(1, 1.0f / 60);
+    CHECK_EQ(g_readyRuns, 1);
+    CHECK_EQ(fake_counts().code_matches, 1 + 1);
+    fake_frames(60, 1.0f); /* the wait's time runs from the event: the second stage stops with it */
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Staged] disabled: exe function changed (helldivers2.exe 0x333000)");
+}
+
 static void NothingWaitingCostsNothing(void)
 {
     const VpmComponentDef* defs[] = {&kTicking};
@@ -1677,6 +1721,7 @@ int main(void)
     RUN(AStoppedComponentNeverGetsReady);
     RUN(AFaultInReadyStopsTheComponent);
     RUN(WaitsOfSeveralComponents);
+    RUN(AWaitFromAReadyIsLookedAtOnce);
     RUN(NothingWaitingCostsNothing);
     RUN(AComponentGetsADataFolder);
     RUN(ExeCodeChecksAndStandIns);

@@ -32,6 +32,11 @@
  *   back with get_live. stop() undoes the live edit. The poll frames still read the record (its fingerprint and flag) and
  *   set the flag again if it is clear; a record that no longer checks out, a charge stuck without progress, or
  *   HF_EVENT_ENTITIES_READY firing again looks the record up by identity again (the Lua's rescan).
+ * - The fire-mode setter's code (the Lua's build fingerprint) is checked with vpm_when_code_ready from
+ *   HF_EVENT_GAME_LOADED: game.dll's code is decoded in parts after that event, and nothing orders the entity data
+ *   after the setter's part. Until it reads as shipped, HF_EVENT_ENTITIES_READY's work (the record, the tick) waits; the
+ *   core stops the component if it never does within 60 s ("the fire-mode setter changed (game.dll 0x755F90)"), with
+ *   nothing changed.
  * - Time is the sum of the ticks' dt (the Lua: the performance counter). The game.dll globals are plain loads (the Lua read
  *   each through ReadProcessMemory); heap reads stay vpm_read. The charging flag is a plain store into the page checked for
  *   the binding (the Lua: WriteProcessMemory).
@@ -62,9 +67,11 @@
  *   2 VirtualProtectEx, 1 WriteProcessMemory].
  * - No clock (the Lua: 1 QueryPerformanceCounter per active tick), no other Windows call, no allocation, no log; the one
  *   exception is the first stalled cycle of a session, logged once.
- * Once per session, at HF_EVENT_ENTITIES_READY: 1 code check, component_record, 1 read of the record, set_live, get_live
- * and a log line [the Lua's first update: 23 reads, 3 VirtualQueryEx, 2 VirtualProtectEx, 1 WriteProcessMemory and
- * 6 QueryPerformanceCounter for its scan, which can take more updates]. */
+ * Once per session, at HF_EVENT_GAME_LOADED: 1 code check (the core repeats it every 30 frames while the code is not
+ * decoded, for at most 60 s); at HF_EVENT_ENTITIES_READY (or when the code is decoded, if that comes later):
+ * component_record, 1 read of the record, set_live, get_live and a log line [the Lua's first update: 23 reads,
+ * 3 VirtualQueryEx, 2 VirtualProtectEx, 1 WriteProcessMemory and 6 QueryPerformanceCounter for its scan, which can take
+ * more updates]. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -75,7 +82,6 @@
 #define HOLDER_MANAGER 0x3326DC0u   /* game.dll: the weapon holders; +32 weapon id -> row, +64 its 48-byte rows */
 #define MISSION_RECORD 0x33266A0u   /* game.dll: the mission record (68 bytes; the loader's frame-state definition) */
 #define FIRE_MODE_SETTER 0x755F90u  /* game.dll: the fire-mode setter, the Lua's build fingerprint */
-#define FIRE_MODE_CODE "48 89 4C 24 08 53 55 56 57 41 57 48 83 EC 20"
 #define ARC_ENTITY HF_ENTITY_ARC3_ARC_THROWER /* the Lua's ARC_RESOURCE, '\xe6\x06\x73\x0f\xd5\x9c\xde\x96' */
 #define ARC_LOW ((uint32_t)ARC_ENTITY)
 #define ARC_HIGH ((uint32_t)(ARC_ENTITY >> 32))
@@ -144,6 +150,8 @@ static struct
     int patched, wrote, rescanRequested, patchLogged, scanLogged;
     double nextScan;
     char why[200];         /* why the record is not patched */
+    int codeReady;         /* the fire-mode setter's bytes read as shipped (CodeReady) */
+    int entitiesReady;     /* HF_EVENT_ENTITIES_READY came first: CodeReady takes it up */
 } s;
 
 static uint8_t g_charge[RECORD_SIZE];     /* the charge record as read */
@@ -642,8 +650,13 @@ static void Tick(VpmComponent* self, float dt)
 
 /* ---- lifecycle ----------------------------------------------------------------------------------------------------- */
 
-/* The fire-mode setter's code first (the Lua's build fingerprint), then the record; again when the game reloads its
- * entity data (the record may have moved; HellForge renews the live edit). */
+/* The fire-mode setter's code, checked first (the Lua's build fingerprint). */
+static const VpmCodePin kPins[] = {
+    {FIRE_MODE_SETTER, "48 89 4C 24 08 53 55 56 57 41 57 48 83 EC 20", "the fire-mode setter", 0},
+};
+
+/* The record, once the setter's code has been checked; again when the game reloads its entity data (the record may have
+ * moved; HellForge renews the live edit). */
 static void EntitiesReady(VpmComponent* self, HfEvent event)
 {
     if (vpm_ticking(self))
@@ -654,13 +667,17 @@ static void EntitiesReady(VpmComponent* self, HfEvent event)
         PatchRecord(self);
         return;
     }
-    if (!vpm_game_code_matches(FIRE_MODE_SETTER, FIRE_MODE_CODE))
-    {
-        vpm_fail(self, "Unsupported game build: the fire-mode setter at game.dll 0x%X is not the reviewed one", FIRE_MODE_SETTER);
-        return;
-    }
+    if (!s.codeReady) { s.entitiesReady = 1; return; }
     PatchRecord(self);
     if (!vpm_tick_start(self, Tick)) vpm_fail(self, "no game-thread tick");
+}
+
+/* The setter's bytes read as shipped (at HF_EVENT_GAME_LOADED, or on the frame they first do): the event's work, if it
+ * came first. */
+static void CodeReady(VpmComponent* self, HfEvent event)
+{
+    s.codeReady = 1;
+    if (s.entitiesReady) EntitiesReady(self, HF_EVENT_ENTITIES_READY);
 }
 
 /* Ends the hold (the engine clears the charging flag itself on its next frame) and undoes the record's live edit. */
@@ -676,6 +693,7 @@ static int Start(VpmComponent* self)
 {
     memset(&s, 0, sizeof s);
     s.frames = POLL_FRAMES - 1; /* the first tick is a poll frame */
+    if (!vpm_when_code_ready(self, kPins, 1, CodeReady)) return 1;
     return vpm_on_load(self, HF_EVENT_ENTITIES_READY, EntitiesReady) ? 0 : 1;
 }
 

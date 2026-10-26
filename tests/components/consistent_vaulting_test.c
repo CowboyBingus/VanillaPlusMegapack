@@ -2563,6 +2563,185 @@ static void AFaultInThePostCheck(void)
     CHECK(SharedUnchanged());
 }
 
+/* ---- the post-update tick refused (vpm_post_tick_start answers 0) -------------------------------------------------- */
+
+/* One engine frame whose second check, if any, must have run before the game's update: its checks. */
+static uint32_t FrameAllBeforeTheUpdate(void (*change)(void))
+{
+    uint32_t polls = St()->counters.polls;
+    uint32_t made = EngineFrame(change);
+    CHECK_EQ(g_pollsInUpdate, polls + made);
+    CHECK(!vpm_post_ticking(fake_component(0)));
+    return made;
+}
+
+/* Refused from the start: the frame's second check runs at once, before the game's update, where the Lua made it, and
+ * a busy frame makes the Lua's checks (two; three on the frame work starts), with the same reads. A climb the update
+ * starts is capped at the next frame's first check, as in the Lua. Lifted later, the post-update tick is used again. */
+static void ARefusedPostTickChecksAtOnce(void)
+{
+    StartedEngine(1);
+    fake_refuse_ticks(0, 1);
+    SlopeReset();
+    for (int i = 0; i < 2; i++) CHECK(FrameAllBeforeTheUpdate(NULL) <= 1);
+    w.input[0] = 1;
+    fake_counts_reset();
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 3);
+    CHECK_EQ(fake_counts().read, 219); /* as with the post-update tick, and the Lua's three checks */
+    CHECK(St()->has_lease);
+    fake_counts_reset();
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+    CHECK_EQ(fake_counts().read, 78);
+    CHECK_EQ(FrameAllBeforeTheUpdate(StartClimb), 2);
+    CHECK(GF(Cell(CV_CAP)) == -1);
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+    CHECK(g_capInUpdate == 2 && GF(Cell(CV_CAP)) == 2);
+    /* Lifted: the next busy frame registers it, and its second check runs after the update. */
+    fake_refuse_ticks(0, 0);
+    uint32_t polls = St()->counters.polls;
+    CHECK_EQ(EngineFrame(NULL), 2);
+    CHECK_EQ(g_pollsInUpdate, polls + 1);
+    CHECK(vpm_post_ticking(fake_component(0)));
+    vpm_core_stop(fake_component(0), "test");
+    CHECK(Baseline());
+}
+
+/* Refused after a registration worked. A busy period with the post-update tick ends (removed); the core then refuses;
+ * idle frames make no extra check; the next busy period's second checks run at once. Within a busy period: a check
+ * that raises removes the tick (its second check runs at once, from the fresh start, which prepares the alternative
+ * again), and with the refusal in place the frames after it check at once too. */
+static void ARefusalAfterARegistrationWorked(void)
+{
+    StartedEngine(1);
+    ArmedLease();
+    uint32_t polls = St()->counters.polls;
+    CHECK_EQ(EngineFrame(NULL), 2);
+    CHECK_EQ(g_pollsInUpdate, polls + 1);
+    w.input[0] = 0;
+    St()->now += 2;
+    CHECK_EQ(EngineFrame(NULL), 1); /* the attempt timed out: nothing in progress */
+    CHECK(!vpm_post_ticking(fake_component(0)) && Baseline());
+    fake_refuse_ticks(0, 1);
+    int idle = 1;
+    for (int i = 0; i < 30; i++) idle &= FrameAllBeforeTheUpdate(NULL) <= 1;
+    CHECK(idle);
+    w.input[0] = 1;
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 3);
+    CHECK(St()->has_lease);
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+    vpm_core_stop(fake_component(0), "test");
+    CHECK(Baseline());
+    /* Mid-way: a held alternative (work in progress) with the post-update tick, then the refusal and a raise. */
+    fake_setup();
+    StartedEngine(1);
+    SlopeReset();
+    g_candidateKind = 0;
+    fake_engine_frames(2, 1.0f / 60);
+    RESET(H(2), H(1));
+    n.flags[2] = 0x100000;
+    CHECK_EQ(EngineFrame(NULL), 3);
+    CHECK(St()->has_pending && vpm_post_ticking(fake_component(0)));
+    fake_refuse_ticks(0, 1);
+    polls = St()->counters.polls;
+    CHECK_EQ(EngineFrame(NULL), 2);
+    CHECK_EQ(g_pollsInUpdate, polls + 1); /* registered before the refusal: it keeps running */
+    cv_test_candidate(RaisingCandidate);
+    St()->now += 0.2; /* the search window's next candidate check is due */
+    CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+    CHECK_LOG("[Consistent Vaulting] error: candidate fixture failure");
+    CHECK(St()->has_pending && St()->busy == 1 && Unit(0) == 0);
+    for (int i = 0; i < 5; i++) CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+    CHECK(Is(vpm_status(fake_component(0)), "local_manual_alternative_prepared"));
+    fake_refuse_ticks(0, 0);
+    polls = St()->counters.polls;
+    CHECK_EQ(EngineFrame(NULL), 2);
+    CHECK_EQ(g_pollsInUpdate, polls + 1);
+    w.input[0] = 0;
+    CHECK_EQ(EngineFrame(NULL), 1);
+    CHECK(!St()->has_pending && Unit(0) == 444 && !vpm_post_ticking(fake_component(0)));
+}
+
+/* OwnErrorsBurst with the post-update tick refused: 7 errors, then `busy` frames of a held alternative (each on the
+ * refused branch, two checks at once), a release and a press that raises again. With the release that makes 3599
+ * clean frames after the 7th error the 8th stops the component; with 3600 the burst has ended. 1 running. */
+static int RefusedBurst(int busy)
+{
+    fake_setup();
+    StartedEngine(1);
+    fake_refuse_ticks(0, 1);
+    SlopeReset();
+    cv_test_candidate(RaisingCandidate);
+    fake_engine_frames(2, 1.0f / 60);
+    for (int i = 0; i < 7; i++)
+    {
+        w.input[0] = 1;
+        CHECK_EQ(FrameAllBeforeTheUpdate(NULL), 2);
+        w.input[0] = 0;
+        fake_engine_frames(1, 1.0f / 60);
+    }
+    CHECK_EQ(fake_log_count("error: candidate fixture failure"), 1);
+    g_candidateKind = 0;
+    cv_test_candidate(StubCandidate);
+    RESET(H(2), H(1));
+    n.flags[2] = 0x100000;
+    for (int i = 0; i < busy; i++)
+    {
+        if (i < 3 || i == busy - 1) CHECK_EQ(FrameAllBeforeTheUpdate(NULL), i == 0 ? 3u : 2u);
+        else fake_engine_frames(1, 1.0f / 60);
+    }
+    CHECK(St()->has_pending && vpm_running(fake_component(0)));
+    cv_test_candidate(RaisingCandidate);
+    w.input[0] = 0;
+    fake_engine_frames(1, 1.0f / 60);
+    w.input[0] = 1;
+    fake_engine_frames(1, 1.0f / 60);
+    return vpm_running(fake_component(0));
+}
+
+static void ErrorBurstsOnTheRefusedBranch(void)
+{
+    CHECK(!RefusedBurst(3597)); /* 1 + 3597 + 1 = 3599 clean frames: still the same burst */
+    CHECK_LOG("disabled: stopped after 8 errors: candidate fixture failure");
+    CHECK(RefusedBurst(3598)); /* 3600: the burst ended, the error starts a new one */
+    CHECK_EQ(fake_log_count("error: candidate fixture failure"), 2);
+}
+
+/* The code checks (the native binding's three routines) run at the first check that calls a game function: a climb
+ * press in a mission, never at HF_EVENT_GAME_LOADED or on idle frames. Still encoded there, they answer a waiting
+ * status, not a stop, and a later check binds once the code reads as shipped. */
+static void CodeChecksWaitForTheFirstPress(void)
+{
+    static const uint8_t kDriver[] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0xD0};
+    MakeWorld();
+    memset(w.game + 0xA9A0C0u, 0xCC, sizeof kDriver); /* the vault driver: still encoded */
+    ResetNatives();
+    cv_native_test(&kFakes);
+    fake_counts_reset();
+    fake_start(kDefs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    cv_test_candidate(NULL);
+    SlopeReset();
+    fake_frames(120, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 0); /* the load, the first ticks, idle frames: no code check */
+    w.input[0] = 1;
+    fake_frames(1, 1.0f / 60);
+    CHECK(fake_counts().code_matches > 0);
+    CHECK(vpm_running(fake_component(0)) && !St()->has_lease && Stores() == 0 && Baseline());
+    CHECK(Is(St()->slope_status, "waiting_for_slope_data"));
+    CHECK_NO_LOG("disabled");
+    memcpy(w.game + 0xA9A0C0u, kDriver, sizeof kDriver); /* decoded */
+    w.input[0] = 0;
+    fake_frames(2, 1.0f / 60);
+    w.input[0] = 1;
+    fake_frames(1, 1.0f / 60);
+    CHECK(St()->has_lease && vpm_running(fake_component(0)));
+    fake_counts_reset();
+    fake_frames(5, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 0); /* bound once */
+    vpm_core_stop(fake_component(0), "test");
+    CHECK(Baseline());
+}
+
 /* The check's own errors restore and start fresh, one log line per burst; 8 in a burst stop the component, and a
  * burst ends after 3600 clean frames. */
 static void OwnErrorsBurst(void)
@@ -2667,6 +2846,10 @@ int main(void)
     RUN(IdleFramesHaveNoPostCheck);
     RUN(PostCheckCountsAndStops);
     RUN(AFaultInThePostCheck);
+    RUN(ARefusedPostTickChecksAtOnce);
+    RUN(ARefusalAfterARegistrationWorked);
+    RUN(ErrorBurstsOnTheRefusedBranch);
+    RUN(CodeChecksWaitForTheFirstPress);
     RUN(OwnErrorsBurst);
     RUN(RefusalAndStop);
     TEST_END();

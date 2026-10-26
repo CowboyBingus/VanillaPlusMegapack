@@ -17,8 +17,9 @@
  *   same point of the frame. Both see the state the previous frame's update left, every 3/64 s of frame time.
  * - Statics in game.dll's and the exe's images (the mode and manager slots, the unit registry, actor lists, pools and
  *   physics world slots, the physics API table) are plain loads; the Lua read them with ReadProcessMemory.
- * - The routines are checked with HfApi.code_matches (the bytes as shipped) and once the game has set its physics API
- *   table (the pack starts before the game's Lua did, see ecs_natives.c).
+ * - The routines are checked with HfApi.code_matches (the bytes as shipped) by the core's wait for game.dll's code to
+ *   be decoded (from HF_EVENT_GAME_LOADED, every 30 frames, at most 60 s), and the physics API table once the game has
+ *   set it (the pack starts before the game's Lua did, see ecs_natives.c). Until both, the poll binds nothing.
  * - The session clock for motion histories and cooldowns is the sum of frame times (the Lua: GetTickCount64). The work
  *   budget's 1 ms deadline still reads the performance counter, as the Lua's api.clock, on frames that inspect a unit.
  * - A failed guard group is compared guard by guard at once: the Lua first read the same span a second time.
@@ -46,8 +47,10 @@
  * - a corpse realignment: 106 reads, 1 QueryPerformanceCounter, 2 queued commands [97 views, 22 reads, 1 clock];
  * - a settled corpse waiting for its re-check: 4 reads [1 view, 4 reads].
  * The work per poll stays bounded as in the Lua: 128 listed entries, 4 inspections, 1 ms from the first inspection. No
- * VirtualQuery, write, allocation or log on a poll frame. Once per session: the bind's plain loads, 8 code comparisons
- * (HfApi.code_matches, 256 bytes at most each) and one QueryPerformanceFrequency; at each mission's end three log lines. */
+ * VirtualQuery, write, allocation or log on a poll frame. Once per session: 8 code comparisons (HfApi.code_matches, 256
+ * bytes at most each) at HF_EVENT_GAME_LOADED (the core's wait: again every 30 frames while the code is not decoded, at
+ * most 60 s; no poll reads anything meanwhile), then on the first poll the bind's plain loads and one
+ * QueryPerformanceFrequency; at each mission's end three log lines. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -163,6 +166,7 @@ static int Start(VpmComponent* self)
     EcsReadsBegin();
     EcsReaderBegin();
     Status(self, kWaitingForApi);
+    if (!EcsWaitForCode(self)) return vpm_fail(self, "game.dll's code checks refused");
     if (!vpm_tick_start(self, Tick)) return vpm_fail(self, "Game update unavailable");
     if (!vpm_listen(self, HF_ON_MISSION_END, MissionEnd, 0)) vpm_log(self, "no counters at a mission's end");
     return 0;

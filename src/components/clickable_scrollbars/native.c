@@ -16,8 +16,10 @@
  * buttons use (0x12FDE90, action 0xA00000000, -1: until release), so rows and tabs the pointer crosses never activate.
  * The input owner is the game.dll global 0x347CF18: a plain load (the Lua read it with ReadProcessMemory).
  *
- * Every routine's first bytes are checked once, at game load, as the Lua checked them before any native scrolling; a
- * mismatch leaves the component off. */
+ * Every routine's first bytes are checked once, before any native scrolling, as the Lua checked them: the core checks
+ * them (vpm_when_code_ready, cs_routine_pins) from game load until they read as shipped, since game.dll's code is
+ * decoded in parts after HF_EVENT_GAME_LOADED; only then are they bound (cs_routines_bind). Bytes that never match
+ * within 60 s leave the component off. */
 #include <string.h>
 #include "clickable_scrollbars.h"
 
@@ -35,14 +37,13 @@ typedef void (*ScrollFn)(void* bar, float value);
 typedef void (*PositionFn)(void* widget, uint64_t xy);
 typedef void (*ConsumeFn)(void* input, uint64_t action, float hold);
 
-typedef struct Routine { uint32_t rva; const char* code; } Routine;
 /* native.lua native_signatures, in its order */
-static const Routine kRoutines[] = {
-    {GRID_SOLVER, "48 8B C4 53 55 56 57 41 54 41 55 41 56 41 57 48 81 EC F8 00 00 00 83 B9"},
-    {SCROLL_SET, "0F 57 D2 0F 2F D1 77 0C F3 0F 10 15 30 28 C3 00 F3 0F 5D D1 F3 0F 10 81"},
-    {POSITION_SET, "48 89 5C 24 18 48 89 6C 24 20 48 89 54 24 10 56 57 41 57 48 83 EC 20 F3"},
-    {ANIMATION_STOP, "40 53 48 83 EC 40 48 8B 05 C3 22 20 01 48 33 C4 48 89 44 24 30 0F B6 01"},
-    {INPUT_CONSUME, "40 53 48 83 EC 20 4C 8B D1 4C 8B CA 48 8B CA E8 DC 7C 28 FF"},
+static const VpmCodePin kRoutines[] = {
+    {GRID_SOLVER, "48 8B C4 53 55 56 57 41 54 41 55 41 56 41 57 48 81 EC F8 00 00 00 83 B9", "native grid solver", 0},
+    {SCROLL_SET, "0F 57 D2 0F 2F D1 77 0C F3 0F 10 15 30 28 C3 00 F3 0F 5D D1 F3 0F 10 81", "native scroll setter", 0},
+    {POSITION_SET, "48 89 5C 24 18 48 89 6C 24 20 48 89 54 24 10 56 57 41 57 48 83 EC 20 F3", "native position setter", 0},
+    {ANIMATION_STOP, "40 53 48 83 EC 40 48 8B 05 C3 22 20 01 48 33 C4 48 89 44 24 30 0F B6 01", "native animation stop", 0},
+    {INPUT_CONSUME, "40 53 48 83 EC 20 4C 8B D1 4C 8B CA 48 8B CA E8 DC 7C 28 FF", "native input consume", 0},
 };
 
 static struct
@@ -53,18 +54,21 @@ static struct
     ConsumeFn consume;
 } g_calls;
 
-int cs_routines_check(void)
+const VpmCodePin* cs_routine_pins(int* count)
+{
+    *count = (int)(sizeof kRoutines / sizeof kRoutines[0]);
+    return kRoutines;
+}
+
+void cs_routines_bind(void)
 {
     memset(&g_calls, 0, sizeof g_calls);
-    for (size_t i = 0; i < sizeof kRoutines / sizeof kRoutines[0]; i++)
-        if (!vpm_game_code_matches(kRoutines[i].rva, kRoutines[i].code)) return 0;
     uintptr_t game = vpm_game();
     g_calls.solve = (ObjectFn)(game + GRID_SOLVER);
     g_calls.scroll = (ScrollFn)(game + SCROLL_SET);
     g_calls.position = (PositionFn)(game + POSITION_SET);
     g_calls.stop = (ObjectFn)(game + ANIMATION_STOP);
     g_calls.consume = (ConsumeFn)(game + INPUT_CONSUME);
-    return 1;
 }
 
 /* The two floats as the engine's vector: x in the low half. */

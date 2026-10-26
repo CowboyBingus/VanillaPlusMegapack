@@ -1147,7 +1147,8 @@ static void StartsWhenTheCodeIsAsReviewed(void)
     CHECK(strlen(region->description) <= 400 && strlen(scanner->description) <= 400);
 }
 
-/* Changed network code, exe code or natives: nothing runs, the reason is logged. */
+/* Changed network code, exe code or natives read as code not decoded yet: the core waits for them, then stops the
+ * component; nothing runs, the reason is logged. */
 static void RefusesChangedCode(void)
 {
     struct { const BlmCode* table; int count; int exe; } cases[3] = {{blm_game_code, blm_game_code_count, 0},
@@ -1159,9 +1160,13 @@ static void RefusesChangedCode(void)
             fake_setup();
             NewWorld(0);
             ChangeCode((cases[c].exe ? fake_exe() : fake_game()) + cases[c].table[i].rva);
-            Started();
+            (void)fake_start(kDefs, 1); /* no jumps over code still being checked */
+            fake_fire(HF_EVENT_GAME_LOADED);
             Frames(2);
-            snprintf(text, sizeof text, "disabled: %s changed", cases[c].table[i].name);
+            CHECK(vpm_running(Self()) && !vpm_ticking(Self()));
+            fake_frames(60, 1.0f);
+            snprintf(text, sizeof text, "disabled: %s changed (%s 0x%X)", cases[c].table[i].name,
+                cases[c].exe ? "helldivers2.exe" : "game.dll", cases[c].table[i].rva);
             CHECK(!vpm_running(Self()));
             CHECK_LOG(text);
             CHECK_EQ(Get32(w.scannerConfig + S_RECHARGE), 20);
@@ -1185,10 +1190,144 @@ static void RefusesAnEngineWithoutItsSlots(void)
         if (c == 5) ChangeCode(Exe(EXE_UNLOAD_PAUSED));
         if (c == 6) ChangeCode(Exe(EXE_PAUSE_UNLOADS));
         if (c == 7) Put64(w.packageApi + blm_package_slots[1].rva, 0);
-        Started();
+        (void)fake_start(kDefs, 1); /* no jumps over code still being checked */
+        fake_fire(HF_EVENT_GAME_LOADED);
+        /* a slot's changed function reads as code not decoded yet: the core waits for it, then stops the component */
+        int code = c == 1 || c == 2 || c == 5 || c == 6;
+        if (code) CHECK(vpm_running(Self()) && !vpm_ticking(Self()));
+        if (code) fake_frames(60, 1.0f);
         CHECK(!vpm_running(Self()));
         CHECK_LOG(texts[c]);
     }
+}
+
+/* ---- game.dll's code decoded in parts after HF_EVENT_GAME_LOADED (vpm_when_code_ready) ------------------------- */
+
+/* The component started with the code at `at` as the game holds it before its part is decoded (one byte flipped:
+ * ChangeCode again decodes it), the load event fired; the jumps to the fakes only once the checks have passed. */
+static void StartedEncoded(uintptr_t at)
+{
+    ChangeCode(at);
+    (void)fake_start(kDefs, 1);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+}
+
+/* Decoded at the event: the 73 code checks and the 6 slot reads there, the frame ticking (StartsWhenTheCodeIsAsReviewed
+ * pins them); still encoded at the event and decoded two seconds later: nothing read, written or offered before; then
+ * every check on the frame of the core's next look, and the component runs as when it started at load. */
+static void TheCodeDecodedLaterStartsItThen(void)
+{
+    NewWorld(1);
+    StartedEncoded(Game(blm_game_code[1].rva));
+    CHECK_EQ(fake_counts().code_matches, 2); /* the first record matches, the second not: the look stops there */
+    CHECK(vpm_running(Self()) && !vpm_ticking(Self()));
+    fake_counts_reset();
+    Frames(120);
+    CHECK_EQ(fake_counts().code_matches, 8); /* one look every 30 frames */
+    CHECK_EQ(Reads() + fake_counts().log + fake_counts().write, 0);
+    CHECK_EQ(blm_page_checks(), 0);
+    CHECK_NO_LOG("ready:");
+    CHECK_EQ(Get32(w.scannerConfig + S_RECHARGE), 20);
+    ChangeCode(Game(blm_game_code[1].rva));
+    fake_counts_reset();
+    Frames(30);
+    CHECK_EQ(fake_counts().code_matches, 73);
+    CHECK(Reads() >= 6); /* the slots' 6, then that frame's own */
+    CHECK_LOG("Better Lobby Management v1.2.1 ready: game code and natives verified; menu ready; squad messages ready; "
+        "scanner ready; CANCEL SOS ready");
+    CHECK(vpm_ticking(Self()));
+    GameJumps();
+    MenuJumps();
+    Frames(2);
+    CHECK_EQ(Get32(w.scannerConfig + S_RECHARGE), 5);
+    fake_counts_reset();
+    Frames(300);
+    CHECK_EQ(fake_counts().code_matches, 0);
+}
+
+/* Never decoded: stopped after 60 s naming the record; nothing read or changed. */
+static void TheCodeNeverDecodedStopsItAfterAMinute(void)
+{
+    NewWorld(1);
+    StartedEncoded(Game(blm_game_code[0].rva));
+    fake_frames(59, 1.0f);
+    CHECK(vpm_running(Self()));
+    fake_frames(1, 1.0f);
+    CHECK(!vpm_running(Self()));
+    CHECK_LOG("[Better Lobby Management] disabled: network components changed (game.dll 0x13F7858)");
+    CHECK_NO_LOG("ready:");
+    CHECK_NO_LOG("region flags restored"); /* nothing to put back: stop() had nothing to do */
+    CHECK_EQ(Reads() + fake_counts().write, 0);
+    CHECK_EQ(blm_page_checks(), 0);
+    CHECK_EQ(Get32(w.scannerConfig + S_RECHARGE), 20);
+}
+
+/* An engine slot's function (the exe's) decoded after the event: the network code passed, the slots wait; then the
+ * component starts on the core's next look. Never decoded: stopped naming the slot. */
+static void AnEngineSlotDecodedLaterStartsItThen(void)
+{
+    NewWorld(1);
+    StartedEncoded(Exe(EXE_CONTINENT));
+    /* the network code, the PlayFab layout, the natives; then the 2 slots, once: the wait registered during the core's
+     * look at the event is looked at by its registration only */
+    CHECK_EQ(fake_counts().code_matches, 18 + 2);
+    CHECK_EQ(Reads(), 6);
+    CHECK(vpm_running(Self()) && !vpm_ticking(Self()));
+    Frames(60);
+    CHECK_NO_LOG("ready:");
+    ChangeCode(Exe(EXE_CONTINENT));
+    Frames(30);
+    CHECK_LOG("ready: game code and natives verified; menu ready");
+    CHECK(vpm_ticking(Self()));
+
+    fake_setup();
+    NewWorld(1);
+    StartedEncoded(Exe(EXE_CONTINENT));
+    fake_frames(60, 1.0f);
+    CHECK(!vpm_running(Self()));
+    CHECK_LOG("[Better Lobby Management] disabled: engine continent changed (helldivers2.exe 0x8C5F20)");
+    CHECK_EQ(Get32(w.scannerConfig + S_RECHARGE), 20);
+}
+
+/* A part's code decoded after the others: the component starts without it (the ready line says so, as for code that
+ * differs), looks again on every 30th frame, and the part joins once its code reads as shipped, its setting applied;
+ * after 60 s without it, it stays out and nothing is looked at again. */
+static void APartDecodedLaterJoins(void)
+{
+    NewWorld(1);
+    StartedEncoded(Game(blm_scanner_code[0].rva));
+    CHECK_LOG("scanner disabled: recharge reader changed");
+    CHECK(vpm_ticking(Self()));
+    GameJumps();
+    MenuJumps();
+    Frames(2);
+    CHECK_EQ(Get32(w.scannerConfig + S_RECHARGE), 20); /* the scanner's setting waits with it */
+    ChangeCode(Game(blm_scanner_code[0].rva));
+    Frames(30);
+    CHECK_LOG("[Better Lobby Management] scanner ready after");
+    CHECK_LOG("its game code was decoded after the others");
+    Frames(2);
+    CHECK_EQ(Get32(w.scannerConfig + S_RECHARGE), 5);
+    fake_counts_reset();
+    Frames(120);
+    CHECK_EQ(fake_counts().code_matches, 0);
+
+    fake_setup();
+    NewWorld(1);
+    StartedEncoded(Game(blm_scanner_code[0].rva));
+    GameJumps();
+    MenuJumps();
+    fake_counts_reset();
+    fake_frames(30, 1.0f);
+    CHECK_EQ(fake_counts().code_matches, 1); /* the 30th frame's look: the scanner's first record */
+    fake_frames(40, 1.0f);
+    CHECK(vpm_running(Self()));
+    CHECK_NO_LOG("scanner ready after");
+    fake_counts_reset();
+    Frames(300);
+    CHECK_EQ(fake_counts().code_matches, 0);
+    CHECK_EQ(Get32(w.scannerConfig + S_RECHARGE), 20);
 }
 
 /* On HellForge the load event may come before the engine hands game.dll its API: one plain load a frame until then. */
@@ -3360,6 +3499,10 @@ int main(void)
     RUN(StartsWhenTheCodeIsAsReviewed);
     RUN(RefusesChangedCode);
     RUN(RefusesAnEngineWithoutItsSlots);
+    RUN(TheCodeDecodedLaterStartsItThen);
+    RUN(TheCodeNeverDecodedStopsItAfterAMinute);
+    RUN(AnEngineSlotDecodedLaterStartsItThen);
+    RUN(APartDecodedLaterJoins);
     RUN(WaitsForTheEngine);
     RUN(DisablesOnlyThePart);
     RUN(DisabledPartsStayAway);

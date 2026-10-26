@@ -2,7 +2,7 @@
 
 A pin is an RVA with the IDA-style pattern a component expects there: the arguments of vpm_game_code_matches,
 vpm_hook and vpm_hook_exe (resolved through the component's #defines), and table rows {..., <rva>, "<pattern>"} next
-to such calls. The core's frame-update bytes (VPM_FRAME_UPDATE / VPM_FRAME_UPDATE_BYTES) are checked too. A pin is
+to such calls or to pins handed to vpm_when_code_ready (VpmCodePin tables). The core's frame-update bytes (VPM_FRAME_UPDATE / VPM_FRAME_UPDATE_BYTES) are checked too. A pin is
 the exe's when its call is vpm_hook_exe or its RVA's #define names the exe (EXE_...); exe pins are checked only with
 --exe <image>. Pins on computed addresses are listed as not checked.
 
@@ -19,6 +19,8 @@ STRING = r'"(?:[^"\\]|\\.)*"'
 STRINGS = rf'{STRING}(?:\s*{STRING})*'
 DEFINE = re.compile(rf'^\s*#define\s+(\w+)\s+((?:0x[0-9A-Fa-f]+|\d+)u?|{STRINGS})', re.M)
 CALL = re.compile(r'\b(vpm_game_code_matches|vpm_hook_exe|vpm_hook)\s*\(([^;]*?)\)\s*(?:\)|;|\|\||&&|\{)', re.S)
+# A folder checks code when it calls one of CALL's functions or hands pins to the core's wait (VpmCodePin tables).
+CHECKS = re.compile(r'\b(?:vpm_game_code_matches|vpm_exe_code_matches|vpm_hook_exe|vpm_hook|vpm_when_code_ready|VpmCodePin)\b')
 ROW = re.compile(r'\{([^{};]*)\}')
 PATTERN = re.compile(r'^(?:[0-9A-Fa-f]{2}|\?\?)(?: (?:[0-9A-Fa-f]{2}|\?\?))*$')
 
@@ -60,7 +62,8 @@ ARRAY = re.compile(r'(\w+)\s*\[\s*\w*\s*\]\s*=\s*\{(.*?)\n\};', re.S)
 
 
 def table_pins(text, defines):
-    """Rows of the file's arrays: {..., <rva>, ..., "<pattern>"}; an array whose name says exe holds exe pins."""
+    """Rows of the file's arrays: {..., <rva>, ..., "<pattern>"}; an array whose name says exe, or a VpmCodePin row
+    flagged VPM_PIN_EXE, holds exe pins."""
     found = []
     for name, body in ARRAY.findall(text):
         if 'slot' in name.lower():
@@ -70,7 +73,8 @@ def table_pins(text, defines):
                 pattern = unquote(literal.group(0))
                 rva, module = row_rva(row[:literal.start()], defines)
                 if PATTERN.match(pattern) and rva is not None:
-                    found.append(('exe' if 'exe' in name.lower() else module, rva, pattern))
+                    exe = 'exe' in name.lower() or 'VPM_PIN_EXE' in row
+                    found.append(('exe' if exe else module, rva, pattern))
     return found
 
 
@@ -109,7 +113,7 @@ def main():
     sources = [(pathlib.Path('src/core/vpm_core.h'), [('game.dll', frame_rva, frame)], [])]
     for path in sorted((ROOT / 'src').rglob('*.[ch]')):
         folder = sorted(path.parent.glob('*.[ch]'))
-        checks_code = any(CALL.search(f.read_text(encoding='utf-8')) for f in folder)
+        checks_code = any(CHECKS.search(f.read_text(encoding='utf-8')) for f in folder)
         found, unresolved = pins_of(path, defines_of(folder), checks_code)
         if found or unresolved:
             sources.append((path.relative_to(ROOT), sorted(set(found)), unresolved))

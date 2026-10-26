@@ -118,6 +118,7 @@ typedef struct MbmState
 {
     VpmComponent* self;
     uintptr_t base;          /* game.dll once the build check passed */
+    int code_ready;          /* the build check's code read as shipped (the core's wait) */
     int initialized, ready;  /* ready: native input found, the list functions known */
     int labels_writable;     /* the action label table's pages (checked once) */
     int slots_writable;      /* the text slots' and the MODS title's pages (checked once) */
