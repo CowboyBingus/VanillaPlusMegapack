@@ -32,9 +32,17 @@
  * lobby only when HellForge's directory lists it (Public, the successor's listing switch and Play with strangers on);
  * the scanner works from the game's compiled 10 s (the backend serves no matchmaking settings); the directory leaves
  * the continent exclusions out of every search, so Lobby Region writes its flags but changes no result. Dropped from
- * the Lua: the test builds' diagnostics recorder, kick modes, unload hold and verbose logs, the Text Language and
+ * the Lua: the test builds' diagnostics recorder (a per-frame copy of the engine's package queue and in-use table while
+ * hosting a squad, for the kick crash the game's own KICK fixed), kick modes and unload hold, the Text Language and
  * translations, the Mod Options Menu registration retries, the shared runtime's update guard (the core's crash guard
  * stops the component instead), the shutdown hook and the Lua entry points.
+ *
+ * Diagnostics (the pack's Detailed mode, vpm_log_detail): the test builds' verbose lines come back, on frames that
+ * already act and on change only: each successor search, why one waits, its timeout and its results (blm_lobby.c); the
+ * squad message's recipients and the chat history before and after it, the squad leader notice's recipients
+ * (blm_chat.c); the escape menu's dialog and focus state when it changes (blm_menu.c blm_menu_trace); and at each
+ * mission's end the counters of the Lua's shutdown line (actions, page checks, the scanner, the SOS cancels and
+ * re-arms, nearby lobbies). describe gives the start-up phase, the parts, the running action and the counters.
  *
  * Direct loads are plain loads on objects a read confirmed once (blm.h), as the Lua's. COST per frame (the Lua's
  * frame_budget pins in brackets):
@@ -50,6 +58,10 @@
  *   1 page check [1]; a new screen: 2 reads [2]). Page checks (VirtualQuery) are made once per target where the Lua
  *   checked before every write: the scanner's field and countdown, the override table, the lobby's post countdown (the
  *   game rewriting the scanner field: 1 read, 0 page checks [Lua: 1, 1]; turning Lobby Region off: 0 [1]).
+ * - Detailed mode (the diagnostics above): idle frames unchanged (no read, no log, no vpm_detailed check); frames that
+ *   act +1 global read where a detailed line exists (a search step, a squad message, an open escape menu), and in
+ *   Detailed mode a menu trace's 13 plain loads per open-menu frame, a line only when they changed; a squad message
+ *   +2 plain loads of the chat history.
  * - Once: 73 code checks (HfApi.code_matches) and 6 reads for the engine's lobby and package slots. While code is not
  *   decoded yet: the waiting checks every 30 frames (at most 60 s), nothing else; a part left out: its checks on every
  *   30th frame for 60 s. */
@@ -286,16 +298,20 @@ static void MenuFrame(void)
     uint32_t privacy = 0;
     uint64_t selected = 0;
     uintptr_t screen = OfferScreen();
-    if (screen == 0 || !blm_lobby_snapshot(&snap)) return;
-    int sosOn = s.sos && blm_sos_offer(&snap, &privacy);
-    if (Changed(&snap, sosOn, privacy)) Rebuild(&snap, sosOn, privacy);
-    int action = blm_menu_step(screen, snap.local, &s.offer, &selected);
-    if (selected != 0 && (!s.hasChosen || s.chosen != selected))
+    if (screen == 0) return;
+    if (blm_lobby_snapshot(&snap))
     {
-        s.chosen = selected;
-        s.hasChosen = 1;
+        int sosOn = s.sos && blm_sos_offer(&snap, &privacy);
+        if (Changed(&snap, sosOn, privacy)) Rebuild(&snap, sosOn, privacy);
+        int action = blm_menu_step(screen, snap.local, &s.offer, &selected);
+        if (selected != 0 && (!s.hasChosen || s.chosen != selected))
+        {
+            s.chosen = selected;
+            s.hasChosen = 1;
+        }
+        if (action != 0) RunAction(action);
     }
-    if (action != 0) RunAction(action);
+    if (vpm_detailed()) blm_menu_trace(screen); /* the Lua's diagnostic builds: the dialog and focus state on change */
 }
 
 /* ---- the frame ----------------------------------------------------------------------------------------------------- */
@@ -467,6 +483,33 @@ static void Loaded(VpmComponent* self, HfEvent event)
     if (!vpm_tick_start(self, WaitEngine)) vpm_fail(self, "the game thread could not be reached");
 }
 
+/* ---- diagnostics ---------------------------------------------------------------------------------------------------- */
+
+/* Detailed mode: the counters the Lua's shutdown line gave, at each mission's end (the core has no shutdown event). */
+static void MissionEnded(VpmComponent* self, const HfEventInfo* event)
+{
+    if (!s.ready || !vpm_detailed()) return;
+    char scanner[256] = "scanner off";
+    int cancels = 0, rearms = 0, leaks = 0;
+    if (s.scanner) blm_scanner_summary(scanner, sizeof scanner);
+    blm_sos_counts(&cancels, &rearms, &leaks);
+    vpm_log_detail(self, "at the mission's end: %d actions; page checks %d; %s; SOS cancels %d, re-arms caught %d (%d "
+        "already posted); nearby lobbies %s", blm_lobby_actions(), blm_page_checks(), scanner, cancels, rearms, leaks,
+        s.region ? blm_region_status() : "unavailable");
+}
+
+/* The tester's mark: where start-up got to, the parts, the action and the counters. */
+static void Describe(VpmComponent* self, char* out, size_t size)
+{
+    int cancels = 0, rearms = 0, leaks = 0;
+    blm_sos_counts(&cancels, &rearms, &leaks);
+    const char* phase = s.ready ? "ready" : s.verified ? "waiting for the engine API" : "waiting for game code";
+    snprintf(out, size, "%s; menu %s, SOS %s, messages %s, region %s, scanner %s; action: %s; %d actions; SOS cancels %d, "
+        "re-arms %d", phase, s.menu ? "on" : "off", s.sos ? "on" : "off", s.chat ? "on" : "off",
+        s.region ? blm_region_status() : "off", s.scanner ? blm_scanner_state() : "off", blm_lobby_status(),
+        blm_lobby_actions(), cancels, rearms);
+}
+
 /* What it changed in the game goes back: the running action is cancelled, the region flags and the scanner's field are
  * restored. A kept SOS cancel ends (the next player leaving lists the SOS again). */
 static void Stop(VpmComponent* self)
@@ -495,9 +538,11 @@ static int Start(VpmComponent* self)
     blm_region_reset();
     blm_scanner_reset();
     RegisterOptions(self);
+    (void)vpm_listen(self, HF_ON_MISSION_END, MissionEnded, 0); /* Detailed lines only; the core logs a refusal */
     const VpmCodePin* pins = NULL;
     int count = blm_game_pins(&pins);
     return vpm_when_code_ready(self, pins, count, Loaded) ? 0 : 1;
 }
 
-const VpmComponentDef vpm_component_better_lobby_management = {"better_lobby_management", "Better Lobby Management", "1.2.1", 0, Start, Stop};
+const VpmComponentDef vpm_component_better_lobby_management = {"better_lobby_management", "Better Lobby Management", "1.2.1", 0, Start, Stop,
+    Describe};

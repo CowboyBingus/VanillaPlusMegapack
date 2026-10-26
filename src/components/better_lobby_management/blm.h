@@ -192,6 +192,8 @@ int blm_menu_closed(void);
 int blm_menu_step(uintptr_t screen, uint64_t local, const BlmOffer* offer, uint64_t* selected);
 const char* blm_menu_game_kick(uintptr_t screen, uint64_t peer, int* card);
 int blm_menu_close(const char** why);
+/* Detailed mode: the open screen's dialog and focus state, a line when it changed (menu.lua trace). */
+void blm_menu_trace(uintptr_t screen);
 
 /* ---- blm_lobby.c --------------------------------------------------------------------------------------------------- */
 
