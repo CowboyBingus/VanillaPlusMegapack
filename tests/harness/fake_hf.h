@@ -50,6 +50,15 @@ void fake_fire(HfEvent event);
 /* Runs the game-thread callback n times; after each, the step fake_after_tick named (the game's own update), if any. */
 void fake_frames(int n, float dt);
 void fake_after_tick(void (*fn)(float dt));
+/* The engine's frame: game.dll's whole update (VPM_FRAME_UPDATE), through the core's hook of it when it is in, with
+ * HellForge's game-thread callback inside (once, or twice with fake_double_tick: the late update's second caller of the
+ * hooked function), then fake_after_tick's step. fake_frame_update(1) lays the update's shipped first bytes into the
+ * fake image (decoded), (0) other bytes (not decoded yet); a fresh fake has neither, so the core's hook never goes in
+ * and fake_frames (HellForge's callback alone) is the whole frame, as before. */
+void fake_frame_update(int decoded);
+void fake_engine_frames(int n, float dt);
+void fake_double_tick(int twice);
+int fake_game_updates(void);
 /* What vpm_user32() answers from now on (a test's stand-ins for GetAsyncKeyState and the others). */
 void fake_user32(const VpmUser32* table);
 /* The detour the code hooked at target last (hook, hook_ex, vpm_hook), or NULL. Its *original is the target itself
@@ -66,6 +75,8 @@ void fake_counts_reset(void);
 
 /* The log: every line since fake_setup or fake_log_clear. */
 int fake_log_has(const char* text);
+/* How many times text occurs in the log: a component's own lines by its "[Name]" prefix. */
+int fake_log_count(const char* text);
 const char* fake_log_text(void);
 void fake_log_clear(void);
 /* Prints the log lines as they come (for debugging a test). */

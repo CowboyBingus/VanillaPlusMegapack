@@ -75,11 +75,20 @@ typedef void (*VpmListenFn)(VpmComponent* self, const HfEventInfo* event);
 
 /* A HellForge load event (HF_EVENT_...), at once if it already happened. 1 registered, 0 not. */
 int vpm_on_load(VpmComponent* self, HfEvent event, VpmLoadFn fn);
-/* The component's game-thread tick: every game update, before the game's (HfApi.on_game_thread). One per component;
- * a second call replaces it. vpm_tick_stop ends it (from inside the tick too); vpm_tick_start may start it again. */
+/* The component's game-thread tick: once per frame, at the start of game.dll's update, where the Lua global `update`
+ * ran (the engine calls game.dll's update right after it). The core hooks that update (game.dll 0xAB5000) once its code
+ * is decoded; until then, or without the hook, the ticks run from HellForge's game-thread callback, which is inside the
+ * same update a little later (before the RPC pump, the world update and the UI pass). One per component; a second call
+ * replaces it. vpm_tick_stop ends it (from inside the tick too); vpm_tick_start may start it again. */
 int vpm_tick_start(VpmComponent* self, VpmTickFn fn);
 void vpm_tick_stop(VpmComponent* self);
 int vpm_ticking(const VpmComponent* self);
+/* A tick after game.dll's whole update in the same frame (after the world update, the mode's update and the UI pass):
+ * for work the Lua did after the game's update, or a second check in the frame. Without the core's hook of the update
+ * it runs right after the frame's ticks. One per component, as vpm_tick_start. */
+int vpm_post_tick_start(VpmComponent* self, VpmTickFn fn);
+void vpm_post_tick_stop(VpmComponent* self);
+int vpm_post_ticking(const VpmComponent* self);
 /* A game event (HF_ON_...): HfApi.subscribe with this priority. 1 registered, 0 not (the log says why). */
 int vpm_listen(VpmComponent* self, uint32_t kind, VpmListenFn fn, int32_t priority);
 

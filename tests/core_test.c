@@ -710,8 +710,186 @@ static void TheHarnessRunsTheGameAfterTheTickAndStandsInForUser32(void)
     CHECK(vpm_user32()->GetAsyncKeyState(0x70) != 0 && vpm_user32()->GetAsyncKeyState(0x71) == 0);
 }
 
+/* ---- the frame hook: one tick per frame at the start of game.dll's update, post-update ticks after it ------------- */
+
+static int g_pre, g_post, g_world, g_preSawWorld, g_postSawWorld;
+static float g_preDt, g_postDt;
+static void World(float dt) { g_world++; }
+static void PreTick(VpmComponent* self, float dt) { g_pre++; g_preDt = dt; g_preSawWorld = g_world; }
+static void PostTick(VpmComponent* self, float dt) { g_post++; g_postDt = dt; g_postSawWorld = g_world; }
+static void FaultingPost(VpmComponent* self, float dt) { g_post++; (void)*g_null; }
+static int StartBoth(VpmComponent* self) { vpm_tick_start(self, PreTick); vpm_post_tick_start(self, PostTick); return 0; }
+static int StartFaultingPost(VpmComponent* self) { vpm_post_tick_start(self, FaultingPost); return 0; }
+static const VpmComponentDef kBoth = {"both", "Both", "1.0", 0, StartBoth, NULL};
+static const VpmComponentDef kFaultingPost = {"faulting_post", "Faulting Post", "1.0", 0, StartFaultingPost, Stop};
+
+static void FrameReset(void) { g_pre = g_post = g_world = g_preSawWorld = g_postSawWorld = 0; g_preDt = g_postDt = 0; }
+
+static void TicksRunAroundTheFrameUpdate(void)
+{
+    FrameReset();
+    fake_frame_update(1);
+    const VpmComponentDef* defs[] = {&kBoth};
+    fake_start(defs, 1);
+    fake_after_tick(World);
+    fake_counts_reset();
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(vpm_frame_hooked(), 1);
+    CHECK_EQ(fake_counts().code_matches + fake_counts().read, 0); /* the bytes were compared with plain loads */
+    CHECK_LOG("ticks run at the start and the end of the game's frame update (game.dll 0xAB5000)");
+    fake_engine_frames(5, 0.02f);
+    CHECK_EQ(fake_game_updates(), 5);
+    CHECK_EQ(g_pre, 5);
+    CHECK_EQ(g_post, 5);
+    CHECK_EQ(g_preSawWorld, 4);   /* before the frame's world update */
+    CHECK_EQ(g_postSawWorld, 5);  /* after it */
+    CHECK(g_preDt == 0.02f && g_postDt == 0.02f);
+    /* HellForge's callback inside the update does nothing now, also when it runs twice in a frame */
+    fake_double_tick(1);
+    fake_engine_frames(5, 0.02f);
+    CHECK_EQ(g_pre, 10);
+    CHECK_EQ(g_post, 10);
+}
+
+static void TicksWaitForTheFrameUpdatesCode(void)
+{
+    FrameReset();
+    fake_frame_update(0); /* not decoded yet */
+    const VpmComponentDef* defs[] = {&kBoth};
+    fake_start(defs, 1);
+    fake_after_tick(World);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(vpm_frame_hooked(), 0);
+    fake_counts_reset();
+    fake_engine_frames(3, 1.0f);
+    /* meanwhile the ticks run in HellForge's callback, the post-update ticks right after the others, and no API call
+     * is made for the wait */
+    CHECK_EQ(g_pre, 3);
+    CHECK_EQ(g_post, 3);
+    CHECK_EQ(g_postSawWorld, 2); /* before the world update: there is no "after" without the hook */
+    FakeCounts waiting = fake_counts();
+    CHECK_EQ(waiting.read + waiting.code_matches + waiting.hook + waiting.log, 0);
+    fake_frame_update(1); /* decoded */
+    fake_engine_frames(1, 1.0f); /* the callback hooks it, and still ticks this frame (the detour missed its start) */
+    CHECK_EQ(vpm_frame_hooked(), 1);
+    CHECK_EQ(g_pre, 4);
+    CHECK_EQ(g_post, 4);
+    fake_engine_frames(4, 1.0f);
+    CHECK_EQ(g_pre, 8);
+    CHECK_EQ(g_post, 8);
+    CHECK_EQ(g_postSawWorld, 8);
+}
+
+static void TicksGiveUpTheFrameHookAfterAMinute(void)
+{
+    FrameReset();
+    fake_frame_update(0);
+    const VpmComponentDef* defs[] = {&kBoth};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_engine_frames(59, 1.0f);
+    CHECK_EQ(vpm_frame_hooked(), 0);
+    fake_engine_frames(1, 1.0f);
+    CHECK_EQ(vpm_frame_hooked(), -1);
+    CHECK_LOG("did not read as shipped within 60 s: ticks stay in HellForge's game-thread callback");
+    fake_frame_update(1); /* decoded later: too late, the fallback stays */
+    fake_engine_frames(10, 1.0f);
+    CHECK_EQ(vpm_frame_hooked(), -1);
+    CHECK_EQ(fake_hook_count(), 0);
+    CHECK_EQ(g_pre, 70);
+    CHECK_EQ(g_post, 70);
+    /* the fallback runs ticks once per call of HellForge's callback: twice in a frame where it is called twice */
+    fake_double_tick(1);
+    fake_engine_frames(1, 1.0f);
+    CHECK_EQ(g_pre, 72);
+}
+
+static void TicksSurviveARefusedFrameHook(void)
+{
+    FrameReset();
+    fake_frame_update(1);
+    HfApi refusing = *fake_api();
+    refusing.hook_ex = HookExRefused;
+    refusing.last_log = LastLogText;
+    const VpmComponentDef* defs[] = {&kBoth};
+    CHECK_EQ(vpm_core_init(&refusing, fake_mod(), defs, 1), 0);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(vpm_frame_hooked(), -1);
+    CHECK_LOG("the game's frame update could not be hooked (more than 16 hooks on one function)");
+    fake_engine_frames(3, 0.5f);
+    CHECK_EQ(g_pre, 3);
+    CHECK_EQ(g_post, 3);
+}
+
+static void AFaultingPostTickStopsOnlyItsComponent(void)
+{
+    FrameReset();
+    Reset();
+    fake_frame_update(1);
+    const VpmComponentDef* defs[] = {&kFaultingPost, &kBoth};
+    fake_start(defs, 2);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_engine_frames(4, 0.1f);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK(vpm_running(fake_component(1)));
+    CHECK_EQ(g_stops, 1);
+    CHECK_EQ(g_post, 1 + 4); /* the faulting one once, the other every frame */
+    CHECK_EQ(g_pre, 4);
+}
+
+static int g_lateStart;
+static void LateLoad(VpmComponent* self, HfEvent event) { g_lateStart = vpm_tick_start(self, PreTick); }
+static int StartLate(VpmComponent* self) { return vpm_on_load(self, HF_EVENT_GAME_LOADED, LateLoad) ? 0 : 1; }
+static const VpmComponentDef kLate = {"late", "Late", "1.0", 0, StartLate, NULL};
+static int NoGameThread(HfMod* mod, HfTickCallback callback, void* user) { return 0; }
+
+/* Without HellForge's callback: ticks are refused until the frame hook is in, then accepted. */
+static void TicksNeedAWayToRun(void)
+{
+    FrameReset();
+    fake_frame_update(1);
+    HfApi none = *fake_api();
+    none.on_game_thread = NoGameThread;
+    const VpmComponentDef* defs[] = {&kBoth, &kLate};
+    CHECK_EQ(vpm_core_init(&none, fake_mod(), defs, 2), 0);
+    CHECK(!vpm_ticking(fake_component(0)) && !vpm_post_ticking(fake_component(0)));
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(vpm_frame_hooked(), 1);
+    CHECK_EQ(g_lateStart, 1);
+    fake_engine_frames(2, 0.1f);
+    CHECK_EQ(g_pre, 2);
+}
+
+static int g_saves;
+static void SaveTick(VpmComponent* self, float dt) { if (++g_saves == 1) vpm_option_set(g_flag, 0); }
+static int StartSaving(VpmComponent* self) { g_flag = vpm_option(self, &kFlag); vpm_tick_start(self, SaveTick); return 0; }
+static const VpmComponentDef kSaving = {"saving", "Saving", "1.0", 0, StartSaving, NULL};
+
+/* The settings countdown runs once per frame under the hook too: a second after a change, the file. */
+static void SettingsSaveOncePerFrameUnderTheHook(void)
+{
+    g_saves = 0;
+    fake_frame_update(1);
+    const VpmComponentDef* defs[] = {&kSaving};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_double_tick(1);
+    fake_engine_frames(1, 0.1f);
+    fake_engine_frames(9, 0.1f);
+    CHECK(GetFileAttributesW(L"vpm-test-settings.ini") == INVALID_FILE_ATTRIBUTES); /* 0.9 s after the change */
+    fake_engine_frames(2, 0.1f);
+    CHECK(GetFileAttributesW(L"vpm-test-settings.ini") != INVALID_FILE_ATTRIBUTES);
+}
+
 int main(void)
 {
+    RUN(TicksRunAroundTheFrameUpdate);
+    RUN(TicksWaitForTheFrameUpdatesCode);
+    RUN(TicksGiveUpTheFrameHookAfterAMinute);
+    RUN(TicksSurviveARefusedFrameHook);
+    RUN(AFaultingPostTickStopsOnlyItsComponent);
+    RUN(TicksNeedAWayToRun);
+    RUN(SettingsSaveOncePerFrameUnderTheHook);
     RUN(GuardedReadsReadAndRefuse);
     RUN(GuardedReadsSurviveGuardPages);
     RUN(GuardedReadsCopyLargeBlocks);

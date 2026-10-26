@@ -305,6 +305,13 @@ static void FakeLog(HfMod* mod, const char* format, ...)
 }
 
 int fake_log_has(const char* text) { return strstr(g_log, text) != NULL; }
+
+int fake_log_count(const char* text)
+{
+    int n = 0;
+    for (const char* at = strstr(g_log, text); at != NULL; at = strstr(at + 1, text)) n++;
+    return n;
+}
 const char* fake_log_text(void) { return g_log; }
 void fake_log_clear(void) { g_logUsed = 0; g_log[0] = 0; }
 void fake_log_echo(int echo) { g_echo = echo; }
@@ -372,6 +379,47 @@ void fake_frames(int n, float dt)
 }
 
 void fake_user32(const VpmUser32* table) { vpm_user32_set(table); }
+
+/* ---- the engine's frame: game.dll's whole update, with HellForge's game-thread callback inside it ------------------ */
+
+static int g_doubleTick;
+static uint8_t g_gameObject[64];
+static void* g_lastGame;
+static float g_lastDt;
+static int g_gameUpdates;
+
+void fake_double_tick(int twice) { g_doubleTick = twice; }
+int fake_game_updates(void) { return g_gameUpdates; }
+
+/* game.dll's frame update as the fake runs it: HellForge's callback (once, or twice as with the late update's second
+ * caller), then the game's own update (fake_after_tick). */
+static void FakeFrameUpdate(void* game, float dt)
+{
+    g_lastGame = game;
+    g_lastDt = dt;
+    g_gameUpdates++;
+    if (g_tick != NULL) g_tick(fake_mod(), dt, g_tickUser);
+    if (g_tick != NULL && g_doubleTick) g_tick(fake_mod(), dt, g_tickUser);
+    if (g_afterTick != NULL) g_afterTick(dt);
+}
+
+void fake_frame_update(int decoded)
+{
+    static const uint8_t shipped[] = VPM_FRAME_UPDATE_BYTES;
+    if (decoded) memcpy(g_game + VPM_FRAME_UPDATE, shipped, sizeof shipped);
+    else memset(g_game + VPM_FRAME_UPDATE, 0xCC, sizeof shipped);
+}
+
+void fake_engine_frames(int n, float dt)
+{
+    for (int i = 0; i < n; i++)
+    {
+        void (*detour)(void*, float) = (void (*)(void*, float))fake_hook_detour((uintptr_t)g_game + VPM_FRAME_UPDATE);
+        if (detour != NULL) detour(g_gameObject, dt);
+        else FakeFrameUpdate(g_gameObject, dt);
+        if (g_lastGame != g_gameObject || g_lastDt != dt) { fprintf(stderr, "fake: the frame update got other arguments\n"); exit(2); }
+    }
+}
 
 void* fake_hook_detour(uintptr_t target)
 {
@@ -676,6 +724,9 @@ void fake_setup(void)
     g_tick = NULL;
     g_tickUser = NULL;
     g_afterTick = NULL;
+    g_doubleTick = 0;
+    g_gameUpdates = 0;
+    g_lastGame = NULL;
     g_state = HF_STATE_NONE;
     snprintf(g_build, sizeof g_build, "25480438");
     memset(&g_counts, 0, sizeof g_counts);
@@ -686,6 +737,8 @@ void fake_setup(void)
     g_afterFn = NULL;
     static const VpmTestHooks hooks = {FakeWritableQuery, FakeModuleExport, FakeCoreRead};
     vpm_core_test_hooks(&hooks);
+    /* A hook of the frame update goes on to the fake's frame update. */
+    fake_set_original((uintptr_t)g_game + VPM_FRAME_UPDATE, (void*)FakeFrameUpdate);
     vpm_core_reset();
     DeleteFileW(L"vpm-test-settings.ini");
     vpm_settings_path_override(L"vpm-test-settings.ini");

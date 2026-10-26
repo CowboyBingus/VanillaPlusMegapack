@@ -441,12 +441,15 @@ static void EveryFrameMatchesTheLua(void)
         int setsBefore = lua.sets;
         int reads = LuaStep(&lua, dt);
         fake_counts_reset();
+        int linesBefore = fake_log_count("[Sound Systems Rebalanced]");
         fake_frames(1, dt);
         FakeCounts c = fake_counts();
-        if ((int)c.read == reads && ww.sets == lua.sets && (int)c.log == lua.sets - setsBefore && Others(c) == 0) continue;
+        /* the component's own lines: the core may log once in a frame too (its frame hook given up after 60 s) */
+        int lines = fake_log_count("[Sound Systems Rebalanced]") - linesBefore;
+        if ((int)c.read == reads && ww.sets == lua.sets && lines == lua.sets - setsBefore && Others(c) == 0) continue;
         if (mismatches++ == 0)
-            printf("  frame %d: reads %u (Lua %d), sets %d (Lua %d), log lines %u (Lua %d)\n", i, c.read, reads, ww.sets, lua.sets,
-                c.log, lua.sets - setsBefore);
+            printf("  frame %d: reads %u (Lua %d), sets %d (Lua %d), log lines %d (Lua %d)\n", i, c.read, reads, ww.sets, lua.sets,
+                lines, lua.sets - setsBefore);
     }
     CHECK_EQ(mismatches, 0);
     CHECK(lua.sets >= 20);
