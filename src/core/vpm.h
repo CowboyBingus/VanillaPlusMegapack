@@ -106,16 +106,21 @@ int vpm_read_u16(uintptr_t address, uint16_t* out);
 int vpm_read_u32(uintptr_t address, uint32_t* out);
 int vpm_read_u64(uintptr_t address, uint64_t* out);
 int vpm_read_f32(uintptr_t address, float* out);
-/* The pointer stored at address, or 0 (unreadable, or null). */
+/* The user-mode pointer stored at address, or 0: unreadable, or not plausible (the Lua runtime's api.pointer). */
 uintptr_t vpm_ptr(uintptr_t address);
-/* A pointer that can be dereferenced: inside the user-mode range and not a small number. */
+/* A user-mode pointer as the Lua runtime's api.pointer accepts one: at least 0x10000 and below 2^47. */
 int vpm_plausible(uintptr_t pointer);
 
 /* HfApi.write (protection changed for the write, instruction cache flushed): 1 written, 0 not. Not for idle frames. */
 int vpm_write(uintptr_t address, const void* data, size_t size);
-/* Whether [address, address + size) is committed read-write memory now (one VirtualQuery per region): to validate a heap
- * target once, when it is found, before plain stores to it. Never per frame. */
+/* Whether [address, address + size) is committed private read-write memory now, the Lua runtime's api.writable_data rule:
+ * never code, read-only, guard, mapped or module image pages. One VirtualQuery per region: to validate a heap target
+ * once, when it is found, before plain stores to it. Never per frame. */
 int vpm_writable(uintptr_t address, size_t size);
+
+/* An export of a loaded module (GetModuleHandleA + GetProcAddress; the tests' harness stands in for it), or NULL: a
+ * plugin's functions (Wwise's), looked up once, never per frame. */
+void* vpm_module_export(const char* module, const char* name);
 
 /* HfApi.code_matches at game.dll + rva: 1 when the bytes as the game shipped them (before any hook) match the IDA-style
  * pattern. */
@@ -144,11 +149,15 @@ typedef struct VpmAvatar
     uintptr_t manager;   /* the avatar manager ([game + 0x3326D20]) */
     uint32_t index;      /* the avatar's index there (0 .. 7) */
     uintptr_t entity;    /* the avatar's entity pointer there (am + 0x110 + index * 8) */
+    uintptr_t record_at; /* where the entity owner keeps the avatar's record (owner + 0xF32F18 + entity index * 24) */
+    uint32_t owner_index; /* the avatar's entity index in the entity owner */
 } VpmAvatar;
 
 /* The local player's own avatar through both registries (player manager -> entity owner -> avatar manager), or 0 when
- * there is none (no mission, downed, dead, another player's). About 16 reads. */
+ * there is none (no mission, downed, dead, another player's): 12 reads. why, when not NULL, receives the step that
+ * failed ("no player manager", "not an owned Helldiver avatar", ...), a static text. */
 int vpm_local_avatar(VpmAvatar* out);
+int vpm_local_avatar_why(VpmAvatar* out, const char** why);
 /* Whether a kept resolution still holds (the manager global, the entity at the kept index and its 24-byte record): 3 reads
  * where vpm_local_avatar makes 16. A respawn, a new mission or another avatar at the index fails it. */
 int vpm_avatar_still(const VpmAvatar* avatar);

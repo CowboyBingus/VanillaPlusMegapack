@@ -19,6 +19,8 @@
 typedef struct FakeCounts
 {
     uint32_t read, write, code_matches, find_pattern, get_live, set_live, hook, log, subscribe, on, other;
+    uint32_t writable; /* VirtualQuery calls of vpm_writable */
+    uint32_t exports;  /* vpm_module_export lookups */
 } FakeCounts;
 
 /* A fresh HellForge and game: zeroed images and heap, no events fired, no logs, counts 0, the core reset, game state
@@ -73,6 +75,15 @@ void fake_set_original(uintptr_t target, void* original);
 /* What projectile_row, damage_row, stratagem_row, difficulty_row ("projectile", "damage", "stratagem", "difficulty"),
  * component_record and record (the component's name, by resource) answer for an id. */
 void fake_set_row(const char* table, uint64_t id, uintptr_t row);
+
+/* A stand-in for a game function at game.dll + rva: code_matches and read_code see `shipped` (an IDA-style pattern of
+ * concrete bytes, at least 14 of them: the function as the game shipped it), while the image holds a jump to fn, so a
+ * component that checked the bytes and then calls game.dll + rva calls fn. The page is made executable. */
+void fake_stand_in(uint32_t rva, const char* shipped, void* fn);
+/* What vpm_module_export answers for a module's export (NULL: absent, the default for every name). */
+void fake_export(const char* module, const char* name, void* fn);
+/* After the nth API read (1: the next) that touches address, fn(user) runs, right after that read. One at a time. */
+void fake_after_read(uintptr_t address, int nth, void (*fn)(void*), void* user);
 
 /* MurmurHash64A, seed 0: the game's resource name hash (resource_hash). */
 uint64_t fake_murmur64(const void* data, size_t size);

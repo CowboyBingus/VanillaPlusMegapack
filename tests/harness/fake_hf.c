@@ -75,11 +75,34 @@ static int Mapped(uintptr_t at, size_t size)
     return 1;
 }
 
+/* fake_after_read's hook */
+static uintptr_t g_afterAt;
+static int g_afterLeft;
+static void (*g_afterFn)(void*);
+static void* g_afterUser;
+
+void fake_after_read(uintptr_t address, int nth, void (*fn)(void*), void* user)
+{
+    g_afterAt = address;
+    g_afterLeft = nth;
+    g_afterFn = fn;
+    g_afterUser = user;
+}
+
+static void AfterRead(uintptr_t address, size_t size)
+{
+    if (g_afterFn == NULL || g_afterAt < address || g_afterAt >= address + size || --g_afterLeft > 0) return;
+    void (*fn)(void*) = g_afterFn;
+    g_afterFn = NULL;
+    fn(g_afterUser);
+}
+
 static int FakeRead(uintptr_t address, void* buffer, size_t size)
 {
     g_counts.read++;
-    if (!Mapped(address, size)) return 1;
+    if (!Mapped(address, size)) { AfterRead(address, size); return 1; }
     memcpy(buffer, (const void*)address, size);
+    AfterRead(address, size);
     return 0;
 }
 
@@ -165,15 +188,86 @@ static uintptr_t FakeFindPattern(const char* module, const char* pattern)
     return 0;
 }
 
+/* fake_stand_in's functions: their bytes as shipped, which code_matches and read_code see. */
+#define MAX_STAND_INS 64
+typedef struct StandIn { uintptr_t at; uint8_t shipped[64]; int size; } StandIn;
+static StandIn g_standIns[MAX_STAND_INS];
+static int g_standInCount;
+
+/* The code bytes at [address, address + size) as the game shipped them: a stand-in's, else the image's. */
+static void ShippedBytes(uintptr_t address, uint8_t* out, size_t size)
+{
+    memcpy(out, (const void*)address, size);
+    for (int i = 0; i < g_standInCount; i++)
+        for (size_t k = 0; k < size; k++)
+        {
+            uintptr_t at = address + k;
+            if (at >= g_standIns[i].at && at < g_standIns[i].at + (uintptr_t)g_standIns[i].size) out[k] = g_standIns[i].shipped[at - g_standIns[i].at];
+        }
+}
+
 static int FakeCodeMatches(uintptr_t address, const char* pattern)
 {
     g_counts.code_matches++;
-    uint8_t bytes[512], mask[512];
+    uint8_t bytes[512], mask[512], code[512];
     int n = ParsePattern(pattern, bytes, mask, 512);
-    return n > 0 && Mapped(address, (size_t)n) && MatchAt((const uint8_t*)address, bytes, mask, n);
+    if (n <= 0 || !Mapped(address, (size_t)n)) return 0;
+    ShippedBytes(address, code, (size_t)n);
+    return MatchAt(code, bytes, mask, n);
 }
 
-static int FakeReadCode(uintptr_t address, void* buffer, size_t size) { return FakeRead(address, buffer, size); }
+static int FakeReadCode(uintptr_t address, void* buffer, size_t size)
+{
+    g_counts.read++;
+    if (!Mapped(address, size)) return 1;
+    ShippedBytes(address, buffer, size);
+    return 0;
+}
+
+void fake_stand_in(uint32_t rva, const char* shipped, void* fn)
+{
+    uint8_t bytes[64], mask[64];
+    int n = ParsePattern(shipped, bytes, mask, 64);
+    if (n < 14 || g_standInCount >= MAX_STAND_INS) { fprintf(stderr, "fake_stand_in: %d bytes (14 to 64)\n", n); exit(2); }
+    StandIn* s = &g_standIns[g_standInCount++];
+    s->at = (uintptr_t)g_game + rva;
+    s->size = n;
+    memcpy(s->shipped, bytes, (size_t)n);
+    uint8_t jump[14] = {0xFF, 0x25, 0, 0, 0, 0};
+    uint64_t target = (uint64_t)(uintptr_t)fn;
+    memcpy(jump + 6, &target, 8);
+    memcpy((void*)s->at, jump, sizeof jump);
+    DWORD old;
+    if (!VirtualProtect((void*)s->at, sizeof jump, PAGE_EXECUTE_READWRITE, &old)) /* lint-ok: C3 the test's stand-in page */
+    {
+        fprintf(stderr, "fake_stand_in: the page could not be made executable\n");
+        exit(2);
+    }
+}
+
+/* fake_export's table */
+#define MAX_EXPORTS 32
+typedef struct Export { char module[64], name[128]; void* fn; } Export;
+static Export g_exports[MAX_EXPORTS];
+static int g_exportCount;
+
+void fake_export(const char* module, const char* name, void* fn)
+{
+    if (g_exportCount >= MAX_EXPORTS) return;
+    snprintf(g_exports[g_exportCount].module, 64, "%s", module);
+    snprintf(g_exports[g_exportCount].name, 128, "%s", name);
+    g_exports[g_exportCount++].fn = fn;
+}
+
+static void* FakeModuleExport(const char* module, const char* name)
+{
+    g_counts.exports++;
+    for (int i = 0; i < g_exportCount; i++)
+        if (_stricmp(g_exports[i].module, module) == 0 && strcmp(g_exports[i].name, name) == 0) return g_exports[i].fn;
+    return NULL;
+}
+
+static void FakeWritableQuery(void) { g_counts.writable++; }
 
 /* ---- logging ----------------------------------------------------------------------------------------------------- */
 
@@ -520,6 +614,10 @@ void fake_setup(void)
     fake_log_clear();
     g_lastLog[0] = 0;
     g_modStruct.api = &g_api;
+    g_standInCount = g_exportCount = 0;
+    g_afterFn = NULL;
+    static const VpmTestHooks hooks = {FakeWritableQuery, FakeModuleExport};
+    vpm_core_test_hooks(&hooks);
     vpm_core_reset();
     DeleteFileW(L"vpm-test-settings.ini");
     vpm_settings_path_override(L"vpm-test-settings.ini");

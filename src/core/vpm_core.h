@@ -68,6 +68,14 @@ void vpm_bindings_reset(void);
 /* Windows functions (core.c) */
 void vpm_user32_init(void);
 
+/* Tests: stand-ins for what the harness cannot fake through HfApi (memory.c). NULL members: the real calls. */
+typedef struct VpmTestHooks
+{
+    void (*writable_query)(void);                                 /* called before each VirtualQuery of vpm_writable */
+    void* (*module_export)(const char* module, const char* name); /* answers vpm_module_export */
+} VpmTestHooks;
+void vpm_core_test_hooks(const VpmTestHooks* hooks);
+
 /* The pack's entry with a given component list: hellforge_mod_init passes src/components.c's; the tests pass their
  * own. 0 loaded, 1 refused (an SDK older than 15). */
 int vpm_core_init(const HfApi* api, HfMod* mod, const VpmComponentDef* const* defs, int count);

@@ -381,8 +381,77 @@ static void ResolvesTheLocalAvatar(void)
     CHECK(!vpm_avatar_still(&avatar));
 }
 
+static void TheAvatarSaysWhyAndWhere(void)
+{
+    const VpmComponentDef* defs[] = {&kNothing};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    VpmAvatar avatar;
+    const char* why = NULL;
+    CHECK(!vpm_local_avatar_why(&avatar, &why));
+    CHECK(why != NULL && strcmp(why, "no player manager or entity owner") == 0);
+    PutLocalPlayer(77);
+    CHECK(vpm_local_avatar_why(&avatar, &why));
+    CHECK(why != NULL && why[0] == 0);
+    CHECK_EQ(avatar.owner_index, 3);
+    uintptr_t owner = (uintptr_t)vpm_game_u64(VPM_RVA_ENTITY_OWNER);
+    CHECK(avatar.record_at == owner + 0xF32F18 + 3 * 24);
+    ((uint32_t*)avatar.record_at)[5] = 0; /* not owned */
+    CHECK(!vpm_local_avatar_why(&avatar, &why));
+    CHECK(strcmp(why, "not an owned Helldiver avatar") == 0);
+}
+
+static void PointersAreUserModeOnly(void)
+{
+    const VpmComponentDef* defs[] = {&kNothing};
+    fake_start(defs, 1);
+    uint64_t* cell = fake_heap(8);
+    *cell = 0x800000000000ull;
+    CHECK(vpm_ptr((uintptr_t)cell) == 0);
+    *cell = 0xFFFF;
+    CHECK(vpm_ptr((uintptr_t)cell) == 0);
+    *cell = 0x7FFFFFFFFFF0ull;
+    CHECK(vpm_ptr((uintptr_t)cell) == 0x7FFFFFFFFFF0ull);
+}
+
+static int g_standInCalls;
+static int StandIn(int x) { g_standInCalls++; return x + 1; }
+static void* g_exported = (void*)&StandIn;
+static int g_afterCalls;
+static void After(void* user) { g_afterCalls++; *(uint32_t*)user = 5; }
+
+static void TheHarnessStandsIn(void)
+{
+    const VpmComponentDef* defs[] = {&kNothing};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_stand_in(0x123450, "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 8B FA", (void*)&StandIn);
+    CHECK(vpm_game_code_matches(0x123450, "48 89 5C 24 08 57 48 83 EC 20"));
+    int (*fn)(int) = (int (*)(int))(void*)(vpm_game() + 0x123450);
+    CHECK_EQ(fn(41), 42);
+    CHECK_EQ(g_standInCalls, 1);
+    fake_export("wwise_pluginw64_release.dll", "?SetState@SoundEngine@AK@@YA?AW4AKRESULT@@II@Z", g_exported);
+    CHECK(vpm_module_export("WWISE_pluginw64_release.dll", "?SetState@SoundEngine@AK@@YA?AW4AKRESULT@@II@Z") == g_exported);
+    CHECK(vpm_module_export("wwise_pluginw64_release.dll", "?IsInitialized@SoundEngine@AK@@YA_NXZ") == NULL);
+    CHECK_EQ(fake_counts().exports, 2);
+    uint32_t* cell = fake_heap(16);
+    uint32_t value = 0;
+    fake_after_read((uintptr_t)&cell[1], 2, After, &cell[1]);
+    CHECK(vpm_read_u32((uintptr_t)&cell[0], &value)); /* does not touch cell[1] */
+    CHECK(vpm_read_u32((uintptr_t)&cell[1], &value) && value == 0);
+    CHECK_EQ(g_afterCalls, 0);
+    CHECK(vpm_read(((uintptr_t)cell), cell + 2, 8) && g_afterCalls == 1); /* the second read touching it */
+    CHECK(vpm_read_u32((uintptr_t)&cell[1], &value) && value == 5);
+    fake_counts_reset();
+    CHECK(vpm_writable((uintptr_t)cell, 16));
+    CHECK_EQ(fake_counts().writable, 1);
+}
+
 int main(void)
 {
+    RUN(TheAvatarSaysWhyAndWhere);
+    RUN(PointersAreUserModeOnly);
+    RUN(TheHarnessStandsIn);
     RUN(StartsSwitchedOnComponents);
     RUN(RefusesAnOldSdk);
     RUN(StaysOffOnAnotherBuild);
