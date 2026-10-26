@@ -965,8 +965,36 @@ static void Reset(void)
 
 #define CASE(test) do { Reset(); RUN(test); } while (0)
 
+/* The label table and the text slots are in game.dll's read-write data section: an image's pages. The Lua's rule takes
+ * them (read-write or write-copy, committed, no guard), where vpm_writable takes only private memory: found in game
+ * (2026-10-26), where every write there was skipped. Real pages of this test program stand in for game.dll's. */
+static int g_imageData[64] = {1};
+static const char kImageReadOnly[64] = "read-only data";
+
+static void ImageDataPagesAreWritable(void)
+{
+    CHECK(mbm_image_data_writable((uintptr_t)g_imageData, sizeof g_imageData));
+    CHECK(!vpm_writable((uintptr_t)g_imageData, sizeof g_imageData)); /* why the core's check is not used here */
+    CHECK(!mbm_image_data_writable((uintptr_t)kImageReadOnly, sizeof kImageReadOnly));
+    CHECK(!mbm_image_data_writable((uintptr_t)ImageDataPagesAreWritable, 16)); /* code */
+    uint8_t* pages = VirtualAlloc(NULL, 3 * 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); /* lint-ok: C4 the test's own pages */
+    CHECK(pages != NULL);
+    CHECK(mbm_image_data_writable((uintptr_t)pages, 3 * 4096)); /* private read-write memory too */
+    DWORD old = 0;
+    CHECK(VirtualProtect(pages + 4096, 4096, PAGE_READWRITE | PAGE_GUARD, &old)); /* lint-ok: C3 the test's own pages */
+    CHECK(!mbm_image_data_writable((uintptr_t)pages, 3 * 4096)); /* a guard page in the middle */
+    CHECK(mbm_image_data_writable((uintptr_t)pages, 4096));
+    CHECK(VirtualProtect(pages + 4096, 4096, PAGE_READONLY, &old)); /* lint-ok: C3 the test's own pages */
+    CHECK(!mbm_image_data_writable((uintptr_t)pages + 4000, 200)); /* spans into a read-only page */
+    CHECK(!mbm_image_data_writable(0, 4));
+    CHECK(!mbm_image_data_writable((uintptr_t)pages, 0));
+    CHECK(!mbm_image_data_writable(UINTPTR_MAX - 2, 8)); /* wraps */
+    CHECK(VirtualFree(pages, 0, MEM_RELEASE)); /* lint-ok: C4 the test's own pages */
+}
+
 int main(void)
 {
+    CASE(ImageDataPagesAreWritable);
     CASE(AddsTheKeyboardDefaultsOnce);
     CASE(RefusesAnUnreviewedLayout);
     CASE(TheCodeDecodedLaterActivatesThen);

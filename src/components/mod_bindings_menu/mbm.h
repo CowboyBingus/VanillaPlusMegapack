@@ -187,6 +187,9 @@ int mbm_release_labels(void);
 void mbm_mods_title(int active);
 uint32_t mbm_claim_label(const char* text);
 void mbm_set_functions(uintptr_t base);
+/* 1 when [address, address + size) is committed read-write or write-copy memory without a guard page, an image's
+ * data pages included (the Lua's write_memory rule); one VirtualQuery per region. */
+int mbm_image_data_writable(uintptr_t address, size_t size);
 void mbm_consume(uintptr_t owner, uint32_t action);
 
 /* mbm_extended.c */

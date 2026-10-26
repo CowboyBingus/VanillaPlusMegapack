@@ -9,6 +9,7 @@
  * extended bindings exist outside a mission (and the engine Gui is reachable) a fifth tab, MORE MODS, follows. */
 #include <stdio.h>
 #include <string.h>
+#include <windows.h>
 #include "mbm.h"
 
 #define MBM_POOL 59
@@ -94,16 +95,37 @@ static void MbmPagesNote(VpmComponent* self, int writable, uint32_t first, uint3
     if (!writable) vpm_log(self, "Writes at game.dll+0x%X .. +0x%X skipped: %s not writable.", first, end, what);
 }
 
+int mbm_image_data_writable(uintptr_t address, size_t size)
+{
+    uintptr_t at = address, end = address + size;
+    if (address == 0 || size == 0 || end < address) return 0;
+    while (at < end)
+    {
+        MEMORY_BASIC_INFORMATION info;
+        if (VirtualQuery((const void*)at, &info, sizeof info) != sizeof info) return 0; /* lint-ok: C4 once per session, when native input is ready */
+        DWORD page = info.Protect & 0xFFu;
+        int writable = page == PAGE_READWRITE || page == PAGE_WRITECOPY || page == PAGE_EXECUTE_READWRITE ||
+            page == PAGE_EXECUTE_WRITECOPY;
+        if (info.State != MEM_COMMIT || !writable || (info.Protect & PAGE_GUARD) != 0) return 0;
+        uintptr_t regionEnd = (uintptr_t)info.BaseAddress + info.RegionSize;
+        if (regionEnd <= at) return 0;
+        at = regionEnd;
+    }
+    return 1;
+}
+
 /* Once native input is ready: the game's list functions, and the pages of every game.dll address this component writes
- * (the Lua checked each write; one check per region here). */
+ * (the Lua checked each write; one check per region here). Both regions are in game.dll's read-write data section, an
+ * image's pages (copy-on-write until first written): the Lua's own rule (write_memory: committed, read-write or
+ * write-copy, no guard), not vpm_writable's, which takes only private memory. */
 void mbm_set_functions(uintptr_t base)
 {
     s_tab.build_rows = (MbmBuildRows)(base + MBM_BUILD_ROWS_RVA);
     s_tab.set_tab_labels = (MbmSetTabLabels)(base + MBM_SET_TAB_LABELS_RVA);
     s_tab.reset_list = (MbmResetList)(base + MBM_LIST_RESET_RVA);
     s_tab.consume = (MbmConsumeAction)(base + MBM_INPUT_CONSUME_RVA);
-    mbm.labels_writable = vpm_writable(base + MBM_LABELS_FIRST, MBM_LABELS_SIZE);
-    mbm.slots_writable = vpm_writable(base + MBM_POOL_FIRST, MBM_POOL_END - MBM_POOL_FIRST);
+    mbm.labels_writable = mbm_image_data_writable(base + MBM_LABELS_FIRST, MBM_LABELS_SIZE);
+    mbm.slots_writable = mbm_image_data_writable(base + MBM_POOL_FIRST, MBM_POOL_END - MBM_POOL_FIRST);
     MbmPagesNote(mbm.self, mbm.labels_writable, MBM_LABELS_FIRST, MBM_LABELS_FIRST + MBM_LABELS_SIZE, "the action label table is");
     MbmPagesNote(mbm.self, mbm.slots_writable, MBM_POOL_FIRST, MBM_POOL_END, "the text slots are");
 }
