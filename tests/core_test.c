@@ -1441,8 +1441,192 @@ static void ExeCodeChecksAndStandIns(void)
     CHECK_EQ(g_exeCalls, 1);
 }
 
+/* ---- code checks that wait for game.dll's code to be decoded --------------------------------------------------- */
+
+static const char kPinA[] = "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 8B FA";
+static const char kPinB[] = "40 53 48 83 EC 20 48 8B D9 E8 11 22 33 44";
+static const VpmCodePin kGamePins[] = {{0x111000, kPinA, "first function", 0}, {0x222000, kPinB, "second function", 0}};
+static const VpmCodePin kExePins[] = {{0x333000, kPinA, "exe function", VPM_PIN_EXE}};
+static int g_readyRuns, g_readyFault;
+static HfEvent g_readyEvent;
+static void Ready(VpmComponent* self, HfEvent event)
+{
+    g_readyRuns++;
+    g_readyEvent = event;
+    if (g_readyFault) (void)*g_null;
+}
+static int StartWaiting(VpmComponent* self) { return vpm_when_code_ready(self, kGamePins, 2, Ready) ? 0 : 1; }
+static int StartWaitingExe(VpmComponent* self) { return vpm_when_code_ready(self, kExePins, 1, Ready) ? 0 : 1; }
+static const VpmComponentDef kWaiting = {"waiting", "Waiting", "1.0", 0, StartWaiting, NULL};
+static const VpmComponentDef kWaitingExe = {"waiting_exe", "Waiting Exe", "1.0", 0, StartWaitingExe, NULL};
+
+static void LayPin(uint8_t* image, uint32_t rva, const char* pattern)
+{
+    for (const char* p = pattern; *p;)
+    {
+        if (*p == ' ') { p++; continue; }
+        char hex[3] = {p[0], p[1], 0};
+        image[rva++] = (uint8_t)strtol(hex, NULL, 16);
+        p += 2;
+    }
+}
+
+static void ReadyAtOnceWhenDecoded(void)
+{
+    g_readyRuns = g_readyFault = 0;
+    LayPin((uint8_t*)fake_game(), 0x111000, kPinA);
+    LayPin((uint8_t*)fake_game(), 0x222000, kPinB);
+    const VpmComponentDef* defs[] = {&kWaiting};
+    fake_start(defs, 1);
+    CHECK_EQ(g_readyRuns, 0);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(g_readyRuns, 1);
+    CHECK(g_readyEvent == HF_EVENT_GAME_LOADED);
+    fake_counts_reset();
+    fake_frames(120, 1.0f / 60);
+    CHECK_EQ(g_readyRuns, 1);
+    CHECK_EQ(fake_counts().code_matches, 0); /* nothing more once ready */
+}
+
+static void ReadyOnceTheCodeIsDecoded(void)
+{
+    g_readyRuns = g_readyFault = 0;
+    LayPin((uint8_t*)fake_game(), 0x111000, kPinA); /* the second one is still encoded */
+    const VpmComponentDef* defs[] = {&kWaiting};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(g_readyRuns, 0);
+    fake_counts_reset();
+    fake_frames(29, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 0); /* a look every 30 frames */
+    fake_frames(1, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 2); /* the first matches, the second not */
+    LayPin((uint8_t*)fake_game(), 0x222000, kPinB);
+    fake_frames(29, 1.0f / 60);
+    CHECK_EQ(g_readyRuns, 0);
+    fake_frames(1, 1.0f / 60);
+    CHECK_EQ(g_readyRuns, 1);
+    CHECK(vpm_running(fake_component(0)));
+    fake_counts_reset();
+    fake_frames(300, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches, 0);
+    CHECK_EQ(g_readyRuns, 1);
+}
+
+static void StoppedWhenTheCodeNeverMatches(void)
+{
+    g_readyRuns = g_readyFault = 0;
+    LayPin((uint8_t*)fake_game(), 0x111000, kPinA);
+    const VpmComponentDef* defs[] = {&kWaiting};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_frames(59, 1.0f);
+    CHECK(vpm_running(fake_component(0)));
+    fake_frames(1, 1.0f);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_EQ(g_readyRuns, 0);
+    CHECK_LOG("[Waiting] disabled: second function changed (game.dll 0x222000)");
+    fake_counts_reset();
+    fake_frames(60, 1.0f);
+    CHECK_EQ(fake_counts().code_matches, 0);
+}
+
+static void ExePinsAreTheExes(void)
+{
+    g_readyRuns = g_readyFault = 0;
+    LayPin((uint8_t*)fake_game(), 0x333000, kPinA); /* in game.dll: not the exe's */
+    const VpmComponentDef* defs[] = {&kWaitingExe};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(g_readyRuns, 0);
+    LayPin((uint8_t*)fake_exe(), 0x333000, kPinA);
+    fake_frames(30, 1.0f / 60);
+    CHECK_EQ(g_readyRuns, 1);
+}
+
+static VpmComponent* g_lateWaiter;
+static int StartLateWaiter(VpmComponent* self) { g_lateWaiter = self; return 0; }
+static const VpmComponentDef kLateWaiter = {"late_waiter", "Late Waiter", "1.0", 0, StartLateWaiter, NULL};
+
+static void ARegistrationAfterTheEventIsLookedAtAtOnce(void)
+{
+    g_readyRuns = g_readyFault = 0;
+    LayPin((uint8_t*)fake_game(), 0x111000, kPinA);
+    LayPin((uint8_t*)fake_game(), 0x222000, kPinB);
+    const VpmComponentDef* defs[] = {&kLateWaiter};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK(vpm_when_code_ready(g_lateWaiter, kGamePins, 2, Ready));
+    CHECK_EQ(g_readyRuns, 1);
+    CHECK(!vpm_when_code_ready(g_lateWaiter, NULL, 0, Ready));
+}
+
+static void AStoppedComponentNeverGetsReady(void)
+{
+    g_readyRuns = g_readyFault = 0;
+    const VpmComponentDef* defs[] = {&kWaiting};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    vpm_core_stop(fake_component(0), "test");
+    LayPin((uint8_t*)fake_game(), 0x111000, kPinA);
+    LayPin((uint8_t*)fake_game(), 0x222000, kPinB);
+    fake_counts_reset();
+    fake_frames(90, 1.0f / 60);
+    CHECK_EQ(g_readyRuns, 0);
+    CHECK_EQ(fake_counts().code_matches, 0);
+}
+
+static void AFaultInReadyStopsTheComponent(void)
+{
+    g_readyRuns = 0;
+    g_readyFault = 1;
+    LayPin((uint8_t*)fake_game(), 0x111000, kPinA);
+    LayPin((uint8_t*)fake_game(), 0x222000, kPinB);
+    const VpmComponentDef* defs[] = {&kWaiting};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    g_readyFault = 0;
+    CHECK_EQ(g_readyRuns, 1);
+    CHECK(!vpm_running(fake_component(0)));
+    CHECK_LOG("[Waiting] disabled: fault 0xC0000005");
+}
+
+static void WaitsOfSeveralComponents(void)
+{
+    g_readyRuns = g_readyFault = 0;
+    LayPin((uint8_t*)fake_game(), 0x111000, kPinA);
+    LayPin((uint8_t*)fake_game(), 0x222000, kPinB);
+    const VpmComponentDef* defs[] = {&kWaiting, &kWaitingExe};
+    fake_start(defs, 2);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(g_readyRuns, 1); /* game.dll's pins match; the exe's never do */
+    fake_frames(60, 1.0f);
+    CHECK(vpm_running(fake_component(0)));
+    CHECK(!vpm_running(fake_component(1)));
+    CHECK_LOG("[Waiting Exe] disabled: exe function changed (helldivers2.exe 0x333000)");
+}
+
+static void NothingWaitingCostsNothing(void)
+{
+    const VpmComponentDef* defs[] = {&kTicking};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_counts_reset();
+    fake_frames(600, 1.0f / 60);
+    CHECK_EQ(fake_counts().code_matches + fake_counts().read, 0);
+}
+
 int main(void)
 {
+    RUN(ReadyAtOnceWhenDecoded);
+    RUN(ReadyOnceTheCodeIsDecoded);
+    RUN(StoppedWhenTheCodeNeverMatches);
+    RUN(ExePinsAreTheExes);
+    RUN(ARegistrationAfterTheEventIsLookedAtAtOnce);
+    RUN(AStoppedComponentNeverGetsReady);
+    RUN(AFaultInReadyStopsTheComponent);
+    RUN(WaitsOfSeveralComponents);
+    RUN(NothingWaitingCostsNothing);
     RUN(AComponentGetsADataFolder);
     RUN(ExeCodeChecksAndStandIns);
     RUN(OptionsAreCheckedAsModOptionsMenuChecksThem);

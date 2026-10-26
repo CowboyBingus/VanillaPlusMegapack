@@ -139,6 +139,19 @@ int vpm_game_code_matches(uint32_t rva, const char* pattern);
 /* The same at helldivers2.exe + rva. */
 int vpm_exe_code_matches(uint32_t rva, const char* pattern);
 
+/* Code checks that wait for game.dll's code to be decoded. HellForge fires HF_EVENT_GAME_LOADED once one pin of
+ * game.dll reads as decoded, and the rest of its code is decoded in parts after that (HellForge itself gives its own
+ * pins 20 s): a check made at that event can fail on code that is still encoded. vpm_when_code_ready checks every pin
+ * (VpmCodePin: an RVA, its pattern as shipped, a name for the log, VPM_PIN_EXE for the exe's) at
+ * HF_EVENT_GAME_LOADED, then every 30 frames until all match, for at most VPM_CODE_WAIT_SECONDS of game time; ready
+ * runs once (guarded, with HF_EVENT_GAME_LOADED) when they match. After the wait the component is stopped:
+ * "disabled: <name> changed (game.dll 0x<rva>)". The pins must stay valid (static). 1 registered, 0 not. While waiting:
+ * one code_matches per pin every 30 frames (an API call), nothing afterwards. */
+#define VPM_PIN_EXE 0x1u
+#define VPM_CODE_WAIT_SECONDS 60.0f
+typedef struct VpmCodePin { uint32_t rva; const char* pattern; const char* name; uint32_t flags; } VpmCodePin;
+int vpm_when_code_ready(VpmComponent* self, const VpmCodePin* pins, int count, VpmLoadFn ready);
+
 /* The game's hash lookup: a 20-byte header {u64 rows, u32 capacity, u32 empty key, u32 multiplier} whose rows are
  * {u32 key, u32 index}, probed linearly from key * multiplier (at most 64 probes, a power-of-two capacity no larger than
  * limit). 1 with *index set (never 0xFFFFFFFF), 0 when the key is absent or the table unreadable. Reads: 1 + probes. */

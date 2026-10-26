@@ -266,10 +266,13 @@ static void RunTicks(int list, float dt)
         if (*Slot(l->items[i], list) == NULL) { CompactTicks(list); break; }
 }
 
+static void CodeWaitsTick(float dt);
+
 static void PreFrame(float dt)
 {
     g_frames++;
     vpm_settings_tick(dt);
+    CodeWaitsTick(dt);
     RunTicks(LIST_PRE, dt);
 }
 
@@ -332,6 +335,89 @@ static void PackTick(HfMod* mod, float dt, void* user)
     PostFrame(dt);
 }
 
+/* ---- code checks that wait for game.dll's code (vpm_when_code_ready) -------------------------------------------- */
+
+#define MAX_CODE_WAITS 64
+#define CODE_CHECK_FRAMES 30
+typedef struct CodeWait
+{
+    VpmComponent* component;
+    const VpmCodePin* pins;
+    int count;
+    VpmLoadFn ready;
+    int done;         /* ready ran, or the component was stopped */
+} CodeWait;
+static CodeWait g_codeWaits[MAX_CODE_WAITS];
+static int g_codeWaitCount, g_codeWaitsOpen, g_codeLoaded, g_codeFrames;
+static float g_codeWaited;
+
+/* The first pin that does not read as shipped now, or -1. */
+static int FirstUnready(const CodeWait* w)
+{
+    for (int i = 0; i < w->count; i++)
+    {
+        const VpmCodePin* p = &w->pins[i];
+        int ok = (p->flags & VPM_PIN_EXE) ? vpm_exe_code_matches(p->rva, p->pattern) : vpm_game_code_matches(p->rva, p->pattern);
+        if (!ok) return i;
+    }
+    return -1;
+}
+
+typedef struct ReadyCall { CodeWait* wait; } ReadyCall;
+static void RunReady(void* arg) { CodeWait* w = ((ReadyCall*)arg)->wait; w->ready(w->component, HF_EVENT_GAME_LOADED); }
+
+/* One look at a wait: ready when every pin matches, stopped when the time is up, else it goes on waiting. */
+static void LookAt(CodeWait* w, int final)
+{
+    if (w->done) return;
+    if (!vpm_running(w->component)) { w->done = 1; g_codeWaitsOpen--; return; }
+    int unready = FirstUnready(w);
+    if (unready < 0)
+    {
+        w->done = 1;
+        g_codeWaitsOpen--;
+        ReadyCall call = {w};
+        vpm_core_guarded(w->component, RunReady, &call);
+        return;
+    }
+    if (!final) return;
+    w->done = 1;
+    g_codeWaitsOpen--;
+    const VpmCodePin* p = &w->pins[unready];
+    vpm_fail(w->component, "%s changed (%s 0x%X)", p->name, (p->flags & VPM_PIN_EXE) ? "helldivers2.exe" : "game.dll", p->rva);
+}
+
+int vpm_when_code_ready(VpmComponent* self, const VpmCodePin* pins, int count, VpmLoadFn ready)
+{
+    if (g_codeWaitCount >= MAX_CODE_WAITS || pins == NULL || count <= 0 || ready == NULL)
+    {
+        vpm_log(self, "core: code checks refused (%d registered of %d)", g_codeWaitCount, MAX_CODE_WAITS);
+        return 0;
+    }
+    CodeWait* w = &g_codeWaits[g_codeWaitCount++];
+    *w = (CodeWait){self, pins, count, ready, 0};
+    g_codeWaitsOpen++;
+    if (g_codeLoaded) LookAt(w, 0);
+    return 1;
+}
+
+/* At HF_EVENT_GAME_LOADED: every wait looked at once. */
+static void CodeWaitsLoaded(void)
+{
+    g_codeLoaded = 1;
+    for (int i = 0; i < g_codeWaitCount; i++) LookAt(&g_codeWaits[i], 0);
+}
+
+/* Per frame while a wait is open: the time, and a look every CODE_CHECK_FRAMES frames. */
+static void CodeWaitsTick(float dt)
+{
+    if (g_codeWaitsOpen <= 0 || !g_codeLoaded) return;
+    g_codeWaited += dt;
+    int final = g_codeWaited >= VPM_CODE_WAIT_SECONDS;
+    if (++g_codeFrames % CODE_CHECK_FRAMES != 0 && !final) return;
+    for (int i = 0; i < g_codeWaitCount; i++) LookAt(&g_codeWaits[i], final);
+}
+
 /* ---- costs: per component, at each mission's end --------------------------------------------------------------- */
 
 static void CostsStart(void)
@@ -365,10 +451,13 @@ static void CoreMissionEnd(HfMod* mod, const HfEventInfo* event, void* user) { C
 
 /* ---- start-up ---------------------------------------------------------------------------------------------------- */
 
+static void CodeWaitsLoaded(void);
+
 static void CoreGameLoaded(HfMod* mod, HfEvent event, void* user)
 {
     vpm_memory_game_loaded();
     TryFrameHook(0);
+    CodeWaitsLoaded();
 }
 
 static int VanillaPlusInSession(void)
@@ -476,6 +565,9 @@ void vpm_core_reset(void)
     g_tickCurrent = NULL;
     g_frameWaited = 0;
     g_frameOriginal = NULL;
+    memset(g_codeWaits, 0, sizeof g_codeWaits);
+    g_codeWaitCount = g_codeWaitsOpen = g_codeLoaded = g_codeFrames = 0;
+    g_codeWaited = 0;
     g_frames = 0;
     vpm_options_reset();
     vpm_bindings_reset();
