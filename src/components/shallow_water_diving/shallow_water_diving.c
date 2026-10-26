@@ -52,7 +52,16 @@
  * applied, changes through on_change) instead of Mod Options Menu's retried registration. The session's counters go to
  * the log at each mission's end and when the component stops (the Lua wrote them to its log file at startup, stop and
  * shutdown). Dropped: the Lua's pause after a failing update below it and its shutdown restore (no such events), the
- * diagnostics log, the JIT notes.
+ * JIT notes.
+ *
+ * Diagnostics. The Lua's diagnostics log (CowboyBingusDiagnostics: each check's status and the counters, rewritten at
+ * most every 2 s) is back as the pack's Detailed lines (vpm_log_detail; nothing in Normal mode), written after a full
+ * check and only on a change: the local avatar found (id, dive controller, entity record), a lease taken (the water
+ * record, the offset's bits before and after, the Drownable manager and table, the startup debt cleared, the page
+ * checks) or given back (why, the restore's own answer, the counters), the check's new reason (on a dive frame with the
+ * water depth, the limit, the stance and the timers it was judged by), the post-update check switched on or off, the
+ * errors of a burst after its first, and a new depth limit. The mark's describe line: the last reason, the local avatar
+ * and the lease followed, the depth limit, the post check, the burst's errors and the counters.
  *
  * Cost per frame, the tick's + the post tick's (reads are vpm_read, guarded plain loads; game.dll's globals and
  * constants are plain loads, which the Lua read through ReadProcessMemory too; its numbers in brackets, from its tests'
@@ -75,7 +84,11 @@
  * tick costs the core a guarded call and two time-stamp reads per frame while it runs; nothing while it is stopped. No
  * Windows call on a frame that does not act (the page check runs only right before a dive's first write in a table), no
  * allocation (all state is static), no logging (an error's first line in a burst only). Once: the option's registration
- * at start and one log line at HF_EVENT_GAME_LOADED, no reads; one log line at each mission's end. */
+ * at start and one log line at HF_EVENT_GAME_LOADED, no reads; one log line at each mission's end.
+ * The detailed lines add nothing to an idle frame (the gate's frames never reach them) and no game read anywhere: a
+ * full check compares three values it already holds (the reason, the avatar, the lease), and only a check where one
+ * changed makes the core's one global read of the Diagnostics mode per line (plus, in Detailed mode, the line itself,
+ * at most 20 per 600 frames); a restore stores its answer. Unmeasured in game. */
 #include <stdio.h>
 #include <string.h>
 #include "../../core/vpm.h"
@@ -98,18 +111,70 @@ static struct
     int watching;             /* the post-update tick runs (the Lua loader's watch_after) */
     int post_refused;         /* the core refused it: one check per frame for the session */
     int frame_failed;         /* the tick's check was an error: counted at the frame's end, with the post check */
+    uintptr_t seen_controller; /* the detailed lines' last local avatar (0: none) and lease */
+    uint32_t seen_id;
+    int seen_lease;
 } s;
 
 static VpmOptionDef g_depth; /* the slider (static: the core keeps it); its texts set at start */
 
 static void SwdAfter(VpmComponent* self, float dt);
 
-static void SwdShow(VpmComponent* self, const char* status, int active)
+/* 1 when the status changed. */
+static int SwdShow(VpmComponent* self, const char* status, int active)
 {
     s.active = active;
-    if (status == s.status) return;
+    if (status == s.status) return 0;
     s.status = status;
     vpm_set_status(self, status);
+    return 1;
+}
+
+/* ---- detailed lines (vpm.h "diagnostics"): what the Lua's diagnostics log file held (each check's status and the
+ * counters) and what a tester's report needs beside it. Only after a full check, only on a change: the local avatar
+ * found, a lease taken or given back (with the restore's answer), the check's new reason (on a dive frame with the
+ * water depth and timers it was judged by). */
+
+static void SwdDetailAvatar(VpmComponent* self)
+{
+    if (!swd.gate)
+    {
+        s.seen_controller = 0;
+        return;
+    }
+    if (swd.gate_controller == s.seen_controller && swd.gate_id == s.seen_id) return;
+    s.seen_controller = swd.gate_controller;
+    s.seen_id = swd.gate_id;
+    vpm_log_detail(self, "local avatar %u: dive controller 0x%llX, entity record 0x%llX", swd.gate_id,
+        (unsigned long long)swd.gate_controller, (unsigned long long)swd.key);
+}
+
+static void SwdDetailLease(VpmComponent* self, const char* reason)
+{
+    if (swd.pending.valid == s.seen_lease) return;
+    s.seen_lease = swd.pending.valid;
+    const SwdSnapshot* d = &swd_snap;
+    if (s.seen_lease)
+        vpm_log_detail(self, "lease taken: water record 0x%llX, +8 %08X -> %08X; Drownable manager 0x%llX, table 0x%llX; "
+            "startup debt %.3f s%s; page checks %u", (unsigned long long)d->water_address, swd.pending.before,
+            swd.pending.after, (unsigned long long)d->manager, (unsigned long long)d->table, (double)d->drown_elapsed,
+            d->drown_elapsed > 0 ? " cleared" : "", swd.queries);
+    else
+        vpm_log_detail(self, "lease given back: %s (restore: %s); observed=%u protected=%u restored=%u", reason,
+            swd.restore_why != NULL ? swd.restore_why : "none", swd.observed, swd.protected, swd.restored);
+}
+
+static void SwdDetailReason(VpmComponent* self, const char* reason)
+{
+    if (!(swd.gate && swd.was_dive))
+    {
+        vpm_log_detail(self, "check: %s", reason);
+        return;
+    }
+    const SwdSnapshot* d = &swd_snap; /* a dive frame: every field is this check's */
+    vpm_log_detail(self, "check: %s (water %.2f above the root%s, max %.2f; stance %u, dive time %.3f, landing %.3f, "
+        "submersion %.3f)", reason, (double)d->surface - (double)d->root_z, d->water_gate ? "" : ", surface unavailable",
+        swd.max_water_depth, d->stance, (double)d->elapsed, (double)d->landing, (double)d->drown_elapsed);
 }
 
 /* The check after the game's update, started or stopped when the Lua loader's watch_after changes. */
@@ -120,11 +185,13 @@ static void SwdWatch(VpmComponent* self, int watch)
     {
         vpm_post_tick_stop(self);
         s.watching = 0;
+        vpm_log_detail(self, "check after the game's update: off");
         return;
     }
     if (vpm_post_tick_start(self, SwdAfter))
     {
         s.watching = 1;
+        vpm_log_detail(self, "check after the game's update: on");
         return;
     }
     s.post_refused = 1;
@@ -157,6 +224,7 @@ static void SwdError(VpmComponent* self, const char* text)
         snprintf(s.burst_error, sizeof s.burst_error, "%s", text);
         vpm_log(self, "error: %s", text);
     }
+    else vpm_log_detail(self, "error %d of this burst: %s", s.errors, text);
     if (s.errors >= ERROR_LIMIT) vpm_fail(self, "stopped after %d errors: %s", ERROR_LIMIT, s.burst_error);
 }
 
@@ -178,7 +246,9 @@ static int SwdCheck(VpmComponent* self)
         return 0;
     }
     SwdSettle(self, 1, reason);
-    SwdShow(self, reason, active);
+    SwdDetailAvatar(self);
+    SwdDetailLease(self, reason);
+    if (SwdShow(self, reason, active)) SwdDetailReason(self, reason);
     return 0;
 }
 
@@ -233,7 +303,10 @@ static void SwdGameLoaded(VpmComponent* self, HfEvent event)
     vpm_log(self, "waiting_for_mission (max dive water depth %.2f; depth option %s)", swd.max_water_depth, s.depth_option);
 }
 
-static void SwdDepthChanged(VpmComponent* self, VpmOption* option, double value) { (void)swd_set_max_water_depth(value); }
+static void SwdDepthChanged(VpmComponent* self, VpmOption* option, double value)
+{
+    if (swd_set_max_water_depth(value)) vpm_log_detail(self, "max dive water depth: %.2f", swd.max_water_depth);
+}
 
 /* The slider for the deepest water a dive may start in; the applied value reaches the dive check through on_change. */
 static void SwdRegisterDepth(VpmComponent* self)
@@ -252,6 +325,18 @@ static void SwdRegisterDepth(VpmComponent* self)
     (void)swd_set_max_water_depth(vpm_option_value(option));
     vpm_option_on_change(option, SwdDepthChanged);
     s.depth_option = "registered";
+}
+
+/* The key state for a tester's mark: the last check's reason, the avatar and lease it follows, the counters. */
+static void Describe(VpmComponent* self, char* out, size_t size)
+{
+    char avatar[64] = "none", lease[48] = "none";
+    if (swd.gate) snprintf(avatar, sizeof avatar, "%u (controller 0x%llX)", swd.gate_id, (unsigned long long)swd.gate_controller);
+    if (swd.pending.valid) snprintf(lease, sizeof lease, "held at 0x%llX", (unsigned long long)swd.pending.address);
+    snprintf(out, size, "%s; local avatar %s; lease %s; max depth %.2f; check after update %s; errors in burst %d; "
+        "observed=%u protected=%u restored=%u", s.status != NULL ? s.status : "waiting_for_mission", avatar, lease,
+        swd.max_water_depth, s.watching ? "on" : s.post_refused ? "refused" : "off", s.errors, swd.observed, swd.protected,
+        swd.restored);
 }
 
 /* Puts back the water record a lease changed (the page is checked again) and logs the session's counters. */
@@ -273,4 +358,5 @@ static int Start(VpmComponent* self)
     return 0;
 }
 
-const VpmComponentDef vpm_component_shallow_water_diving = {"shallow_water_diving", "Shallow Water Diving", "3.10.1", 0, Start, Stop};
+const VpmComponentDef vpm_component_shallow_water_diving = {"shallow_water_diving", "Shallow Water Diving", "3.10.1", 0, Start, Stop,
+    Describe};

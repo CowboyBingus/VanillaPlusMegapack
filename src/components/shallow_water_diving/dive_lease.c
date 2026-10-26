@@ -115,7 +115,7 @@ static int LeaseOurs(int have, uint32_t current)
            (p->recovery.valid && LeasePartial(p->recovery.before, p->recovery.after, current));
 }
 
-int swd_restore(int reuse, const char** reason)
+static int LeaseRestore(int reuse, const char** reason)
 {
     SwdLease* p = &swd.pending;
     if (!p->valid) { *reason = "nothing_to_restore"; return 1; }
@@ -136,6 +136,14 @@ int swd_restore(int reuse, const char** reason)
     if (!LeaseStore(p->address, target, checked)) { *reason = "offset_not_writable"; return 0; }
     *reason = "restored";
     return LeaseHolds(p->address, target);
+}
+
+/* The restore, with its answer kept for the detailed lines (swd.restore_why). */
+int swd_restore(int reuse, const char** reason)
+{
+    int ok = LeaseRestore(reuse, reason);
+    swd.restore_why = *reason;
+    return ok;
 }
 
 static int LeaseRelease(const char* why, int reuse, const char** reason)
