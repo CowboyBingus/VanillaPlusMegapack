@@ -888,7 +888,7 @@ static void TheHookGoesInAtLoad(void)
     fake_counts_reset();
     fake_fire(HF_EVENT_GAME_LOADED);
     FakeCounts c = fake_counts();
-    CHECK_EQ(c.code_matches, 4);
+    CHECK_EQ(c.code_matches, 5); /* the 4 checks, and vpm_hook's own of the re-draw before it hooks (once per start) */
     CHECK_EQ(c.hook, 1);
     CHECK_EQ(c.read + c.write, 0);
     CHECK_EQ(fake_hook_count(), 1);
@@ -1309,7 +1309,7 @@ static void TheReDrawDecodedLaterIsHookedThen(void)
     fake_counts_reset();
     Frames(30);
     CHECK_EQ(fake_counts().hook, 1);
-    CHECK_EQ(fake_counts().code_matches, 1);
+    CHECK_EQ(fake_counts().code_matches, 2); /* the look, and vpm_hook's own check before it hooks (once) */
     CHECK_EQ(fake_hook_count(), 1);
     CHECK_LOG("[Holster Your Shield] The game's re-draw (game.dll 0xA95A90) is hooked: a shield the game draws while it is on the back goes back inside the draw.");
     CHECK_NO_LOG("hook refused");
@@ -1322,6 +1322,64 @@ static void TheReDrawDecodedLaterIsHookedThen(void)
     fake_counts_reset();
     Frames(300);
     CHECK_EQ(fake_counts().code_matches + fake_counts().hook, 0);
+}
+
+/* ---- live switches ------------------------------------------------------------------------------------------------ */
+
+/* Off and on with the re-draw hooked, without HellForge's live mods: the hook stays in, only calls the original while
+ * the component is off, and the next start finds it in (no second hook, which HellForge would refuse) and works as at
+ * load. */
+static void ALiveSwitchKeepsOneHook(void)
+{
+    HookedShieldOnTheBack();
+    VpmComponent* c = fake_component(0);
+    vpm_component_switch(c, 0);
+    Frame();
+    CHECK(!vpm_running(c));
+    CHECK_EQ(fake_hook_count(), 1);
+    w.redraws = 0;
+    FakeCounts off = WieldCounted(1, 1);
+    CHECK_EQ(w.redraws, 1);
+    CHECK_EQ(off.read, 0); /* the detour's gate: the component is off */
+    fake_counts_reset();
+    DecodeFunctions(); /* code_matches sees the functions as shipped (the fake's call stubs hide them) */
+    vpm_component_switch(c, 1);
+    Frame();
+    JumpTo(SET_ITEM_RVA, (uintptr_t)GameSetItem);
+    JumpTo(SET_MODE_RVA, (uintptr_t)GameSetMode);
+    JumpTo(SEND_HELD_RVA, (uintptr_t)GameSendHeld);
+    CHECK(vpm_running(c));
+    CHECK_EQ(fake_log_count("Holster Your Shield v1.0 initialized."), 2); /* the wait looked at once after start() */
+    CHECK_EQ(fake_counts().hook, 0);
+    CHECK_EQ(fake_hook_count(), 1);
+    CHECK(fake_hook_detour(fake_game() + REDRAW_RVA) == (void*)w.detour);
+    CHECK_EQ(fake_log_count("The game's re-draw (game.dll 0xA95A90) is hooked"), 2);
+    CHECK_NO_LOG("hook refused");
+    Settle();
+    ClearCalls();
+    Press(); /* the fresh start acts on a press again, its move checked on the next frame */
+    Frame();
+    CHECK_EQ(fake_log_count(": done (held "), 2);
+}
+
+/* With HellForge's live mods the core takes the hook out at the switch-off and the next start hooks it again. */
+static void ALiveSwitchWithLiveModsHooksAgain(void)
+{
+    World(NULL, 0);
+    SetRow(SHIELD, SHIELD, 2, 2);
+    fake_stand_in(REDRAW_RVA, REDRAW_SHIPPED, (void*)GameRedraw);
+    fake_start_live(kDefs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK_EQ(fake_hook_count(), 1);
+    vpm_component_switch(fake_component(0), 0);
+    Frame();
+    CHECK_EQ(fake_counts().unhook, 1);
+    CHECK_EQ(fake_hook_count(), 0);
+    vpm_component_switch(fake_component(0), 1);
+    Frame();
+    CHECK(vpm_running(fake_component(0)));
+    CHECK_EQ(fake_hook_count(), 1);
+    CHECK(fake_hook_detour(fake_game() + REDRAW_RVA) != NULL);
 }
 
 int main(void)
@@ -1369,5 +1427,7 @@ int main(void)
     RUN(TheHookRefusedForOtherBytesLeavesTheReStowNextFrame);
     RUN(TheHookRefusedByHellForgeLeavesTheReStowNextFrame);
     RUN(TheHookMovesTheReStowIntoTheDraw);
+    RUN(ALiveSwitchKeepsOneHook);
+    RUN(ALiveSwitchWithLiveModsHooksAgain);
     TEST_END();
 }

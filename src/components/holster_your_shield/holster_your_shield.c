@@ -72,8 +72,9 @@
  * calls inside the call, where the fallback makes the same 31 reads and 3 calls on the next frame (and the Lua 37 reads
  * and the 3 calls), and the frame after only the move's check. Idle frames cost the same with the hook as without.
  * Fewer reads than the Lua because game.dll's globals are plain loads here. No write, no page query (VirtualQuery), no
- * allocation and no other Windows call on any path. Once per session, at HF_EVENT_GAME_LOADED: 4 code checks (the
- * three functions and the re-draw's first 25 bytes), the hook, and 2 plain loads (the game's "nothing held" ids). While
+ * allocation and no other Windows call on any path. Once per start, at HF_EVENT_GAME_LOADED: 4 code checks (the
+ * three functions and the re-draw's first 25 bytes), vpm_hook's own check of those bytes and the hook (not again in a
+ * start after a live switch-off while the hook is still in), and 2 plain loads (the game's "nothing held" ids). While
  * game.dll's code is not decoded yet: the three functions' checks every 30 frames (the core's wait, at most 60 s, no
  * tick); then, if the re-draw's bytes are not decoded yet, 1 code check on every 30th frame for at most 60 s. */
 #include <stdio.h>
@@ -161,7 +162,6 @@ static struct
     SetItemFn set_item;
     SetModeFn set_mode;
     SendHeldFn send_held;
-    RedrawFn redraw;   /* the hook's original: HellForge rewrites it when another hook joins the chain */
     int hooked;
     int redraw_waiting; /* the re-draw's bytes did not read as shipped yet: looked at again every 30 frames */
     float redraw_waited;
@@ -186,6 +186,11 @@ static struct
     Counts counts;
     char why[48];
 } s;
+
+/* The hook's original: HellForge rewrites it when another hook joins the chain. Outside s, which start() resets: the
+ * hook stays in after a switch-off without HellForge's live mods, and a start after it must not zero what the detour
+ * calls (vpm.h "hooks"). */
+static RedrawFn g_redraw;
 
 /* ---- the game's registries ------------------------------------------------------------------------------------- */
 
@@ -596,9 +601,9 @@ static uint64_t Redraw(uint64_t record, uint64_t send, uint64_t blend)
     uint32_t avatar = 0;
     if (!vpm_running(s.self) || !s.toggled || s.busy || !vpm_read_u32((uintptr_t)record + RECORD_ENTITY, &avatar) ||
         avatar != s.toggled_for)
-        return s.redraw(record, send, blend);
+        return g_redraw(record, send, blend);
     s.busy = 1;
-    uint64_t result = s.redraw(record, send, blend);
+    uint64_t result = g_redraw(record, send, blend);
     s.busy = 0;
     (void)vpm_guarded(s.self, AfterRedraw, NULL); /* a fault stops the component, and the core logs it */
     return result;
@@ -632,8 +637,8 @@ static void LogRedraw(VpmComponent* self)
         : "is not hooked: a shield the game draws while it is on the back goes back on the next frame");
 }
 
-/* The game's re-draw hooked, or why the re-stow stays on the next frame: vpm_hook's check and hook, split so that the
- * check can wait for the code to be decoded (the same refusal texts). final: the wait is over. */
+/* The game's re-draw hooked, or why the re-stow stays on the next frame: a check that can wait for the code to be
+ * decoded (worded as vpm_hook's refusal), then vpm_hook. final: the wait is over. */
 static void TryRedraw(VpmComponent* self, int final)
 {
     s.redraw_waiting = 0;
@@ -642,10 +647,8 @@ static void TryRedraw(VpmComponent* self, int final)
         if (!final) { s.redraw_waiting = 1; return; }
         vpm_log(self, "hook refused: game.dll+0x%X is not the reviewed function", REDRAW_RVA);
     }
-    else if (vpm_hf()->hook_ex(vpm_mod(), vpm_game() + REDRAW_RVA, (void*)Redraw, (void**)&s.redraw, 0) != 0)
-        vpm_log(self, "hook refused at game.dll+0x%X: %s", REDRAW_RVA, vpm_hf()->last_log(vpm_mod()));
-    else
-        s.hooked = 1;
+    else if (vpm_hook(self, REDRAW_RVA, REDRAW_SHIPPED, (void*)Redraw, (void**)&g_redraw))
+        s.hooked = 1; /* vpm_hook checks the bytes once more and logs a refusal; a start after a switch-off finds it in */
     LogRedraw(self);
 }
 
@@ -675,7 +678,8 @@ static void FunctionsReady(VpmComponent* self, HfEvent event)
 }
 
 /* Nothing to put back: the component writes no memory, and the shield stays where the game has it. The re-draw's hook
- * stays for the session (HellForge's hooks do) and only calls the original from now on. */
+ * stays in without HellForge's live mods (it only calls the original while the component is off, and a later start
+ * finds it in); with them the core takes it out. */
 static void Stop(VpmComponent* self)
 {
     if (!s.bound) return;

@@ -189,17 +189,26 @@ static void ProjectilesReady(VpmComponent* self, HfEvent event)
     vpm_tick_start(self, Wait);
 }
 
-/* Puts the vanilla template back on the rows this session changed (the core stopping the component). */
+/* Puts the vanilla template back on the rows this start changed (a switch-off, or the core stopping the component):
+ * every changed row that still holds the no-foliage template, after one page check over their span, as Apply's (a
+ * switch-off runs on a game frame: one VirtualQuery per row would be up to 99). */
 static void Stop(VpmComponent* self)
 {
     const uint32_t value = VANILLA;
+    int back[FOLIAGE_TARGET_COUNT];
+    uintptr_t low = UINTPTR_MAX, high = 0;
     for (int i = 0; i < FOLIAGE_TARGET_COUNT; i++)
     {
         uint32_t now;
-        if (s.changed[i] && vpm_read_u32(s.rows[i] + AT_TEMPLATE, &now) && now == NO_FOLIAGE && vpm_writable(s.rows[i] + AT_TEMPLATE, 4))
-            memcpy((void*)(s.rows[i] + AT_TEMPLATE), &value, 4);
+        back[i] = s.changed[i] && vpm_read_u32(s.rows[i] + AT_TEMPLATE, &now) && now == NO_FOLIAGE;
         s.changed[i] = 0;
+        if (!back[i]) continue;
+        if (s.rows[i] < low) low = s.rows[i];
+        if (s.rows[i] > high) high = s.rows[i];
     }
+    if (high == 0 || !vpm_writable(low + AT_TEMPLATE, high - low + 4)) return;
+    for (int i = 0; i < FOLIAGE_TARGET_COUNT; i++)
+        if (back[i]) memcpy((void*)(s.rows[i] + AT_TEMPLATE), &value, 4);
 }
 
 /* The reader's bytes read as shipped: the event's work, if it came first. */

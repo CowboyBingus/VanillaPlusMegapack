@@ -1326,7 +1326,8 @@ static void PagesOfCategories(void)
 /* ---- new on HellForge: the pack's switches ------------------------------------------------------------------------- */
 
 /* VANILLA PLUS MEGAPACK lists a switch per component (Zulu switched off in the settings file: it did not start and
- * registered nothing). Applied, a switch is saved for the next session; this session runs on as it started. */
+ * registered nothing). Applied, a switch is saved and the core applies it at the next frame: Beta stops, Zulu starts and
+ * its options join the tab. Mod Options Menu's own switch applies from the next session, and its row says why. */
 static void ThePacksSwitches(void)
 {
     FILE* file = fopen("vpm-test-settings.ini", "w");
@@ -1354,7 +1355,13 @@ static void ThePacksSwitches(void)
     CHECK(Shows(Row(5) + 3992, "Note a problem now") && G32(Row(5) + 29068) == 0);
     P32(Panel(2) + 33296, 1);
     Frame();
-    CHECK(Shows(w.title, "Beta") && Shows(w.body, "Switches Beta on or off. Applies from the next session."));
+    CHECK(Shows(w.title, "Beta") && Shows(w.body, "Switches Beta on or off at once."));
+    P32(Panel(2) + 33296, 3);
+    Frame();
+    CHECK(Shows(w.body, "Switches Mod Options Menu on or off. Applies from the next session: it draws this menu, and the "
+        "game's menu would keep its MODS tab without it."));
+    P32(Panel(2) + 33296, 1);
+    Frame();
     P32(Row(1) + 29068, 0);
     P32(Row(2) + 29068, 1);
     Frame();
@@ -1368,7 +1375,14 @@ static void ThePacksSwitches(void)
     const char* beta = vpm_setting("components", "beta");
     const char* zulu = vpm_setting("components", "zulu");
     CHECK(beta != NULL && strcmp(beta, "off") == 0 && zulu != NULL && strcmp(zulu, "on") == 0);
-    CHECK(vpm_running(fake_component(1)) && !vpm_running(fake_component(2)));
+    CHECK(vpm_running(fake_component(1)) && !vpm_running(fake_component(2))); /* applied at the next frame */
+    Frame();
+    CHECK(!vpm_running(fake_component(1)) && vpm_running(fake_component(2)));
+    CHECK_LOG("[Beta] switched off: stopped");
+    CHECK_LOG("[Zulu] switched on: running");
+    CHECK(Shows(Button(3) + 1928, "ZULU")); /* its options, registered by the live start */
+    PickCategory(0, 2);
+    Frame();
     P32(Row(1) + 29068, 1);
     Frame();
     CHECK(G8(UNAPPLIED) == 1);
@@ -1385,7 +1399,8 @@ static void ThePacksSwitches(void)
     Frame();
     ReleaseKeys();
     CHECK_LOG("[core] MARK 1 at ");
-    CHECK_LOG("[core] MARK 1: Beta: running");
+    CHECK_LOG("[core] MARK 1: Zulu: running");
+    CHECK_NO_LOG("[core] MARK 1: Beta: running");
     Frame();
     CHECK(G8(UNAPPLIED) == 0 && G32(Row(5) + 29068) == 0);
 }

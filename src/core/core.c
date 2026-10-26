@@ -8,7 +8,15 @@
  * log reports at a mission's end), one bit scan and an increment for the tick-time histogram, and one compare for the
  * slow-tick count. Per tick list that
  * has ticks: the thread's call record set and put back (two thread-local copies, for the fault line and the crash
- * breadcrumb) and one compare of the status-line flag. No Windows call, no log call and no allocation per frame. */
+ * breadcrumb) and one compare of the status-line flag. One compare of the live-switch flag (a switch or HellForge's
+ * change of mods waits for the frame; added for live switches). No Windows call, no log call and no allocation per frame.
+ *
+ * Live switches (vpm.h): a switch the player changes is noted and applied at the start of the next frame, on the game
+ * thread, outside every component's callback (Mod Options Menu applies from its own tick). Each start is a new
+ * generation of the component: every registration it makes (load events, listeners, code waits) carries it, and one
+ * made by an earlier generation never fires again. Its slot is reused, so switching on and off adds no registrations
+ * with HellForge: the core holds one load-event callback per event for the pack and delivers it to the components'
+ * registrations itself, and a dead subscription of the same kind and priority is taken over. */
 #include <intrin.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -19,9 +27,25 @@ static const HfApi* g_hf;
 static HfMod* g_mod;
 static VpmComponent g_components[VPM_MAX_COMPONENTS];
 static int g_componentCount;
+static int g_initialized;      /* vpm_core_init ran and no unload came since */
+static int g_buildOk;          /* the game's build is the one the pack was made for */
+static int g_vanillaPlus;      /* HellForge's own Vanilla Plus is in the session */
+static VpmLive g_live;         /* HellForge's live mods, when its HfApi offers them */
+/* The live switches' work for the next frame (one compare per frame while none waits): bit 0 a switch, bit 1 HellForge's
+ * mods changed (its HF_EVENT_MODS_CHANGED, on the loader's change thread). */
+#define WORK_SWITCH 0x1L
+#define WORK_MODS 0x2L
+static volatile LONG g_switchWork;
+/* Load events arrive on HellForge's watch thread, live switches run on the game thread: one at a time. */
+static SRWLOCK g_lifeLock = SRWLOCK_INIT;
 
-typedef struct LoadReg { VpmComponent* component; HfEvent event; VpmLoadFn fn; } LoadReg;
-typedef struct ListenReg { VpmComponent* component; VpmListenFn fn; uint32_t kind; } ListenReg;
+/* A load event registration: dead once its generation is not the component's running one. pending: the event had fired
+ * when it was made from start(), so it is delivered when start() returns. dispatch: the core's delivery it was made in
+ * (that delivery skips it: it was delivered at once). */
+typedef struct LoadReg { VpmComponent* component; uint32_t generation; HfEvent event; VpmLoadFn fn; int pending; uint32_t dispatch; } LoadReg;
+/* A game event subscription: HellForge keeps it for the session; dead registrations of the same kind and priority are
+ * taken over by the next vpm_listen. subscribed: HellForge accepted it. */
+typedef struct ListenReg { VpmComponent* component; uint32_t generation; VpmListenFn fn; uint32_t kind; int32_t priority; int subscribed; } ListenReg;
 static LoadReg g_loads[VPM_MAX_LOADS];
 static int g_loadCount;
 static ListenReg g_listens[VPM_MAX_LISTENS];
@@ -38,6 +62,13 @@ static int g_starting;         /* vpm_core_init is running the components' start
 
 uint64_t vpm_core_frame(void) { return g_frame; }
 int vpm_core_starting(void) { return g_starting; }
+
+int vpm_core_alive(const VpmComponent* c, uint32_t generation)
+{
+    return c != NULL && c->state == VPM_STATE_RUNNING && c->generation == generation;
+}
+const VpmLive* vpm_core_live(void) { return &g_live; }
+const char* vpm_component_next_session(const VpmComponent* component) { return component->def->next_session; }
 
 const HfApi* vpm_hf(void) { return g_hf; }
 const HfApi* vpm_core_hf(void) { return g_hf; }
@@ -110,15 +141,11 @@ void vpm_core_status_lines(void)
 typedef struct StopCall { VpmComponent* component; } StopCall;
 static void RunStop(void* arg) { VpmComponent* c = ((StopCall*)arg)->component; c->def->stop(c); }
 
-void vpm_core_stop(VpmComponent* component, const char* reason)
+/* Its stop(), guarded, when start() had returned 0; then its hooks (taken out with HellForge's live mods). 0 when the
+ * stop faulted (what it changed may be left). */
+static int RunStopGuarded(VpmComponent* component, int started)
 {
-    if (component->state == VPM_STATE_STOPPED) return;
-    int started = component->started;
-    component->state = VPM_STATE_STOPPED;
-    component->tick = NULL;
-    component->post_tick = NULL;
-    snprintf(component->status, sizeof component->status, "disabled: %s", reason);
-    vpm_log(component, "disabled: %s", reason);
+    int finished = 1;
     if (started && component->def->stop != NULL)
     {
         StopCall call = {component};
@@ -132,8 +159,24 @@ void vpm_core_stop(VpmComponent* component, const char* reason)
             vpm_fault_text(&fault, text, sizeof text);
             vpm_diag_fault(&fault);
             vpm_log(component, "its stop did not finish: %s", text);
+            finished = 0;
         }
     }
+    vpm_hooks_component_off(component);
+    return finished;
+}
+
+void vpm_core_stop(VpmComponent* component, const char* reason)
+{
+    if (component->state == VPM_STATE_STOPPED) return;
+    int started = component->started;
+    component->state = VPM_STATE_STOPPED;
+    component->started = 0;
+    component->tick = NULL;
+    component->post_tick = NULL;
+    snprintf(component->status, sizeof component->status, "disabled: %s", reason);
+    vpm_log(component, "disabled: %s", reason);
+    (void)RunStopGuarded(component, started); /* a fault in it is logged */
 }
 
 int vpm_fail(VpmComponent* self, const char* format, ...)
@@ -183,26 +226,102 @@ int vpm_core_guarded(VpmComponent* component, uint32_t kind, uint32_t detail, vo
     return code == 0;
 }
 
-/* ---- load events ------------------------------------------------------------------------------------------------- */
+/* ---- load events ------------------------------------------------------------------------------------------------- *
+ * The core registers once per event with HellForge (HookCore) and delivers each to the components' registrations in
+ * registration order, as HellForge would have. It remembers which events fired and in which order, so a component
+ * started later (a live switch-on) gets them as at boot: right after its start() returns. */
+
+#define FIRST_LOAD HF_EVENT_GAME_LOADED
+#define LAST_LOAD HF_EVENT_PROJECTILES_READY
+static int g_eventOk[LAST_LOAD + 1];   /* HellForge accepted the core's registration of the event */
+static int g_fired[LAST_LOAD + 1];
+static HfEvent g_firedOrder[LAST_LOAD];
+static int g_firedCount;
+static uint32_t g_loadDispatch;        /* counts the core's deliveries of an event */
+static int g_loadWalks;                /* a walk over the registrations runs (a delivery): they must not move */
 
 typedef struct LoadCall { LoadReg* reg; HfEvent event; } LoadCall;
 static void RunLoad(void* arg) { LoadCall* call = arg; call->reg->fn(call->reg->component, call->event); }
 
-static void LoadTrampoline(HfMod* mod, HfEvent event, void* user)
+static void DeliverLoad(LoadReg* reg, HfEvent event)
 {
-    LoadReg* reg = user;
-    if (!vpm_running(reg->component)) return;
+    reg->pending = 0;
+    if (!vpm_core_alive(reg->component, reg->generation)) return;
     LoadCall call = {reg, event};
     vpm_core_guarded(reg->component, VPM_CALL_LOAD, (uint32_t)event, RunLoad, &call);
 }
 
+/* A slot for a new registration, at the end so that deliveries keep registration order: the dead ones are dropped
+ * first (the live ones keep their order), unless a delivery is walking the table; then, when it is full, a dead one's
+ * slot. NULL when none is free. */
+static LoadReg* LoadSlot(void)
+{
+    if (g_loadWalks == 0)
+    {
+        int kept = 0;
+        for (int i = 0; i < g_loadCount; i++)
+            if (vpm_core_alive(g_loads[i].component, g_loads[i].generation)) g_loads[kept++] = g_loads[i];
+        g_loadCount = kept;
+    }
+    if (g_loadCount < VPM_MAX_LOADS) return &g_loads[g_loadCount++];
+    for (int i = 0; i < g_loadCount; i++)
+        if (!vpm_core_alive(g_loads[i].component, g_loads[i].generation)) return &g_loads[i];
+    return NULL;
+}
+
 int vpm_on_load(VpmComponent* self, HfEvent event, VpmLoadFn fn)
 {
-    if (g_loadCount >= VPM_MAX_LOADS) { vpm_log(self, "core: no room for another load event"); return 0; }
-    LoadReg* reg = &g_loads[g_loadCount++];
-    *reg = (LoadReg){self, event, fn};
-    if (g_hf->on(g_mod, event, LoadTrampoline, reg) != 0) { vpm_log(self, "core: load event %d refused", (int)event); return 0; }
+    if ((int)event < FIRST_LOAD || (int)event > LAST_LOAD || !g_eventOk[event] || fn == NULL)
+    {
+        vpm_log(self, "core: load event %d refused", (int)event);
+        return 0;
+    }
+    LoadReg* reg = LoadSlot();
+    if (reg == NULL) { vpm_log(self, "core: no room for another load event"); return 0; }
+    *reg = (LoadReg){self, self->generation, event, fn, 0, g_loadDispatch};
+    if (!g_fired[event]) return 1;
+    if (self->in_start) { reg->pending = 1; return 1; } /* delivered when its start() returns (DeliverPast) */
+    g_loadWalks++;
+    DeliverLoad(reg, event);
+    g_loadWalks--;
     return 1;
+}
+
+static void CoreGameLoaded(void);
+
+/* HellForge's load event (on its watch thread, or right after a live init): the core's own work at game.dll's load,
+ * then every registration of the event made before this delivery. */
+static void CoreLoadEvent(HfMod* mod, HfEvent event, void* user)
+{
+    if ((int)event < FIRST_LOAD || (int)event > LAST_LOAD) return;
+    AcquireSRWLockExclusive(&g_lifeLock); /* lint-ok: C4 a load event: a handful per session */
+    if (!g_fired[event]) { g_fired[event] = 1; g_firedOrder[g_firedCount++] = event; }
+    uint32_t dispatch = ++g_loadDispatch;
+    if (event == HF_EVENT_GAME_LOADED) CoreGameLoaded();
+    int count = g_loadCount;
+    g_loadWalks++;
+    for (int i = 0; i < count; i++)
+        if (g_loads[i].event == event && g_loads[i].dispatch != dispatch) DeliverLoad(&g_loads[i], event);
+    g_loadWalks--;
+    ReleaseSRWLockExclusive(&g_lifeLock); /* lint-ok: C4 a load event: a handful per session */
+}
+
+static void CodeWaitsLook(VpmComponent* c);
+
+/* After a start() that returned 0: the events that fired before it, in the order the game fired them; at
+ * HF_EVENT_GAME_LOADED its code waits are looked at first, as the core looks at every wait before that event's
+ * callbacks. */
+static void DeliverPast(VpmComponent* c)
+{
+    g_loadWalks++;
+    for (int e = 0; e < g_firedCount && vpm_running(c); e++)
+    {
+        HfEvent event = g_firedOrder[e];
+        if (event == HF_EVENT_GAME_LOADED) CodeWaitsLook(c);
+        for (int i = 0; i < g_loadCount && vpm_running(c); i++)
+            if (g_loads[i].component == c && g_loads[i].pending && g_loads[i].event == event) DeliverLoad(&g_loads[i], event);
+    }
+    g_loadWalks--;
 }
 
 /* ---- game events ------------------------------------------------------------------------------------------------- */
@@ -210,24 +329,48 @@ int vpm_on_load(VpmComponent* self, HfEvent event, VpmLoadFn fn)
 typedef struct ListenCall { ListenReg* reg; const HfEventInfo* event; } ListenCall;
 static void RunListen(void* arg) { ListenCall* call = arg; call->reg->fn(call->reg->component, call->event); }
 
+/* A game event's delivery: a compare of the generation for a dead registration. lint: per-frame */
 static void ListenTrampoline(HfMod* mod, const HfEventInfo* event, void* user)
 {
     ListenReg* reg = user;
-    if (!vpm_running(reg->component)) return;
+    if (!vpm_core_alive(reg->component, reg->generation)) return;
     ListenCall call = {reg, event};
     vpm_core_guarded(reg->component, VPM_CALL_LISTENER, reg->kind, RunListen, &call);
 }
 
+/* A dead subscription of this kind and priority to take over (the component's own first), or NULL. */
+static ListenReg* DeadListen(VpmComponent* self, uint32_t kind, int32_t priority)
+{
+    ListenReg* any = NULL;
+    for (int i = 0; i < g_listenCount; i++)
+    {
+        ListenReg* reg = &g_listens[i];
+        if (!reg->subscribed || reg->kind != kind || reg->priority != priority || vpm_core_alive(reg->component, reg->generation)) continue;
+        if (reg->component == self) return reg;
+        if (any == NULL) any = reg;
+    }
+    return any;
+}
+
 int vpm_listen(VpmComponent* self, uint32_t kind, VpmListenFn fn, int32_t priority)
 {
+    ListenReg* dead = fn != NULL ? DeadListen(self, kind, priority) : NULL;
+    if (dead != NULL)
+    {
+        dead->component = self;
+        dead->generation = self->generation;
+        dead->fn = fn;
+        return 1;
+    }
     if (g_listenCount >= VPM_MAX_LISTENS) { vpm_log(self, "core: no room for another listener"); return 0; }
     ListenReg* reg = &g_listens[g_listenCount++];
-    *reg = (ListenReg){self, fn, kind};
+    *reg = (ListenReg){self, self->generation, fn, kind, priority, 0};
     if (!g_hf->subscribe(g_mod, kind, ListenTrampoline, reg, priority))
     {
         vpm_log(self, "core: game event %u refused (%s)", kind, g_hf->last_log(g_mod));
         return 0;
     }
+    reg->subscribed = 1;
     return 1;
 }
 
@@ -349,10 +492,12 @@ static void RunTicks(int list, float dt)
 }
 
 static void CodeWaitsTick(float dt);
+static void SwitchWork(void);
 
 static void PreFrame(float dt)
 {
     g_frame++;
+    if (g_switchWork != 0) SwitchWork();
     vpm_settings_tick(dt);
     CodeWaitsTick(dt);
     RunTicks(LIST_PRE, dt);
@@ -427,10 +572,13 @@ typedef struct CodeWait
     const VpmCodePin* pins;
     int count;
     VpmLoadFn ready;
-    int done;         /* ready ran, or the component was stopped */
+    int done;         /* ready ran, or the component was stopped: the slot is free again */
+    uint32_t generation; /* the component's start that registered it */
+    int pending;      /* registered from start() after HF_EVENT_GAME_LOADED: looked at when start() returns */
 } CodeWait;
 static CodeWait g_codeWaits[MAX_CODE_WAITS];
 static int g_codeWaitCount, g_codeWaitsOpen, g_codeLoaded, g_codeFrames;
+static int g_codePass; /* a pass over the waits runs (at the event, or a frame's look) */
 static float g_codeWaited;
 
 /* The first pin that does not read as shipped now, or -1. */
@@ -452,7 +600,7 @@ static void RunReady(void* arg) { CodeWait* w = ((ReadyCall*)arg)->wait; w->read
 static void LookAt(CodeWait* w, int final)
 {
     if (w->done) return;
-    if (!vpm_running(w->component)) { w->done = 1; g_codeWaitsOpen--; return; }
+    if (!vpm_core_alive(w->component, w->generation)) { w->done = 1; g_codeWaitsOpen--; return; }
     int unready = FirstUnready(w);
     if (unready < 0)
     {
@@ -471,16 +619,35 @@ static void LookAt(CodeWait* w, int final)
 
 int vpm_when_code_ready(VpmComponent* self, const VpmCodePin* pins, int count, VpmLoadFn ready)
 {
-    if (g_codeWaitCount >= MAX_CODE_WAITS || pins == NULL || count <= 0 || ready == NULL)
+    CodeWait* w = NULL;
+    /* A finished wait's slot (a component switched on again); not during a pass, which would look at it again. */
+    for (int i = 0; i < g_codeWaitCount && w == NULL && !g_codePass; i++)
+        if (g_codeWaits[i].done) w = &g_codeWaits[i];
+    if (w == NULL && g_codeWaitCount < MAX_CODE_WAITS && pins != NULL && count > 0 && ready != NULL) w = &g_codeWaits[g_codeWaitCount++];
+    if (w == NULL || pins == NULL || count <= 0 || ready == NULL)
     {
         vpm_log(self, "core: code checks refused (%d registered of %d)", g_codeWaitCount, MAX_CODE_WAITS);
         return 0;
     }
-    CodeWait* w = &g_codeWaits[g_codeWaitCount++];
-    *w = (CodeWait){self, pins, count, ready, 0};
+    *w = (CodeWait){self, pins, count, ready, 0, self->generation, 0};
     g_codeWaitsOpen++;
-    if (g_codeLoaded) LookAt(w, 0);
+    if (!g_codeLoaded) return 1;
+    if (self->in_start) w->pending = 1; /* looked at when its start() returns (DeliverPast) */
+    else LookAt(w, 0);
     return 1;
+}
+
+/* A component's waits registered during its start(), after HF_EVENT_GAME_LOADED: looked at now (DeliverPast). */
+static void CodeWaitsLook(VpmComponent* c)
+{
+    int count = g_codeWaitCount;
+    for (int i = 0; i < count && vpm_running(c); i++)
+    {
+        CodeWait* w = &g_codeWaits[i];
+        if (w->component != c || !w->pending) continue;
+        w->pending = 0;
+        LookAt(w, 0);
+    }
 }
 
 /* At HF_EVENT_GAME_LOADED: every wait looked at once. A wait a ready registers during the pass was looked at by its
@@ -489,7 +656,21 @@ static void CodeWaitsLoaded(void)
 {
     g_codeLoaded = 1;
     int count = g_codeWaitCount;
+    g_codePass = 1;
     for (int i = 0; i < count; i++) LookAt(&g_codeWaits[i], 0);
+    g_codePass = 0;
+}
+
+/* A switched-off component's waits are over: their slots are free for its next start. */
+static void CodeWaitsForget(VpmComponent* c)
+{
+    for (int i = 0; i < g_codeWaitCount; i++)
+    {
+        CodeWait* w = &g_codeWaits[i];
+        if (w->component != c || w->done) continue;
+        w->done = 1;
+        g_codeWaitsOpen--;
+    }
 }
 
 /* Per frame while a wait is open: the time, and a look every CODE_CHECK_FRAMES frames. */
@@ -500,7 +681,9 @@ static void CodeWaitsTick(float dt)
     int final = g_codeWaited >= VPM_CODE_WAIT_SECONDS;
     if (++g_codeFrames % CODE_CHECK_FRAMES != 0 && !final) return;
     int count = g_codeWaitCount; /* as at the event: one registered during the pass was looked at by its registration */
+    g_codePass = 1;
     for (int i = 0; i < count; i++) LookAt(&g_codeWaits[i], final);
+    g_codePass = 0;
 }
 
 /* ---- costs: per component, at each mission's end --------------------------------------------------------------- */
@@ -599,7 +782,8 @@ static void CoreMissionEnd(HfMod* mod, const HfEventInfo* event, void* user)
 
 static void CodeWaitsLoaded(void);
 
-static void CoreGameLoaded(HfMod* mod, HfEvent event, void* user)
+/* game.dll's load (inside CoreLoadEvent, before the components' registrations of it). */
+static void CoreGameLoaded(void)
 {
     int known = vpm_game() != 0;
     vpm_memory_game_loaded();
@@ -621,37 +805,133 @@ static int VanillaPlusInSession(void)
     }
 }
 
-void vpm_component_switch(VpmComponent* component, int on)
-{
-    component->switched_on = on != 0;
-    vpm_setting_put("components", component->def->id, on ? "on" : "off");
-    vpm_settings_save_soon();
-}
+#define OVERLAP_STATUS "off: HellForge's Vanilla Plus is on and changes the same thing"
 
 typedef struct StartCall { VpmComponent* component; int result; } StartCall;
 static void RunStart(void* arg) { StartCall* call = arg; call->result = call->component->def->start(call->component); }
 
-static void StartComponent(VpmComponent* c, int buildOk, int vanillaPlus)
+/* Starts a switched-on component (at init, or a live switch-on): a new generation, start() guarded, then the load events
+ * that already fired. */
+static void StartComponent(VpmComponent* c)
 {
     if (!c->switched_on) { snprintf(c->status, sizeof c->status, "off"); return; }
-    if (!buildOk) { snprintf(c->status, sizeof c->status, "off: needs game build %s", VPM_GAME_BUILD); return; }
-    if (vanillaPlus && (c->def->flags & VPM_OVERLAPS_VANILLA_PLUS))
+    if (!g_buildOk) { snprintf(c->status, sizeof c->status, "off: needs game build %s", VPM_GAME_BUILD); return; }
+    if (g_vanillaPlus && (c->def->flags & VPM_OVERLAPS_VANILLA_PLUS))
     {
-        snprintf(c->status, sizeof c->status, "off: HellForge's Vanilla Plus is on and changes the same thing");
+        snprintf(c->status, sizeof c->status, OVERLAP_STATUS);
         vpm_log(c, "%s", c->status);
         return;
     }
+    c->generation++;
     c->state = VPM_STATE_RUNNING;
+    c->started = 0;
     snprintf(c->status, sizeof c->status, "running");
     StartCall call = {c, 1};
-    if (!vpm_core_guarded(c, VPM_CALL_START, 0, RunStart, &call)) return;
+    c->in_start = 1;
+    int ran = vpm_core_guarded(c, VPM_CALL_START, 0, RunStart, &call);
+    c->in_start = 0;
+    if (!ran) return;
     if (call.result != 0)
     {
         if (c->state == VPM_STATE_RUNNING) vpm_core_stop(c, "start refused");
         return;
     }
-    if (c->state == VPM_STATE_RUNNING) c->started = 1;
+    if (c->state != VPM_STATE_RUNNING) return;
+    c->started = 1;
+    DeliverPast(c);
 }
+
+/* Stops a component for a switch (or the pack's unload): its registrations die with its generation, its stop() runs
+ * when it had started. A component a fault stopped already ran its stop(): only its status changes. 0 when its stop()
+ * faulted. */
+static int SwitchOff(VpmComponent* c, const char* status)
+{
+    int running = c->state == VPM_STATE_RUNNING, started = c->started;
+    c->state = VPM_STATE_OFF;
+    c->started = 0;
+    c->generation++;
+    c->tick = NULL;
+    c->post_tick = NULL;
+    snprintf(c->status, sizeof c->status, "%s", status);
+    CodeWaitsForget(c);
+    if (!running) return 1;
+    vpm_log(c, "%s: stopped", status);
+    return RunStopGuarded(c, started);
+}
+
+static void Apply(VpmComponent* c, int on)
+{
+    if (!on)
+    {
+        if (c->state != VPM_STATE_OFF || strcmp(c->status, "off") != 0) (void)SwitchOff(c, "switched off"); /* a fault is logged */
+        snprintf(c->status, sizeof c->status, "off");
+        return;
+    }
+    if (c->state == VPM_STATE_RUNNING) return;
+    StartComponent(c);
+    vpm_log(c, "switched on: %s", c->status);
+}
+
+/* HellForge's mods changed (live mods): its Vanilla Plus came or went, so the components that overlap it stop or start. */
+static void ModsChanged(void)
+{
+    int now = VanillaPlusInSession();
+    if (now == g_vanillaPlus) return;
+    g_vanillaPlus = now;
+    vpm_core_log("HellForge's mods changed: its Vanilla Plus is %s now", now ? "in the session" : "gone");
+    for (int i = 0; i < g_componentCount; i++)
+    {
+        VpmComponent* c = &g_components[i];
+        if (!(c->def->flags & VPM_OVERLAPS_VANILLA_PLUS) || c->def->next_session != NULL) continue;
+        if (now && c->state == VPM_STATE_RUNNING) (void)SwitchOff(c, OVERLAP_STATUS); /* a fault is logged */
+        else if (!now && c->switched_on && c->state != VPM_STATE_RUNNING) Apply(c, 1);
+    }
+}
+
+/* The frame's live-switch work, at the start of the frame on the game thread (one compare while none waits): every
+ * switch the player changed since the last frame, in the components' order. While HellForge's watch thread delivers a
+ * load event the work waits for the next frame: the game thread never waits for it. */
+static void SwitchWork(void)
+{
+    LONG work = InterlockedExchange(&g_switchWork, 0);
+    if (!TryAcquireSRWLockExclusive(&g_lifeLock)) /* lint-ok: C4 a frame that applies a switch */
+    {
+        InterlockedOr(&g_switchWork, work);
+        return;
+    }
+    if (work & WORK_MODS) ModsChanged();
+    for (int i = 0; i < g_componentCount; i++)
+    {
+        VpmComponent* c = &g_components[i];
+        if (c->wanted == VPM_SWITCH_NONE) continue;
+        int on = c->wanted;
+        c->wanted = VPM_SWITCH_NONE;
+        Apply(c, on);
+    }
+    ReleaseSRWLockExclusive(&g_lifeLock); /* lint-ok: C4 a frame that applies a switch */
+    if (g_statusPending) vpm_core_status_lines();
+}
+
+void vpm_component_switch(VpmComponent* component, int on)
+{
+    on = on != 0;
+    int was = component->switched_on;
+    component->switched_on = on;
+    vpm_setting_put("components", component->def->id, on ? "on" : "off");
+    vpm_settings_save_soon();
+    if (component->def->next_session != NULL)
+    {
+        if (on != was) vpm_log(component, "switched %s: applies from the next session (%s)", on ? "on" : "off", component->def->next_session);
+        return;
+    }
+    component->wanted = on;
+    InterlockedOr(&g_switchWork, WORK_SWITCH);
+    /* No frame to wait for (no game-thread callback and no frame hook): at once. */
+    if (!g_tickHooked && g_frameState != 1) SwitchWork();
+}
+
+/* HF_EVENT_MODS_CHANGED (live mods, on HellForge's change thread): noted for the next frame. */
+static void CoreModsChanged(HfMod* mod, HfEvent event, void* user) { InterlockedOr(&g_switchWork, WORK_MODS); }
 
 static void LogSummary(void)
 {
@@ -666,31 +946,46 @@ static void HookCore(void)
 {
     g_tickHooked = g_hf->on_game_thread(g_mod, PackTick, NULL);
     if (!g_tickHooked) vpm_core_log("the game thread could not be reached (%s): components that tick stay idle", g_hf->last_log(g_mod));
-    if (g_hf->on(g_mod, HF_EVENT_GAME_LOADED, CoreGameLoaded, NULL) != 0) vpm_core_log("game.dll's load event refused: components see it as absent");
+    for (int event = FIRST_LOAD; event <= LAST_LOAD; event++)
+    {
+        g_eventOk[event] = 1; /* before on(): HellForge may deliver an event that already fired inside it */
+        if (g_hf->on(g_mod, (HfEvent)event, CoreLoadEvent, NULL) == 0) continue;
+        g_eventOk[event] = 0;
+        vpm_core_log("load event %d refused: components see it as absent", event);
+    }
+    if (g_live.present && g_hf->on(g_mod, (HfEvent)VPM_EVENT_MODS_CHANGED, CoreModsChanged, NULL) != 0)
+        vpm_core_log("HellForge's mods-changed event refused: its Vanilla Plus coming or going applies from the next session");
     if (!g_hf->subscribe(g_mod, HF_ON_MISSION_START, CoreMissionStart, NULL, 0) ||
         !g_hf->subscribe(g_mod, HF_ON_MISSION_END, CoreMissionEnd, NULL, 0))
         vpm_core_log("mission events refused (%s): no per-mission cost report", g_hf->last_log(g_mod));
 }
 
+static void Forget(void);
+
 int vpm_core_init(const HfApi* api, HfMod* mod, const VpmComponentDef* const* defs, int count)
 {
     g_hf = api;
     g_mod = mod;
-    if (api->version < 15 || api->size < sizeof(HfApi))
+    if (api->version < 15 || api->size < SDK15_SIZE)
     {
         api->log(mod, "Vanilla Plus Megapack needs HellForge mod SDK 15 or newer (this HellForge has %u)", api->version);
         return 1;
     }
+    Forget(); /* vpm_diag_reset among the rest */
+    g_initialized = 1;
     g_tscInit = __rdtsc();
     QueryPerformanceCounter(&g_qpcInit); /* lint-ok: C4 once, at the pack's start */
     g_slowCycles = UINT64_MAX;
-    vpm_diag_reset();
     vpm_guard_install();
     vpm_memory_init();
     vpm_user32_init();
-    int buildOk = strcmp(api->build_id(), VPM_GAME_BUILD) == 0;
-    int vanillaPlus = VanillaPlusInSession();
-    vpm_diag_identity(vanillaPlus);
+    g_buildOk = strcmp(api->build_id(), VPM_GAME_BUILD) == 0;
+    g_vanillaPlus = VanillaPlusInSession();
+    g_live = vpm_live_detect(api, mod);
+    vpm_diag_identity(g_vanillaPlus);
+    if (g_live.present)
+        vpm_core_log("HellForge's live mods: the pack can be taken out and set up again while the game runs (set up %s)",
+            g_live.phase == VPM_LOAD_LIVE ? "while the game runs" : "as the game started");
     vpm_settings_load();
     vpm_diag_settings_loaded();
     HookCore();
@@ -701,11 +996,12 @@ int vpm_core_init(const HfApi* api, HfMod* mod, const VpmComponentDef* const* de
         memset(c, 0, sizeof *c);
         c->def = defs[i];
         c->index = i;
+        c->wanted = VPM_SWITCH_NONE;
         const char* saved = vpm_setting("components", c->def->id);
         c->switched_on = saved != NULL ? strcmp(saved, "off") != 0 : !(c->def->flags & VPM_DEFAULT_OFF);
     }
     g_starting = 1;
-    for (int i = 0; i < g_componentCount; i++) StartComponent(&g_components[i], buildOk, vanillaPlus);
+    for (int i = 0; i < g_componentCount; i++) StartComponent(&g_components[i]);
     g_starting = 0;
     LogSummary();
     vpm_diag_register();
@@ -713,24 +1009,98 @@ int vpm_core_init(const HfApi* api, HfMod* mod, const VpmComponentDef* const* de
     return 0;
 }
 
-void vpm_core_reset(void)
+/* Every component, registration, option, binding and setting forgotten (the guard stays as it is). The frame update's
+ * original stays: a frame of an earlier set-up may still be returning through the detour. */
+static void Forget(void)
 {
     memset(g_components, 0, sizeof g_components);
     g_componentCount = g_loadCount = g_listenCount = g_tickHooked = g_frameState = 0;
+    memset(g_loads, 0, sizeof g_loads);
+    memset(g_listens, 0, sizeof g_listens);
     memset(g_lists, 0, sizeof g_lists);
     g_tickList = g_tickAt = 0;
     g_tickCurrent = NULL;
     g_frameWaited = 0;
-    g_frameOriginal = NULL;
     memset(g_codeWaits, 0, sizeof g_codeWaits);
-    g_codeWaitCount = g_codeWaitsOpen = g_codeLoaded = g_codeFrames = 0;
+    g_codeWaitCount = g_codeWaitsOpen = g_codeLoaded = g_codeFrames = g_codePass = 0;
     g_codeWaited = 0;
+    memset(g_eventOk, 0, sizeof g_eventOk);
+    memset(g_fired, 0, sizeof g_fired);
+    g_firedCount = 0;
+    g_loadDispatch = 0;
+    g_loadWalks = 0;
     g_frame = g_missionFrame = 0;
     g_starting = g_statusPending = 0;
+    g_initialized = g_buildOk = g_vanillaPlus = 0;
+    memset(&g_live, 0, sizeof g_live);
+    InterlockedExchange(&g_switchWork, 0);
+    vpm_hooks_unload();
     vpm_options_reset();
     vpm_diag_reset();
     vpm_crash_reset();
     vpm_bindings_reset();
+}
+
+void vpm_core_reset(void)
+{
+    Forget();
+    g_frameOriginal = NULL;
+}
+
+/* ---- HellForge's live mods (SDK 16) ------------------------------------------------------------------------------ *
+ * HellForge PR 65 adds two functions after SDK 15's last one (stats_source): load_phase and unhook. Another SDK 16
+ * proposal numbers its own additions differently, so the pack never trusts the SDK number or an event number alone: it
+ * takes the functions only when the HfApi's size covers both, both are set, the SDK is 16 or newer and load_phase answers
+ * one of its two phases. Built with PR 65's header, the fields are read by name. */
+
+#ifdef HF_LOAD_LIVE
+#define LIVE_PHASE_AT offsetof(HfApi, load_phase)
+#define LIVE_UNHOOK_AT offsetof(HfApi, unhook)
+#else
+#define LIVE_PHASE_AT (offsetof(HfApi, stats_source) + sizeof(void*))
+#define LIVE_UNHOOK_AT (LIVE_PHASE_AT + sizeof(void*))
+#endif
+
+VpmLive vpm_live_detect(const HfApi* api, HfMod* mod)
+{
+    VpmLive live;
+    memset(&live, 0, sizeof live);
+    if (api->version < 16 || api->size < LIVE_UNHOOK_AT + sizeof(void*)) return live;
+    memcpy(&live.load_phase, (const char*)api + LIVE_PHASE_AT, sizeof live.load_phase);
+    memcpy(&live.unhook, (const char*)api + LIVE_UNHOOK_AT, sizeof live.unhook);
+    if (live.load_phase == NULL || live.unhook == NULL) { memset(&live, 0, sizeof live); return live; }
+    live.phase = live.load_phase(mod);
+    if (live.phase != VPM_LOAD_BOOT && live.phase != VPM_LOAD_LIVE) { memset(&live, 0, sizeof live); return live; }
+    live.present = 1;
+    return live;
+}
+
+/* hellforge_mod_unload (HellForge took the pack's callbacks and hooks out already: this stops what the pack started
+ * itself, and its components' game edits). On HellForge's change thread. */
+int vpm_core_unload(uint32_t reason)
+{
+    if (!g_initialized) return 0;
+    AcquireSRWLockExclusive(&g_lifeLock); /* lint-ok: C4 the pack taken out: once */
+    vpm_core_log("HellForge takes the pack out (%s): every component stops", reason == VPM_UNLOAD_REPLACE ? "a new version replaces it" : "removed");
+    int finished = 1;
+    for (int i = g_componentCount - 1; i >= 0; i--)
+    {
+        g_components[i].wanted = VPM_SWITCH_NONE;
+        finished &= SwitchOff(&g_components[i], "off: the pack was taken out");
+    }
+    memset(g_lists, 0, sizeof g_lists);
+    g_tickHooked = 0;
+    if (g_frameState == 1 && g_live.unhook != NULL) (void)g_live.unhook(g_mod, vpm_game() + VPM_FRAME_UPDATE); /* 1 when HellForge took it out already */
+    g_frameState = -1; /* a game-thread callback still in flight must not hook it again (the next init starts at 0) */
+    vpm_hooks_unload();
+    InterlockedExchange(&g_switchWork, 0);
+    vpm_settings_flush();
+    if (finished) vpm_core_log("the pack is out: no component runs, its hooks and the crash guard are gone");
+    else vpm_core_log("the pack is out, but a component's stop did not finish: what it changed may be left (restart the session to be sure)");
+    g_initialized = 0;
+    ReleaseSRWLockExclusive(&g_lifeLock); /* lint-ok: C4 the pack taken out: once */
+    vpm_guard_uninstall();
+    return finished ? 0 : 1;
 }
 
 /* ---- Windows functions found at run time ------------------------------------------------------------------------- */
@@ -759,5 +1129,11 @@ const char* vpm_text(const VpmComponent* self, const char* key, const char* engl
 HF_MOD_EXPORT int hellforge_mod_init(const HfApi* api, HfMod* mod)
 {
     return vpm_core_init(api, mod, vpm_components, vpm_component_total);
+}
+
+/* SDK 16 (HellForge's live mods): called before HellForge takes the pack out. An older HellForge never calls it. */
+HF_MOD_EXPORT int hellforge_mod_unload(const HfApi* api, HfMod* mod, uint32_t reason)
+{
+    return vpm_core_unload(reason);
 }
 #endif

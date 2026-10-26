@@ -2,7 +2,8 @@
  *
  * Categories are the pack's components that registered options (vpm_option_owner), each listing its options in
  * registration order, plus one category of the pack itself, VANILLA PLUS MEGAPACK, with a switch per component
- * (vpm_component_switched_on / vpm_component_switch; a switch applies from the next session) and then the pack's own
+ * (vpm_component_switched_on / vpm_component_switch; a switch applies at once, or from the next session for a
+ * component that names why: vpm_component_next_session) and then the pack's own
  * options (those vpm_pack() owns: Diagnostics, Note a problem now). Values are the core's:
  * the applied value is vpm_option_value, and the player's edits stay pending here until APPLY, which hands each to
  * vpm_option_apply (set, the owner's on_change) in registration order, switches after options, and the settings file
@@ -217,7 +218,8 @@ static void AddOption(int index)
     category->items[category->count++] = item;
 }
 
-/* The pack's own category: a switch per component, which applies from the next session. Its owner is the core's record
+/* The pack's own category: a switch per component, which applies at once (from the next frame), or from the next session
+ * for a component that cannot restart while the game runs (its row says why). Its owner is the core's record
  * (vpm_pack), so the pack's own options (Diagnostics, Note a problem now) are listed in it after the switches. */
 static void AddSwitches(void)
 {
@@ -227,14 +229,16 @@ static void AddSwitches(void)
     {
         VpmComponent* component = vpm_component_at(i);
         MomItem* item = &g_items[MOM_MAX_OPTIONS + i];
-        char text[160];
+        char text[VPM_OPTION_DESCRIPTION];
         memset(item, 0, sizeof *item);
         item->component = component;
         item->key = MOM_MAX_OPTIONS + i;
         item->kind = VPM_TOGGLE;
         item->label = mom_text_named(vpm_def(component)->name, LABEL_LIMIT);
         if (item->label == NULL) item->label = mom_intern(vpm_def(component)->id);
-        snprintf(text, sizeof text, "Switches %s on or off. Applies from the next session.", vpm_def(component)->name);
+        const char* later = vpm_component_next_session(component);
+        if (later == NULL) snprintf(text, sizeof text, "Switches %s on or off at once.", vpm_def(component)->name);
+        else snprintf(text, sizeof text, "Switches %s on or off. Applies from the next session: %s.", vpm_def(component)->name, later);
         item->description = mom_text_resolve(text);
         ToggleFields(item);
         if (descriptor == NULL) descriptor = Descriptor(g_descriptors[MOM_MAX_OPTIONS], item);

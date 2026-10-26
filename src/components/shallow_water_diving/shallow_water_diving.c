@@ -350,6 +350,9 @@ static void Stop(VpmComponent* self)
 
 static int Start(VpmComponent* self)
 {
+    /* A live switch-on after a stop that could not put the water record back: one more try before the reset forgets it. */
+    const char* why = NULL;
+    if (swd.pending.valid && !swd_restore(0, &why)) vpm_log(self, "restore_failed (%s): kept as it is", why);
     memset(&s, 0, sizeof s);
     swd_reset();
     SwdRegisterDepth(self);

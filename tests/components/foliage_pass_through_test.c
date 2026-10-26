@@ -321,6 +321,34 @@ static void StopPutsTheRowsBack(void)
     CHECK_EQ(Template(239), 2);
 }
 
+/* A live switch-off puts the rows back with one page check (not one per row), a switch-on applies again at once (the
+ * code check and HF_EVENT_PROJECTILES_READY replayed after its start), and so on many times. */
+static void ALiveSwitchPutsBackAndAppliesAgain(void)
+{
+    MakeWorld(VANILLA_LIST, 0, 1);
+    Started();
+    fake_fire(HF_EVENT_PROJECTILES_READY);
+    CHECK_EQ(Count(2), 99);
+    for (int i = 0; i < 20; i++)
+    {
+        fake_counts_reset();
+        vpm_component_switch(fake_component(0), 0);
+        fake_frames(1, 1.0f / 60);
+        CHECK(!vpm_running(fake_component(0)));
+        CHECK_EQ(Count(0), 99);
+        CHECK_EQ(fake_counts().writable, 1);
+        vpm_component_switch(fake_component(0), 1);
+        fake_frames(1, 1.0f / 60);
+        CHECK(vpm_running(fake_component(0)));
+        CHECK_EQ(Count(2), 99);
+        CHECK_EQ(Template(OTHER_TYPE), 0);
+    }
+    CHECK_EQ(fake_log_count("applied: 99 projectile types use the no-foliage query (99 changed now, 0 already changed)"), 21);
+    fake_counts_reset();
+    fake_frames(100, 1.0f / 60);
+    CHECK_EQ(fake_counts().read + fake_counts().writable + fake_counts().log, 0);
+}
+
 int main(void)
 {
     RUN(TargetsAreThePlayersOnly);
@@ -333,6 +361,7 @@ int main(void)
     RUN(RefusesAnotherReader);
     RUN(RefusesReadOnlySettings);
     RUN(StopPutsTheRowsBack);
+    RUN(ALiveSwitchPutsBackAndAppliesAgain);
     RUN(TheReaderDecodedAtTheEventIsCheckedThere);
     RUN(TheReaderDecodedLaterAppliesThen);
     RUN(TheReaderDecodedBeforeTheSettingsWaitsForThem);

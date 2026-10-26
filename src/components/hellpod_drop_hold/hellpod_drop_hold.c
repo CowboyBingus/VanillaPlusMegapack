@@ -124,7 +124,8 @@ static const char* const kSceneNames[] = {"none", "mission extraction", "ship br
 /* The manager as read at one check. */
 typedef struct View { uintptr_t records, locals, nets, map; uint32_t active, map_capacity, map_empty, map_multiplier; } View;
 typedef struct Pod { uint32_t index, id; uintptr_t record; const PodKind* kind; } Pod;
-typedef struct Held { int active; Pod pod; float saved, value; double held_for; const char* retry; } Held;
+/* address: where the held t was stored, for a stop that cannot read the manager (Stop). */
+typedef struct Held { int active; Pod pod; float saved, value; double held_for; const char* retry; uintptr_t address; } Held;
 /* Entity ids (the Lua's done and sighted tables): the oldest gives way when full. */
 typedef struct IdSet { uint32_t ids[SEEN]; int count, next; } IdSet;
 
@@ -493,7 +494,7 @@ static int StartHold(VpmComponent* self, const View* v, const Pod* pod, const ch
     float value = (float)((HOLD_SPEED - braking) / ((double)initial - braking));
     if (!SamePod(v, pod, pod->index)) { *why = "drop_pod_moved"; return LEFT_ALONE; }
     if (!Store(address, value)) { *why = "drop_pod_not_writable"; return REFUSED; }
-    s.held = (Held){1, *pod, saved, value, 0, NULL};
+    s.held = (Held){1, *pod, saved, value, 0, NULL, address};
     vpm_log(self, "holding %s pod %u at %.0f m (speed factor %.3f -> %.3f)", pod->kind->name, pod->id,
         HeightOf(v, pod->index), saved, value);
     return HELD;
@@ -648,8 +649,21 @@ static void Tick(VpmComponent* self, float dt)
     if (why != NULL) vpm_fail(self, "%s", why);
 }
 
-/* The core stopping the component (a refusal or a fault): the held pod is released, as the Lua's stop did. */
-static void Stop(VpmComponent* self) { (void)Release(self, "stopped"); }
+/* The core stopping the component (a switch-off, a refusal or a fault): the held pod is released, as the Lua's stop did.
+ * When the manager cannot be read just now, no later poll comes to retry (the tick stops with the component, and the
+ * next start forgets the hold), so the saved t goes back at the address it was held at, if that still holds exactly
+ * the component's own value (after one page check). */
+static void Stop(VpmComponent* self)
+{
+    (void)Release(self, "stopped");
+    if (!s.held.active) return;
+    float now;
+    s.held.active = 0;
+    if (vpm_read_f32(s.held.address, &now) && now == s.held.value && Store(s.held.address, s.held.saved))
+        vpm_log(self, "released pod %u (stopped) at its kept address: the manager could not be read", s.held.pod.id);
+    else
+        vpm_log(self, "pod %u left as it is (stopped): the manager could not be read and its speed changed", s.held.pod.id);
+}
 
 static int Start(VpmComponent* self)
 {

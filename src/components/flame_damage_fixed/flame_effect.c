@@ -157,3 +157,20 @@ int fdf_apply_effect(uintptr_t data, int* writes, FdfReason* why)
     }
     return VerifyEffect(data, why);
 }
+
+int fdf_unapply_effect(uintptr_t data, int* writes, FdfReason* why)
+{
+    int pending = 0;
+    *writes = 0;
+    if (!CheckEffect(data, &pending, why)) return 0;
+    if (pending == FDF_PATCH_COUNT) return 1; /* every word holds the shipped value already */
+    FDF_COUNT(writable);
+    if (!vpm_writable(data, FDF_EFFECT_SIZE)) return Fail(why, FDF_EFFECT_WRITABLE);
+    for (int i = 0; i < FDF_PATCH_COUNT; i++)
+    {
+        if (U32(g_effect + fdf_patches[i].offset) != fdf_patches[i].fixed) continue;
+        fdf_store(data + fdf_patches[i].offset, fdf_patches[i].shipped);
+        (*writes)++;
+    }
+    return 1;
+}

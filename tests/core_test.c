@@ -1,6 +1,7 @@
 /* The core: start-up, switches, the crash guard, ticks, listeners, options, the settings file, bindings, the game's
- * lookup, the local avatar, and the diagnostics (identity, fault context, the crash breadcrumb, status lines, the
- * mission's end, settings problems, costs, the detailed lines' limiter, the tester's mark). */
+ * lookup, the local avatar, the diagnostics (identity, fault context, the crash breadcrumb, status lines, the
+ * mission's end, settings problems, costs, the detailed lines' limiter, the tester's mark), live switches and
+ * HellForge's live mods (detection, the unload export, a second init). */
 #include <math.h>
 #include <string.h>
 #include "core/vpm_version.h"
@@ -2439,6 +2440,512 @@ static void IdleFramesAreTheSameInBothModesAndAllocateNothing(void)
     CHECK_EQ(ticks[0], 2 * 10000); /* Ticking and Idle Detail every frame */
 }
 
+/* ---- live switches ------------------------------------------------------------------------------------------------ *
+ * A component of every kind in one: a load-event edit (a game word set at HF_EVENT_ENTITIES_READY, put back by stop()),
+ * a code wait whose ready starts its tick, a listener and an option. Its callbacks note what ran, in which order, and
+ * whether its start() was still running. */
+
+#define LIVE_PIN_RVA 0x100000u
+#define LIVE_READY 9
+static uint32_t* g_edit;
+static int g_liveStarts, g_liveStops, g_liveTicks, g_liveHeard, g_liveChanged, g_liveReady, g_inLiveStart, g_duringStart;
+static int g_liveLoads[8], g_liveOrder[16], g_liveOrderCount;
+static int g_liveFaultNext;
+static VpmOption* g_liveOption;
+static const VpmOptionDef kLiveOption = {"strength", VPM_SLIDER, "Strength", NULL, 1, 0, 5, 1, NULL, 0};
+static const VpmCodePin kLivePins[] = {{LIVE_PIN_RVA, "48 89 5C 24 08", "live function", 0}};
+
+static void LiveOrder(int what)
+{
+    if (g_liveOrderCount < 16) g_liveOrder[g_liveOrderCount++] = what;
+    g_duringStart += g_inLiveStart;
+}
+static void LiveTick(VpmComponent* self, float dt) { g_liveTicks++; }
+static void LiveHeard(VpmComponent* self, const HfEventInfo* event) { g_liveHeard++; }
+static void LiveChanged(VpmComponent* self, VpmOption* option, double value) { g_liveChanged++; }
+static void LiveLoad(VpmComponent* self, HfEvent event)
+{
+    g_liveLoads[event]++;
+    LiveOrder((int)event);
+    if (event == HF_EVENT_ENTITIES_READY && *g_edit == 0) *g_edit = 7;
+}
+static void LiveReady(VpmComponent* self, HfEvent event)
+{
+    g_liveReady++;
+    LiveOrder(LIVE_READY);
+    vpm_tick_start(self, LiveTick);
+}
+static int StartLive(VpmComponent* self)
+{
+    g_liveStarts++;
+    if (g_liveFaultNext) { g_liveFaultNext = 0; (void)*g_null; }
+    g_inLiveStart = 1;
+    int ok = vpm_on_load(self, HF_EVENT_GAME_LOADED, LiveLoad) && vpm_on_load(self, HF_EVENT_ENTITIES_READY, LiveLoad) &&
+             vpm_listen(self, HF_ON_SPAWN, LiveHeard, 3) && vpm_when_code_ready(self, kLivePins, 1, LiveReady);
+    g_liveOption = vpm_option(self, &kLiveOption);
+    if (g_liveOption != NULL) vpm_option_on_change(g_liveOption, LiveChanged);
+    g_inLiveStart = 0;
+    return ok && g_liveOption != NULL ? 0 : 1;
+}
+static void StopLive(VpmComponent* self)
+{
+    g_liveStops++;
+    if (*g_edit == 7) *g_edit = 0;
+}
+static const VpmComponentDef kLive = {"live", "Live", "1.0", 0, StartLive, StopLive};
+static const VpmComponentDef kLiveOff = {"live_off", "Live Off", "1.0", VPM_DEFAULT_OFF, StartLive, StopLive};
+static const VpmComponentDef kLater = {"later", "Later", "1.0", 0, StartTicking, Stop, NULL, "it needs a test"};
+static const VpmComponentDef kLiveFaultLoad = {"live_fault_load", "Live Fault Load", "1.0", VPM_DEFAULT_OFF, StartFaultLoad, Stop};
+
+static void LiveReset(void)
+{
+    Reset();
+    g_edit = fake_heap(16);
+    g_liveStarts = g_liveStops = g_liveTicks = g_liveHeard = g_liveChanged = g_liveReady = 0;
+    g_inLiveStart = g_duringStart = g_liveOrderCount = g_liveFaultNext = 0;
+    memset(g_liveLoads, 0, sizeof g_liveLoads);
+    static const uint8_t code[] = {0x48, 0x89, 0x5C, 0x24, 0x08};
+    memcpy((void*)(fake_game() + LIVE_PIN_RVA), code, sizeof code);
+}
+
+static void Spawn(void)
+{
+    HfSpawnEvent spawn = {{sizeof spawn, HF_ON_SPAWN, 1}, 1, 2, 3, 1};
+    fake_emit(&spawn.info);
+}
+
+/* The player's switch, applied by the core at the next frame. */
+static void SwitchNow(int index, int on)
+{
+    vpm_component_switch(fake_component(index), on);
+    fake_frames(1, DT);
+}
+
+static int Order(int a, int b, int c) { return g_liveOrderCount == 3 && g_liveOrder[0] == a && g_liveOrder[1] == b && g_liveOrder[2] == c; }
+
+/* Off: at the next frame its stop() runs and puts the edit back; its tick, listener, load events and option callback stop;
+ * the switch is saved. */
+static void ALiveSwitchOffStopsEverything(void)
+{
+    LiveReset();
+    const VpmComponentDef* defs[] = {&kLive, &kTicking};
+    fake_start(defs, 2);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    CHECK(Order(LIVE_READY, HF_EVENT_GAME_LOADED, HF_EVENT_ENTITIES_READY)); /* the code waits first, as at boot */
+    CHECK_EQ(*g_edit, 7);
+    fake_frames(2, DT);
+    CHECK_EQ(g_liveTicks, 2);
+    Spawn();
+    CHECK_EQ(g_liveHeard, 1);
+    VpmComponent* c = fake_component(0);
+    vpm_component_switch(c, 0);
+    CHECK(vpm_running(c) && g_liveStops == 0); /* at the next frame, never inside the caller's callback */
+    fake_frames(1, DT);
+    CHECK(!vpm_running(c));
+    CHECK_EQ(g_liveStops, 1);
+    CHECK_EQ(*g_edit, 0);
+    CHECK(strcmp(vpm_status(c), "off") == 0);
+    CHECK_LOG("[Live] switched off: stopped");
+    CHECK_EQ(g_liveTicks, 2); /* the switch comes before the frame's ticks */
+    fake_frames(5, DT);
+    CHECK_EQ(g_liveTicks, 2);
+    Spawn();
+    CHECK_EQ(g_liveHeard, 1);
+    fake_fire(HF_EVENT_ENTITIES_READY); /* the game reloads its entity data: nothing for a component that is off */
+    CHECK_EQ(g_liveLoads[HF_EVENT_ENTITIES_READY], 1);
+    CHECK_EQ(*g_edit, 0);
+    CHECK(vpm_option_apply(g_liveOption, 3));
+    CHECK_EQ(g_liveChanged, 0);
+    CHECK(vpm_option_value(g_liveOption) == 3);
+    CHECK(!vpm_component_switched_on(c) && strcmp(vpm_setting("components", "live"), "off") == 0);
+    CHECK(vpm_running(fake_component(1)) && g_stops == 0);
+    CHECK_EQ(g_ticks, 8); /* the other component ticked on */
+}
+
+/* On: start() runs at the next frame, then the code waits and the load events that fired before, in the game's order and
+ * after start() returned; the component then works as if it had started at boot. */
+static void ALiveSwitchOnGetsTheEventsThatFired(void)
+{
+    LiveReset();
+    const VpmComponentDef* defs[] = {&kLiveOff};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    CHECK_EQ(g_liveStarts, 0);
+    CHECK_EQ(*g_edit, 0);
+    SwitchNow(0, 1);
+    VpmComponent* c = fake_component(0);
+    CHECK(vpm_running(c));
+    CHECK_EQ(g_liveStarts, 1);
+    CHECK(Order(LIVE_READY, HF_EVENT_GAME_LOADED, HF_EVENT_ENTITIES_READY));
+    CHECK_EQ(g_duringStart, 0); /* none of them inside start() */
+    CHECK_EQ(*g_edit, 7);
+    CHECK_LOG("[Live Off] switched on: running");
+    CHECK_EQ(g_liveTicks, 1); /* started before the frame's ticks: it ticks in the frame that switched it on */
+    fake_frames(3, DT);
+    CHECK_EQ(g_liveTicks, 4);
+    Spawn();
+    CHECK_EQ(g_liveHeard, 1);
+    CHECK(vpm_option_apply(g_liveOption, 2));
+    CHECK_EQ(g_liveChanged, 1);
+    fake_fire(HF_EVENT_ENTITIES_READY); /* a reload of the entity data reaches it like any other */
+    CHECK_EQ(g_liveLoads[HF_EVENT_ENTITIES_READY], 2);
+}
+
+/* Two hundred times off and on: no registration piles up with HellForge or in the core, each event reaches it once, and
+ * switches within one frame apply only the last one. */
+static void SwitchingManyTimesAddsNothing(void)
+{
+    LiveReset();
+    const VpmComponentDef* defs[] = {&kLive};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    int options = vpm_option_count();
+    FakeCounts before = fake_counts();
+    for (int i = 0; i < 200; i++)
+    {
+        SwitchNow(0, 0);
+        CHECK_EQ(*g_edit, 0);
+        SwitchNow(0, 1);
+        CHECK_EQ(*g_edit, 7);
+    }
+    FakeCounts after = fake_counts();
+    CHECK_EQ(g_liveStarts, 201);
+    CHECK_EQ(g_liveStops, 200);
+    CHECK_EQ(g_liveReady, 201);
+    CHECK_EQ(after.subscribe - before.subscribe, 0);
+    CHECK_EQ(after.on - before.on, 0);
+    CHECK_EQ(vpm_option_count(), options);
+    g_liveHeard = 0;
+    Spawn();
+    CHECK_EQ(g_liveHeard, 1);
+    int loads = g_liveLoads[HF_EVENT_ENTITIES_READY];
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    CHECK_EQ(g_liveLoads[HF_EVENT_ENTITIES_READY], loads + 1);
+    g_liveTicks = 0;
+    fake_frames(4, DT);
+    CHECK_EQ(g_liveTicks, 4);
+    /* Within one frame only the last switch counts. */
+    VpmComponent* c = fake_component(0);
+    vpm_component_switch(c, 0);
+    vpm_component_switch(c, 1);
+    fake_frames(1, DT);
+    CHECK(vpm_running(c) && g_liveStops == 200 && g_liveStarts == 201); /* on and on: nothing to do */
+    vpm_component_switch(c, 1);
+    vpm_component_switch(c, 0);
+    vpm_component_switch(c, 1);
+    vpm_component_switch(c, 0);
+    fake_frames(1, DT);
+    CHECK(!vpm_running(c) && g_liveStops == 201);
+}
+
+/* Load events reach a component's registrations in the order it made them, however often it and the others were
+ * switched (their dead registrations leave holes in the table). */
+static char g_loadTrail[64];
+static void TrailA(VpmComponent* self, HfEvent event) { strncat(g_loadTrail, "A", sizeof g_loadTrail - strlen(g_loadTrail) - 1); }
+static void TrailB(VpmComponent* self, HfEvent event) { strncat(g_loadTrail, "B", sizeof g_loadTrail - strlen(g_loadTrail) - 1); }
+static void TrailC(VpmComponent* self, HfEvent event) { strncat(g_loadTrail, "C", sizeof g_loadTrail - strlen(g_loadTrail) - 1); }
+static int StartTrailAB(VpmComponent* self)
+{
+    return vpm_on_load(self, HF_EVENT_ENTITIES_READY, TrailA) && vpm_on_load(self, HF_EVENT_ENTITIES_READY, TrailB) ? 0 : 1;
+}
+static int StartTrailC(VpmComponent* self) { return vpm_on_load(self, HF_EVENT_ENTITIES_READY, TrailC) ? 0 : 1; }
+static const VpmComponentDef kTrailAB = {"trail_ab", "Trail AB", "1.0", 0, StartTrailAB, NULL};
+static const VpmComponentDef kTrailC = {"trail_c", "Trail C", "1.0", 0, StartTrailC, NULL};
+
+static void LoadEventsKeepTheirOrderAcrossSwitches(void)
+{
+    Reset();
+    const VpmComponentDef* defs[] = {&kTrailC, &kTrailAB, &kLive};
+    LiveReset();
+    fake_start(defs, 3);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    g_loadTrail[0] = 0;
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    CHECK(strcmp(g_loadTrail, "CAB") == 0);
+    for (int i = 0; i < 30; i++)
+    {
+        SwitchNow(i % 3, 0);
+        g_loadTrail[0] = 0;
+        SwitchNow(i % 3, 1);
+        CHECK(strcmp(g_loadTrail, i % 3 == 0 ? "C" : i % 3 == 1 ? "AB" : "") == 0);
+    }
+    g_loadTrail[0] = 0;
+    fake_fire(HF_EVENT_ENTITIES_READY); /* the order they were registered in now: C, then A B, as their starts ran */
+    CHECK(strcmp(g_loadTrail, "CAB") == 0);
+    CHECK_EQ(g_liveLoads[HF_EVENT_ENTITIES_READY], 12);
+}
+
+/* Without HellForge's live mods a hook stays in: a start after a switch-off finds it and does not hook again (HellForge
+ * would refuse the same detour twice); while off, the detour only calls the original. A start that reset its original
+ * gets it back. */
+static void AHookIsNotDoubledBySwitchingWithoutLiveMods(void)
+{
+    Reset();
+    g_detourWork = 0;
+    fake_stand_in(g_hookRva, "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 8B FA", (void*)&g_original);
+    const VpmComponentDef* defs[] = {&kHooking};
+    fake_start(defs, 1);
+    int (*detour)(int) = (int (*)(int))fake_hook_detour(fake_game() + g_hookRva);
+    CHECK_EQ(fake_hook_count(), 1);
+    CHECK_EQ(detour(5), 1005);
+    SwitchNow(0, 0);
+    CHECK_EQ(fake_hook_count(), 1);
+    CHECK_EQ(vpm_hooks_in(), 1);
+    CHECK_EQ(detour(5), 10); /* off: the original only */
+    uint32_t hooks = fake_counts().hook;
+    SwitchNow(0, 1);
+    CHECK(vpm_running(fake_component(0)));
+    CHECK_EQ(fake_counts().hook, hooks);
+    CHECK_EQ(fake_hook_count(), 1);
+    CHECK_EQ(detour(5), 1005);
+    CHECK_NO_LOG("hook refused");
+    SwitchNow(0, 0);
+    g_hooked = NULL; /* a component whose start() resets its original (vpm.h says not to) */
+    SwitchNow(0, 1);
+    CHECK(g_hooked != NULL && detour(6) == 1006);
+    CHECK_LOG("its original was reset by start() and is put back");
+}
+
+/* With HellForge's live mods a switched-off component's hook is taken out (unhook) and its next start hooks again. */
+static void AHookIsTakenOutWithLiveMods(void)
+{
+    Reset();
+    fake_stand_in(g_hookRva, "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 8B FA", (void*)&g_original);
+    const VpmComponentDef* defs[] = {&kHooking};
+    fake_start_live(defs, 1);
+    CHECK_EQ(fake_hook_count(), 1);
+    SwitchNow(0, 0);
+    CHECK_EQ(fake_counts().unhook, 1);
+    CHECK_EQ(fake_hook_count(), 0);
+    CHECK_EQ(vpm_hooks_in(), 0);
+    CHECK(fake_hook_detour(fake_game() + g_hookRva) == NULL);
+    SwitchNow(0, 1);
+    CHECK_EQ(fake_hook_count(), 1);
+    CHECK_EQ(vpm_hooks_in(), 1);
+    int (*detour)(int) = (int (*)(int))fake_hook_detour(fake_game() + g_hookRva);
+    CHECK(detour != NULL && detour(5) == 1005);
+    vpm_core_stop(fake_component(0), "test"); /* a fault's stop takes it out too */
+    CHECK_EQ(fake_hook_count(), 0);
+}
+
+/* A fault in a live start stops that component only; a fault in a load event delivered after it runs its stop(); a
+ * later switch off and on starts it again. */
+static void AFaultDuringALiveStart(void)
+{
+    LiveReset();
+    const VpmComponentDef* defs[] = {&kLive, &kTicking, &kLiveFaultLoad};
+    fake_start(defs, 3);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    SwitchNow(0, 0);
+    g_liveFaultNext = 1;
+    SwitchNow(0, 1);
+    VpmComponent* c = fake_component(0);
+    CHECK(!vpm_running(c));
+    CHECK(strncmp(vpm_status(c), "disabled: fault 0xC0000005", 26) == 0);
+    CHECK_LOG("[Live] switched on: disabled: fault 0xC0000005");
+    CHECK_EQ(g_liveStops, 1); /* start() did not return: no stop() */
+    CHECK(vpm_running(fake_component(1)));
+    int ticks = g_ticks;
+    fake_frames(2, DT);
+    CHECK_EQ(g_ticks, ticks + 2);
+    SwitchNow(0, 0);
+    SwitchNow(0, 1);
+    CHECK(vpm_running(c));
+    CHECK_EQ(*g_edit, 7);
+    /* The fault in the replayed load event: stopped, its stop() run (its start had returned 0). */
+    g_stops = 0;
+    SwitchNow(2, 1);
+    CHECK(!vpm_running(fake_component(2)));
+    CHECK_EQ(g_stops, 1);
+    CHECK_LOG("[Live Fault Load] disabled: fault 0xC0000005");
+}
+
+/* A component that names why it cannot restart: its switch is saved, it runs on, and the log says from when. */
+static void ANextSessionSwitchWaitsForTheNextSession(void)
+{
+    Reset();
+    const VpmComponentDef* defs[] = {&kLater};
+    fake_start(defs, 1);
+    VpmComponent* c = fake_component(0);
+    CHECK(strcmp(vpm_component_next_session(c), "it needs a test") == 0);
+    SwitchNow(0, 0);
+    CHECK(vpm_running(c) && g_stops == 0);
+    CHECK(!vpm_component_switched_on(c));
+    CHECK_LOG("[Later] switched off: applies from the next session (it needs a test)");
+    fake_frames(2, DT);
+    CHECK_EQ(g_ticks, 3);
+}
+
+/* HellForge's unload: every component stopped and its edits put back, no tick, no hook, no guard, the settings saved;
+ * HellForge then takes its registrations out, and a second init in the same process starts afresh. */
+static void TheUnloadLeavesNothingAndASecondInitWorks(void)
+{
+    LiveReset();
+    FrameReset();
+    fake_frame_update(1);
+    g_detourWork = 0;
+    fake_stand_in(g_hookRva, "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 8B FA", (void*)&g_original);
+    const VpmComponentDef* defs[] = {&kLive, &kHooking, &kTicking};
+    CHECK_EQ(fake_start_live(defs, 3), 0);
+    CHECK_LOG("HellForge's live mods: the pack can be taken out and set up again while the game runs (set up as the game started)");
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    CHECK_EQ(vpm_frame_hooked(), 1);
+    fake_engine_frames(2, DT);
+    CHECK_EQ(g_liveTicks, 2);
+    CHECK(vpm_option_apply(g_liveOption, 4)); /* saved about a second later: the unload writes it now */
+    CHECK(vpm_guard_problem() == NULL);
+    CHECK_EQ(vpm_core_unload(VPM_UNLOAD_REMOVE), 0);
+    CHECK_LOG("HellForge takes the pack out (removed): every component stops");
+    CHECK_LOG("the pack is out");
+    for (int i = 0; i < 3; i++)
+    {
+        CHECK(!vpm_running(fake_component(i)));
+        CHECK(strcmp(vpm_status(fake_component(i)), "off: the pack was taken out") == 0);
+    }
+    CHECK_EQ(g_liveStops, 1);
+    CHECK_EQ(g_stops, 2); /* Hooking's and Ticking's */
+    CHECK_EQ(*g_edit, 0);
+    CHECK_EQ(vpm_hooks_in(), 0);
+    CHECK(fake_hook_detour(fake_game() + g_hookRva) == NULL);
+    CHECK(fake_hook_detour(fake_game() + VPM_FRAME_UPDATE) == NULL);
+    CHECK(vpm_guard_problem() != NULL);
+    fake_engine_frames(2, DT); /* a frame through the game's own update: nothing of the pack runs */
+    CHECK_EQ(g_liveTicks, 2);
+    CHECK_EQ(vpm_core_unload(VPM_UNLOAD_REMOVE), 0); /* twice: nothing more */
+    CHECK_EQ(fake_log_count("HellForge takes the pack out"), 1);
+    /* HellForge takes its registrations out; the same DLL set up again (its events replayed). */
+    fake_take_out();
+    LiveReset();
+    g_liveStops = 0;
+    *g_edit = 0;
+    fake_log_clear();
+    fake_live_phase(1);
+    CHECK_EQ(fake_start_live(defs, 3), 0);
+    CHECK_LOG("(set up while the game runs)");
+    CHECK(vpm_guard_problem() == NULL);
+    for (int i = 0; i < 3; i++) CHECK(vpm_running(fake_component(i)));
+    CHECK_LOG("3 of 3 components running");
+    CHECK_EQ(g_liveStarts, 1);
+    CHECK(Order(LIVE_READY, HF_EVENT_GAME_LOADED, HF_EVENT_ENTITIES_READY));
+    CHECK_EQ(*g_edit, 7);
+    CHECK(vpm_option_value(g_liveOption) == 4); /* the unload's save */
+    CHECK_EQ(vpm_frame_hooked(), 1);
+    CHECK_EQ(fake_hook_count(), 2); /* the component's and the frame update's, once each */
+    fake_engine_frames(3, DT);
+    CHECK_EQ(g_liveTicks, 3);
+    int (*detour)(int) = (int (*)(int))fake_hook_detour(fake_game() + g_hookRva);
+    CHECK(detour != NULL && detour(5) == 1005);
+    CHECK_EQ(vpm_core_unload(VPM_UNLOAD_REPLACE), 0);
+    CHECK_LOG("HellForge takes the pack out (a new version replaces it)");
+    fake_take_out();
+}
+
+/* A stop() that faults during the unload: the others still stop, and HellForge hears that something may be left. */
+static void AnUnloadWhoseStopFaultsSaysSo(void)
+{
+    Reset();
+    const VpmComponentDef* defs[] = {&kTicking, &kFaultStop};
+    fake_start_live(defs, 2);
+    CHECK_EQ(vpm_core_unload(VPM_UNLOAD_REMOVE), 1);
+    CHECK_EQ(g_stops, 1);
+    CHECK_LOG("[Fault Stop] its stop did not finish: fault 0xC0000005");
+    CHECK_LOG("a component's stop did not finish: what it changed may be left");
+    CHECK(vpm_guard_problem() != NULL);
+    fake_take_out();
+}
+
+/* Live mods are found by what the HfApi offers: PR 65's two functions after SDK 15's last, a version of 16 or more and a
+ * phase load_phase knows. An SDK 15 table, an SDK 16 table of SDK 15's size (another proposal's), a table without
+ * unhook or with a phase it does not know: none. */
+static void LiveModsAreFoundByWhatTheApiOffers(void)
+{
+    CHECK(!vpm_live_detect(fake_api(), fake_mod()).present);
+    const HfApi* live = fake_live_api();
+    VpmLive found = vpm_live_detect(live, fake_mod());
+    CHECK(found.present && found.phase == VPM_LOAD_BOOT && found.unhook != NULL && found.load_phase != NULL);
+    fake_live_phase(1);
+    CHECK(vpm_live_detect(live, fake_mod()).phase == VPM_LOAD_LIVE);
+    fake_live_phase(7);
+    CHECK(!vpm_live_detect(live, fake_mod()).present);
+    fake_live_phase(0);
+    static uint8_t table[sizeof(HfApi) + 2 * sizeof(void*)];
+    memcpy(table, live, live->size);
+    HfApi* t = (HfApi*)table;
+    t->version = 15;
+    CHECK(!vpm_live_detect(t, fake_mod()).present);
+    t->version = 16;
+    t->size = (uint32_t)SDK15_SIZE;
+    CHECK(!vpm_live_detect(t, fake_mod()).present);
+    t->size = live->size;
+    memset(table + live->size - sizeof(void*), 0, sizeof(void*)); /* no unhook */
+    CHECK(!vpm_live_detect(t, fake_mod()).present);
+    /* An SDK 16 table of SDK 15's size starts the pack as on SDK 15: no live line, no mods-changed registration. */
+    memcpy(table, live, live->size);
+    t->size = (uint32_t)SDK15_SIZE;
+    const VpmComponentDef* defs[] = {&kTicking};
+    CHECK_EQ(vpm_core_init(t, fake_mod(), defs, 1), 0);
+    CHECK(vpm_running(fake_component(0)));
+    CHECK_NO_LOG("HellForge's live mods");
+    CHECK_EQ(fake_counts().on, 4); /* the core's four load events */
+    fake_next_session();
+    fake_start_live(defs, 1);
+    CHECK_EQ(fake_counts().on, 5); /* and HellForge's mods-changed event */
+}
+
+/* With live mods, HellForge's Vanilla Plus coming into the session stops the components that overlap it, at the next
+ * frame; leaving it starts them again. Without live mods the event is never registered. */
+static void HellForgesModsChangingMovesTheOverlaps(void)
+{
+    Reset();
+    const VpmComponentDef* defs[] = {&kOverlap};
+    fake_start_live(defs, 1);
+    VpmComponent* c = fake_component(0);
+    CHECK(vpm_running(c));
+    fake_add_mod("skyeshade.vanilla-plus", HF_MOD_CODE);
+    fake_fire((HfEvent)VPM_EVENT_MODS_CHANGED);
+    CHECK(vpm_running(c));
+    fake_frames(1, DT);
+    CHECK(!vpm_running(c));
+    CHECK(strcmp(vpm_status(c), "off: HellForge's Vanilla Plus is on and changes the same thing") == 0);
+    CHECK_LOG("HellForge's mods changed: its Vanilla Plus is in the session now");
+    fake_clear_mods();
+    fake_fire((HfEvent)VPM_EVENT_MODS_CHANGED);
+    fake_frames(1, DT);
+    CHECK(vpm_running(c));
+    CHECK_EQ(g_starts, 2);
+    CHECK(vpm_component_switched_on(c));
+}
+
+/* Idle frames cost the same after switches as before them: no log, no Windows call, no read or write, nothing allocated,
+ * with the component on again and with it off. */
+static void IdleFramesAfterSwitchesCostNothing(void)
+{
+    LiveReset();
+    const VpmComponentDef* defs[] = {&kLive};
+    fake_start(defs, 1);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_fire(HF_EVENT_ENTITIES_READY);
+    fake_frames(3700, DT); /* past the core's one-off work */
+    for (int pass = 0; pass < 2; pass++)
+    {
+        SwitchNow(0, 0);
+        if (pass == 0) SwitchNow(0, 1);
+        fake_frames(200, DT); /* the settings save a second after the switch */
+        fake_counts_reset();
+        size_t before = BusyHeapBlocks();
+        fake_frames(5000, DT);
+        size_t after = BusyHeapBlocks();
+        FakeCounts c = fake_counts();
+        CHECK_EQ(after, before);
+        CHECK_EQ(c.log + c.read + c.write + c.writable + c.code_matches + c.unhook + c.other, 0);
+    }
+}
+
 int main(void)
 {
     RUN(ReadyAtOnceWhenDecoded);
@@ -2520,5 +3027,18 @@ int main(void)
     RUN(DetailedLinesComeOnlyInDetailedModeThroughTheLimiter);
     RUN(ANoteWritesANumberedMarkAndSwitchesItselfOff);
     RUN(IdleFramesAreTheSameInBothModesAndAllocateNothing);
+    RUN(ALiveSwitchOffStopsEverything);
+    RUN(ALiveSwitchOnGetsTheEventsThatFired);
+    RUN(SwitchingManyTimesAddsNothing);
+    RUN(LoadEventsKeepTheirOrderAcrossSwitches);
+    RUN(AHookIsNotDoubledBySwitchingWithoutLiveMods);
+    RUN(AHookIsTakenOutWithLiveMods);
+    RUN(AFaultDuringALiveStart);
+    RUN(ANextSessionSwitchWaitsForTheNextSession);
+    RUN(TheUnloadLeavesNothingAndASecondInitWorks);
+    RUN(AnUnloadWhoseStopFaultsSaysSo);
+    RUN(LiveModsAreFoundByWhatTheApiOffers);
+    RUN(HellForgesModsChangingMovesTheOverlaps);
+    RUN(IdleFramesAfterSwitchesCostNothing);
     TEST_END();
 }

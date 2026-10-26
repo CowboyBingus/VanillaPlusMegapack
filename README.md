@@ -29,8 +29,18 @@ the game that folder as its `%LOCALAPPDATA%`. Edit it only while the game is clo
 match_your_colors = off
 ```
 
-A switch takes effect in the next session. Options (Shallow Water Diving's dive depth, Match Your Colors' choices) are
-under `[options]`; the Mod Options Menu component shows them in the game.
+An edit of the file takes effect in the next session. In the game, Mod Options Menu's VANILLA PLUS MEGAPACK category
+has a switch per component, and a switch applied there takes effect at once: switched off, a component stops and puts
+back what it changed; switched on, it starts as if the game had just loaded. Three components cannot restart while
+the game runs, and their switches apply from the next session (their rows say why): Mod Options Menu (it draws that
+menu), Mod Bindings Menu (it keeps the session's binding changes) and Match Your Colors (its background worker and
+textures). Options (Shallow Water Diving's dive depth, Match Your Colors' choices) are under `[options]`; the Mod
+Options Menu component shows them in the game.
+
+With HellForge's live mods (SDK 16, HellForge 0.3.0), HellForge can also take the whole pack out while the game runs
+and set it up again; the pack's `hellforge_mod_unload` stops every component first. The manifest opts in with
+`"code": {"dll": "vanilla_plus_megapack.dll", "sdk": 16, "live": true}`, which an SDK 15 HellForge refuses to load,
+so the shipped manifest stays at SDK 15 until the pack requires HellForge 0.3.0.
 
 The pack's log (`mod-cowboybingus.vanilla-plus-megapack.log` in the session's logs folder) starts with the pack's
 version, commit and build date, the local time and the settings it loaded (core lines are tagged `[core]`), lists each
@@ -85,10 +95,12 @@ builds the same DLL from this folder.
 
 `src/core/vpm.h` is the whole interface a component uses:
 
-- **Lifecycle.** A component is a `VpmComponentDef`: `start()` runs once at start-up when it is switched on and
-  registers load events (`vpm_on_load`), a game-thread tick (`vpm_tick_start`), game events (`vpm_listen`), options and
-  bindings. `stop()` puts back what it changed. The core makes one registration of each kind with HellForge for the
-  whole pack.
+- **Lifecycle.** A component is a `VpmComponentDef`: `start()` runs at start-up when it is switched on, and again
+  whenever the player switches it on in game, and registers load events (`vpm_on_load`), a game-thread tick
+  (`vpm_tick_start`), game events (`vpm_listen`), options and bindings. `stop()` puts back what it changed, at a
+  switch-off as at a fault. The core makes one registration of each kind with HellForge for the whole pack; a
+  component's registrations die with the start that made them, and a start after the game's load events gets them
+  replayed in order. A component that cannot restart says why in `VpmComponentDef.next_session`.
 - **The crash guard.** Every call into a component runs guarded: a fault in the pack's own code stops that component
   and logs where (which callback, the registers, the pack's return addresses), and the game and the other components
   go on. Faults in game code are left to the game, after a breadcrumb line saying which component's call was running.
@@ -104,7 +116,8 @@ Rules for components:
 
 - A component ports its Lua release 1:1: the same addresses, checks, writes and timing. Where HellForge moves a game
   table (stratagems, projectiles, difficulty levels), rows are reached by identity (`get_live`, `set_live`).
-- `start()` sets every piece of the component's static state, so a test can start it again. A test that needs to see
+- `start()` sets every piece of the component's static state, so the player (and a test) can start it again; what
+  must outlive a start (a hook's original, a clean-up still owed) lives outside that state. A test that needs to see
   that state uses a `VPM_TEST`-only accessor declared in the component's own header (Hellpod Drop Hold's is the
   pattern); the DLL never has it.
 - Per frame: an idle gate first; no Windows calls, no allocation and no logging on an idle frame. The file's header

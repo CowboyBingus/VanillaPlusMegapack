@@ -392,21 +392,31 @@ static void Save(int force)
 /* ---- start-up, cleanup ------------------------------------------------------------------------------------------- */
 
 /* The profile saved, every lease released (only through revalidated ownership). */
-static void ReleaseLeases(void)
+/* 1 when every lease went back (or none was held). */
+static int ReleaseLeases(void)
 {
-    if (!s.policy_ready) return;
+    if (!s.policy_ready) return 1;
     Save(1);
-    if (!apc_policy_clear()) LogOnce("cleanup", apc_error());
+    int ok = apc_policy_clear();
+    if (!ok) LogOnce("cleanup", apc_error());
     apc_error_clear();
+    return ok;
 }
 
-/* Every tile back to the native pipeline, every retained atlas and lease released, the profile saved. */
-static void Cleanup(void)
+/* Every tile back to the native pipeline, every retained atlas and lease released, the profile saved: 1 when all of it
+ * went back. */
+static int Cleanup(void)
 {
-    if (s.images && s.ready && !apc_images_clear("cleanup")) LogOnce("image cleanup", apc_error());
+    int images = !(s.images && s.ready) || apc_images_clear("cleanup");
+    if (!images) LogOnce("image cleanup", apc_error());
     apc_error_clear();
-    ReleaseLeases();
+    return ReleaseLeases() && images;
 }
+
+/* A stop whose clean-up did not hand everything back: the modules still hold the game's textures, tile bindings or
+ * leases, so the next start (a live switch-on) tries the clean-up again before its resets would forget them. Outside s,
+ * which start() resets. */
+static int g_cleanupPending;
 
 /* HellForge's records for mod content the catalogues skipped: said once per count. */
 static void NoteSkipped(void)
@@ -658,7 +668,7 @@ static int PolicyStep(double seconds, uint64_t refreshes)
             snprintf(why, sizeof why, "%s", apc_error());
             apc_error_clear();
             s.has_last = 0;
-            ReleaseLeases();
+            (void)ReleaseLeases(); /* a failure is logged; the leases are cleared again at the stop */
             NoteStatus("waiting_for_ui");
             LogOnce("waiting for the UI", why);
             return 1;
@@ -753,7 +763,7 @@ static void Tick(VpmComponent* self, float dt)
 static void Stop(VpmComponent* self)
 {
     apc_error_clear();
-    Cleanup();
+    g_cleanupPending = !Cleanup();
 }
 
 static int Setting(const char* key)
@@ -764,6 +774,12 @@ static int Setting(const char* key)
 
 static int Start(VpmComponent* self)
 {
+    if (g_cleanupPending)
+    {
+        g_cleanupPending = !Cleanup();
+        if (g_cleanupPending) return vpm_fail(self, "the last stop could not hand the game's images back yet; switch it on again later");
+        vpm_log(self, "the last stop's clean-up finished now");
+    }
     memset(&s, 0, sizeof s);
     s.self = self;
     s.prewarm = Setting("prewarm");

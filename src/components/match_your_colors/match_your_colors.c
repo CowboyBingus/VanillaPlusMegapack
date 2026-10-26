@@ -332,4 +332,5 @@ static int MycStart(VpmComponent* self)
     return 0;
 }
 
-const VpmComponentDef vpm_component_match_your_colors = {"match_your_colors", "Match Your Colors", "1.5", 0, MycStart, MycStop, MycDescribe};
+const VpmComponentDef vpm_component_match_your_colors = {"match_your_colors", "Match Your Colors", "1.5", 0, MycStart, MycStop,
+    MycDescribe, "its background worker, textures and lobby colors need a new session to be let go safely"};

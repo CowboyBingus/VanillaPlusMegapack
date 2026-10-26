@@ -2380,7 +2380,7 @@ static void RegionOption(void)
     CHECK(vpm_option_apply(Option("region"), 2));
     vpm_core_stop(Self(), "test");
     CHECK(strcmp(Excluded("NA"), "AF AS OC") == 0);
-    CHECK_LOG("Better Lobby Management stopped for this session; region flags restored");
+    CHECK_LOG("Better Lobby Management stopped; region flags restored");
 
     fake_setup();
     SavedOption("better_lobby_management.region", "2");
@@ -3490,7 +3490,7 @@ static void StopPutsBack(void)
     CHECK(!vpm_running(Self()));
     CHECK(strcmp(Excluded("NA"), "AF AS OC") == 0);
     CHECK_EQ(Get32(FIELD), 20);
-    CHECK_LOG("Better Lobby Management stopped for this session; region flags restored");
+    CHECK_LOG("Better Lobby Management stopped; region flags restored");
     fake_counts_reset();
     Frames(10);
     CHECK_EQ(Reads(), 0);

@@ -364,6 +364,9 @@ static void Stop(VpmComponent* self)
 
 static int Start(VpmComponent* self)
 {
+    /* A live switch-on after a stop that could not put the duration back: one more try before the reset forgets it. */
+    const char* why = "";
+    if (chp_lease_held() && chp_settings_restore(&why) <= 0) vpm_log(self, "restore_abandoned: %s (the cut stays until the pack is gone)", why);
     memset(&s, 0, sizeof s);
     s.shown = CHP_WAITING_FOR_MISSION;
     chp_snapshot_reset();

@@ -20,8 +20,9 @@
  * option where the Lua's set() dropped it. The core refuses at registration what the Lua's register_option refused
  * (lengths, choices, ranges, kinds, defaults); the tab leaves out only an option whose texts it cannot show (not UTF-8,
  * control characters, blank), with the core's text functions (vpm_utf8_*, vpm_upper). New here: a VANILLA PLUS
- * MEGAPACK category with a switch per component (vpm_component_switch), which applies from the next session (the row's
- * description says so). The game.dll functions are checked with vpm_game_code_matches (the bytes as shipped, so another
+ * MEGAPACK category with a switch per component (vpm_component_switch), which the core applies at the next frame, or from
+ * the next session for a component that cannot restart while the game runs (the row's description says which, and why).
+ * Its own switch is one of those: it draws this menu. The game.dll functions are checked with vpm_game_code_matches (the bytes as shipped, so another
  * mod's hook does not fail them), by the core's wait (vpm_when_code_ready): at HF_EVENT_GAME_LOADED, then every 30
  * frames until all 25 read as decoded, at most 60 s. The 1:1 port checked them at its first tick, which comes right
  * after that event, while HellForge says game.dll's code is still decoded in parts (it gives its own later pins 20 s),
@@ -134,4 +135,6 @@ static int Start(VpmComponent* self)
     return 0;
 }
 
-const VpmComponentDef vpm_component_mod_options_menu = {"mod_options_menu", "Mod Options Menu", "1.2.1", 0, Start, Stop};
+const VpmComponentDef vpm_component_mod_options_menu = {"mod_options_menu", "Mod Options Menu", "1.2.1", 0, Start, Stop, NULL,
+    /* switched off while its own tab shows the switch, the game's menu would keep a MODS tab nothing updates */
+    "it draws this menu, and the game's menu would keep its MODS tab without it"};

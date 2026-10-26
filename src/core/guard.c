@@ -160,6 +160,15 @@ void vpm_guard_install(void)
     if (g_handler == NULL) snprintf(g_problem, sizeof g_problem, "Windows refused its exception handler");
 }
 
+/* HellForge takes the pack out: no handler of the pack's may stay in the process's chain (its DLL stays loaded, but a
+ * new version is another DLL with handlers of its own). */
+void vpm_guard_uninstall(void)
+{
+    if (g_handler != NULL && RemoveVectoredExceptionHandler(g_handler) != 0) g_handler = NULL; /* lint-ok: C7 the guard's own handler, taken out with the pack */
+    if (g_handler == NULL) snprintf(g_problem, sizeof g_problem, "taken out with the pack");
+    vpm_crash_uninstall();
+}
+
 /* noinline: the resume point must stay in this function's own frame, which outlives the call it guards. Locals changed
  * after RtlCaptureContext would come back with their values from the capture, so the only state read after a resume is
  * the volatile flag and memory the handler wrote. */

@@ -14,7 +14,7 @@
 /* VpmComponent.state */
 #define VPM_STATE_OFF 0      /* switched off, or not started (overlap, build, refused) */
 #define VPM_STATE_RUNNING 1
-#define VPM_STATE_STOPPED 2  /* stopped for the session: a fault, or vpm_fail */
+#define VPM_STATE_STOPPED 2  /* stopped: a fault, or vpm_fail (a switch off and on starts it again) */
 
 /* The mission-end cost report's tick-time histogram: power-of-two buckets of time-stamp counter cycles (the last also
  * holds everything longer), and the time from which a tick counts as slow. One tick that was interrupted (the thread
@@ -29,6 +29,9 @@ struct VpmComponent
     int switched_on;     /* the player's saved switch */
     int state;           /* VPM_STATE_... */
     int started;         /* start() returned 0, so stop() may undo it */
+    uint32_t generation; /* counts its starts: a registration made by an earlier start (another generation) is dead */
+    int in_start;        /* its start() is running: load events already fired wait until it returns */
+    int wanted;          /* a live switch waits for the next frame: 1 on, 0 off (VPM_SWITCH_NONE: none) */
     VpmTickFn tick;      /* NULL: not ticking */
     VpmTickFn post_tick; /* after game.dll's update; NULL: none */
     char status[VPM_STATUS_SIZE];
@@ -89,6 +92,8 @@ typedef struct VpmFault
 
 /* guard.c */
 void vpm_guard_install(void);
+/* Takes the guard's and the breadcrumb's handlers out (hellforge_mod_unload); vpm_guard_install puts them back. */
+void vpm_guard_uninstall(void);
 /* NULL when the guard is installed, else why not ("the pack's image was not found"). */
 const char* vpm_guard_problem(void);
 /* Runs fn(arg) under the guard: 0, or the code of the fault that ended it (described in *fault). */
@@ -111,12 +116,38 @@ void vpm_fault_context(VpmFault* fault, const CONTEXT* context);
 
 /* crash.c: the last-in-line breadcrumb for faults the guard passes on (installed with the guard) */
 void vpm_crash_install(void);
+void vpm_crash_uninstall(void);
 void vpm_crash_reset(void);
 /* Tests: breadcrumb lines written since the reset. */
 int vpm_crash_notes(void);
 
 /* core.c */
+#define VPM_SWITCH_NONE -1
+/* The HfApi of SDK 15 ends with stats_source: the least a HellForge must offer (a newer header's sizeof is larger). */
+#define SDK15_SIZE (offsetof(HfApi, stats_source) + sizeof(void*))
+/* HellForge PR 65's SDK 16 numbers (its header names them HF_EVENT_MODS_CHANGED, HF_LOAD_*, HF_UNLOAD_*): used only
+ * once vpm_live_detect found its functions, never on the SDK number alone (another SDK 16 proposal uses event 5 for
+ * another event). */
+#define VPM_EVENT_MODS_CHANGED 5
+#define VPM_LOAD_BOOT 0u
+#define VPM_LOAD_LIVE 1u
+#define VPM_UNLOAD_REMOVE 1u
+#define VPM_UNLOAD_REPLACE 2u
 const HfApi* vpm_core_hf(void);
+/* 1 while a registration made by a component's start of this generation may still fire: it runs, and the generation is
+ * its current one. */
+int vpm_core_alive(const VpmComponent* component, uint32_t generation);
+/* HellForge's live mods (SDK 16), when its HfApi offers them: load_phase and unhook (NULL members otherwise). */
+typedef struct VpmLive
+{
+    int present;                              /* the HfApi covers both and load_phase answered boot or live */
+    uint32_t phase;                           /* HF_LOAD_BOOT or HF_LOAD_LIVE */
+    uint32_t (*load_phase)(HfMod* mod);
+    int (*unhook)(HfMod* mod, uintptr_t target);
+} VpmLive;
+const VpmLive* vpm_core_live(void);
+/* Reads HellForge's live functions out of an HfApi (by its size, not its SDK number). Tests call it with their tables. */
+VpmLive vpm_live_detect(const HfApi* api, HfMod* mod);
 /* Stops a component for the session with a reason (its stop() runs guarded when it had started). */
 void vpm_core_stop(VpmComponent* component, const char* reason);
 /* Runs fn(arg) guarded for a component, as a call of this kind (VPM_CALL_...): on a fault the core logs it and the
@@ -166,6 +197,12 @@ int vpm_diag_last_fault(VpmFault* out);
 /* memory.c */
 void vpm_memory_init(void);
 void vpm_memory_game_loaded(void);
+/* vpm_hook's record of the pack's hooks: a switched-off component's hooks taken out (with HellForge's unhook; without
+ * it they stay and their detours only call the original), every record forgotten (after HellForge took the pack out),
+ * and how many are in (tests). */
+void vpm_hooks_component_off(VpmComponent* component);
+void vpm_hooks_unload(void);
+int vpm_hooks_in(void);
 
 /* options.c: the settings file and the option and switch records */
 void vpm_settings_load(void);
@@ -208,8 +245,13 @@ void vpm_core_test_hooks(const VpmTestHooks* hooks);
 /* The pack's entry with a given component list: hellforge_mod_init passes src/components.c's; the tests pass their
  * own. 0 loaded, 1 refused (an SDK older than 15). */
 int vpm_core_init(const HfApi* api, HfMod* mod, const VpmComponentDef* const* defs, int count);
-/* Tests: forget every component, registration, option, binding and setting (the guard stays installed). */
+/* Tests: forget every component, registration, option, binding and setting (the guard stays installed). vpm_core_init
+ * calls it too, so a second init in the same process (HellForge setting the pack up again) starts afresh. */
 void vpm_core_reset(void);
+/* hellforge_mod_unload: HellForge takes the pack out (HF_UNLOAD_REMOVE or HF_UNLOAD_REPLACE). Every running component is
+ * stopped (its stop() runs), the ticks and the frame hook go, the component hooks are taken out, the settings are saved
+ * and the crash guard is removed. 0: nothing of the pack is left running; 1: a stop() faulted (logged). */
+int vpm_core_unload(uint32_t reason);
 /* Tests: the settings file's path override (NULL: %LOCALAPPDATA%\CowboyBingus\VanillaPlusMegapack\settings.ini). */
 void vpm_settings_path_override(const wchar_t* path);
 
