@@ -146,6 +146,11 @@ int vpm_game_code_matches(uint32_t rva, const char* pattern)
     return g_game != 0 && rva < g_gameSize && vpm_core_hf()->code_matches(g_game + rva, pattern);
 }
 
+int vpm_exe_code_matches(uint32_t rva, const char* pattern)
+{
+    return g_exe != 0 && rva < g_exeSize && vpm_core_hf()->code_matches(g_exe + rva, pattern);
+}
+
 /* ---- the game's hash lookup ------------------------------------------------------------------------------------- */
 
 typedef struct LookupHeader { uint64_t rows; uint32_t capacity, empty, multiplier; } LookupHeader;

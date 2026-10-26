@@ -1002,8 +1002,44 @@ static void TheRevisionCountsChangesAndSaveNowWrites(void)
     CHECK(GetFileAttributesW(L"vpm-test-settings.ini") != INVALID_FILE_ATTRIBUTES);
 }
 
+static int StartPlain(VpmComponent* self) { return 0; }
+static const VpmComponentDef kFolders = {"folder_user", "Folder User", "1.0", 0, StartPlain, NULL};
+
+static void AComponentGetsADataFolder(void)
+{
+    const VpmComponentDef* defs[] = {&kFolders};
+    fake_start(defs, 1);
+    wchar_t path[MAX_PATH];
+    CHECK(vpm_data_folder(fake_component(0), path, MAX_PATH));
+    CHECK(wcscmp(path, L"vpm-test-data\\folder_user") == 0);
+    CHECK((GetFileAttributesW(path) & FILE_ATTRIBUTE_DIRECTORY) != 0 && GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES);
+    CHECK(vpm_data_folder(fake_component(0), path, MAX_PATH)); /* already there */
+    wchar_t tiny[8];
+    CHECK(!vpm_data_folder(fake_component(0), tiny, 8)); /* does not fit */
+    CHECK(tiny[0] == 0);
+}
+
+static int g_exeCalls;
+static int ExeStandIn(int x) { g_exeCalls++; return x - 1; }
+
+static void ExeCodeChecksAndStandIns(void)
+{
+    const VpmComponentDef* defs[] = {&kFolders};
+    fake_start(defs, 1);
+    fake_stand_in_exe(0x31AF50, "40 53 48 83 EC 20 48 8B D9 E8 11 22 33 44", (void*)&ExeStandIn);
+    CHECK(vpm_exe_code_matches(0x31AF50, "40 53 48 83 EC 20 48 8B D9"));
+    CHECK(!vpm_exe_code_matches(0x31AF50, "40 53 48 83 EC 30"));
+    CHECK(!vpm_exe_code_matches(FAKE_EXE_SIZE + 4, "40"));
+    CHECK(!vpm_game_code_matches(0x31AF50, "40 53 48 83 EC 20")); /* the exe's stand-in, not game.dll's */
+    int (*fn)(int) = (int (*)(int))(void*)(vpm_exe() + 0x31AF50);
+    CHECK_EQ(fn(10), 9);
+    CHECK_EQ(g_exeCalls, 1);
+}
+
 int main(void)
 {
+    RUN(AComponentGetsADataFolder);
+    RUN(ExeCodeChecksAndStandIns);
     RUN(OptionsAreCheckedAsModOptionsMenuChecksThem);
     RUN(AComponentHoldsThirtyTwoOptions);
     RUN(TheRevisionCountsChangesAndSaveNowWrites);

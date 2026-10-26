@@ -31,6 +31,34 @@ static const wchar_t* g_pathOverride;
 
 void vpm_settings_path_override(const wchar_t* path) { g_pathOverride = path; }
 
+/* Tests: the pack's folder is beside the settings file's override (its directory), in a folder of its own. */
+static int PackFolder(wchar_t* out, size_t size)
+{
+    if (g_pathOverride != NULL)
+    {
+        _snwprintf(out, size, L"vpm-test-data");
+        out[size - 1] = 0;
+        return CreateDirectoryW(out, NULL) || GetLastError() == ERROR_ALREADY_EXISTS; /* lint-ok: C4 made once, off idle frames */
+    }
+    wchar_t base[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH - 64) return 0;
+    _snwprintf(out, size, L"%ls\\CowboyBingus", base);
+    if (!CreateDirectoryW(out, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return 0; /* lint-ok: C4 made once, off idle frames */
+    _snwprintf(out, size, L"%ls\\CowboyBingus\\VanillaPlusMegapack", base);
+    out[size - 1] = 0;
+    return CreateDirectoryW(out, NULL) || GetLastError() == ERROR_ALREADY_EXISTS; /* lint-ok: C4 made once, off idle frames */
+}
+
+int vpm_data_folder(const VpmComponent* self, wchar_t* out, size_t size)
+{
+    wchar_t pack[MAX_PATH];
+    if (out == NULL || size < 2 || !PackFolder(pack, MAX_PATH)) return 0;
+    int n = _snwprintf(out, size, L"%ls\\%hs", pack, vpm_def(self)->id);
+    if (n < 0 || (size_t)n >= size) { out[0] = 0; return 0; }
+    return CreateDirectoryW(out, NULL) || GetLastError() == ERROR_ALREADY_EXISTS; /* lint-ok: C4 made once, off idle frames */
+}
+
 static int SettingsPath(int create)
 {
     if (g_pathOverride != NULL)
