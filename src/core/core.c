@@ -5,7 +5,8 @@
  * Per frame (the frame update's detour, or HellForge's game-thread callback until it is in): the frame's settings
  * countdown (one compare while nothing waits to be saved), then each ticking component's tick under one guard, and after
  * game.dll's update each post-update tick, with two time-stamp counter reads around each (the per-component cost the
- * log reports at a mission's end) and one compare for the largest single tick (the report's peak). Per tick list that
+ * log reports at a mission's end), one bit scan and an increment for the tick-time histogram, and one compare for the
+ * slow-tick count. Per tick list that
  * has ticks: the thread's call record set and put back (two thread-local copies, for the fault line and the crash
  * breadcrumb) and one compare of the status-line flag. No Windows call, no log call and no allocation per frame. */
 #include <intrin.h>
@@ -30,6 +31,9 @@ static uint64_t g_frame;       /* frames this session: one increment per frame *
 static uint64_t g_missionFrame; /* g_frame when the mission started */
 static uint64_t g_tscStart;    /* the time-stamp counter and performance counter when the mission started */
 static LARGE_INTEGER g_qpcStart;
+static uint64_t g_tscInit;     /* the same at the pack's start: the counter's rate before the first mission ends */
+static LARGE_INTEGER g_qpcInit;
+static uint64_t g_slowCycles = UINT64_MAX; /* VPM_SLOW_TICK_MS in counter cycles (none counted until it is known) */
 static int g_starting;         /* vpm_core_init is running the components' start() */
 
 uint64_t vpm_core_frame(void) { return g_frame; }
@@ -299,9 +303,12 @@ static void RunTickList(void* arg)
             fn(c, dt);
             uint64_t spent = __rdtsc() - start;
             c->cycles += spent;
-            /* The one compare this adds per tick: the largest single tick for the mission-end report (alpha
-             * diagnostics, KB megapack-alpha-diagnostics-plan item 7: a spike hides in an average). */
-            if (spent > c->peak) c->peak = spent;
+            /* The tick-time histogram and the slow count for the mission-end report (alpha diagnostics, KB
+             * megapack-alpha-diagnostics-plan item 7: a spike hides in an average, and a single largest tick is decided
+             * by one interruption of the thread). One bit scan, one increment, one compare per tick. */
+            int bucket = 63 - __builtin_clzll(spent | 1);
+            c->buckets[bucket < VPM_COST_BUCKETS ? bucket : VPM_COST_BUCKETS - 1]++;
+            if (spent >= g_slowCycles) c->slow++;
             c->calls++;
         }
         g_tickAt = g_tickAt + 1;
@@ -498,22 +505,64 @@ static void CodeWaitsTick(float dt)
 
 /* ---- costs: per component, at each mission's end --------------------------------------------------------------- */
 
+/* Counter cycles per ms between two (time-stamp counter, performance counter) pairs at least minSeconds apart, or 0. */
+static double CyclesPerMs(uint64_t tsc0, LARGE_INTEGER qpc0, uint64_t tsc1, LARGE_INTEGER qpc1, double minSeconds)
+{
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency); /* lint-ok: C4 once per mission */
+    double seconds = frequency.QuadPart > 0 ? (double)(qpc1.QuadPart - qpc0.QuadPart) / (double)frequency.QuadPart : 0;
+    return seconds > 0 && seconds >= minSeconds && tsc1 > tsc0 ? (double)(tsc1 - tsc0) / (seconds * 1000.0) : 0;
+}
+
 static void CostsStart(void)
 {
     g_missionFrame = g_frame;
     g_tscStart = __rdtsc();
     QueryPerformanceCounter(&g_qpcStart); /* lint-ok: C4 once per mission, at its start */
-    for (int i = 0; i < g_componentCount; i++) g_components[i].cycles = g_components[i].calls = g_components[i].peak = 0;
+    double cyclesPerMs = CyclesPerMs(g_tscInit, g_qpcInit, g_tscStart, g_qpcStart, 0.05); /* 50 ms: a rate worth a threshold */
+    g_slowCycles = cyclesPerMs > 0 ? (uint64_t)(cyclesPerMs * VPM_SLOW_TICK_MS) : UINT64_MAX;
+    for (int i = 0; i < g_componentCount; i++)
+    {
+        VpmComponent* c = &g_components[i];
+        c->cycles = c->calls = c->slow = 0;
+        memset(c->buckets, 0, sizeof c->buckets);
+    }
 }
 
-/* The mission's frames and length, then per ticking component the average ms per frame and its largest single tick. */
+/* The histogram's non-empty buckets from 0.01 ms up, as "0.01-0.02 ms: 3, 0.5-1 ms: 1" (Detailed mode's line). */
+static void BucketsText(const VpmComponent* c, double cyclesPerMs, char* out, size_t size)
+{
+    size_t at = 0;
+    out[0] = 0;
+    for (int b = 0; b < VPM_COST_BUCKETS && at + 1 < size; b++)
+    {
+        double low = (double)(1ull << b) / cyclesPerMs;
+        if (c->buckets[b] == 0 || low * 2 < 0.01) continue;
+        int n = b == VPM_COST_BUCKETS - 1 ? snprintf(out + at, size - at, "%s%.3g ms and longer: %u", at ? ", " : "", low, c->buckets[b])
+                                          : snprintf(out + at, size - at, "%s%.3g-%.3g ms: %u", at ? ", " : "", low, low * 2, c->buckets[b]);
+        if (n < 0) break;
+        at += (size_t)n;
+    }
+}
+
+/* The slowest non-empty bucket's range in ms. */
+static double SlowestBucket(const VpmComponent* c, double cyclesPerMs)
+{
+    for (int b = VPM_COST_BUCKETS - 1; b >= 0; b--)
+        if (c->buckets[b] != 0) return (double)(1ull << b) / cyclesPerMs;
+    return 0;
+}
+
+/* The mission's frames and length, then per ticking component the average ms per frame and how many single ticks took
+ * VPM_SLOW_TICK_MS or longer, with the slowest bucket; Detailed mode adds each one's histogram. */
 static void CostsReport(void)
 {
     LARGE_INTEGER now, frequency;
+    uint64_t tscNow = __rdtsc();
     QueryPerformanceCounter(&now); /* lint-ok: C4 once per mission, at its end */
     QueryPerformanceFrequency(&frequency); /* lint-ok: C4 once per mission, at its end */
     double seconds = (double)(now.QuadPart - g_qpcStart.QuadPart) / (double)frequency.QuadPart;
-    double cyclesPerMs = seconds > 0 ? (double)(__rdtsc() - g_tscStart) / (seconds * 1000.0) : 0;
+    double cyclesPerMs = CyclesPerMs(g_tscStart, g_qpcStart, tscNow, now, 0);
     uint64_t frames = g_frame - g_missionFrame;
     if (cyclesPerMs <= 0 || frames == 0) return;
     vpm_core_log("this mission: %llu frames over %.1f s (%.2f ms per frame)", (unsigned long long)frames, seconds,
@@ -523,8 +572,17 @@ static void CostsReport(void)
         VpmComponent* c = &g_components[i];
         if (c->calls == 0) continue;
         double ms = (double)c->cycles / cyclesPerMs / (double)frames;
-        vpm_core_log("cost this mission: %s %.4f ms per frame, peak %.3f ms (%llu ticks over %llu frames)", c->def->name, ms,
-            (double)c->peak / cyclesPerMs, (unsigned long long)c->calls, (unsigned long long)frames);
+        double slowest = SlowestBucket(c, cyclesPerMs);
+        vpm_core_log("cost this mission: %s %.4f ms per frame; ticks of %.1f ms or longer: %llu of %llu; slowest "
+            "%.3g-%.3g ms (%llu ticks over %llu frames)", c->def->name, ms, VPM_SLOW_TICK_MS,
+            (unsigned long long)c->slow, (unsigned long long)c->calls, slowest, slowest * 2, (unsigned long long)c->calls,
+            (unsigned long long)frames);
+        if (vpm_detailed())
+        {
+            char text[512];
+            BucketsText(c, cyclesPerMs, text, sizeof text);
+            vpm_core_log("tick times this mission: %s %s", c->def->name, text[0] ? text : "every tick under 0.01 ms");
+        }
     }
 }
 
@@ -623,6 +681,9 @@ int vpm_core_init(const HfApi* api, HfMod* mod, const VpmComponentDef* const* de
         api->log(mod, "Vanilla Plus Megapack needs HellForge mod SDK 15 or newer (this HellForge has %u)", api->version);
         return 1;
     }
+    g_tscInit = __rdtsc();
+    QueryPerformanceCounter(&g_qpcInit); /* lint-ok: C4 once, at the pack's start */
+    g_slowCycles = UINT64_MAX;
     vpm_diag_reset();
     vpm_guard_install();
     vpm_memory_init();

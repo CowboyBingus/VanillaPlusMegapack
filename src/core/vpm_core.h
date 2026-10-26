@@ -16,6 +16,12 @@
 #define VPM_STATE_RUNNING 1
 #define VPM_STATE_STOPPED 2  /* stopped for the session: a fault, or vpm_fail */
 
+/* The mission-end cost report's tick-time histogram: power-of-two buckets of time-stamp counter cycles (the last also
+ * holds everything longer), and the time from which a tick counts as slow. One tick that was interrupted (the thread
+ * switched out, a page brought in) lands in one high bucket; a component that is slow fills them. */
+#define VPM_COST_BUCKETS 40
+#define VPM_SLOW_TICK_MS 0.1
+
 struct VpmComponent
 {
     const VpmComponentDef* def;
@@ -28,7 +34,8 @@ struct VpmComponent
     char status[VPM_STATUS_SIZE];
     uint64_t cycles;     /* time-stamp counter cycles spent in its tick this mission */
     uint64_t calls;      /* tick calls this mission */
-    uint64_t peak;       /* the largest single tick call's cycles this mission (pre or post) */
+    uint32_t buckets[VPM_COST_BUCKETS]; /* tick calls this mission by cycles: bucket b holds 2^b .. 2^(b+1) - 1 */
+    uint64_t slow;       /* tick calls this mission that took VPM_SLOW_TICK_MS or longer (pre or post) */
     /* diagnostics (diag.c) */
     VpmDescribeFn summary;       /* vpm_on_summary's */
     uint64_t status_frame;       /* the frame its last status line was logged */
