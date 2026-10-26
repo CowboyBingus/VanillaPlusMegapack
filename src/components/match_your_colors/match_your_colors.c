@@ -23,12 +23,14 @@
  *   - the disk cache lives in vpm_data_folder (%LOCALAPPDATA%\CowboyBingus\VanillaPlusMegapack\match_your_colors\
  *     MatchYourColors.cache); with no shutdown event, it is not written at shutdown (the save after a job still is);
  *   - no pause (the core has none): an error of the step is logged and counted as the Lua's guard did (8 stop it);
- *   - the lobby's PlayFab functions come from vpm_module_export (PlayFabMultiplayerWin.dll), once.
+ *   - the reader's file handles are closed by the worker (the Lua closed 4 per binding check on the game thread);
+ *   - the lobby's PlayFab functions come from vpm_module_export (PlayFabMultiplayerWin.dll, HellForge's stand-in in a
+ *     HellForge session), once; its member ids there are SteamID64s in hex, the players' peers, as the sync expects.
  *
  * COST per frame (the Lua's tests/test_addon.lua frame_budget pins in brackets; reads are vpm_read's guarded plain
  * loads, about 25 ns in the test process, where the Lua's read_into was a ReadProcessMemory, 1-2 us in game):
- *   - before the game loads and while the engine's script API is not filled: one compare, and every 30 frames a few
- *     plain loads of game.dll's script API pointer;
+ *   - before the game loads and while the engine's script API is not filled: one compare, and every 30 frames one
+ *     code_matches of get_engine_api's first bytes and a plain load of game.dll's script API pointer;
  *   - no local Helldiver (title screen, loading, dead): one resolve every 15 frames (1 read with no player manager, up to
  *     about 20 for the whole chain), nothing between [the same];
  *   - idle (the Helldiver found, nothing changed): 1 read of its 120 unit bytes, +1 on odd frames for its preview slot's
