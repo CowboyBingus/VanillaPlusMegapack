@@ -716,6 +716,50 @@ static void StoppedWhenTheCodeIsNeverDecoded(void)
     CHECK_EQ(Reads(100), 0);
 }
 
+/* The menu data is filled in after the code matched (a player's machine, 2026-10-26): MOM waits for it, reads nothing
+ * but the 15 data words every 30 frames, starts once it reads as reviewed, and logs how long that took. */
+static void StartsWhenTheMenuDataIsFilledInLater(void)
+{
+    fake_setup();
+    MakeWorld();
+    uintptr_t game = fake_game();
+    uint32_t label = G32(game + 0x33114D0);
+    P32(game + 0x33114D0, 0); /* not filled in yet */
+    CHECK_EQ(fake_start(kDefs, 4), 0);
+    VpmComponent* self = fake_component(MOM_INDEX);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    CHECK(vpm_running(self) && vpm_ticking(self));
+    CHECK_NO_LOG(VERIFIED);
+    fake_counts_reset();
+    fake_frames(29, DT);
+    CHECK_EQ(fake_counts().read, 0); /* game.dll's data is plain loads; nothing between looks */
+    fake_frames(60, DT);
+    CHECK(vpm_running(self));
+    CHECK_NO_LOG(VERIFIED);
+    CHECK_EQ(fake_counts().log, 0); /* waiting says nothing */
+    P32(game + 0x33114D0, label); /* the game fills it in */
+    fake_frames(30, DT);
+    CHECK_LOG(VERIFIED);
+    CHECK_LOG("The game's menu data read as reviewed ");
+    CHECK(vpm_running(self));
+    InstallStubs(); /* the game's menu functions, as the other tests once verified; the menu opens after */
+    MenuOnOptions();
+    Frame();
+    CHECK(G32(w.bar + 57448) == 4 && Shows(w.bar + 8296 + 3400 * 3, "MODS")); /* the MODS tab, as at once */
+
+    /* never filled in: refused after the wait, saying it holds 0 */
+    fake_setup();
+    MakeWorld();
+    P32(fake_game() + 0x33114D0, 0);
+    CHECK_EQ(fake_start(kDefs, 4), 0);
+    fake_fire(HF_EVENT_GAME_LOADED);
+    fake_frames(3700, DT); /* 59.2 s */
+    CHECK(vpm_running(fake_component(MOM_INDEX)));
+    fake_frames(100, DT);
+    CHECK(!vpm_running(fake_component(MOM_INDEX)));
+    CHECK_LOG("disabled: Mod options integration unavailable: tab labels changed (game.dll+0x33114D0 holds 0x00000000, reviewed 0x");
+}
+
 static void RefusesAChangedGame(void)
 {
     static const char* const texts[] = {"options_visual changed", "tab labels changed", "category labels changed",
@@ -730,8 +774,9 @@ static void RefusesAChangedGame(void)
         if (c == 2) P32(game + 0x32EC990 + 48 * 5 + 8, 1);
         if (c == 3) P32(game + 0x32ECC60 + 4, 11);
         CHECK_EQ(fake_start(kDefs, 4), 0);
-        fake_fire(HF_EVENT_GAME_LOADED); /* a changed function: refused once the wait is over; changed data: at once */
-        if (c == 0) fake_frames(3800, DT);
+        fake_fire(HF_EVENT_GAME_LOADED); /* refused once the 60 s wait is over: changed code and changed data alike */
+        if (c > 0) CHECK(vpm_running(fake_component(MOM_INDEX))); /* the data still has time to be filled in */
+        fake_frames(3800, DT);
         CHECK(!vpm_running(fake_component(MOM_INDEX)));
         CHECK_LOG("disabled: Mod options integration unavailable: ");
         CHECK_LOG(texts[c]);
@@ -1631,6 +1676,7 @@ static void UpperCaseInEveryScript(void)
 int main(void)
 {
     RUN(VerifiesTheGameOnce);
+    RUN(StartsWhenTheMenuDataIsFilledInLater);
     RUN(RefusesAChangedGame);
     RUN(StartsOnceTheCodeIsDecoded);
     RUN(StoppedWhenTheCodeIsNeverDecoded);
