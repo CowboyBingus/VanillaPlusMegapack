@@ -189,6 +189,8 @@ typedef struct MomState
 {
     VpmComponent* self;
     int hasView;
+    float labelWaited;          /* seconds since game.dll's code matched while its menu data does not read as reviewed */
+    int labelFrames;
     MomView view;
     int modsPage;               /* the category page shown, kept for the session */
     int modsTabLogged;

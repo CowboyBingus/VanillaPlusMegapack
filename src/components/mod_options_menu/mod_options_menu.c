@@ -93,19 +93,49 @@ static void Step(VpmComponent* self, float dt)
     mom_neutralize_dialog(&mom.view);
 }
 
+#define LABEL_CHECK_FRAMES 30     /* the menu data's look while it waits */
+#define LABEL_WAIT_SECONDS 60.0f  /* of game time after game.dll's code matched */
+
+/* Verified: the functions are bound; the step runs from the next game update on (it replaces the label wait). */
+static void Ready(VpmComponent* self)
+{
+    vpm_log(self, "Native options layout verified for current game build.");
+    if (!vpm_tick_start(self, Step)) vpm_fail(self, "the game thread could not be reached");
+}
+
+/* The menu data (the tab and category labels, the setting descriptor) is game.dll's read-write data, which the game can
+ * fill in after its code is decoded: a player's log (2026-10-26) had the tab labels not yet in place the moment the code
+ * matched, which stopped the component for the session. So the data gets the code's patience: a look every 30 frames,
+ * for at most 60 s, then the refusal with the value found. 15 plain loads per look; no call between looks.
+ * lint: per-frame */
+static void LabelWait(VpmComponent* self, float dt)
+{
+    mom.labelWaited += dt;
+    if (++mom.labelFrames % LABEL_CHECK_FRAMES != 0 && mom.labelWaited < LABEL_WAIT_SECONDS) return;
+    const char* failure = mom_native_verify();
+    if (failure == NULL)
+    {
+        vpm_log(self, "The game's menu data read as reviewed %.1f s after its code matched.", mom.labelWaited);
+        Ready(self);
+        return;
+    }
+    if (mom.labelWaited >= LABEL_WAIT_SECONDS) vpm_fail(self, MOM_UNAVAILABLE "%s", failure);
+}
+
 /* game.dll's 25 functions read as shipped (the core's wait, from HF_EVENT_GAME_LOADED): the labels and descriptor
- * verified once, the functions bound, then the step from the next game update on. Before this nothing runs: no tick,
- * no read. */
+ * verified (at once, or by LabelWait while the game fills them in), the functions bound, then the step from the next
+ * game update on. Before this nothing runs: no tick, no read. */
 static void CodeReady(VpmComponent* self, HfEvent event)
 {
     const char* failure = mom_native_verify();
-    if (failure != NULL)
+    if (failure == NULL)
     {
-        vpm_fail(self, MOM_UNAVAILABLE "%s", failure);
+        Ready(self);
         return;
     }
-    vpm_log(self, "Native options layout verified for current game build.");
-    if (!vpm_tick_start(self, Step)) vpm_fail(self, "the game thread could not be reached");
+    mom.labelWaited = 0;
+    mom.labelFrames = 0;
+    if (!vpm_tick_start(self, LabelWait)) vpm_fail(self, MOM_UNAVAILABLE "%s", failure);
 }
 
 /* Hands an open MODS view back to the game as on leaving the tab, but only while its escape menu is still open on top:

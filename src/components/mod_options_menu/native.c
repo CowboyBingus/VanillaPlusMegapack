@@ -5,6 +5,7 @@
  * them from HF_EVENT_GAME_LOADED until they read as decoded (every 30 frames, at most 60 s), since game.dll's code is
  * decoded in parts after that event. The labels and the descriptor are data, read once the functions match. The build
  * itself is the core's check. */
+#include <stdio.h>
 #include "../../core/vpm.h"
 #include "native.h"
 
@@ -85,22 +86,30 @@ static void Bind(uintptr_t base)
     BIND(play_sound, MOM_PLAY_SOUND);
 }
 
+/* The refusal text, with the value found and the one reviewed, so a log tells a game update from data not filled in
+ * yet (zero). */
+static int Differs(const char** why, const char* what, uint32_t rva, uint32_t reviewed)
+{
+    static char text[128];
+    uint32_t found = vpm_game_u32(rva);
+    if (found == reviewed) return 0;
+    snprintf(text, sizeof text, "%s (game.dll+0x%X holds 0x%08X, reviewed 0x%08X)", what, rva, found, reviewed);
+    *why = text;
+    return 1;
+}
+
 static int LabelsAsReviewed(const char** why)
 {
     for (uint32_t i = 0; i < 3; i++)
-        if (vpm_game_u32(MOM_TAB_LABELS_RVA + i * 4u) != mom_tab_labels[i]) { *why = "tab labels changed"; return 0; }
+        if (Differs(why, "tab labels changed", MOM_TAB_LABELS_RVA + i * 4u, mom_tab_labels[i])) return 0;
     for (uint32_t i = 0; i < 9; i++)
-        if (vpm_game_u32(MOM_CATEGORY_TABLE_RVA + i * MOM_CATEGORY_RECORD + 8u) != mom_category_labels[i])
-        {
-            *why = "category labels changed";
+        if (Differs(why, "category labels changed", MOM_CATEGORY_TABLE_RVA + i * MOM_CATEGORY_RECORD + 8u,
+                mom_category_labels[i]))
             return 0;
-        }
-    if (vpm_game_u32(MOM_INERT_DESCRIPTOR_RVA) != INERT_SETTING ||
-        vpm_game_u32(MOM_INERT_DESCRIPTOR_RVA + 4u) != INERT_CATEGORY || vpm_game_u32(MOM_INERT_DESCRIPTOR_RVA + 12u) != 0)
-    {
-        *why = "setting descriptors changed";
+    if (Differs(why, "setting descriptors changed", MOM_INERT_DESCRIPTOR_RVA, INERT_SETTING) ||
+        Differs(why, "setting descriptors changed", MOM_INERT_DESCRIPTOR_RVA + 4u, INERT_CATEGORY) ||
+        Differs(why, "setting descriptors changed", MOM_INERT_DESCRIPTOR_RVA + 12u, 0))
         return 0;
-    }
     return 1;
 }
 
