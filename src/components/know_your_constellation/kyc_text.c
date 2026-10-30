@@ -1,8 +1,8 @@
 /* Know Your Constellation's text layout (Bingus Text v1, bingus_text.lua: check, boundaries, pieces, wrap), for UTF-8
  * in any script: measured, wrapped and scrolled by character, never by byte. The decoding is the core's
  * (vpm_utf8_decode, the same module's decode); the check here takes a piece of a text by its length, as the panel's
- * labels are. Translations and the game's Text Language (the rest of bingus_text.lua) are not ported: the pack's texts
- * are English (vpm_text). Nothing here runs per frame: the panel lays out text when its report, geometry or font
+ * labels are. The translations and the game's Text Language (the rest of bingus_text.lua) are the core's (vpm_text,
+ * vpm_text_format). Nothing here runs per frame: the panel lays out text when its report, geometry or font
  * changes. */
 #include <string.h>
 #include "kyc.h"

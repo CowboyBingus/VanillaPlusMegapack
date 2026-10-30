@@ -30,15 +30,18 @@
  * labels and descriptor check, the binding and the tick start in the ready step (CodeReady), and a function that never
  * reads as shipped stops it with the Lua's wording ("Mod options integration unavailable: options_visual changed",
  * the core adding "(game.dll 0x1998590)"). Their calling convention and the arguments they take are checked against
- * the decoded game.dll of 25480438, function by function (native.h). Texts are English (vpm_text). Dropped: the
- * _G.ModOptionsMenu API for Lua mods, the values file and its backup (the core saves), the game's Text Language query
- * and text refresh on each opening (no translations yet), and the Lua update guard (error bursts, pauses, shutdown
- * save): the core's crash guard stops the component on a fault, and stop() hands an open view back to the game as the
- * Lua's guard did.
+ * the decoded game.dll of 25480438, function by function (native.h). Texts are the Lua's locales/en.lua through
+ * vpm_text; on each escape-menu opening the step re-reads the game's Text Language and re-resolves MOM's own texts, as
+ * the Lua's translation.observe and tr:refresh did. Dropped: the _G.ModOptionsMenu API for Lua mods, the values file and
+ * its backup (the core saves), the BingusTranslations packs (no Lua state), and the Lua update guard (error bursts,
+ * pauses, shutdown save): the core's crash guard stops the component on a fault, and stop() hands an open view back to
+ * the game as the Lua's guard did.
  *
  * Cost (the Lua's test_options_tab.lua budgets: ReadProcessMemory calls per frame):
  * - Escape menu closed (most of every session): 1 plain load (the UI state pointer in game.dll) and 1 read (the UI stack,
  *   24 bytes); no Windows call of its own, no allocation, no log. The Lua: 1 read.
+ * - Each opening (once, not per frame): vpm_text_refresh's 0 to 3 heap reads (the settings pointer and the language table
+ *   entry are plain image loads) and MOM's own texts re-interned; the model is rebuilt at the next MODS view.
  * - Menu open on another tab, or covered: 2 reads (the stack, the screen pointer; covered: 1) and plain loads of the tab
  *   bar. The Lua: 2.
  * - MODS shown, nothing changing: 2 reads, 1 native call (the OPTIONS visual pass), plain loads for the page check, the
@@ -54,31 +57,29 @@
  *   look) until all match, at most 60 s; then 15 plain loads of the native labels and setting 139's descriptor. The Lua:
  *   the shared runtime's build hash, 25 byte compares, 15 loads, in its first update. */
 #include "mom.h"
+#include "locale_data.h"
 
 MomState mom;
 
-/* The game's escape menu, every game update: the idle gate first (closed: 1 read), then the MODS tab and the view, as
- * the Lua's step. A view dropped with the menu (closed or rebuilt) never applies its edits; reopening the escape menu
- * re-initialises every widget MOM touched. lint: per-frame */
-static void Step(VpmComponent* self, float dt)
+/* Drop the open view, at a close or a rebuilt menu. */
+static void StepDropView(void)
 {
-    uintptr_t screen = 0;
-    int status = mom_escape_menu(&screen);
-    if (status == MOM_MENU_CLOSED)
-    {
-        if (!mom.hasView) return;
-        mom.hasView = 0;
-        mom_drop_pending();
-        vpm_log(self, "Escape menu closed on the MODS tab.");
-        return;
-    }
-    if (status != MOM_MENU_OPEN) return;
-    if (mom.hasView && mom.view.screen != screen) { mom.hasView = 0; mom_drop_pending(); }
-    if (!mom_ensure_mods_tab(screen))
-    {
-        if (mom.hasView) { mom.hasView = 0; mom_drop_pending(); }
-        return;
-    }
+    mom.hasView = 0;
+    mom_drop_pending();
+}
+
+/* The escape menu closed: drop a view with it. */
+static void StepClosed(VpmComponent* self)
+{
+    mom.menuSeen = 0;
+    if (!mom.hasView) return;
+    StepDropView();
+    vpm_log(self, "Escape menu closed on the MODS tab.");
+}
+
+/* Follow the selected tab: leave, maintain or enter the MODS view. */
+static void StepView(uintptr_t screen)
+{
     uint32_t tab = mom_get32(screen + MOM_TAB_BAR + MOM_TAB_CURRENT);
     if (mom.hasView)
     {
@@ -87,10 +88,40 @@ static void Step(VpmComponent* self, float dt)
     }
     else if (tab == MOM_MODS_TAB)
         mom_enter_view(screen);
+}
+
+/* The escape menu is open: refresh the opening's texts, keep the tab and view, then update the view. */
+static void StepOpen(uintptr_t screen, float dt)
+{
+    if (!mom.menuSeen)
+    {
+        /* The OPTIONS tab is where the game's Text Language changes: read it and re-resolve MOM's texts once per
+         * opening, as the Lua's step did. */
+        mom.menuSeen = 1;
+        mom_refresh_texts();
+    }
+    if (mom.hasView && mom.view.screen != screen) StepDropView();
+    if (!mom_ensure_mods_tab(screen))
+    {
+        if (mom.hasView) StepDropView();
+        return;
+    }
+    StepView(screen);
     if (!mom.hasView) return;
     mom_update_apply(&mom.view);
     mom_update_visuals(&mom.view, dt);
     mom_neutralize_dialog(&mom.view);
+}
+
+/* The game's escape menu, every game update: the idle gate first (closed: 1 read), then the MODS tab and the view, as
+ * the Lua's step. A view dropped with the menu (closed or rebuilt) never applies its edits; reopening the escape menu
+ * re-initialises every widget MOM touched. lint: per-frame */
+static void Step(VpmComponent* self, float dt)
+{
+    uintptr_t screen = 0;
+    int status = mom_escape_menu(&screen);
+    if (status == MOM_MENU_CLOSED) StepClosed(self);
+    else if (status == MOM_MENU_OPEN) StepOpen(screen, dt);
 }
 
 #define LABEL_CHECK_FRAMES 30     /* the menu data's look while it waits */
@@ -155,6 +186,7 @@ static int Start(VpmComponent* self)
     memset(&mom, 0, sizeof mom);
     memset(&mom_native, 0, sizeof mom_native);
     mom.self = self;
+    vpm_text_table(self, &vpm_texts_mod_options_menu);
     mom_text_reset();
     mom_model_reset();
     mom_rows_reset();

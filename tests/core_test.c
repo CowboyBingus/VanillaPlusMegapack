@@ -1498,6 +1498,104 @@ static void TextClipKeepsWholeCharacters(void)
     CHECK_EQ(vpm_utf8_clip("abc", 3), 3);
 }
 
+/* ---- texts: the game's language, the fallback and format() ------------------------------------------------------- */
+
+static const VpmTextEntry kTextEntriesEn[] = {
+    {"both", "BOTH EN"},
+    {"hello", "HELLO"},
+    {"only.en", "ONLY EN"},
+    {"place", "Hi {name}"},
+};
+static const VpmTextEntry kTextEntriesEnGb[] = {{"both", "BOTH EN-GB"}};
+static const VpmTextEntry kTextEntriesZh[] = {{"both", "BOTH ZH"}, {"hello", "ZH"}};
+static const VpmTextEntry kTextEntriesZhHans[] = {{"both", "BOTH ZH-HANS"}};
+static const VpmTextLocale kTextLocales[] = {
+    {"en", kTextEntriesEn, (int)(sizeof kTextEntriesEn / sizeof kTextEntriesEn[0])},
+    {"en-GB", kTextEntriesEnGb, (int)(sizeof kTextEntriesEnGb / sizeof kTextEntriesEnGb[0])},
+    {"zh", kTextEntriesZh, (int)(sizeof kTextEntriesZh / sizeof kTextEntriesZh[0])},
+    {"zh-Hans", kTextEntriesZhHans, (int)(sizeof kTextEntriesZhHans / sizeof kTextEntriesZhHans[0])},
+};
+static const VpmTextTable kTextTable = {kTextLocales, (int)(sizeof kTextLocales / sizeof kTextLocales[0])};
+
+static VpmComponent* g_textSelf;
+static int StartText(VpmComponent* self) { g_textSelf = self; vpm_text_table(self, &kTextTable); return 0; }
+static const VpmComponentDef kText = {"text_user", "Text User", "1.0", 0, StartText, NULL};
+
+static void TextLanguageComesFromTheGame(void)
+{
+    fake_text_language("zh-CN");
+    const VpmComponentDef* defs[] = {&kText};
+    fake_start(defs, 1);
+    CHECK(strcmp(vpm_text_language(), "zh-Hans") == 0);
+    /* the exact tag, then its base ('zh-Hans' -> 'zh'), then English */
+    CHECK(strcmp(vpm_text(g_textSelf, "both", "fallback"), "BOTH ZH-HANS") == 0);
+    CHECK(strcmp(vpm_text(g_textSelf, "hello", "fallback"), "ZH") == 0);
+    CHECK(strcmp(vpm_text(g_textSelf, "only.en", "fallback"), "ONLY EN") == 0);
+    CHECK(strcmp(vpm_text(g_textSelf, "missing", "fallback"), "fallback") == 0);
+    CHECK(strcmp(vpm_text(g_textSelf, "place", "fallback"), "Hi {name}") == 0); /* format() is the caller's */
+    /* the game's setting can change between observations, as its OPTIONS tab allows */
+    fake_text_language("en-GB");
+    CHECK(vpm_text_refresh());
+    CHECK(strcmp(vpm_text_language(), "en-GB") == 0);
+    CHECK(strcmp(vpm_text(g_textSelf, "both", "fallback"), "BOTH EN-GB") == 0);
+    CHECK(strcmp(vpm_text(g_textSelf, "hello", "fallback"), "HELLO") == 0);
+    /* a code the Lua did not map is its own tag: no translation matches, English shows */
+    fake_text_language("xx");
+    CHECK(vpm_text_refresh());
+    CHECK(strcmp(vpm_text_language(), "xx") == 0);
+    CHECK(strcmp(vpm_text(g_textSelf, "both", "fallback"), "BOTH EN") == 0);
+    /* a code its matcher refuses, and an unreadable setting: the previous language stays */
+    fake_text_language("z1");
+    CHECK(!vpm_text_refresh());
+    CHECK(strcmp(vpm_text_language(), "xx") == 0);
+    *(uint64_t*)(fake_game() + 0x3326340) = 0;
+    CHECK(!vpm_text_refresh());
+    CHECK(strcmp(vpm_text_language(), "xx") == 0);
+    CHECK(strcmp(vpm_text(g_textSelf, "both", "fallback"), "BOTH EN") == 0);
+}
+
+/* No Text Language in memory: Steam's game language once, its "schinese" to zh-Hans, and English when neither is
+ * readable. A later game observation wins over Steam. */
+static void* FakeSteamApps(void) { return (void*)0x1234; }
+static const char* FakeSteamLanguage(void* apps) { return "schinese"; }
+
+static void TextFallsBackToSteamThenEnglish(void)
+{
+    fake_export("steam_api64.dll", "SteamAPI_SteamApps_v008", (void*)FakeSteamApps);
+    fake_export("steam_api64.dll", "SteamAPI_ISteamApps_GetCurrentGameLanguage", (void*)FakeSteamLanguage);
+    const VpmComponentDef* defs[] = {&kText};
+    fake_start(defs, 1);
+    CHECK(strcmp(vpm_text_language(), "zh-Hans") == 0);
+    CHECK(strcmp(vpm_text(g_textSelf, "hello", "fallback"), "ZH") == 0);
+    CHECK(strcmp(vpm_text(g_textSelf, "missing", "fallback"), "fallback") == 0);
+    fake_text_language("us");
+    CHECK(vpm_text_refresh());
+    CHECK(strcmp(vpm_text_language(), "en") == 0);
+    CHECK(strcmp(vpm_text(g_textSelf, "hello", "fallback"), "HELLO") == 0);
+}
+
+static void TextFormatsPlaceholdersAsTheLua(void)
+{
+    char out[64];
+    const char* names[] = {"name", "count"};
+    const char* values[] = {"Ada", "3"};
+    const char* text = "Hi {name}, {count} left; {unknown} {1x} {} {name_2}";
+    const char* more_names[] = {"name", "count", "name_2"};
+    const char* more_values[] = {"Ada", "3", "!"};
+    size_t needed = vpm_text_format(out, sizeof out, text, more_names, more_values, 3);
+    CHECK(strcmp(out, "Hi Ada, 3 left; {unknown} {1x} {} !") == 0);
+    CHECK_EQ(needed, strlen(out));
+    /* a placeholder with no value stays as written */
+    (void)vpm_text_format(out, sizeof out, "{name}", names, values, 0);
+    CHECK(strcmp(out, "{name}") == 0);
+    /* cut when it does not fit, but the return says what it needed (as snprintf) */
+    needed = vpm_text_format(out, 4, "Ada!", names, values, 2);
+    CHECK(strcmp(out, "Ada") == 0);
+    CHECK_EQ(needed, 4);
+    CHECK_EQ(vpm_text_format(out, sizeof out, "", names, values, 2), 0);
+    CHECK(out[0] == 0);
+}
+
 static int StartPlain(VpmComponent* self) { return 0; }
 static const VpmComponentDef kFolders = {"folder_user", "Folder User", "1.0", 0, StartPlain, NULL};
 
@@ -3011,6 +3109,9 @@ int main(void)
     RUN(TextUpperCasesAsTheLua);
     RUN(TextUpperNeverCutsACharacter);
     RUN(TextClipKeepsWholeCharacters);
+    RUN(TextLanguageComesFromTheGame);
+    RUN(TextFallsBackToSteamThenEnglish);
+    RUN(TextFormatsPlaceholdersAsTheLua);
     RUN(TheIdentityBlockSaysWhichBuildRan);
     RUN(TheOptionsNotAtTheirDefaultsAreListed);
     RUN(AFaultSaysWhichCallbackItWasIn);

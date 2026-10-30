@@ -35,9 +35,9 @@
  *     is one check per region at activation (vpm_writable); writes it would have skipped are skipped (logged once).
  *     Before its first store into a binding page's screen object (tab buttons, the row request) and into a binding map,
  *     each is checked writable once, which the Lua did not do.
- *   - Texts: English (vpm_text), so the Lua's language observation and per-page refresh have nothing to do. The UTF-8
- *     checks, limits and upper case of every script the game's fonts carry are kept (mbm_text.c, over the core's one
- *     copy of the Lua text module).
+ *   - Texts: the Lua's locales/en.lua through vpm_text (its only locale; vpm_text's English fallback needs no page-open
+ *     refresh, which the Lua's one-locale table made a no-op too). The UTF-8 checks, limits and upper case of every
+ *     script the game's fonts carry are kept (mbm_text.c, over the core's one copy of the Lua text module).
  *   - Extended bindings and the MORE MODS page need the engine's input and Gui, which a C mod cannot reach yet
  *     (mbm_engine.h). Their logic is ported behind that interface; without a backend an extended binding answers -1 (the
  *     caller's fixed key; the Lua said false until engine input existed) and the MORE MODS tab is not offered (status).
@@ -80,6 +80,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "mbm.h"
+#include "locale_data.h"
 
 MbmState mbm;
 
@@ -338,6 +339,7 @@ static int MbmStart(VpmComponent* self)
     memset(&mbm, 0, sizeof mbm);
     memset(&s_mbm, 0, sizeof s_mbm);
     mbm.self = self;
+    vpm_text_table(self, &vpm_texts_mod_bindings_menu);
     mbm.in_mission = 1; /* unknown counts as a mission, so MORE MODS is never offered before the check */
     MbmText(self, mbm.empty_text, sizeof mbm.empty_text, "section.none", "NO MOD BINDINGS INSTALLED");
     MbmText(self, mbm.unnamed_text, sizeof mbm.unnamed_text, "section.unnamed", "MODS");

@@ -14,7 +14,8 @@
  * slider range a float can hold, the kind, the default) and keeps a slider's value rounded to its shown decimals. Here
  * an option is left out only when the tab cannot show one of its texts (not valid UTF-8, a control character after
  * display_text, or blank), and the log says why once. The model is built when the MODS tab opens and again when the
- * registry has grown (its revision is the option count). */
+ * registry has grown (its revision is the option count) or the escape menu reopened after the texts' language changed
+ * (mom_model_texts_changed). */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,6 +67,8 @@ void mom_model_reset(void)
     g_categoryCount = 0;
     g_revision = -1;
 }
+
+void mom_model_texts_changed(void) { g_revision = -1; }
 
 int mom_model_revision(void) { return vpm_option_count(); }
 
@@ -185,12 +188,12 @@ static MomCategory* NewCategory(const char* title, VpmComponent* owner)
     return c;
 }
 
-/* The category named after an option's component (the Lua's mod name, upper case), new at its first option. */
+/* The category named after an option's component (the Lua's option.mod name, upper case), new at its first option. */
 static MomCategory* OwnerCategory(VpmComponent* owner)
 {
     for (int i = 0; i < g_categoryCount; i++)
         if (g_categories[i].owner == owner) return &g_categories[i];
-    const char* name = mom_text_named(vpm_def(owner)->name, TITLE_LIMIT);
+    const char* name = mom_text_named(vpm_text(owner, "option.mod", vpm_def(owner)->name), TITLE_LIMIT);
     return NewCategory(mom_text_upper(name != NULL ? name : vpm_def(owner)->id), owner);
 }
 

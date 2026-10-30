@@ -66,8 +66,11 @@ typedef struct MomCategory
 } MomCategory;
 
 void mom_model_reset(void);
-/* The model for the options registered now (rebuilt when the registry grew), and its revision (the option count). */
+/* The model for the options registered now (rebuilt when the registry grew or the texts changed), and its revision (the
+ * option count). */
 void mom_model_update(void);
+/* The texts' language changed: rebuild the model (and its page control) at the next update. */
+void mom_model_texts_changed(void);
 int mom_model_revision(void);
 /* The categories in button order (alphabetical, then registration order): their count. */
 int mom_model_categories(const MomCategory** out, int capacity);
@@ -105,6 +108,9 @@ const char* mom_text_named(const char* name, size_t limit);
 const char* mom_text_upper(const char* text);
 /* {page} and {pages} in a template replaced by the numbers. */
 const char* mom_text_page(const char* format, int page, int pages);
+/* Once per escape-menu opening: re-read the game's Text Language and re-resolve MOM's own texts, then have the model
+ * rebuilt so the page control's texts follow too. The Lua's translation.observe, tr:refresh and translation.refresh. */
+void mom_refresh_texts(void);
 
 /* ---- the open MODS view (view.c) ------------------------------------------------------------------------------ */
 
@@ -189,6 +195,7 @@ typedef struct MomState
 {
     VpmComponent* self;
     int hasView;
+    int menuSeen;               /* the escape menu was open at the last step: its texts were refreshed for this opening */
     float labelWaited;          /* seconds since game.dll's code matched while its menu data does not read as reviewed */
     int labelFrames;
     MomView view;

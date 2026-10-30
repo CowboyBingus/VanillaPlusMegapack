@@ -1,8 +1,281 @@
-/* UTF-8 text for the components that show text: the shared Lua text module's decode, encode, check, length, upper and
- * clip (Translations/bingus_text.lua v1 in the research workspace, which every Lua component carried a copy of), in one
- * C copy. Nothing here runs per frame unless a component shows text on that frame; nothing allocates. */
+/* The components' texts: the shared Lua text module's decode, encode, check, length, upper and clip
+ * (Translations/bingus_text.lua v1 in the research workspace, which every Lua component carried a copy of), its
+ * format(), and its language choice (the game's Text Language, mapped to a tag, with English fallback), in one C copy.
+ * The per-component strings themselves are the generator's (src/components/<id>/locale_data.c). Nothing here runs per
+ * frame unless a component shows text on that frame; nothing allocates. A language read (vpm_text_refresh) is 0 to 3
+ * heap reads (4 when the 16-byte code read falls back to 8), when the first text asks for it and at the menu openings
+ * that observe it (Mod Options Menu, Better Lobby Management). */
+#include <stdio.h>
 #include <string.h>
-#include "vpm.h"
+#include "vpm_core.h"
+
+/* The game's Text Language in bingus_text.lua v1: the settings object at game.dll+0x3326340, its language index at
+ * +705500+212, and 15 records at game.dll+0x37C5650 whose code string is at +8. */
+#define TEXT_SETTINGS_RVA 0x3326340u
+#define TEXT_SETTINGS_INDEX (705500u + 212u)
+#define TEXT_TABLE_RVA 0x37C5650u
+#define TEXT_LANGUAGES 15
+#define TEXT_TAG 17 /* a 16-character tag and its NUL */
+
+typedef struct TextCode { const char* code; const char* tag; } TextCode;
+
+/* Record codes to BCP 47 tags, as bingus_text.lua's GAME_CODES: only 'us' is confirmed; the rest are the game's code
+ * spellings. A code not here is kept as its own tag, so no translation matches it and English shows. */
+static const TextCode kGameCodes[] = {
+    {"us", "en"}, {"en", "en"}, {"en-US", "en"}, {"uk", "en-GB"}, {"gb", "en-GB"}, {"en-GB", "en-GB"},
+    {"de", "de"}, {"fr", "fr"}, {"it", "it"}, {"es", "es"}, {"es-ES", "es"}, {"mx", "es-419"}, {"es-MX", "es-419"},
+    {"es-419", "es-419"}, {"pl", "pl"}, {"ru", "ru"}, {"jp", "ja"}, {"ja", "ja"}, {"kr", "ko"}, {"ko", "ko"},
+    {"br", "pt-BR"}, {"pt-BR", "pt-BR"}, {"pt", "pt"}, {"zh-CN", "zh-Hans"}, {"cn", "zh-Hans"}, {"zh", "zh-Hans"},
+    {"zhs", "zh-Hans"}, {"zh-TW", "zh-Hant"}, {"tw", "zh-Hant"}, {"zht", "zh-Hant"}, {"cz", "cs"}, {"cs", "cs"},
+    {"gr", "el"}, {"el", "el"}, {"nl", "nl"}, {"tr", "tr"}, {"ua", "uk"},
+};
+
+/* Steam's language names (ISteamApps::GetCurrentGameLanguage) to tags, as bingus_text.lua's STEAM. */
+static const TextCode kSteamLanguages[] = {
+    {"english", "en"}, {"schinese", "zh-Hans"}, {"tchinese", "zh-Hant"}, {"koreana", "ko"}, {"japanese", "ja"},
+    {"russian", "ru"}, {"polish", "pl"}, {"french", "fr"}, {"german", "de"}, {"italian", "it"}, {"spanish", "es"},
+    {"latam", "es-419"}, {"brazilian", "pt-BR"}, {"portuguese", "pt"}, {"ukrainian", "uk"}, {"czech", "cs"},
+    {"dutch", "nl"}, {"turkish", "tr"}, {"thai", "th"}, {"vietnamese", "vi"}, {"danish", "da"}, {"finnish", "fi"},
+    {"norwegian", "no"}, {"swedish", "sv"}, {"hungarian", "hu"}, {"romanian", "ro"}, {"bulgarian", "bg"},
+    {"greek", "el"}, {"arabic", "ar"}, {"indonesian", "id"},
+};
+
+static char g_language[TEXT_TAG] = "en"; /* the game's tag, once read */
+static int g_gameLanguage;               /* g_language is the game's (not Steam's, not English) */
+static int g_autoObserved;               /* the first vpm_text had its one look */
+static int g_steamTried;                 /* Steam's language was asked once */
+static char g_steamLanguage[TEXT_TAG];
+
+static int Letter(unsigned char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+static int TagChar(unsigned char c) { return Letter(c) || (c >= '0' && c <= '9') || c == '-'; }
+
+static const char* TableTag(const TextCode* table, int count, const char* value)
+{
+    for (int i = 0; i < count; i++)
+        if (strcmp(table[i].code, value) == 0) return table[i].tag;
+    return NULL;
+}
+
+/* A tag a Steam language may carry: valid_tag's pattern (two letters, an optional third, an optional hyphen, then
+ * letters, digits and hyphens; 16 characters at most), so an unknown Steam name is never used as a game tag. */
+static int TagFits(const char* value)
+{
+    size_t n = strlen(value);
+    if (n < 2 || n >= TEXT_TAG || !Letter((unsigned char)value[0]) || !Letter((unsigned char)value[1])) return 0;
+    size_t i = 2;
+    if (i < n && Letter((unsigned char)value[i])) i++;
+    if (i < n && value[i] == '-') i++;
+    for (; i < n; i++)
+        if (!TagChar((unsigned char)value[i])) return 0;
+    return 1;
+}
+
+/* The code bytes at the record: the settings object's language index, the record's string pointer, then the 16-byte
+ * read or, when it failed, the 8-byte one, as the Lua's load(text, 16) or load(text, 8). The table's first entry is a
+ * plain image load: when it is absent, [game+0x3326340] is not the settings object (some tests reuse that RVA for the
+ * game object), so the index is not read. */
+static int GameCodeBytes(char* bytes, size_t* n)
+{
+    if (!vpm_plausible((uintptr_t)vpm_game_u64(TEXT_TABLE_RVA))) return 0;
+    uint64_t settings = vpm_game_u64(TEXT_SETTINGS_RVA);
+    if (!vpm_plausible((uintptr_t)settings)) return 0;
+    uint32_t index = 0;
+    if (!vpm_read_u32((uintptr_t)settings + TEXT_SETTINGS_INDEX, &index) || index >= TEXT_LANGUAGES) return 0;
+    uint64_t record = vpm_game_u64(TEXT_TABLE_RVA + 8u * index);
+    if (!vpm_plausible((uintptr_t)record)) return 0;
+    uint64_t text = 0;
+    if (!vpm_read_u64((uintptr_t)record + 8, &text) || !vpm_plausible((uintptr_t)text)) return 0;
+    if (vpm_read((uintptr_t)text, bytes, 16)) { *n = 16; return 1; }
+    if (vpm_read((uintptr_t)text, bytes, 8)) { *n = 8; return 1; }
+    return 0;
+}
+
+/* The bytes matched as the Lua did: a letter, then letters and hyphens, then NUL; 12 characters at most. */
+static int GameCodeMatch(const char* bytes, size_t n, char* out, size_t size)
+{
+    if (n == 0 || !Letter((unsigned char)bytes[0])) return 0;
+    size_t length = 0;
+    while (length < n && bytes[length] != 0)
+    {
+        if (length > 0 && !(Letter((unsigned char)bytes[length]) || bytes[length] == '-')) return 0;
+        length++;
+    }
+    if (length == 0 || length > 12 || length >= n || length + 1 > size) return 0;
+    memcpy(out, bytes, length);
+    out[length] = 0;
+    return 1;
+}
+
+/* The code string at the record. */
+static int GameCode(char* out, size_t size)
+{
+    char bytes[16];
+    size_t n = 0;
+    if (!GameCodeBytes(bytes, &n)) return 0;
+    return GameCodeMatch(bytes, n, out, size);
+}
+
+void vpm_text_reset(void)
+{
+    snprintf(g_language, sizeof g_language, "%s", "en");
+    g_gameLanguage = g_autoObserved = g_steamTried = 0;
+    g_steamLanguage[0] = 0;
+}
+
+/* Steam's current game language: two lookups in steam_api64.dll (the game has it loaded; nothing is loaded) and two
+ * calls into it, once per session and only when the game's setting cannot be read, as bingus_text's steam_language. */
+static const char* SteamLanguage(void)
+{
+    typedef void* (__cdecl* SteamAppsFn)(void);
+    typedef const char* (__cdecl* SteamLanguageFn)(void* apps);
+    SteamAppsFn apps_fn = (SteamAppsFn)(void*)vpm_module_export("steam_api64.dll", "SteamAPI_SteamApps_v008");
+    SteamLanguageFn language_fn =
+        (SteamLanguageFn)(void*)vpm_module_export("steam_api64.dll", "SteamAPI_ISteamApps_GetCurrentGameLanguage");
+    if (apps_fn == NULL || language_fn == NULL) return NULL;
+    void* apps = apps_fn();
+    return apps != NULL ? language_fn(apps) : NULL;
+}
+
+/* The tag vpm_text resolves with now. The first text of a session looks the game's setting up once; if it cannot be
+ * read, Steam's language is asked once, then "en". */
+static const char* CurrentLanguage(void)
+{
+    if (!g_gameLanguage && !g_autoObserved) (void)vpm_text_refresh();
+    if (g_gameLanguage) return g_language;
+    if (!g_steamTried)
+    {
+        g_steamTried = 1;
+        const char* name = SteamLanguage();
+        if (name != NULL)
+        {
+            const char* tag = TableTag(kSteamLanguages, (int)(sizeof kSteamLanguages / sizeof kSteamLanguages[0]), name);
+            if (tag == NULL && TagFits(name)) tag = name;
+            if (tag != NULL) snprintf(g_steamLanguage, sizeof g_steamLanguage, "%s", tag);
+        }
+    }
+    return g_steamLanguage[0] != 0 ? g_steamLanguage : "en";
+}
+
+int vpm_text_refresh(void)
+{
+    g_autoObserved = 1;
+    char code[TEXT_TAG];
+    if (!GameCode(code, sizeof code)) return 0;
+    const char* tag = TableTag(kGameCodes, (int)(sizeof kGameCodes / sizeof kGameCodes[0]), code);
+    if (tag == NULL) tag = code;
+    if (strlen(tag) >= sizeof g_language) return 0;
+    snprintf(g_language, sizeof g_language, "%s", tag);
+    g_gameLanguage = 1;
+    return 1;
+}
+
+const char* vpm_text_language(void) { return CurrentLanguage(); }
+
+void vpm_text_table(VpmComponent* self, const VpmTextTable* table)
+{
+    if (self != NULL) self->texts = table;
+}
+
+static const VpmTextLocale* FindLocale(const VpmTextTable* table, const char* tag)
+{
+    if (table == NULL || table->locales == NULL || tag == NULL) return NULL;
+    for (int i = 0; i < table->count; i++)
+        if (table->locales[i].tag != NULL && strcmp(table->locales[i].tag, tag) == 0) return &table->locales[i];
+    return NULL;
+}
+
+static const char* LookupText(const VpmTextLocale* locale, const char* key)
+{
+    if (locale == NULL || locale->entries == NULL) return NULL;
+    for (int i = 0; i < locale->count; i++)
+        if (locale->entries[i].key != NULL && strcmp(locale->entries[i].key, key) == 0) return locale->entries[i].text;
+    return NULL;
+}
+
+const char* vpm_text(const VpmComponent* self, const char* key, const char* english)
+{
+    if (key == NULL) return english;
+    const VpmTextTable* table = self != NULL ? self->texts : NULL;
+    if (table == NULL) return english;
+    const char* language = CurrentLanguage();
+    const char* text = LookupText(FindLocale(table, language), key);
+    if (text == NULL)
+    {
+        const char* dash = strchr(language, '-');
+        if (dash != NULL)
+        {
+            char base[TEXT_TAG];
+            size_t n = (size_t)(dash - language);
+            if (n < sizeof base)
+            {
+                memcpy(base, language, n);
+                base[n] = 0;
+                text = LookupText(FindLocale(table, base), key);
+            }
+        }
+    }
+    if (text == NULL) text = LookupText(FindLocale(table, "en"), key);
+    return text != NULL ? text : english;
+}
+
+/* {[A-Za-z_][A-Za-z0-9_]*}: the Lua's placeholder pattern, ASCII as its %a and %w are here. */
+static int Placeholder(const char* text, size_t* name)
+{
+    const char* p = text + 1;
+    if (!(Letter((unsigned char)*p) || *p == '_')) return 0;
+    size_t n = 1;
+    while (p[n] != 0 && (Letter((unsigned char)p[n]) || (p[n] >= '0' && p[n] <= '9') || p[n] == '_')) n++;
+    if (p[n] != '}') return 0;
+    *name = n;
+    return 1;
+}
+
+/* The value for a placeholder's name (the bytes between its braces), or NULL when no names[i] matches. */
+static const char* FormatValue(const char* name, size_t length, const char* const* names,
+    const char* const* values, int count)
+{
+    for (int i = 0; i < count; i++)
+        if (names[i] != NULL && strlen(names[i]) == length && memcmp(names[i], name, length) == 0)
+            return values[i];
+    return NULL;
+}
+
+/* Copies as much of value as fits, and returns how much was copied. */
+static size_t FormatCopy(char* out, size_t size, size_t written, const char* value, size_t length)
+{
+    size_t room = size - 1 - written;
+    size_t copy = length < room ? length : room;
+    memcpy(out + written, value, copy);
+    return copy;
+}
+
+size_t vpm_text_format(char* out, size_t size, const char* text, const char* const* names, const char* const* values,
+    int count)
+{
+    if (out == NULL || size == 0) return 0;
+    if (text == NULL) text = "";
+    size_t written = 0, needed = 0;
+    for (const char* p = text; *p;)
+    {
+        size_t name = 0;
+        const char* value = NULL;
+        if (*p == '{' && Placeholder(p, &name))
+            value = FormatValue(p + 1, name, names, values, count);
+        if (value != NULL)
+        {
+            size_t n = strlen(value);
+            written += FormatCopy(out, size, written, value, n);
+            needed += n;
+            p += name + 2;
+            continue;
+        }
+        if (written + 1 < size) out[written++] = *p;
+        needed++;
+        p++;
+    }
+    out[written] = 0;
+    return needed;
+}
 
 /* A lead byte: the continuation bytes it needs (0: it starts no character), its bits of the value, and the range of
  * the first continuation byte (which rules out overlong forms, surrogates and values above U+10FFFF). */

@@ -18,8 +18,9 @@
  *     applied on the frame after it ends, the earliest; the log gives the worker's time in place of the slices;
  *   - the engine is opened on HellForge's game-loaded event and, when the engine has not filled its script API yet,
  *     again every 30 frames until it has (the Lua ran after the engine's script setup);
- *   - the options are the core's (the Lua's ids, kinds, labels and defaults; Recolor Weapons says it is experimental);
- *     texts are English (vpm_text);
+ *   - the options are the core's (the Lua's ids, kinds, labels and defaults); texts are the Lua's locales/en.lua
+ *     through vpm_text (the only locale it shipped; the core adds the English fallback), with Recolor Weapons keeping
+ *     the C port's "Experimental." tag;
  *   - the disk cache lives in vpm_data_folder (%LOCALAPPDATA%\CowboyBingus\VanillaPlusMegapack\match_your_colors\
  *     MatchYourColors.cache); with no shutdown event, it is not written at shutdown (the save after a job still is);
  *   - no pause (the core has none): an error of the step is logged and counted as the Lua's guard did (8 stop it);
@@ -56,6 +57,7 @@
 #include <string.h>
 #include <wchar.h>
 #include "myc_addon.h"
+#include "locale_data.h"
 
 #define g myc_g
 #define ENGINE_RETRY_FRAMES 30
@@ -81,6 +83,14 @@ static const char* g_squadColorChoices[3];
 static const char* g_hideChoices[4];
 
 static const char* MycTr(const char* key, const char* english) { return vpm_text(s.self, key, english); }
+
+/* The weapons description, behind the C port's Experimental. tag (the inline text carried before the locales). */
+static const char* MycExperimental(const char* description)
+{
+    static char text[VPM_OPTION_DESCRIPTION * 4 + 1];
+    snprintf(text, sizeof text, "Experimental. %s", description);
+    return text;
+}
 
 /* ---- options ------------------------------------------------------------------------------------------------------ */
 
@@ -164,10 +174,10 @@ static void MycDefinitions(void)
         "Helmet, or the paint scheme's. A complete set left alone still gives its cape its colors. With Helmet and Armor "
         "Match Cape the cape keeps its colors (it is the one matched). Emblems and other decals keep their colors."), 0);
     g_defs[O_WEAPONS] = MycToggleOption("recolor_weapons", MycTr("option.weapons.label", "Recolor Weapons"),
-        MycTr("option.weapons.description", "Experimental. Recolors your weapons too (primary, sidearm, support weapon and "
-        "their attachments), to the same colors as the cape: the armor's, the helmet's, the cape's or the paint scheme's. "
-        "While on, it replaces a weapon's own paint scheme. Lenses, lights and decals keep their colors; grenades and "
-        "backpacks keep theirs."), 0);
+        MycExperimental(MycTr("option.weapons.description", "Recolors your weapons too (primary, sidearm, support weapon "
+        "and their attachments), to the same colors as the cape: the armor's, the helmet's, the cape's or the paint "
+        "scheme's. While on, it replaces a weapon's own paint scheme. Lenses, lights and decals keep their colors; "
+        "grenades and backpacks keep theirs.")), 0);
 }
 
 /* An option's value as the instance takes it (the scheme: 0 none, 1 to the schemes' count). */
@@ -325,6 +335,7 @@ static int MycStart(VpmComponent* self)
     s.self = self;
     g.self = self;
     g.worker.self = self;
+    vpm_text_table(self, &vpm_texts_match_your_colors);
     MycRegister();
     MycPaths();
     vpm_on_summary(self, MycSummary);

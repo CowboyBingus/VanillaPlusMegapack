@@ -93,6 +93,7 @@
 #include <string.h>
 #include "../../core/vpm.h"
 #include "dive_data.h"
+#include "locale_data.h"
 
 #define GATE_FRAMES 120   /* a full check every 120th idle frame (about 2 s at 60 FPS) */
 #define POLL_FRAMES 30    /* without a local avatar, a check every 30th frame */
@@ -354,6 +355,7 @@ static int Start(VpmComponent* self)
     const char* why = NULL;
     if (swd.pending.valid && !swd_restore(0, &why)) vpm_log(self, "restore_failed (%s): kept as it is", why);
     memset(&s, 0, sizeof s);
+    vpm_text_table(self, &vpm_texts_shallow_water_diving);
     swd_reset();
     SwdRegisterDepth(self);
     if (!vpm_on_load(self, HF_EVENT_GAME_LOADED, SwdGameLoaded)) return 1;

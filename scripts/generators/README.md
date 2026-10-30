@@ -13,5 +13,6 @@ reproduce its output; none runs at build time.
 | `geometry_fixture.py <test_geometry.lua>` | the captured native descriptors in `tests/components/consistent_vaulting_test.c` | ConsistentVaulting `tests/test_geometry.lua` |
 | `gen_roster_header.py` | `src/components/know_your_constellation/kyc_roster_data.h` | KnowYourConstellation `src/roster_data.lua`, names checked against `locales/en.lua` |
 | `replays.py <tests folder> <out.c>` | the replay fixtures in `tests/components/sentry_aim_retention_test.c` | SentryAimRetention's two replay fixtures |
+| `gen_locales.py --lua <VanillaPlusMegapack Lua checkout>/components` | `src/components/<id>/locale_data.c/.h` for the seven components whose Lua shipped `locales/` | the Lua Megapack v42's `legacy` branch, `components/<Slug>/locales/<tag>.lua`; translations keep the English keys, placeholders and limits |
 
 The dump helpers one level up (`callers.py`, `calls_in.py`, `check_code_pins.py`) read a decoded game.dll image.

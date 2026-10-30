@@ -66,6 +66,7 @@
 #include <string.h>
 #include <windows.h>
 #include "ship_station_hotkeys.h"
+#include "locale_data.h"
 
 #define SHORTCUTS 6
 #define CONTEXT_FRAMES 15            /* the context's interval until the ship is found */
@@ -363,6 +364,7 @@ static int Start(VpmComponent* self)
     if (user32->GetAsyncKeyState == NULL || user32->GetForegroundWindow == NULL || user32->GetWindowThreadProcessId == NULL)
         return vpm_fail(self, "user32's key and window functions are unavailable");
     s.process_id = GetCurrentProcessId();
+    vpm_text_table(self, &vpm_texts_ship_station_hotkeys);
     RegisterBindings(self);
     if (!vpm_tick_start(self, Tick)) return vpm_fail(self, "the game thread could not be reached");
     vpm_log(self, "Ship menu hotkeys initialized (Tab, F1, F5-F8).");

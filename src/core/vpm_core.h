@@ -25,6 +25,7 @@
 struct VpmComponent
 {
     const VpmComponentDef* def;
+    const VpmTextTable* texts; /* its locale tables (vpm_text_table), NULL: no translations */
     int index;
     int switched_on;     /* the player's saved switch */
     int state;           /* VPM_STATE_... */
@@ -213,6 +214,9 @@ void vpm_bindings_reset(void);
 /* An option's settings key ("component.id") and its default (a slider's snapped as its value is). */
 const char* vpm_option_key(const VpmOption* option);
 double vpm_option_default(const VpmOption* option);
+
+/* text.c: the language and Steam state a new session reads again (core.c Forget) */
+void vpm_text_reset(void);
 
 /* Windows functions (core.c) */
 void vpm_user32_init(void);

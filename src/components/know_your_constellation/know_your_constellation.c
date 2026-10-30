@@ -31,9 +31,10 @@
  *   (its frame ran after the updates below it in the chain, which is still before game.dll's update), so the native
  *   panel's rectangle is the one the previous frame solved, as in the Lua.
  * - It starts ticking at HF_EVENT_GAME_LOADED (the Lua's first update came after game.dll had loaded).
- * - Dropped: the game's Text Language reads (translations are not part of the pack yet: vpm_text is English); the
- *   update guard's pause and resume after the game's own update fails (HellForge does not chain updates); the
- *   shutdown status; the Lua's JIT and loader specifics.
+ * - Its texts are the core's, from the Lua's locales/en.lua and zh-Hans.lua (vpm_text; the core reads the game's Text
+ *   Language at start-up and a menu opening, as bingus_text's observe did). Dropped: the update guard's pause and
+ *   resume after the game's own update fails (HellForge does not chain updates); the shutdown status; the Lua's JIT
+ *   and loader specifics.
  *
  * Cost per frame (the core's tick): "reads" are vpm_read (guarded plain loads) of heap records, pinned by the tests;
  * the rest of what the Lua read with ReadProcessMemory are game.dll statics, now plain loads. The Lua's frame_budget
@@ -45,7 +46,8 @@
  *   A client's joinable hover: 21 and 9 (Lua 30). Loadout: 3 and 2 (Lua 5).
  * - A re-sample frame (every 0.5 s while a report is up, 0.1 s while one is pending): map 43 reads (Lua 64), with
  *   campaign spawn weights the same, briefing 44 (Lua 68), client 73 (Lua 99). The frame the war table opens: 44
- *   (Lua 70, with its 5 Text Language reads). The roster and the model are made again only when their inputs change.
+ *   (Lua 70; the Lua's 5 Text Language reads were at a mod's start and a menu opening, and are the core's there too).
+ *   The roster and the model are made again only when their inputs change.
  * - The panel (kyc_lua.c, the Lua part included): while it is hidden or still, no engine call and no ffi call; the
  *   Lua part's update reads one integer. A change (a new forecast, the native panel moved, shown, hidden): one call
  *   into the DLL from the Lua part with the panel's engine calls. Up and still, every 30th frame: the 3 checks (worlds,
@@ -59,6 +61,7 @@
 #include "kyc.h"
 #include "kyc_lua.h"
 #include "kyc_panel.h"
+#include "locale_data.h"
 
 #define QUIET_CHECK 30        /* the idle gate's full check: every 30th frame */
 #define BURST_ERRORS 8        /* genuine errors in one burst that stop the component */
@@ -489,6 +492,7 @@ static int Start(VpmComponent* self)
 {
     const KycReaders* override = s.override;
     memset(&s, 0, sizeof s);
+    vpm_text_table(self, &vpm_texts_know_your_constellation);
     kyc_error_clear();
     kyc_mission_reset();
     kyc_roster_reset();
