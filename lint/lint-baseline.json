@@ -1,5 +1,4 @@
 {
-  "format": 1,
-  "note": "Known lint violations per (unit, kind, file, rule, normalised line text). `python scripts/lint/lint.py check` fails when a count rises; `python scripts/lint/lint.py update` rewrites this file.",
+  "format": 2,
   "entries": []
 }
