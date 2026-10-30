@@ -23,19 +23,21 @@
  * they read as shipped; code that never does within 60 s stops the component ("host-left check changed (game.dll
  * 0x10834ED)"), before anything changed. A part whose own code does not read as shipped yet is left out as before, and
  * looked at again on every 30th frame for 60 s: it joins once its code reads as shipped (its setting applied, a log
- * line), else it stays out for the session. The settings are applied on the first frame after the
- * checks, as the Lua's first update registered its options. The options are the core's (vpm_option, the Lua's ids,
- * kinds and defaults); texts are English (vpm_text). Game state is the Lua's own reads (the mode at +0xAC21C, the host
- * and peers in the network context), not HellForge's events. The SOS Beacon's settings are read through the stratagem
+ * line), else it stays out for the session. When the engine slots are ready, the Text Language is observed and the
+ * options registered, as the Lua's first update did; the settings are applied on the first frame after the checks. The
+ * options are the core's (vpm_option, the Lua's ids, kinds and defaults); texts are the Lua's locales/en.lua and
+ * zh-Hans.lua through vpm_text. Game state is the Lua's own
+ * reads (the mode at +0xAC21C, the host and peers in the network context), not HellForge's events. The SOS Beacon's
+ * settings are read through the stratagem
  * list the game reads now (HellForge moves it when mods add stratagems). The lobbies come from HellForge's local
  * backend: DISBAND and CANCEL SOS need nothing of it beyond the game's own lobby calls; PROMOTE finds the successor's
  * lobby only when HellForge's directory lists it (Public, the successor's listing switch and Play with strangers on);
  * the scanner works from the game's compiled 10 s (the backend serves no matchmaking settings); the directory leaves
  * the continent exclusions out of every search, so Lobby Region writes its flags but changes no result. Dropped from
  * the Lua: the test builds' diagnostics recorder (a per-frame copy of the engine's package queue and in-use table while
- * hosting a squad, for the kick crash the game's own KICK fixed), kick modes and unload hold, the Text Language and
- * translations, the Mod Options Menu registration retries, the shared runtime's update guard (the core's crash guard
- * stops the component instead), the shutdown hook and the Lua entry points.
+ * hosting a squad, for the kick crash the game's own KICK fixed), kick modes and unload hold, the BingusTranslations
+ * packs (no Lua state), the Mod Options Menu registration retries, the shared runtime's update guard (the core's crash
+ * guard stops the component instead), the shutdown hook and the Lua entry points.
  *
  * Diagnostics (the pack's Detailed mode, vpm_log_detail): the test builds' verbose lines come back, on frames that
  * already act and on change only: each successor search, why one waits, its timeout and its results (blm_lobby.c); the
@@ -51,7 +53,9 @@
  *   system is confirmed once with one read. With Lobby Region on, every 120th frame adds its check: plain loads and the
  *   engine's continent call [Lua: the same].
  * - Escape menu open with nothing to do (hosting a squad on the ship, or alone in a mission with an SOS on): plain loads
- *   only, no read, no native call [Lua: 47 and 46 direct loads, no Windows call].
+ *   only and no native call, except the opening with an action to offer: that observes the Text Language (0 to 3 reads,
+ *   3 when the table is present [Lua: 5]) and rebuilds the offer on a change [Lua: 47 and 46 direct loads, no Windows
+ *   call].
  * - A kept SOS cancel: 6 plain loads on top of the full frame [Lua: 6]; a caught re-arm: two native calls, no page check
  *   [Lua: 1 when the lobby had already posted it].
  * - Acting frames: the Lua's reads and native calls (CANCEL SOS: 8 reads, 2 page checks [Lua: 8, 2]; adding the buttons:
@@ -62,11 +66,13 @@
  *   act +1 global read where a detailed line exists (a search step, a squad message, an open escape menu), and in
  *   Detailed mode a menu trace's 13 plain loads per open-menu frame, a line only when they changed; a squad message
  *   +2 plain loads of the chat history.
- * - Once: 73 code checks (HfApi.code_matches) and 6 reads for the engine's lobby and package slots. While code is not
- *   decoded yet: the waiting checks every 30 frames (at most 60 s), nothing else; a part left out: its checks on every
- *   30th frame for 60 s. */
+ * - Once: 73 code checks (HfApi.code_matches) and 6 reads for the engine's lobby and package slots; the ready step
+ *   observes the Text Language (0 to 3 reads, 3 when the table is present [Lua: 5]). While code is not decoded yet: the
+ *   waiting checks every 30 frames (at most 60 s), nothing else; a part left out: its checks on every 30th frame for
+ *   60 s. */
 #include <stdio.h>
 #include "blm.h"
+#include "locale_data.h"
 
 #define VERSION "v1.2.1"
 #define WAIT_SECONDS 600.0f
@@ -101,6 +107,8 @@ static struct
     int partsFrames;
     double clock;
     int quiet;                    /* nothing pending after the last full frame */
+    int menuSeen;                 /* the offer menu's opening: its texts were observed for this opening */
+    char textLanguage[32];        /* the tag of the last Text Language observation */
     int menu, sos, chat, region, scanner; /* the parts that passed their checks */
     char menuWhy[WHY_SIZE], sosWhy[WHY_SIZE], chatWhy[WHY_SIZE], regionWhy[WHY_SIZE], scannerWhy[WHY_SIZE];
     uint32_t scanned;
@@ -165,6 +173,25 @@ static void RegisterOptions(VpmComponent* self)
         s.options[i] = vpm_option(self, &g_options[i]);
         if (s.options[i] != NULL) vpm_option_on_change(s.options[i], handlers[i]);
     }
+}
+
+/* Observe the game's Text Language now, as the Lua's observe_language: 1 when the tag changed. */
+static int ObserveLanguage(void)
+{
+    char tag[32];
+    (void)vpm_text_refresh();
+    snprintf(tag, sizeof tag, "%s", vpm_text_language());
+    int changed = strcmp(s.textLanguage, tag) != 0;
+    snprintf(s.textLanguage, sizeof s.textLanguage, "%s", tag);
+    return changed;
+}
+
+/* The offer menu's opening: observe the language once, and rebuild the offer when it changed. */
+static void ObserveMenuOpening(void)
+{
+    if (s.menuSeen) return;
+    s.menuSeen = 1;
+    if (ObserveLanguage()) s.shown.mode = -1;
 }
 
 static double OptionValue(int option)
@@ -298,7 +325,8 @@ static void MenuFrame(void)
     uint32_t privacy = 0;
     uint64_t selected = 0;
     uintptr_t screen = OfferScreen();
-    if (screen == 0) return;
+    if (screen == 0) { s.menuSeen = 0; return; }
+    ObserveMenuOpening();
     if (blm_lobby_snapshot(&snap))
     {
         int sosOn = s.sos && blm_sos_offer(&snap, &privacy);
@@ -437,6 +465,8 @@ static void LogReady(VpmComponent* self)
 static void SlotsReady(VpmComponent* self, HfEvent event)
 {
     blm_engine_bind();
+    (void)ObserveLanguage();
+    RegisterOptions(self);
     s.partsPending = !VerifyParts();
     blm_lobby_use(s.chat, s.menu);
     LogReady(self);
@@ -531,6 +561,7 @@ static int Start(VpmComponent* self)
     s.shown.mode = -1;
     s.shown.count = -1;
     blm_component = self;
+    vpm_text_table(self, &vpm_texts_better_lobby_management);
     blm_game_reset();
     /* No blm_text_reset: the game's widgets may still point at texts an earlier start showed (a live switch-off with the
      * escape menu open); interning finds them again, so the pool only grows by texts it never had. */
@@ -540,7 +571,6 @@ static int Start(VpmComponent* self)
     blm_sos_reset();
     blm_region_reset();
     blm_scanner_reset();
-    RegisterOptions(self);
     (void)vpm_listen(self, HF_ON_MISSION_END, MissionEnded, 0); /* Detailed lines only; the core logs a refusal */
     const VpmCodePin* pins = NULL;
     int count = blm_game_pins(&pins);

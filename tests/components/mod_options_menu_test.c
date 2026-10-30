@@ -1673,6 +1673,53 @@ static void UpperCaseInEveryScript(void)
     CHECK(Shows(Button(2) + 1928, "\xD0\x9F\xD0\x9B\xD0\x90\xD0\x92"));
 }
 
+/* The Lua's step read the game's Text Language and re-resolved its texts once per escape-menu opening. The test table
+ * stands in for a translation: a language changed while the menu stays open waits for the next opening. */
+static const VpmTextEntry kRefreshEn[] = {
+    {"category.none", "EMPTY-EN"},
+    {"category.page", "PAGE {page} OF {pages}"},
+    {"page.description", "DESC-EN"},
+    {"page.label", "Mods Page EN"},
+    {"page.value", "{page} / {pages}"},
+    {"tab.mods", "MODS-EN"},
+};
+static const VpmTextEntry kRefreshZz[] = {
+    {"category.none", "EMPTY-ZZ"},
+    {"category.page", "ZZ {page}/{pages}"},
+    {"page.label", "ZZ Page"},
+    {"page.value", "{page}/{pages}"},
+    {"tab.mods", "MODS-ZZ"},
+};
+static const VpmTextLocale kRefreshLocales[] = {
+    {"en", kRefreshEn, (int)(sizeof kRefreshEn / sizeof kRefreshEn[0])},
+    {"zz", kRefreshZz, (int)(sizeof kRefreshZz / sizeof kRefreshZz[0])},
+};
+static const VpmTextTable kRefreshTable = {kRefreshLocales, (int)(sizeof kRefreshLocales / sizeof kRefreshLocales[0])};
+
+static void RefreshesItsTextsOnEachOpening(void)
+{
+    Ready(kDefs, 4);
+    vpm_text_table(mom.self, &kRefreshTable);
+    MenuOnOptions();
+    Frame();
+    CHECK(strcmp(mom.modsTitle, "MODS-EN") == 0 && strcmp(mom.emptyText, "EMPTY-EN") == 0);
+    CHECK(Shows(w.bar + 8296 + 3400 * 3, "MODS-EN"));
+    SelectMods();
+    Frame();
+    /* The OPTIONS tab changed the language behind MOM's back: this opening keeps the texts it resolved. */
+    fake_text_language("zz");
+    Frame();
+    CHECK(strcmp(mom.modsTitle, "MODS-EN") == 0);
+    SetStack(0, 0, 0);
+    Frame();
+    MenuOnOptions();
+    Frame();
+    CHECK(strcmp(mom.modsTitle, "MODS-ZZ") == 0 && strcmp(mom.emptyText, "EMPTY-ZZ") == 0);
+    CHECK(Shows(w.bar + 8296 + 3400 * 3, "MODS-ZZ"));
+    CHECK(strcmp(mom_text_page(vpm_text(mom.self, "category.page", "PAGE {page} OF {pages}"), 1, 2), "ZZ 1/2") == 0);
+    CHECK(strcmp(vpm_text(mom.self, "page.description", "fallback"), "DESC-EN") == 0);
+}
+
 int main(void)
 {
     RUN(VerifiesTheGameOnce);
@@ -1681,6 +1728,7 @@ int main(void)
     RUN(StartsOnceTheCodeIsDecoded);
     RUN(StoppedWhenTheCodeIsNeverDecoded);
     RUN(TheModsTab);
+    RUN(RefreshesItsTextsOnEachOpening);
     RUN(CategoriesStayInPlace);
     RUN(SlidersAsShallowWaterDivingRegistersThem);
     RUN(PagesOfCategories);

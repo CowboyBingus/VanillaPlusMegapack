@@ -1,6 +1,6 @@
-/* Know Your Constellation's display model (model.lua) and texts (locales/en.lua): the headline, the listed enemies with
- * their meters, the captions, and a signature of every drawn text so that equal content never redraws. Texts come
- * through vpm_text with the Lua's keys (English until the pack has translations). Made when the report, the mission
+/* Know Your Constellation's display model (model.lua) and texts (locales/en.lua and zh-Hans.lua): the headline, the
+ * listed enemies with their meters, the captions, and a signature of every drawn text so that equal content never
+ * redraws. Texts come through vpm_text with the Lua's keys. Made when the report, the mission
  * key, the screen or the tags change, never per frame. */
 #include <stdio.h>
 #include <string.h>

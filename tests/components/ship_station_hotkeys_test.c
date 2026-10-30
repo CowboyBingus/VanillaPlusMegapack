@@ -899,9 +899,23 @@ static void StoppedBackendFallsBackToKeys(void)
     CHECK_EQ(g_calls.presenters, 1);
 }
 
+/* Ship Station Hotkeys shipped English only: its table is used, and another language falls back to it. */
+static void UsesTheLuaLocales(void)
+{
+    MakeGame();
+    Started(0, 0);
+    CHECK(strcmp(vpm_text(g_ssh, "binding.section", "fallback"), "Ship Station Hotkeys") == 0);
+    CHECK(strcmp(vpm_text(g_ssh, "binding.control_center", "fallback"), "CONTROL CENTER") == 0);
+    fake_text_language("zh-CN");
+    CHECK(vpm_text_refresh());
+    CHECK(strcmp(vpm_text(g_ssh, "binding.section", "fallback"), "Ship Station Hotkeys") == 0);
+    CHECK(strcmp(vpm_text(g_ssh, "no.such.key", "fallback"), "fallback") == 0);
+}
+
 int main(void)
 {
     RUN(RegistersTheSixBindings);
+    RUN(UsesTheLuaLocales);
     RUN(FixedKeysWithoutBindings);
     RUN(BindingsAnswerFirst);
     RUN(RefusedBindingKeepsItsKey);

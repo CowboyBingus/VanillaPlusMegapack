@@ -158,21 +158,16 @@ static int Large(Builder* b, double size, int shown, int* fits)
     return 1;
 }
 
-/* '{count}' in text replaced by count (unknown placeholders stay), appended to out. */
+/* '{count}' in text replaced by count (unknown placeholders stay), appended to out: the core's format(). */
 static int Format(const char* text, int count, char* out, size_t size, size_t* used)
 {
     char number[16];
     snprintf(number, sizeof number, "%d", count);
-    for (const char* p = text; *p;)
-    {
-        const char* piece = strncmp(p, "{count}", 7) == 0 ? number : NULL;
-        size_t n = piece != NULL ? strlen(number) : 1;
-        if (*used + n + 1 > size) return kyc_fail("Forecast text too long");
-        memcpy(out + *used, piece != NULL ? piece : p, n);
-        *used += n;
-        p += piece != NULL ? 7 : 1;
-    }
-    out[*used] = 0;
+    const char* names[] = {"count"};
+    const char* values[] = {number};
+    size_t needed = vpm_text_format(out + *used, size - *used, text, names, values, 1);
+    if (needed >= size - *used) return kyc_fail("Forecast text too long");
+    *used += needed;
     return 1;
 }
 

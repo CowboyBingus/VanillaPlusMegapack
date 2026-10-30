@@ -825,6 +825,7 @@ static void StartComponent(VpmComponent* c)
     c->generation++;
     c->state = VPM_STATE_RUNNING;
     c->started = 0;
+    c->texts = NULL; /* start() sets its tables again, if it has any */
     snprintf(c->status, sizeof c->status, "running");
     StartCall call = {c, 1};
     c->in_start = 1;
@@ -1036,6 +1037,7 @@ static void Forget(void)
     InterlockedExchange(&g_switchWork, 0);
     vpm_hooks_unload();
     vpm_options_reset();
+    vpm_text_reset();
     vpm_diag_reset();
     vpm_crash_reset();
     vpm_bindings_reset();
@@ -1122,8 +1124,6 @@ void vpm_user32_init(void)
     g_user32.GetWindowThreadProcessId =
         (unsigned long(__stdcall*)(void*, unsigned long*))(void*)GetProcAddress(user32, "GetWindowThreadProcessId");
 }
-
-const char* vpm_text(const VpmComponent* self, const char* key, const char* english) { return english; }
 
 #ifndef VPM_TEST
 HF_MOD_EXPORT int hellforge_mod_init(const HfApi* api, HfMod* mod)

@@ -150,11 +150,11 @@ int blm_game_searching(void);
 /* ---- blm_text.c ---------------------------------------------------------------------------------------------------- */
 
 void blm_text_reset(void);
-/* A text's English (vpm_text). */
+/* A text in the game's language (vpm_text). */
 const char* blm_tr(const char* key, const char* english);
 /* A copy that stays for the session: the game's widgets keep pointers to the texts they show. */
 const char* blm_intern(const char* text);
-/* {name} (any one placeholder) replaced by value. */
+/* {name} (any one placeholder) replaced by value, as the Lua's format() did (the core's vpm_text_format). */
 void blm_format(char* out, size_t size, const char* template_text, const char* placeholder, const char* value);
 
 /* ---- blm_chat.c ---------------------------------------------------------------------------------------------------- */

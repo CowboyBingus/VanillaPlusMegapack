@@ -53,6 +53,10 @@ uintptr_t fake_game(void);
 uintptr_t fake_exe(void);
 /* Zeroed, 16-byte aligned memory the API reads and writes (a 256 MB arena; reset by fake_setup). */
 void* fake_heap(size_t size);
+/* Makes the fake game's Text Language read as `code`, as bingus_text.game_code finds it: a settings object at
+ * [game.dll+0x3326340], index 0 at +705500+212, and the first record at game.dll+0x37C5650 whose string (at +8) is
+ * `code`. Call it before fake_start (or before vpm_text_refresh) to change the language. */
+void fake_text_language(const char* code);
 /* API reads and writes touching [address, address + size) fail from now on. */
 void fake_hole(uintptr_t address, size_t size);
 /* The holes made at address (fake_hole) are gone: reads and writes there work again. */

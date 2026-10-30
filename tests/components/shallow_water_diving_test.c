@@ -1706,10 +1706,23 @@ static void MarkDescribes(void)
     CHECK_LOG("; max depth 0.20; check after update on; errors in burst 0; observed=1 protected=1 restored=0\n");
 }
 
+/* The Lua shipped English only: the generated table is used, and another language falls back to it. */
+static void UsesTheLuaLocales(void)
+{
+    MakeWorld(0);
+    fake_text_language("zh-CN");
+    Started();
+    VpmOption* option = DepthOption();
+    CHECK(option != NULL && strcmp(vpm_option_def(option)->label, "Max Dive Water Depth") == 0);
+    CHECK(strcmp(vpm_text(fake_component(0), "option.depth.label", "fallback"), "Max Dive Water Depth") == 0);
+    CHECK(strcmp(vpm_text(fake_component(0), "no.such.key", "fallback"), "fallback") == 0);
+}
+
 int main(void)
 {
     RUN(MissionModes);
     RUN(DepthLimit);
+    RUN(UsesTheLuaLocales);
     RUN(RaisedDepthLimit);
     RUN(StartupDebtAndLandings);
     RUN(OrdinaryStatesNeverLease);

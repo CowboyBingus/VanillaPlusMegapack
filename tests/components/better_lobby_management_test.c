@@ -6,12 +6,13 @@
  * counted.
  *
  * Not ported, with the parts they test: the diagnostic recorder and the test builds' kick modes, unload hold and control
- * search (test_diag.lua, parts of test_lobby.lua and test_menu.lua), translations and the Text Language
- * (test_bingus_text.lua, test_locales.lua, the end of test_addon.lua), the Mod Options Menu registration retries and
- * the shared runtime's guard, pause and hostile neighbours (test_addon.lua), the idle gate's equivalence with v1.2 and
- * the LuaJIT trace and allocation checks (test_idle_gate.lua, test_scanner.lua), the Lua API layer and packaging
- * (test_windows_api.lua, test_ffi_names.lua, test_entry.lua, test_package.py), and the scanner's lost write (a plain
- * store always lands). */
+ * search (test_diag.lua, parts of test_lobby.lua and test_menu.lua), the BingusTranslations packs and BLM's per-menu
+ * language re-read (the core reads the game's Text Language; TranslatesItsTextsAsTheLuaDid covers the shipped zh-Hans
+ * locale; the rest of test_bingus_text.lua and test_locales.lua is the core's), the Mod Options Menu registration
+ * retries and the shared runtime's guard, pause and hostile neighbours (test_addon.lua), the idle gate's equivalence
+ * with v1.2 and the LuaJIT trace and allocation checks (test_idle_gate.lua, test_scanner.lua), the Lua API layer and
+ * packaging (test_windows_api.lua, test_ffi_names.lua, test_entry.lua, test_package.py), and the scanner's lost write
+ * (a plain store always lands). */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1134,7 +1135,9 @@ static void StartsWhenTheCodeIsAsReviewed(void)
     CHECK_LOG("Better Lobby Management v1.2.1 ready: game code and natives verified; menu ready; squad messages ready; "
         "scanner ready; CANCEL SOS ready");
     CHECK_NO_LOG("Lobby Region disabled");
-    /* Once: every record's code (73), the engine's lobby and package API and their four slots (6 reads), no page check. */
+    /* Once: every record's code (73), the engine's lobby and package API and their four slots (6 reads), no page check;
+     * the Text Language observation finds no language table in this fake game, so it adds no read (the table's first
+     * record is a plain image load). */
     CHECK_EQ(fake_counts().code_matches, 73);
     CHECK_EQ(Reads(), 6);
     CHECK_EQ(blm_page_checks(), 0);
@@ -3654,10 +3657,29 @@ static void DescribeInTheMark(void)
     CHECK_LOG("; action: promote: waiting for Tango's lobby; 0 actions;");
 }
 
+/* The Lua's locales/zh-Hans.lua through vpm_text, and its placeholders through the core's format(). */
+static void TranslatesItsTextsAsTheLuaDid(void)
+{
+    NewWorld(1);
+    fake_text_language("zh-CN");
+    Started();
+    CHECK(strcmp(blm_tr("button.disband", "CANCEL"), "解散小队") == 0);
+    CHECK(strcmp(blm_tr("option.mod", "CANCEL"), "更好的大厅管理") == 0); /* MOM's category button */
+    CHECK(strcmp(blm_tr("option.region.label", "CANCEL"), "大厅地区") == 0);
+    CHECK(strcmp(blm_tr("player.unknown", "CANCEL"), "玩家 {id}") == 0);
+    char text[256]; /* the zh-Hans cancel-SOS body is 132 UTF-8 bytes once {privacy} is filled */
+    blm_format(text, sizeof text, blm_tr("button.promote", "CANCEL"), "{name}", "ALPHA");
+    CHECK(strcmp(text, "提升 ALPHA 为小队长") == 0);
+    blm_format(text, sizeof text, blm_tr("dialog.cancel_sos.private", "CANCEL"), "{privacy}", "仅限好友");
+    CHECK(strcmp(text, "停止发出SOS信号，有空位时也不会重新发出。你的大厅将恢复为仅限好友。你可以再次呼叫SOS信标。") == 0);
+    CHECK(strcmp(blm_tr("no.such.key", "English fallback"), "English fallback") == 0);
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0); /* every line out before a fault */
     RUN(StartsWhenTheCodeIsAsReviewed);
+    RUN(TranslatesItsTextsAsTheLuaDid);
     RUN(RefusesChangedCode);
     RUN(RefusesAnEngineWithoutItsSlots);
     RUN(TheCodeDecodedLaterStartsItThen);

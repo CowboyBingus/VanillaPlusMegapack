@@ -992,9 +992,22 @@ static void ImageDataPagesAreWritable(void)
     CHECK(VirtualFree(pages, 0, MEM_RELEASE)); /* lint-ok: C4 the test's own pages */
 }
 
+/* Mod Bindings Menu shipped English only: its table is used, and another language falls back to it. */
+static void UsesTheLuaLocales(void)
+{
+    MakeWorld();
+    fake_text_language("zh-CN");
+    fake_start(kDefs, 2);
+    VpmComponent* self = fake_component(1);
+    CHECK(strcmp(vpm_text(self, "tab.more", "fallback"), "MORE MODS") == 0);
+    CHECK(strcmp(vpm_text(self, "section.none", "fallback"), "NO MOD BINDINGS INSTALLED") == 0);
+    CHECK(strcmp(vpm_text(self, "no.such.key", "fallback"), "fallback") == 0);
+}
+
 int main(void)
 {
     CASE(ImageDataPagesAreWritable);
+    CASE(UsesTheLuaLocales);
     CASE(AddsTheKeyboardDefaultsOnce);
     CASE(RefusesAnUnreviewedLayout);
     CASE(TheCodeDecodedLaterActivatesThen);

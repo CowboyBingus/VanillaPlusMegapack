@@ -136,6 +136,23 @@ void* fake_heap(size_t size)
     return g_heap + at;
 }
 
+/* The game's Text Language layout on 25480438 (bingus_text.lua v1's GAME). */
+#define TEXT_SETTINGS_RVA 0x3326340u
+#define TEXT_SETTINGS_INDEX (705500u + 212u)
+#define TEXT_TABLE_RVA 0x37C5650u
+
+void fake_text_language(const char* code)
+{
+    uint8_t* settings = fake_heap(TEXT_SETTINGS_INDEX + 4u);
+    uint64_t* record = fake_heap(16);
+    char* text = fake_heap(16);
+    snprintf(text, 16, "%s", code);
+    record[1] = (uint64_t)(uintptr_t)text;
+    *(uint64_t*)(g_game + TEXT_SETTINGS_RVA) = (uint64_t)(uintptr_t)settings;
+    *(uint32_t*)(settings + TEXT_SETTINGS_INDEX) = 0;
+    *(uint64_t*)(g_game + TEXT_TABLE_RVA) = (uint64_t)(uintptr_t)record;
+}
+
 void fake_hole(uintptr_t address, size_t size)
 {
     if (g_holeCount < MAX_HOLES) g_holes[g_holeCount++] = (Hole){address, size};

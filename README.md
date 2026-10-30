@@ -108,6 +108,11 @@ builds the same DLL from this folder.
   `vpm_detailed`, `vpm_on_summary` for a line at each mission's end, `VpmComponentDef.describe` for a tester's mark.
 - **Memory.** `vpm_game_u64(rva)` and friends are plain loads inside game.dll's image; `vpm_read` reads the game's heap
   through HellForge (safe on a bad pointer); `vpm_write` changes code and read-only data.
+- **Text.** `vpm_text` is a component's text in the game's Text Language, from the per-component tables generated from
+  the Lua's `locales/<tag>.lua` (`scripts/generators/gen_locales.py`), with the English table and then the caller's English
+  as fallback; `vpm_text_format` is the Lua's `format()` for `{placeholders}`. The first text of a component with a
+  table reads the game's setting; Mod Options Menu and Better Lobby Management observe it again at their menu openings
+  (BLM also when it becomes ready). The shared Lua text module's UTF-8 functions are one C copy in `src/core/text.c`.
 - **Options and bindings**, as Mod Options Menu and Mod Bindings Menu offered them, saved in the settings file.
 - **The local player:** `vpm_local_avatar` and `vpm_action_slot` (the game's processed input: Fire, Jump, Backpack
   Function...).

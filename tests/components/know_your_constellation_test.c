@@ -2660,6 +2660,24 @@ static void LuaStopAndRefusal(void)
     LuaLeave();
 }
 
+/* The Lua's locales/zh-Hans.lua through vpm_text: the titles, separators and captions the panel draws. */
+static void TranslatedHeadlines(void)
+{
+    fake_text_language("zh-CN");
+    Loaded();
+    VpmComponent* self = fake_component(0);
+    char out[KYC_HEADLINE_SIZE];
+    CHECK(strcmp(kyc_title_text(self, 1), "胆液虫群") == 0);
+    KycTags t = Tags(2, (int[]){1, 11});
+    CHECK(kyc_headline(self, &t, out, sizeof out) && strcmp(out, "蟑龙活动 // 胆液虫群") == 0);
+    t = Tags(0, NULL);
+    CHECK(kyc_headline(self, &t, out, sizeof out) && strcmp(out, "常规部队") == 0);
+    CHECK(strcmp(vpm_text(self, "panel.label", "FORECAST"), "敌情预测 // 情报与侦察") == 0);
+    CHECK(strcmp(vpm_text(self, "panel.list_separator", ","), "、") == 0);
+    CHECK(strcmp(vpm_text(self, "panel.more", "and {count} more"), "另有 {count} 种") == 0);
+    CHECK(strcmp(vpm_text(self, "no.such.key", "English fallback"), "English fallback") == 0);
+}
+
 int main(void)
 {
     RUN(RosterIntegrity);
@@ -2671,6 +2689,7 @@ int main(void)
     RUN(DrawRules);
     RUN(BoundaryDraws);
     RUN(Headlines);
+    RUN(TranslatedHeadlines);
     RUN(ExclusionKey);
     RUN(TextWrap);
     RUN(HostedForecast);

@@ -2003,9 +2003,28 @@ static void TheCacheSaveAfterAWeaponsJobReadsOnlyKeptKits(void)
     CHECK(myc_g.worker.thread == NULL);
 }
 
+/* Match Your Colors shipped only English: its generated table is the Lua's (no "Experimental."), the registered option
+ * keeps the C port's tag ahead of it, and another language falls back to it. */
+static void UsesTheLuaLocales(void)
+{
+    Boot(1, 1, HELMET, 1);
+    VpmOption* weapons = OptionNamed("recolor_weapons");
+    CHECK(weapons != NULL);
+    const char* description = vpm_option_def(weapons)->description;
+    CHECK(strncmp(description, "Experimental. Recolors", 22) == 0);
+    const char* table = vpm_text(fake_component(0), "option.weapons.description", "fallback");
+    CHECK(strncmp(table, "Recolors your weapons too", 25) == 0);
+    CHECK(strstr(table, "Experimental.") == NULL);
+    fake_text_language("zh-CN");
+    CHECK(vpm_text_refresh());
+    CHECK(strcmp(vpm_text(fake_component(0), "option.mod", "fallback"), "Match Your Colors") == 0);
+    CHECK(strcmp(vpm_text(fake_component(0), "no.such.key", "fallback"), "fallback") == 0);
+}
+
 int main(void)
 {
     RUN(RegistersTheLuaOptions);
+    RUN(UsesTheLuaLocales);
     RUN(SavedOptionsAreLoggedAsChanges);
     RUN(WaitsForTheEngineScriptApi);
     RUN(StopsWhenAnEngineFunctionChanged);

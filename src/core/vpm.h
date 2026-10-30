@@ -414,8 +414,55 @@ const VpmUser32* vpm_user32(void);
 
 /* ---- text ------------------------------------------------------------------------------------------------------- */
 
-/* A component's text in the game's language: English until translations are added. */
+/* A component's texts, generated from the Lua's locales/<language>.lua files (scripts/generators/gen_locales.py):
+ * locales, English first; each locale holds its keys and UTF-8 texts. Keys are the Lua's ('button.disband'), and the
+ * texts keep the placeholders the Lua's format() fills ({name}, {count}...). */
+typedef struct VpmTextEntry
+{
+    const char* key;
+    const char* text;
+} VpmTextEntry;
+typedef struct VpmTextLocale
+{
+    const char* tag;          /* a Bingus Text language tag ('en', 'zh-Hans') */
+    const VpmTextEntry* entries;
+    int count;
+} VpmTextLocale;
+typedef struct VpmTextTable
+{
+    const VpmTextLocale* locales;
+    int count;
+} VpmTextTable;
+
+/* Gives the component its tables (from start(); the table must stay valid). vpm_text resolves through it from then on;
+ * NULL (the default) keeps the English argument. */
+void vpm_text_table(VpmComponent* self, const VpmTextTable* table);
+
+/* Re-reads the game's Text Language as bingus_text's observe did: the settings object [game.dll+0x3326340], its language
+ * index at +705500+212, the 15-language table at game.dll+0x37C5650, the record's code string at +8. The codes the Lua
+ * mapped to BCP 47 tags map the same way (us/en -> en, zh-CN -> zh-Hans, ...); an unlisted code is its own tag. The
+ * settings pointer and the table entry are game.dll's image (plain loads); the index, the record's string pointer and
+ * the string are heap reads through vpm_read: 0 reads when the game has no settings object or language table, 3 when it
+ * has one (4 if the 16-byte code read falls back to 8). Not for idle frames. 1 when a code was read and the language
+ * updated, 0 not (the previous language stays, or English with Steam's language as the one-time fallback when none was
+ * ever read). vpm_text calls it once when no game language has been observed yet; Mod Options Menu calls it each time
+ * the escape menu opens, and Better Lobby Management at its ready step and each menu opening, as their Lua did. */
+int vpm_text_refresh(void);
+/* The language tag vpm_text resolves with now: the game's, else Steam's (read once, when the game's setting cannot be),
+ * else "en". */
+const char* vpm_text_language(void);
+
+/* A component's text in the game's language: the current locale's text for key, else the English locale's, else the
+ * English argument. The language chain is the Lua's: the tag first, then its base ('zh-Hant' tries 'zh-Hant', then
+ * 'zh'), then English. No allocation: a pointer into the generated table, or english. */
 const char* vpm_text(const VpmComponent* self, const char* key, const char* english);
+
+/* The Lua text module's format() (bingus_text.lua v1): every {name} in text whose name is names[i] is replaced by
+ * values[i]; a placeholder with no value, and one not matching {[A-Za-z_][A-Za-z0-9_]*}, stays as written. Writes text
+ * into out (size bytes, always terminated, cut when it does not fit) and returns the full length it needs, as snprintf
+ * does, so a caller with a fixed buffer can tell it was cut. No allocation. */
+size_t vpm_text_format(char* out, size_t size, const char* text, const char* const* names, const char* const* values,
+    int count);
 
 /* UTF-8, as the Lua text module (bingus_text.lua v1) every text-showing component carried (core text.c):
  * - decode: the code point at text (at most size bytes), its length in bytes, or 0 when the bytes are not valid UTF-8

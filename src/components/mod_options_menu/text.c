@@ -6,7 +6,9 @@
  * Text widgets keep a pointer to the text they show, and a hidden widget may still point at one after the MODS view
  * closes, until the game re-initialises that widget. So every text lives in one buffer for the session, one buffer per
  * distinct text: a widget shows a text when its argument is that text's address (widgets.c). The buffers are static
- * (no allocation); Start resets them. */
+ * (no allocation); Start resets them, and mom_refresh_texts re-resolves MOM's own texts at each escape-menu opening as
+ * the Lua's translation.observe and tr:refresh did (the buffer keeps earlier texts, which a hidden widget may still
+ * point at). */
 #include <stdio.h>
 #include <string.h>
 #include "mom.h"
@@ -91,13 +93,19 @@ const char* mom_text_upper(const char* text)
 const char* mom_text_page(const char* format, int page, int pages)
 {
     static char work[256];
-    size_t n = 0;
-    for (const char* p = format; *p && n + 12 < sizeof work;)
-    {
-        if (strncmp(p, "{pages}", 7) == 0) { n += (size_t)snprintf(work + n, sizeof work - n, "%d", pages); p += 7; }
-        else if (strncmp(p, "{page}", 6) == 0) { n += (size_t)snprintf(work + n, sizeof work - n, "%d", page); p += 6; }
-        else work[n++] = *p++;
-    }
-    work[n] = 0;
+    char page_text[16], pages_text[16];
+    snprintf(page_text, sizeof page_text, "%d", page);
+    snprintf(pages_text, sizeof pages_text, "%d", pages);
+    const char* names[] = {"page", "pages"};
+    const char* values[] = {page_text, pages_text};
+    vpm_text_format(work, sizeof work, format, names, values, 2);
     return mom_intern(work);
+}
+
+void mom_refresh_texts(void)
+{
+    (void)vpm_text_refresh();
+    mom.modsTitle = mom_intern(vpm_text(mom.self, "tab.mods", "MODS"));
+    mom.emptyText = mom_intern(vpm_text(mom.self, "category.none", "NO MOD OPTIONS INSTALLED"));
+    mom_model_texts_changed();
 }
