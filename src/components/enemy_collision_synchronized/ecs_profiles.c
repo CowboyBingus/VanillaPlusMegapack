@@ -176,7 +176,7 @@ static const EcsActorNode kActors9[] = {
     {0xF6CA3127u, 0x9B115563u}, {0xF786B2B4u, 0x38F24831u},
 };
 
-static const EcsActorNode kActors10[] = { /* lint-ok: C14 generated from the catalog: variants of one skeleton share most of their allowlist */
+static const EcsActorNode kActors10[] = { /* lint-ok: R14 generated from the catalog: variants of one skeleton share most of their allowlist */
     {0x0BE61734u, 0x4508030Cu}, {0x0F578594u, 0x564E8BCCu}, {0x1E2DFE08u, 0x9B47948Du}, {0x1FF1C46Au, 0x91C08B37u},
     {0x201EDB75u, 0xE411E02Eu}, {0x292C4F7Fu, 0x9B115563u}, {0x36F081C0u, 0xF452DB4Au}, {0x3E0C625Fu, 0x8329F875u},
     {0x47405E14u, 0x38F24831u}, {0x4C1FE16Du, 0xC1466369u}, {0x4E884507u, 0x9B115563u}, {0x57177953u, 0x1FBA9B23u},
@@ -188,7 +188,7 @@ static const EcsActorNode kActors10[] = { /* lint-ok: C14 generated from the cat
     {0xE7414EACu, 0x9B115563u}, {0xEAB0621Du, 0xCE7E106Au}, {0xF6C42514u, 0x58D886FBu}, {0xF6CA3127u, 0x9B115563u},
 };
 
-static const EcsActorNode kActors11[] = { /* lint-ok: C14 generated from the catalog: variants of one skeleton share most of their allowlist */
+static const EcsActorNode kActors11[] = { /* lint-ok: R14 generated from the catalog: variants of one skeleton share most of their allowlist */
     {0x0BE61734u, 0x4508030Cu}, {0x0F578594u, 0x564E8BCCu}, {0x1E2DFE08u, 0x9B47948Du}, {0x1FF1C46Au, 0x91C08B37u},
     {0x201EDB75u, 0xE411E02Eu}, {0x292C4F7Fu, 0x9B115563u}, {0x36F081C0u, 0xF452DB4Au}, {0x3E0C625Fu, 0x8329F875u},
     {0x47405E14u, 0x38F24831u}, {0x4C1FE16Du, 0xC1466369u}, {0x4E884507u, 0x9B115563u}, {0x57177953u, 0x1FBA9B23u},
