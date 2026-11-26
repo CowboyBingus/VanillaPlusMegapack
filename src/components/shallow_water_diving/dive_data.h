@@ -20,7 +20,7 @@ typedef struct SwdSnapshot
 {
     int dive, swim, ragdoll;
     float elapsed, landing;      /* the native dive timer and landing timer (+8, +12 of the dive record) */
-    uintptr_t key;               /* the avatar's entity record (entity owner + 0xF32F18 + index * 24) */
+    uintptr_t key;               /* the avatar's entity record (vpm_entity_records() + index * 24; owner + 0xF32F18 as shipped, moved by HellForge 0.5) */
     uint32_t entity[6];          /* that record as read */
     uintptr_t controller;        /* its dive controller (avatar manager + 0x53D900 + index * 0x1238) */
     uint32_t id;                 /* the avatar id */

@@ -229,6 +229,11 @@ int vpm_when_code_ready(VpmComponent* self, const VpmCodePin* pins, int count, V
  * {u32 key, u32 index}, probed linearly from key * multiplier (at most 64 probes, a power-of-two capacity no larger than
  * limit). 1 with *index set (never 0xFFFFFFFF), 0 when the key is absent or the table unreadable. Reads: 1 + probes. */
 int vpm_lookup(uintptr_t header, uint32_t key, uint32_t limit, uint32_t* index);
+/* Where the entity owner ([game + 0x346BF98]) keeps its 24-byte entity records now: owner + 0xF32F18 as the game ships,
+ * elsewhere (possibly before the owner) when HellForge 0.5 or a mod moved them. Read from the game's own addressing
+ * instruction; 0 when that instruction is not the reviewed one or the result is implausible. One code_matches until the
+ * instruction first matches, then a plain load of its displacement. */
+uintptr_t vpm_entity_records(uintptr_t owner);
 
 /* ---- hooks (detours) -------------------------------------------------------------------------------------------- *
  * vpm_hook detours game.dll + rva (vpm_hook_exe: the exe + rva) to detour, after checking the function's bytes as the
@@ -272,7 +277,8 @@ typedef struct VpmAvatar
     uintptr_t manager;   /* the avatar manager ([game + 0x3326D20]) */
     uint32_t index;      /* the avatar's index there (0 .. 7) */
     uintptr_t entity;    /* the avatar's entity pointer there (am + 0x110 + index * 8) */
-    uintptr_t record_at; /* where the entity owner keeps the avatar's record (owner + 0xF32F18 + entity index * 24) */
+    uintptr_t record_at; /* where the entity owner keeps the avatar's record (vpm_entity_records() + entity index * 24;
+                          * owner + 0xF32F18 as shipped, moved by HellForge 0.5) */
     uint32_t owner_index; /* the avatar's entity index in the entity owner */
 } VpmAvatar;
 
