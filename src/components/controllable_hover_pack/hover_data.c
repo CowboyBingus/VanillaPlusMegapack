@@ -33,7 +33,6 @@
 #define PM_PLAYER 0xE8u             /* the local player's 24-byte record (owned bit) */
 #define PM_UNIT 0x3A8u              /* the local unit (0x7FFF: none) */
 #define OWNER_LOOKUP 0xF22EC8u      /* entity owner: unit -> entity index */
-#define OWNER_RECORDS 0xF32F18u     /* entity owner: 24-byte entity records */
 #define AM_LOOKUP 0xF8u             /* avatar manager: avatar id -> index */
 #define AM_COUNT 0x6Cu
 #define AM_SLOT_IN_BLOCK 0xA4u      /* the entity pointers (+0x110) from the count (+0x6C) */
@@ -201,7 +200,9 @@ static int AvatarRecord(uint32_t unit, uint8_t* avatar)
     if (r != 0) return r;
     if (!found) return CHP_WAITING_FOR_AVATAR;
     if (ei >= 262144u) return Fail("Unsupported entity index");
-    L.avatar = owner + OWNER_RECORDS + (uintptr_t)ei * 24u;
+    uintptr_t records = vpm_entity_records(owner);
+    if (records == 0) return Fail("Entity records not found");
+    L.avatar = records + (uintptr_t)ei * 24u;
     r = Read(L.avatar, avatar, 24);
     if (r != 0) return r;
     if (U32(avatar) != AVATAR_LOW || U32(avatar + 4) != AVATAR_HIGH || !Owned(avatar)) return CHP_WAITING_FOR_AVATAR;

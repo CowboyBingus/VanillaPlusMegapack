@@ -19,7 +19,6 @@
 #define EXE_UNIT_REGISTRY 0x1A100F0u    /* helldivers2.exe: the unit registry global */
 #define EXE_SCENE_GRAPH 0x2BD870u       /* the scene-graph method a unit's vtable holds at +0xE8 */
 #define AT_SOURCE_LOOKUP 0xF22EC8u      /* entity manager: unit id -> entity index (15871688) */
-#define AT_SOURCE_RECORDS 0xF32F18u     /* its 24-byte entity records (15937304); the engine reference at +12 */
 #define NO_UNIT 0x7FFFu
 #define MAX_ENTITY 262144u
 #define MAX_LOOKUP 1048576u
@@ -309,7 +308,9 @@ static int UnitObject(RbfReader* r, RbfSnapshot* c, uint32_t slot, uint32_t gene
 static int UnitPosition(RbfReader* r, RbfSnapshot* c, uintptr_t em, uint32_t index)
 {
     if (index >= MAX_ENTITY) return Fail(r, "Entity index outside supported bound");
-    int rc = Read(em + AT_SOURCE_RECORDS + (uintptr_t)index * 24u, g_entity, sizeof g_entity);
+    uintptr_t records = vpm_entity_records(em);
+    if (records == 0) return Fail(r, "Entity records not found");
+    int rc = Read(records + (uintptr_t)index * 24u, g_entity, sizeof g_entity);
     if (rc != RBF_OK) return rc;
     uint32_t engine = U32(g_entity, 12);
     uint8_t cell[8];

@@ -99,7 +99,6 @@
 #define PM_NETWORK 0x3A8u          /* the local avatar's network id (0x7FFF: none) */
 #define OWNER_NETWORK_MAP 0xF22EC8u
 #define OWNER_ENTITY_MAP 0xF1AEB0u
-#define OWNER_RECORDS 0xF32F18u    /* 24-byte entity records */
 #define OWNER_SETTINGS 0xF12BC0u   /* the shared EquipmentComponent settings */
 #define AM_MAP 0xF8u
 #define AM_COUNT 0x6Cu
@@ -219,7 +218,9 @@ static const char* LocalAvatar(Kept* k)
     if (why != NULL) return why;
     if (!vpm_lookup(owner + OWNER_NETWORK_MAP, network, 1048576u, &index) || index >= 262144u)
         return "avatar not in the entity map";
-    k->address = owner + OWNER_RECORDS + 24u * (uintptr_t)index;
+    uintptr_t records = vpm_entity_records(owner);
+    if (records == 0) return "entity records not found";
+    k->address = records + 24u * (uintptr_t)index;
     uint32_t* w = k->avatar.record;
     if (!vpm_read(k->address, w, 24)) return "avatar record unreadable";
     if (w[0] != AVATAR_TYPE_LOW || w[1] != AVATAR_TYPE_HIGH || (w[5] & 1u) == 0) return "not an owned Helldiver avatar";
@@ -315,8 +316,10 @@ static const char* EquipmentRecord(uint32_t entity, uintptr_t* record)
     }
     uintptr_t owner = (uintptr_t)vpm_game_u64(VPM_RVA_ENTITY_OWNER);
     if (!vpm_plausible(owner)) return "entities not ready";
+    uintptr_t entityRecords = vpm_entity_records(owner);
+    if (entityRecords == 0) return "entity records not found";
     if (!vpm_lookup(owner + OWNER_ENTITY_MAP, entity, 1048576u, &index) ||
-        !vpm_read(owner + OWNER_RECORDS + 24u * (uintptr_t)index, words, sizeof words) || words[2] != entity)
+        !vpm_read(entityRecords + 24u * (uintptr_t)index, words, sizeof words) || words[2] != entity)
     {
         snprintf(s.why, sizeof s.why, "entity %u not found", entity);
         return s.why;

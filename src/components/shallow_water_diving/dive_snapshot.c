@@ -262,7 +262,9 @@ static int SnapEntity(Chain* c)
     if (found == WAITING) return 0;
     if (found == ABSENT || ei == 0xFFFFFFFFu) return StageWait("waiting_for_local_avatar");
     if (ei >= 262144u) return StageFail("Unsupported entity index");
-    c->entity_address = c->owner + 0xF32F18 + (uintptr_t)ei * 24u;
+    uintptr_t records = vpm_entity_records(c->owner);
+    if (records == 0) return StageFail("Entity records not found");
+    c->entity_address = records + (uintptr_t)ei * 24u;
     c->entity = SnapRead(c->entity_address, 24, 1);
     if (c->entity == NONE) return 0;
     if (Word(c->entity) != AVATAR_LOW || Word(c->entity + 4) != AVATAR_HIGH) return StageFail("Unsupported avatar resource");

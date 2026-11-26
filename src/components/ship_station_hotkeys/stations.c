@@ -54,7 +54,6 @@
 #define POD_OCCUPIED 4u
 #define HELLPOD_OPEN_WAIT_SECONDS 10.0
 #define ENTITY_LOOKUP 0xF22EC8u        /* entity manager: entity id -> record index */
-#define ENTITY_RECORDS 0xF32F18u       /* entity manager: 24-byte records, the owned bit in byte 20 */
 #define PLAYERS_FROM 0x84u             /* player manager: local count +0x84, active +0x88, record +0xE8, unit +0x3A8 */
 #define PLAYERS_TO 0x3ACu
 
@@ -257,7 +256,8 @@ static int EntityRecord(uintptr_t entities, uint32_t entity, uint8_t* record)
     uint32_t index = 0;
     if (!vpm_read(entities + ENTITY_LOOKUP, header, sizeof header) || !MapLayout(header, &map)) return 0;
     if (!HashedValue(&map, entity, &index) || index == 0xFFFFFFFFu || index >= 262144u) return 0;
-    return vpm_read(entities + ENTITY_RECORDS + 24u * (uintptr_t)index, record, 24);
+    uintptr_t records = vpm_entity_records(entities);
+    return records != 0 && vpm_read(records + 24u * (uintptr_t)index, record, 24);
 }
 
 /* The local player's avatar: entity id, unit, and the entity manager (the Lua's local_avatar). */

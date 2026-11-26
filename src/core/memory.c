@@ -239,6 +239,35 @@ int vpm_exe_code_matches(uint32_t rva, const char* pattern)
     return g_exe != 0 && rva < g_exeSize && vpm_core_hf()->code_matches(g_exe + rva, pattern);
 }
 
+/* ---- the entity owner's records ----------------------------------------------------------------------------------- *
+ * HellForge 0.5 moves the entity owner's 24-byte records out of the owner (4096 a world, the game's 2048) and rewrites
+ * the game's instructions that address them (HellForge docs/modding/hooks.md "Fields a mod moved"). Their offset is read
+ * where EntityDescriptor (game.dll 0xFD9D40) addresses them: lea rax,[rax+rax*2]; lea rax,[rax+disp32]; lea rax,
+ * [r10+rax*8], so 8 * the signed disp32 (0x1E65E3 * 8 = 0xF32F18 as shipped). The live bytes are checked as well as
+ * the reviewed ones, since a rewrite lands there. The offset is signed and may reach anywhere disp32 * 8 does. */
+#define ENTITY_RECORDS_SITE 0xFD9DD7u
+#define ENTITY_RECORDS_PATTERN "48 8D 04 40 48 8D 80 ?? ?? ?? ?? 49 8D 04 C2"
+static volatile LONG g_entityRecordsChecked; /* 1 once the site matched (it never stops matching) */
+
+uintptr_t vpm_entity_records(uintptr_t owner)
+{
+    static const uint8_t kBefore[7] = { 0x48, 0x8D, 0x04, 0x40, 0x48, 0x8D, 0x80 };
+    static const uint8_t kAfter[4] = { 0x49, 0x8D, 0x04, 0xC2 };
+    if (owner == 0) return 0;
+    if (g_entityRecordsChecked == 0)
+    {
+        if (!vpm_game_code_matches(ENTITY_RECORDS_SITE, ENTITY_RECORDS_PATTERN)) return 0;
+        InterlockedExchange(&g_entityRecordsChecked, 1);
+    }
+    uint8_t live[15];
+    if (!vpm_game_read(ENTITY_RECORDS_SITE, live, sizeof live)) return 0;
+    if (memcmp(live, kBefore, sizeof kBefore) != 0 || memcmp(live + 11, kAfter, sizeof kAfter) != 0) return 0;
+    int32_t displacement;
+    memcpy(&displacement, live + 7, 4);
+    uintptr_t records = owner + (uintptr_t)((intptr_t)displacement * 8);
+    return vpm_plausible(records) ? records : 0;
+}
+
 /* ---- the game's hash lookup ------------------------------------------------------------------------------------- */
 
 typedef struct LookupHeader { uint64_t rows; uint32_t capacity, empty, multiplier; } LookupHeader;
@@ -274,7 +303,6 @@ int vpm_lookup(uintptr_t header, uint32_t key, uint32_t limit, uint32_t* index)
 #define PM_UNIT 0x3A8u               /* the local player's unit id (0x7FFF: none) */
 #define PM_PLAYER 0xE8u              /* the local player's record pointer (24 bytes, owned bit) */
 #define OWNER_LOOKUP 0xF22EC8u       /* entity owner: unit id -> entity index */
-#define OWNER_RECORDS 0xF32F18u      /* entity owner: 24-byte entity records */
 #define AM_LOOKUP 0xF8u              /* avatar manager: avatar id -> avatar index */
 #define AM_COUNT 0x6Cu
 #define AM_ENTITIES 0x110u
@@ -297,7 +325,9 @@ static int LocalRecord(VpmAvatar* a, const char** why)
     if (playerRecord == 0 || !vpm_read(playerRecord, player, sizeof player) || !Owned(player)) { *why = "no owned local player record"; return 0; }
     uint32_t ei;
     if (!vpm_lookup(owner + OWNER_LOOKUP, unit, 1048576u, &ei) || ei >= 262144u) { *why = "the player's unit has no entity"; return 0; }
-    a->record_at = owner + OWNER_RECORDS + (uintptr_t)ei * 24u;
+    uintptr_t records = vpm_entity_records(owner);
+    if (records == 0) { *why = "entity records not found"; return 0; }
+    a->record_at = records + (uintptr_t)ei * 24u;
     a->owner_index = ei;
     if (!vpm_read(a->record_at, a->record, 24) || a->record[0] != AVATAR_TYPE_LOW || a->record[1] != AVATAR_TYPE_HIGH || !Owned(a->record))
     {

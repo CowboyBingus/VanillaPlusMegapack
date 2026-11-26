@@ -2,8 +2,8 @@
  * manager [game + 0x3326468]: count +132, entity records +232 + 8 i (id +8, flags +20 bit 0 owned here), the map +208
  * from a player's entity id to its index, peer +712 + 56 i, Helldiver unit +936 + 32 i, UI slot +948 + 32 i.
  * Customization [game + 0x33264F8]: the map +2352 to its record, applied kits +2412 + 68 r (body, helmet, cape, armor),
- * desired +2684 + 64 r. Entities [game + 0x346BF98]: the map +0xF22EC8 from a unit to its entity, records +0xF32F18 +
- * 24 e. Avatars [game + 0x3326D20]: the map +248, count +0x6c, records +5532272 + 440 i with three arrays of 10 unit
+ * desired +2684 + 64 r. Entities [game + 0x346BF98]: the map +0xF22EC8 from a unit to its entity, records
+ * vpm_entity_records() + 24 e (+0xF32F18 as shipped, moved by HellForge 0.5). Avatars [game + 0x3326D20]: the map +248, count +0x6c, records +5532272 + 440 i with three arrays of 10 unit
  * refs at +220. Previews [game + 0x346D580]: player slots +2080 + 2184 s (peer +0, entry count +64, 132-byte entries
  * from +68, their unit arrays at +12). Game thread; reads only. */
 #include <stdio.h>
@@ -27,7 +27,6 @@
 #define C_DESIRED 2684
 #define C_DESIRED_SIZE 64
 #define E_MAP 0xF22EC8u
-#define E_RECORDS 0xF32F18u
 #define A_MAP 248
 #define A_COUNT 0x6c
 #define A_RECORDS 5532272u
@@ -137,8 +136,10 @@ static int MycAvRecord(MycIdentity* out, int remote, const char** why)
     uintptr_t entities = MycAvPointer(vpm_game() + ENTITIES);
     uint32_t entity_index;
     if (entities == 0 || !myc_avatar_lookup(entities + E_MAP, out->unit, &entity_index)) { *why = "Helldiver entity not found"; return 0; }
+    uintptr_t records = vpm_entity_records(entities);
+    if (records == 0) { *why = "entity records not found"; return 0; }
     uint8_t e[24];
-    if (!MycAvRead(entities + E_RECORDS + 24 * (uintptr_t)entity_index, e, 24) || MycAvLe32(e) != AVATAR_LOW
+    if (!MycAvRead(records + 24 * (uintptr_t)entity_index, e, 24) || MycAvLe32(e) != AVATAR_LOW
         || MycAvLe32(e + 4) != AVATAR_HIGH)
     {
         *why = "not an avatar entity";

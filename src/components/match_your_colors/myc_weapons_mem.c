@@ -1,7 +1,8 @@
 /* Match Your Colors: the Helldiver's weapons in game memory (weapons.lua, Recolor Weapons v1.5), 1:1. Inventory
  * [game + 0x3326738]: the map +40 from an avatar's entity id to its row, rows [+80] of 48 bytes (+0 primary, +4 sidearm,
  * +8 support: entity ids; +28 the slot in hand), each row's entity [+64]. Entities [game + 0x346BF98]: the map
- * +0xF1AEB0 to records +0xF32F18 + 24 e (+0 resource, +12 unit). Weapon customization [game + 0x3326A38]: the map +632
+ * +0xF1AEB0 to records vpm_entity_records() + 24 e (+0xF32F18 as shipped, moved by HellForge 0.5; +0 resource, +12
+ * unit). Weapon customization [game + 0x3326A38]: the map +632
  * to its record [+672] + 128 j (attachment units), the map +696 to the weapon's own copy [+760] + 4872 k (attachments'
  * unit names and the MaterialOverride). Weapon catalogue [entities + 0xF12558] (packages). The Armory's preview weapon
  * in UiPreviewSystem weapon slot 3. Reads only: on changes (game thread) and inside jobs (worker). */
@@ -20,7 +21,6 @@
 #define I_HEAD 16
 #define I_COUNT 20
 #define E_MAP 0xF1AEB0u
-#define E_RECORDS 0xF32F18u
 #define E_CATALOGUE 0xF12558u
 #define C_MAP 632
 #define C_RECORDS 672
@@ -109,7 +109,8 @@ int myc_weapons_owned(const MycInventoryWhere* where)
 static int MycWpEntity(uintptr_t entities, uint32_t id, uint8_t out[24])
 {
     uint32_t e;
-    return myc_avatar_lookup(entities + E_MAP, id, &e) && MycWpRead(entities + E_RECORDS + 24 * (uintptr_t)e, out, 24)
+    uintptr_t records = vpm_entity_records(entities);
+    return records != 0 && myc_avatar_lookup(entities + E_MAP, id, &e) && MycWpRead(records + 24 * (uintptr_t)e, out, 24)
         && MycWpLe32(out + 8) == id;
 }
 
